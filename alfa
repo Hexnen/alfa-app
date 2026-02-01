@@ -1,0 +1,82 @@
+#!/bin/bash
+
+# Alfa App - zarządzanie aplikacją
+# Użycie: ./alfa start|stop|status|logs
+
+PROJECT_DIR="/config/workspace/programming/alfa-app"
+FRONTEND_DIR="$PROJECT_DIR/frontend"
+BACKEND_LOG="/tmp/alfa-backend.log"
+FRONTEND_LOG="/tmp/alfa-frontend.log"
+
+case "$1" in
+  start)
+    echo "🚀 Uruchamianie Alfa App..."
+    
+    # Sprawdź czy już działa
+    if netstat -tlnp 2>/dev/null | grep -q ":4000"; then
+      echo "⚠️  Frontend już działa na porcie 4000"
+    else
+      cd "$FRONTEND_DIR" && nohup npm run dev > "$FRONTEND_LOG" 2>&1 &
+      echo "✅ Frontend uruchomiony (port 4000)"
+    fi
+    
+    if netstat -tlnp 2>/dev/null | grep -q ":4001"; then
+      echo "⚠️  Backend już działa na porcie 4001"
+    else
+      cd "$PROJECT_DIR" && nohup npm run dev > "$BACKEND_LOG" 2>&1 &
+      echo "✅ Backend uruchomiony (port 4001)"
+    fi
+    
+    sleep 2
+    echo ""
+    echo "📱 Frontend: https://ts150.korat-egret.ts.net:4000/"
+    echo "🔌 Backend:  https://ts150.korat-egret.ts.net:4001/"
+    echo ""
+    echo "Logi: tail -f /tmp/alfa-frontend.log /tmp/alfa-backend.log"
+    ;;
+    
+  stop)
+    echo "🛑 Zatrzymywanie Alfa App..."
+    pkill -f "vite" 2>/dev/null && echo "✅ Frontend zatrzymany" || echo "ℹ️  Frontend nie był uruchomiony"
+    pkill -f "tsx watch" 2>/dev/null && echo "✅ Backend zatrzymany" || echo "ℹ️  Backend nie był uruchomiony"
+    ;;
+    
+  restart)
+    $0 stop
+    sleep 2
+    $0 start
+    ;;
+    
+  status)
+    echo "📊 Status Alfa App:"
+    if netstat -tlnp 2>/dev/null | grep -q ":4000"; then
+      echo "  ✅ Frontend: http://localhost:4000/"
+    else
+      echo "  ❌ Frontend: nieaktywny"
+    fi
+    
+    if netstat -tlnp 2>/dev/null | grep -q ":4001"; then
+      echo "  ✅ Backend:  http://localhost:4001/"
+    else
+      echo "  ❌ Backend:  nieaktywny"
+    fi
+    ;;
+    
+  logs)
+    echo "📋 Logi (Ctrl+C aby wyjść):"
+    tail -f "$FRONTEND_LOG" "$BACKEND_LOG" 2>/dev/null
+    ;;
+    
+  *)
+    echo "Alfa App - zarządzanie aplikacją"
+    echo ""
+    echo "Użycie: ./alfa [komenda]"
+    echo ""
+    echo "Komendy:"
+    echo "  start    - Uruchamia frontend i backend w tle"
+    echo "  stop     - Zatrzymuje wszystkie procesy"
+    echo "  restart  - Restartuje aplikację"
+    echo "  status   - Sprawdza status serwerów"
+    echo "  logs     - Pokazuje logi (Ctrl+C aby wyjść)"
+    ;;
+esac

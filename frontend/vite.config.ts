@@ -5,7 +5,9 @@ import path from 'path'
 export default defineConfig({
   plugins: [react()],
   server: {
+    host: '0.0.0.0',
     port: 4000,
+    allowedHosts: ['ts150.korat-egret.ts.net'],
     proxy: {
       '/api': {
         target: 'http://localhost:4001',
