@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
@@ -43,32 +43,34 @@ const departmentColors: Record<string, "default" | "secondary" | "outline"> = {
 
 export function Objects() {
   const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
   const [objects, setObjects] = useState<ObjectWithContractor[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState(
-    searchParams.get("status") || ""
-  );
-  const [departmentFilter, setDepartmentFilter] = useState(
-    searchParams.get("department") || ""
-  );
-  const [contractorFilter] = useState(
-    searchParams.get("contractorId") || ""
-  );
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [departmentFilter, setDepartmentFilter] = useState("all");
+  const [contractorFilter, setContractorFilter] = useState<number | undefined>(undefined);
   const [formOpen, setFormOpen] = useState(false);
   const [editingObject, setEditingObject] = useState<ObjectWithContractor | null>(
     null
   );
+
+  // Read contractorId from URL on mount
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const contractorId = params.get("contractorId");
+    if (contractorId) {
+      setContractorFilter(parseInt(contractorId));
+    }
+  }, []);
 
   const loadObjects = useCallback(async () => {
     setLoading(true);
     try {
       const res = await getObjects({
         search,
-        status: statusFilter || undefined,
-        department: departmentFilter || undefined,
-        contractorId: contractorFilter ? parseInt(contractorFilter) : undefined,
+        status: statusFilter !== "all" ? statusFilter : undefined,
+        department: departmentFilter !== "all" ? departmentFilter : undefined,
+        contractorId: contractorFilter,
         pageSize: 100,
       });
       setObjects(res.data);
@@ -82,14 +84,6 @@ export function Objects() {
   useEffect(() => {
     loadObjects();
   }, [loadObjects]);
-
-  useEffect(() => {
-    const params = new URLSearchParams();
-    if (statusFilter) params.set("status", statusFilter);
-    if (departmentFilter) params.set("department", departmentFilter);
-    if (contractorFilter) params.set("contractorId", contractorFilter);
-    setSearchParams(params);
-  }, [statusFilter, departmentFilter, contractorFilter, setSearchParams]);
 
   const handleCreate = async (data: ObjectInput) => {
     await createObject(data);
@@ -153,7 +147,7 @@ export function Objects() {
                 <SelectValue placeholder="Status" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="">Wszystkie statusy</SelectItem>
+                <SelectItem value="all">Wszystkie statusy</SelectItem>
                 {Object.entries(statusLabels).map(([value, label]) => (
                   <SelectItem key={value} value={value}>
                     {label}
@@ -166,7 +160,7 @@ export function Objects() {
                 <SelectValue placeholder="Dzial" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="">Wszystkie dzialy</SelectItem>
+                <SelectItem value="all">Wszystkie dzialy</SelectItem>
                 {Object.entries(departmentLabels).map(([value, label]) => (
                   <SelectItem key={value} value={value}>
                     {label}
@@ -275,9 +269,7 @@ export function Objects() {
         onClose={closeForm}
         onSubmit={editingObject ? handleUpdate : handleCreate}
         object={editingObject}
-        preselectedContractorId={
-          contractorFilter ? parseInt(contractorFilter) : undefined
-        }
+        preselectedContractorId={contractorFilter}
       />
     </div>
   );

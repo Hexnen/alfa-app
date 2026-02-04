@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -40,6 +41,7 @@ import { OrderForm } from "@/components/OrderForm";
 import {
   Plus,
   Search,
+  Eye,
   Trash2,
   Edit3,
   ClipboardList,
@@ -66,6 +68,7 @@ const orderStatuses = [
 ];
 
 export function Orders() {
+  const navigate = useNavigate();
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -350,8 +353,18 @@ export function Orders() {
                       <Button
                         variant="ghost"
                         size="icon"
+                        onClick={() => navigate(`/orders/${order.id}`)}
+                        className="text-slate-600 hover:text-indigo-600"
+                        title="Szczegóły"
+                      >
+                        <Eye className="w-4 h-4" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
                         onClick={() => openEditForm(order)}
                         className="text-slate-600 hover:text-indigo-600"
+                        title="Edytuj"
                       >
                         <Edit3 className="w-4 h-4" />
                       </Button>
@@ -360,6 +373,7 @@ export function Orders() {
                         size="icon"
                         onClick={() => openDeleteDialog(order)}
                         className="text-slate-600 hover:text-red-600"
+                        title="Usuń"
                       >
                         <Trash2 className="w-4 h-4" />
                       </Button>

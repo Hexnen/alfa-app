@@ -1,9 +1,10 @@
 import { useEffect, useState, useCallback } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
@@ -11,7 +12,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Label } from "@/components/ui/label";
 import {
   Dialog,
   DialogContent,
@@ -19,7 +19,7 @@ import {
   DialogTitle,
   DialogFooter,
 } from "@/components/ui/dialog";
-import { Plus, Search, Pencil, Trash2 } from "lucide-react";
+import { Plus, Search, Eye, Pencil, Trash2 } from "lucide-react";
 import {
   getContracts,
   getObjects,
@@ -42,14 +42,11 @@ const statusColors: Record<string, "default" | "success" | "secondary" | "destru
 
 export function Contracts() {
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
   const [contracts, setContracts] = useState<ContractWithDetails[]>([]);
   const [objects, setObjects] = useState<ObjectWithContractor[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState(
-    searchParams.get("status") || ""
-  );
+  const [statusFilter, setStatusFilter] = useState("all");
   const [formOpen, setFormOpen] = useState(false);
   const [editingContract, setEditingContract] = useState<Contract | null>(null);
   const [formData, setFormData] = useState<ContractInput>({
@@ -66,7 +63,7 @@ export function Contracts() {
     try {
       const res = await getContracts({
         search,
-        status: statusFilter || undefined,
+        status: statusFilter !== "all" ? statusFilter : undefined,
         pageSize: 100,
       });
       setContracts(res.data);
@@ -176,7 +173,7 @@ export function Contracts() {
                 <SelectValue placeholder="Status" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="">Wszystkie statusy</SelectItem>
+                <SelectItem value="all">Wszystkie statusy</SelectItem>
                 {Object.entries(contractStatusLabels).map(([value, label]) => (
                   <SelectItem key={value} value={value}>
                     {label}
@@ -253,6 +250,14 @@ export function Contracts() {
                       </td>
                       <td className="py-3 px-2">
                         <div className="flex items-center justify-end gap-2">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => navigate(`/contracts/${contract.id}`)}
+                            title="Szczegoly"
+                          >
+                            <Eye className="h-4 w-4" />
+                          </Button>
                           <Button
                             variant="ghost"
                             size="icon"
