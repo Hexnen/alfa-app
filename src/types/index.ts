@@ -92,6 +92,41 @@ export interface ContractInput {
   status?: ContractStatus;
 }
 
+export const OrderStatus = {
+  NEW: "new",
+  IN_PROGRESS: "in_progress",
+  COMPLETED: "completed",
+  CANCELLED: "cancelled",
+} as const;
+export type OrderStatus = (typeof OrderStatus)[keyof typeof OrderStatus];
+
+export interface OrderInput {
+  requesterName: string;
+  requesterPhone: string;
+  requesterEmail: string;
+  payerName: string;
+  payerNip: string;
+  payerContractorId?: number;
+  objectName: string;
+  objectAddress?: string;
+  objectCity?: string;
+  objectLocationUrl?: string;
+  objectId?: number;
+  contactPerson: string;
+  contactPhone: string;
+  contactEmail?: string;
+  isCameraInstallation?: boolean;
+  cameraCount?: number;
+  megaphoneCount?: number;
+  vtoolsOfferNumber?: string;
+  monthlyAmount?: number;
+  rentalAmount?: number;
+  invoiceIssuer?: string;
+  status?: OrderStatus;
+  serviceStartDate?: string;
+  notes?: string;
+}
+
 export interface WorkflowTransition {
   objectId: number;
   newStatus: ObjectStatus;

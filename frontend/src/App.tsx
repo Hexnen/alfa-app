@@ -5,6 +5,7 @@ import { Contractors } from "./pages/Contractors";
 import { Objects } from "./pages/Objects";
 import { ObjectDetails } from "./pages/ObjectDetails";
 import { Contracts } from "./pages/Contracts";
+import { Orders } from "./pages/Orders";
 
 function App() {
   return (
@@ -16,6 +17,7 @@ function App() {
           <Route path="/objects" element={<Objects />} />
           <Route path="/objects/:id" element={<ObjectDetails />} />
           <Route path="/contracts" element={<Contracts />} />
+          <Route path="/orders" element={<Orders />} />
         </Routes>
       </Layout>
     </BrowserRouter>

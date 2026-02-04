@@ -3,6 +3,7 @@ import contractorsRoutes from "./contractors.js";
 import objectsRoutes from "./objects.js";
 import contractsRoutes from "./contracts.js";
 import historyRoutes from "./history.js";
+import ordersRoutes from "./orders.js";
 import { db, schema } from "../db/index.js";
 import { sql, eq } from "drizzle-orm";
 
@@ -57,12 +58,37 @@ api.get("/stats", async (c) => {
     .from(schema.objects)
     .where(eq(schema.objects.status, "active"));
 
+  const [ordersCount] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(schema.orders);
+
+  const [newOrders] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(schema.orders)
+    .where(eq(schema.orders.status, "new"));
+
+  const [inProgressOrders] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(schema.orders)
+    .where(eq(schema.orders.status, "in_progress"));
+
+  const [completedOrders] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(schema.orders)
+    .where(eq(schema.orders.status, "completed"));
+
   return c.json({
     success: true,
     data: {
       contractors: contractorsCount.count,
       objects: objectsCount.count,
       contracts: contractsCount.count,
+      orders: ordersCount.count,
+      ordersByStatus: {
+        new: newOrders.count,
+        inProgress: inProgressOrders.count,
+        completed: completedOrders.count,
+      },
       objectsByStatus: {
         pending: pendingObjects.count,
         inProgress: inProgressObjects.count,
@@ -83,5 +109,6 @@ api.route("/contractors", contractorsRoutes);
 api.route("/objects", objectsRoutes);
 api.route("/contracts", contractsRoutes);
 api.route("/history", historyRoutes);
+api.route("/orders", ordersRoutes);
 
 export default api;

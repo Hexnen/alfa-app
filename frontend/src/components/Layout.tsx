@@ -4,6 +4,7 @@ import {
   Users,
   Building2,
   FileText,
+  ClipboardList,
   Menu,
   X,
 } from "lucide-react";
@@ -16,6 +17,7 @@ const navigation = [
   { name: "Kontrahenci", href: "/contractors", icon: Users },
   { name: "Obiekty", href: "/objects", icon: Building2 },
   { name: "Umowy", href: "/contracts", icon: FileText },
+  { name: "Zlecenia", href: "/orders", icon: ClipboardList },
 ];
 
 interface LayoutProps {

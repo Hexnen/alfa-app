@@ -324,3 +324,111 @@ export interface HistoryWithDetails extends ObjectHistoryRecord {
   object: ObjectRecord | null;
   contractor: Contractor | null;
 }
+
+// Orders
+export interface Order {
+  id: number;
+  orderNumber: string;
+  requesterName: string;
+  requesterPhone: string;
+  requesterEmail: string;
+  payerName: string;
+  payerNip: string;
+  payerContractorId: number | null;
+  objectName: string;
+  objectAddress: string | null;
+  objectCity: string | null;
+  objectLocationUrl: string | null;
+  objectId: number | null;
+  contactPerson: string;
+  contactPhone: string;
+  contactEmail: string | null;
+  isCameraInstallation: boolean;
+  cameraCount: number | null;
+  megaphoneCount: number | null;
+  vtoolsOfferNumber: string | null;
+  monthlyAmount: number | null;
+  rentalAmount: number | null;
+  invoiceIssuer: string | null;
+  status: "new" | "in_progress" | "completed" | "cancelled";
+  serviceStartDate: string | null;
+  notes: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface OrderInput {
+  requesterName: string;
+  requesterPhone: string;
+  requesterEmail: string;
+  payerName: string;
+  payerNip: string;
+  payerContractorId?: number;
+  objectName: string;
+  objectAddress?: string;
+  objectCity?: string;
+  objectLocationUrl?: string;
+  objectId?: number;
+  contactPerson: string;
+  contactPhone: string;
+  contactEmail?: string;
+  isCameraInstallation?: boolean;
+  cameraCount?: number;
+  megaphoneCount?: number;
+  vtoolsOfferNumber?: string;
+  monthlyAmount?: number;
+  rentalAmount?: number;
+  invoiceIssuer?: string;
+  status?: "new" | "in_progress" | "completed" | "cancelled";
+  serviceStartDate?: string;
+  notes?: string;
+}
+
+export async function getOrders(params?: {
+  search?: string;
+  status?: string;
+  page?: number;
+  pageSize?: number;
+}) {
+  const searchParams = new URLSearchParams();
+  if (params?.search) searchParams.set("search", params.search);
+  if (params?.status) searchParams.set("status", params.status);
+  if (params?.page) searchParams.set("page", String(params.page));
+  if (params?.pageSize) searchParams.set("pageSize", String(params.pageSize));
+
+  const query = searchParams.toString();
+  return request<PaginatedResponse<Order>>(
+    `/orders${query ? `?${query}` : ""}`
+  );
+}
+
+export async function getOrder(id: number) {
+  return request<ApiResponse<Order>>(`/orders/${id}`);
+}
+
+export async function createOrder(data: OrderInput) {
+  return request<ApiResponse<Order>>("/orders", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateOrder(id: number, data: Partial<OrderInput>) {
+  return request<ApiResponse<Order>>(`/orders/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateOrderStatus(id: number, status: string) {
+  return request<ApiResponse<Order>>(`/orders/${id}/status`, {
+    method: "PATCH",
+    body: JSON.stringify({ status }),
+  });
+}
+
+export async function deleteOrder(id: number) {
+  return request<ApiResponse<null>>(`/orders/${id}`, {
+    method: "DELETE",
+  });
+}

@@ -93,6 +93,64 @@ export const objectHistory = sqliteTable("object_history", {
     .notNull(),
 });
 
+// Orders table - zlecenia montażu
+export const orders = sqliteTable("orders", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  orderNumber: text("order_number").notNull().unique(),
+  
+  // Osoba zlecająca
+  requesterName: text("requester_name").notNull(),
+  requesterPhone: text("requester_phone").notNull(),
+  requesterEmail: text("requester_email").notNull(),
+  
+  // Dane płatnika
+  payerName: text("payer_name").notNull(),
+  payerNip: text("payer_nip").notNull(),
+  payerContractorId: integer("payer_contractor_id").references(() => contractors.id),
+  
+  // Dane obiektu
+  objectName: text("object_name").notNull(),
+  objectAddress: text("object_address"),
+  objectCity: text("object_city"),
+  objectLocationUrl: text("object_location_url"),
+  objectId: integer("object_id").references(() => objects.id),
+  
+  // Osoba kontaktowa na miejscu
+  contactPerson: text("contact_person").notNull(),
+  contactPhone: text("contact_phone").notNull(),
+  contactEmail: text("contact_email"),
+  
+  // Szczegóły techniczne
+  isCameraInstallation: integer("is_camera_installation", { mode: "boolean" }).default(false),
+  cameraCount: integer("camera_count"),
+  megaphoneCount: integer("megaphone_count"),
+  vtoolsOfferNumber: text("vtools_offer_number"),
+  
+  // Dane finansowe
+  monthlyAmount: real("monthly_amount"),
+  rentalAmount: real("rental_amount"),
+  invoiceIssuer: text("invoice_issuer"),
+  
+  // Status i daty
+  status: text("status", {
+    enum: ["new", "in_progress", "completed", "cancelled"],
+  })
+    .default("new")
+    .notNull(),
+  serviceStartDate: text("service_start_date"),
+  
+  // Uwagi
+  notes: text("notes"),
+  
+  // Timestampy
+  createdAt: text("created_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+  updatedAt: text("updated_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+});
+
 // Type exports
 export type Contractor = typeof contractors.$inferSelect;
 export type NewContractor = typeof contractors.$inferInsert;
@@ -105,3 +163,6 @@ export type NewContract = typeof contracts.$inferInsert;
 
 export type ObjectHistoryRecord = typeof objectHistory.$inferSelect;
 export type NewObjectHistory = typeof objectHistory.$inferInsert;
+
+export type Order = typeof orders.$inferSelect;
+export type NewOrder = typeof orders.$inferInsert;
