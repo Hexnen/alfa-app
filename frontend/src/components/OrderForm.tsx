@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
@@ -21,6 +21,8 @@ import {
 import { Badge } from "./ui/badge";
 import { Separator } from "./ui/separator";
 import { ScrollArea } from "./ui/scroll-area";
+import { Alert, AlertDescription } from "./ui/alert";
+import { NIPField } from "./NIPField";
 import {
   User,
   Phone,
@@ -33,10 +35,14 @@ import {
   FileText,
   Calendar,
   ClipboardList,
-  Search,
+  Check,
+  AlertCircle,
+  Home,
 } from "lucide-react";
-import type { Order, OrderInput, Contractor, ObjectRecord } from "@/lib/api";
-import { getContractors, getObjects } from "@/lib/api";
+import type { Order, OrderInput, Contractor, ObjectRecord, ObjectHistoryRecord } from "@/lib/api";
+import { getContractorObjects } from "@/lib/api";
+import { normalizeNIP } from "@/lib/nip";
+import { objectTypeLabels, installationTypeLabels, statusLabels } from "@/lib/utils";
 
 interface OrderFormProps {
   open: boolean;
@@ -54,75 +60,161 @@ const orderStatuses = [
 
 export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
   const [loading, setLoading] = useState(false);
-  const [contractors, setContractors] = useState<Contractor[]>([]);
-  const [objects, setObjects] = useState<ObjectRecord[]>([]);
-  const [showContractorSearch, setShowContractorSearch] = useState(false);
-  const [showObjectSearch, setShowObjectSearch] = useState(false);
-
+  const [error, setError] = useState<string | null>(null);
+  
+  // Contractor state
+  const [contractorNIP, setContractorNIP] = useState(order?.payerNip || "");
+  const [selectedContractor, setSelectedContractor] = useState<Contractor | null>(null);
+  const [createContractor, setCreateContractor] = useState(!order);
+  const [showContractorForm, setShowContractorForm] = useState(!order);
+  
+  // Object state
+  const [contractorObjects, setContractorObjects] = useState<Array<ObjectRecord & { latestAction: ObjectHistoryRecord | null }>>([]);
+  const [createObject, setCreateObject] = useState(!order);
+  const [selectedObject, setSelectedObject] = useState<ObjectRecord | null>(null);
+  
+  // Form data
   const [formData, setFormData] = useState<OrderInput>({
-    requesterName: order?.requesterName || "",
-    requesterPhone: order?.requesterPhone || "",
-    requesterEmail: order?.requesterEmail || "",
-    payerName: order?.payerName || "",
-    payerNip: order?.payerNip || "",
-    payerContractorId: order?.payerContractorId ?? undefined,
-    objectName: order?.objectName || "",
-    objectAddress: order?.objectAddress || "",
-    objectCity: order?.objectCity || "",
-    objectLocationUrl: order?.objectLocationUrl || "",
-    objectId: order?.objectId ?? undefined,
-    contactPerson: order?.contactPerson || "",
-    contactPhone: order?.contactPhone || "",
-    contactEmail: order?.contactEmail || "",
-    isCameraInstallation: order?.isCameraInstallation || false,
-    cameraCount: order?.cameraCount ?? undefined,
-    megaphoneCount: order?.megaphoneCount ?? undefined,
-    vtoolsOfferNumber: order?.vtoolsOfferNumber || "",
-    monthlyAmount: order?.monthlyAmount || undefined,
-    rentalAmount: order?.rentalAmount || undefined,
-    invoiceIssuer: order?.invoiceIssuer || "",
-    status: order?.status || "new",
-    serviceStartDate: order?.serviceStartDate || "",
-    notes: order?.notes || "",
+    requesterName: "",
+    requesterPhone: "",
+    requesterEmail: "",
+    payerName: "",
+    payerNip: "",
+    objectName: "",
+    objectAddress: "",
+    objectCity: "",
+    objectLocationUrl: "",
+    contactPerson: "",
+    contactPhone: "",
+    contactEmail: "",
+    isCameraInstallation: false,
+    status: "new",
+    serviceStartDate: "",
+    notes: "",
+    // New fields
+    createContractor: true,
+    createObject: true,
+    contractorAddress: "",
+    contractorCity: "",
+    contractorPhone: "",
+    contractorEmail: "",
+    contractorContactPerson: "",
+    objectType: "monitoring",
+    objectInstallationType: "new",
   });
 
+  // Reset form when dialog opens/closes
   useEffect(() => {
     if (open) {
-      loadContractors();
-      loadObjects();
+      const hasOrder = !!order;
+      const hasContractor = hasOrder && order.payerContractorId != null;
+      const hasObject = hasOrder && order.objectId != null;
+      
+      setContractorNIP(order?.payerNip || "");
+      setSelectedContractor(order?.contractor || null);
+      setCreateContractor(!hasContractor);
+      setShowContractorForm(!hasContractor);
+      setCreateObject(!hasObject);
+      setSelectedObject(order?.object || null);
+      setError(null);
+      
+      setFormData({
+        requesterName: order?.requesterName || "",
+        requesterPhone: order?.requesterPhone || "",
+        requesterEmail: order?.requesterEmail || "",
+        payerName: order?.payerName || "",
+        payerNip: order?.payerNip || "",
+        payerContractorId: order?.payerContractorId ?? undefined,
+        objectName: order?.objectName || "",
+        objectAddress: order?.objectAddress || "",
+        objectCity: order?.objectCity || "",
+        objectLocationUrl: order?.objectLocationUrl || "",
+        objectId: order?.objectId ?? undefined,
+        contactPerson: order?.contactPerson || "",
+        contactPhone: order?.contactPhone || "",
+        contactEmail: order?.contactEmail || "",
+        isCameraInstallation: order?.isCameraInstallation || false,
+        cameraCount: order?.cameraCount ?? undefined,
+        megaphoneCount: order?.megaphoneCount ?? undefined,
+        vtoolsOfferNumber: order?.vtoolsOfferNumber || "",
+        monthlyAmount: order?.monthlyAmount ?? undefined,
+        rentalAmount: order?.rentalAmount ?? undefined,
+        invoiceIssuer: order?.invoiceIssuer || "",
+        status: order?.status || "new",
+        serviceStartDate: order?.serviceStartDate || "",
+        notes: order?.notes || "",
+        createContractor: !hasContractor,
+        createObject: !hasObject,
+        contractorAddress: "",
+        contractorCity: "",
+        contractorPhone: "",
+        contractorEmail: "",
+        contractorContactPerson: "",
+        objectType: "monitoring",
+        objectInstallationType: "new",
+      });
+      
+      if (order?.payerContractorId) {
+        loadContractorObjects(order.payerContractorId);
+      }
     }
-  }, [open]);
+  }, [open, order]);
 
-  const loadContractors = async () => {
+  const loadContractorObjects = async (contractorId: number) => {
     try {
-      const response = await getContractors({ pageSize: 100 });
-      setContractors(response.data);
-    } catch (error) {
-      console.error("Error loading contractors:", error);
+      const response = await getContractorObjects(contractorId);
+      setContractorObjects(response.data || []);
+    } catch (err) {
+      console.error("Error loading contractor objects:", err);
     }
   };
 
-  const loadObjects = async () => {
-    try {
-      const response = await getObjects({ pageSize: 100 });
-      setObjects(response.data);
-    } catch (error) {
-      console.error("Error loading objects:", error);
+  const handleNIPChange = useCallback((nip: string, contractor: Contractor | null) => {
+    setContractorNIP(nip);
+    setFormData((prev) => ({
+      ...prev,
+      payerNip: nip,
+    }));
+    
+    if (contractor) {
+      // NIP exists - contractor found
+      setSelectedContractor(contractor);
+      setCreateContractor(false);
+      setShowContractorForm(false);
+      setFormData((prev) => ({
+        ...prev,
+        payerName: contractor.name,
+        payerContractorId: contractor.id,
+        createContractor: false,
+      }));
+      // Load contractor's objects
+      loadContractorObjects(contractor.id);
+    } else if (nip.length === 10 && validateNIP(nip)) {
+      // NIP is valid but doesn't exist - show form to create new contractor
+      setSelectedContractor(null);
+      setCreateContractor(true);
+      setShowContractorForm(true);
+      setFormData((prev) => ({
+        ...prev,
+        payerContractorId: undefined,
+        createContractor: true,
+      }));
+      setContractorObjects([]);
     }
-  };
+  }, []);
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoading(true);
-    try {
-      await onSubmit(formData);
-      onClose();
-    } catch (error) {
-      console.error("Error submitting form:", error);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const handleUseExistingContractor = useCallback((contractor: Contractor) => {
+    setSelectedContractor(contractor);
+    setCreateContractor(false);
+    setShowContractorForm(false);
+    setFormData((prev) => ({
+      ...prev,
+      payerName: contractor.name,
+      payerContractorId: contractor.id,
+      createContractor: false,
+    }));
+    loadContractorObjects(contractor.id);
+  }, []);
 
   const handleChange = (
     e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>
@@ -139,30 +231,92 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
     }));
   };
 
-  const selectContractor = (contractor: Contractor) => {
-    setFormData((prev) => ({
-      ...prev,
-      payerContractorId: contractor.id,
-      payerName: contractor.name,
-      payerNip: contractor.nip,
-    }));
-    setShowContractorSearch(false);
-  };
-
-  const selectObject = (obj: ObjectRecord) => {
+  const handleSelectObject = (obj: ObjectRecord) => {
+    setSelectedObject(obj);
+    setCreateObject(false);
     setFormData((prev) => ({
       ...prev,
       objectId: obj.id,
       objectName: obj.name,
-      objectAddress: obj.address || "",
-      objectCity: obj.city || "",
+      objectAddress: obj.address || prev.objectAddress,
+      objectCity: obj.city || prev.objectCity,
+      createObject: false,
     }));
-    setShowObjectSearch(false);
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    
+    // Validation
+    if (!formData.payerNip || !validateNIP(formData.payerNip)) {
+      setError("Podaj prawidłowy NIP");
+      return;
+    }
+    
+    if (!formData.payerName) {
+      setError("Podaj nazwę płatnika");
+      return;
+    }
+    
+    if (createContractor && !formData.payerContractorId) {
+      // Creating new contractor - validate required fields
+      if (!formData.payerName) {
+        setError("Podaj nazwę kontrahenta");
+        return;
+      }
+    } else if (!formData.payerContractorId) {
+      setError("Wybierz lub utwórz kontrahenta");
+      return;
+    }
+    
+    if (createObject) {
+      // Creating new object - validate required fields
+      if (!formData.objectName) {
+        setError("Podaj nazwę obiektu");
+        return;
+      }
+      if (!formData.objectType || !formData.objectInstallationType) {
+        setError("Wybierz typ ochrony i typ instalacji");
+        return;
+      }
+    } else if (!formData.objectId) {
+      setError("Wybierz lub utwórz obiekt");
+      return;
+    }
+    
+    setLoading(true);
+    try {
+      await onSubmit({
+        ...formData,
+        payerNip: normalizeNIP(formData.payerNip),
+        createContractor,
+        createObject,
+      });
+      onClose();
+    } catch (err: any) {
+      console.error("Error submitting form:", err);
+      setError(err.message || "Wystąpił błąd podczas zapisywania");
+    } finally {
+      setLoading(false);
+    }
   };
 
   const getStatusLabel = (status: string) => {
     return orderStatuses.find((s) => s.value === status)?.label || status;
   };
+
+  // Helper function to validate NIP
+  function validateNIP(nip: string): boolean {
+    const normalized = nip.replace(/[^\d]/g, '');
+    if (normalized.length !== 10) return false;
+    const weights = [6, 5, 7, 2, 3, 4, 5, 6, 7];
+    const digits = normalized.split('').map(Number);
+    const sum = weights.reduce((acc, w, i) => acc + w * digits[i], 0);
+    return sum % 11 === digits[9];
+  }
+
+  const isEditing = !!order;
 
   return (
     <Dialog open={open} onOpenChange={onClose}>
@@ -194,6 +348,13 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
 
         <ScrollArea className="max-h-[calc(95vh-140px)]">
           <form onSubmit={handleSubmit} className="p-6 space-y-8">
+            {error && (
+              <Alert variant="destructive">
+                <AlertCircle className="h-4 w-4" />
+                <AlertDescription>{error}</AlertDescription>
+              </Alert>
+            )}
+
             {/* Osoba zlecająca */}
             <section className="space-y-4">
               <div className="flex items-center gap-2 text-slate-700">
@@ -257,74 +418,117 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
 
             {/* Dane płatnika */}
             <section className="space-y-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2 text-slate-700">
-                  <Building2 className="w-4 h-4" />
-                  <h3 className="font-semibold uppercase tracking-wide text-sm">
-                    Dane płatnika
-                  </h3>
-                </div>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setShowContractorSearch(!showContractorSearch)}
-                  className="text-indigo-600 border-indigo-200 hover:bg-indigo-50"
-                >
-                  <Search className="w-4 h-4 mr-1" />
-                  Wybierz z bazy
-                </Button>
+              <div className="flex items-center gap-2 text-slate-700">
+                <Building2 className="w-4 h-4" />
+                <h3 className="font-semibold uppercase tracking-wide text-sm">
+                  Dane płatnika
+                </h3>
               </div>
 
-              {showContractorSearch && (
-                <div className="p-3 bg-white border border-slate-200 rounded-lg">
-                  <p className="text-sm text-slate-500 mb-2">Wybierz kontrahenta:</p>
-                  <ScrollArea className="h-32">
-                    <div className="space-y-1">
-                      {contractors.map((c) => (
-                        <button
-                          key={c.id}
-                          type="button"
-                          onClick={() => selectContractor(c)}
-                          className="w-full text-left px-3 py-2 text-sm rounded hover:bg-slate-100 transition-colors"
-                        >
-                          <span className="font-medium">{c.name}</span>
-                          <span className="text-slate-500 ml-2">NIP: {c.nip}</span>
-                        </button>
-                      ))}
+              {/* NIP Field */}
+              <NIPField
+                value={contractorNIP}
+                onChange={handleNIPChange}
+                onUseExisting={handleUseExistingContractor}
+                disabled={isEditing}
+              />
+
+              {/* New Contractor Form */}
+              {showContractorForm && createContractor && !isEditing && (
+                <div className="p-4 bg-white border border-slate-200 rounded-lg space-y-4">
+                  <h4 className="font-medium text-slate-700 flex items-center gap-2">
+                    <Check className="w-4 h-4 text-green-500" />
+                    Tworzenie nowego kontrahenta
+                  </h4>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <Label htmlFor="payerName">
+                        Nazwa kontrahenta <span className="text-red-500">*</span>
+                      </Label>
+                      <Input
+                        id="payerName"
+                        name="payerName"
+                        value={formData.payerName}
+                        onChange={handleChange}
+                        placeholder="Nazwa firmy"
+                        required
+                        className="bg-white"
+                      />
                     </div>
-                  </ScrollArea>
+                    <div className="space-y-2">
+                      <Label htmlFor="contractorPhone">Telefon</Label>
+                      <Input
+                        id="contractorPhone"
+                        name="contractorPhone"
+                        value={formData.contractorPhone || ""}
+                        onChange={handleChange}
+                        placeholder="Opcjonalnie"
+                        className="bg-white"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="contractorEmail">Email</Label>
+                      <Input
+                        id="contractorEmail"
+                        name="contractorEmail"
+                        type="email"
+                        value={formData.contractorEmail || ""}
+                        onChange={handleChange}
+                        placeholder="Opcjonalnie"
+                        className="bg-white"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="contractorContactPerson">Osoba kontaktowa</Label>
+                      <Input
+                        id="contractorContactPerson"
+                        name="contractorContactPerson"
+                        value={formData.contractorContactPerson || ""}
+                        onChange={handleChange}
+                        placeholder="Opcjonalnie"
+                        className="bg-white"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="contractorAddress">Adres</Label>
+                      <Input
+                        id="contractorAddress"
+                        name="contractorAddress"
+                        value={formData.contractorAddress || ""}
+                        onChange={handleChange}
+                        placeholder="Ulica i numer"
+                        className="bg-white"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="contractorCity">Miasto</Label>
+                      <Input
+                        id="contractorCity"
+                        name="contractorCity"
+                        value={formData.contractorCity || ""}
+                        onChange={handleChange}
+                        placeholder="Miasto"
+                        className="bg-white"
+                      />
+                    </div>
+                  </div>
                 </div>
               )}
 
-              <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <Label htmlFor="payerName" className="text-slate-700">
-                    Nazwa płatnika <span className="text-red-500">*</span>
-                  </Label>
-                  <Input
-                    id="payerName"
-                    name="payerName"
-                    value={formData.payerName}
-                    onChange={handleChange}
-                    required
-                    className="bg-white border-slate-300 focus:border-indigo-500 focus:ring-indigo-500"
-                  />
+              {/* Selected Contractor Info (when editing or using existing) */}
+              {(selectedContractor || isEditing) && !createContractor && (
+                <div className="p-4 bg-green-50 border border-green-200 rounded-lg">
+                  <div className="flex items-center gap-2 text-green-800">
+                    <Check className="w-5 h-5" />
+                    <span className="font-medium">
+                      Wybrany kontrahent: {formData.payerName}
+                    </span>
+                  </div>
+                  <p className="text-sm text-green-700 mt-1">
+                    NIP: {formData.payerNip}
+                  </p>
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="payerNip" className="text-slate-700">
-                    NIP płatnika <span className="text-red-500">*</span>
-                  </Label>
-                  <Input
-                    id="payerNip"
-                    name="payerNip"
-                    value={formData.payerNip}
-                    onChange={handleChange}
-                    required
-                    className="bg-white border-slate-300 focus:border-indigo-500 focus:ring-indigo-500"
-                  />
-                </div>
-              </div>
+              )}
             </section>
 
             <Separator className="bg-slate-200" />
@@ -338,94 +542,184 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
                     Dane obiektu
                   </h3>
                 </div>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setShowObjectSearch(!showObjectSearch)}
-                  className="text-indigo-600 border-indigo-200 hover:bg-indigo-50"
-                >
-                  <Search className="w-4 h-4 mr-1" />
-                  Wybierz z bazy
-                </Button>
+                {!isEditing && (
+                  <div className="flex items-center space-x-2">
+                    <Checkbox
+                      id="createObject"
+                      checked={createObject}
+                      onCheckedChange={(checked) => {
+                        setCreateObject(checked as boolean);
+                        setSelectedObject(null);
+                        setFormData((prev) => ({
+                          ...prev,
+                          createObject: checked as boolean,
+                          objectId: checked ? undefined : prev.objectId,
+                        }));
+                      }}
+                    />
+                    <Label htmlFor="createObject" className="text-sm font-medium cursor-pointer">
+                      Utwórz nowy obiekt
+                    </Label>
+                  </div>
+                )}
               </div>
 
-              {showObjectSearch && (
-                <div className="p-3 bg-white border border-slate-200 rounded-lg">
-                  <p className="text-sm text-slate-500 mb-2">Wybierz obiekt:</p>
-                  <ScrollArea className="h-32">
-                    <div className="space-y-1">
-                      {objects.map((o) => (
+              {/* Existing Objects List */}
+              {!createObject && !isEditing && selectedContractor && (
+                <div className="space-y-2">
+                  <Label className="text-slate-700">Wybierz obiekt kontrahenta:</Label>
+                  {contractorObjects.length === 0 ? (
+                    <p className="text-sm text-slate-500">
+                      Ten kontrahent nie ma jeszcze obiektów. Zaznacz "Utwórz nowy obiekt".
+                    </p>
+                  ) : (
+                    <div className="grid gap-2">
+                      {contractorObjects.map((obj) => (
                         <button
-                          key={o.id}
+                          key={obj.id}
                           type="button"
-                          onClick={() => selectObject(o)}
-                          className="w-full text-left px-3 py-2 text-sm rounded hover:bg-slate-100 transition-colors"
+                          onClick={() => handleSelectObject(obj)}
+                          className={`p-3 text-left border rounded-lg transition-colors ${
+                            selectedObject?.id === obj.id
+                              ? "border-indigo-500 bg-indigo-50"
+                              : "border-slate-200 hover:bg-slate-50"
+                          }`}
                         >
-                          <span className="font-medium">{o.name}</span>
-                          <span className="text-slate-500 ml-2">
-                            {o.city || ""} {o.address || ""}
-                          </span>
+                          <div className="flex items-center justify-between">
+                            <span className="font-medium">{obj.name}</span>
+                            {selectedObject?.id === obj.id && (
+                              <Check className="w-4 h-4 text-indigo-600" />
+                            )}
+                          </div>
+                          <p className="text-sm text-slate-500">
+                            {obj.city} {obj.address}
+                          </p>
+                          {obj.latestAction && (
+                            <Badge variant="secondary" className="mt-1 text-xs">
+                              {statusLabels[obj.status] || obj.status}
+                            </Badge>
+                          )}
                         </button>
                       ))}
                     </div>
-                  </ScrollArea>
+                  )}
                 </div>
               )}
 
-              <div className="space-y-2">
-                <Label htmlFor="objectName" className="text-slate-700">
-                  Nazwa obiektu w SAFESTAR <span className="text-red-500">*</span>
-                </Label>
-                <Input
-                  id="objectName"
-                  name="objectName"
-                  value={formData.objectName}
-                  onChange={handleChange}
-                  required
-                  className="bg-white border-slate-300 focus:border-indigo-500 focus:ring-indigo-500"
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <Label htmlFor="objectAddress" className="text-slate-700">
-                    Adres obiektu
-                  </Label>
-                  <Input
-                    id="objectAddress"
-                    name="objectAddress"
-                    value={formData.objectAddress}
-                    onChange={handleChange}
-                    className="bg-white border-slate-300 focus:border-indigo-500 focus:ring-indigo-500"
-                  />
+              {/* New Object Form */}
+              {(createObject || isEditing) && (
+                <div className="p-4 bg-white border border-slate-200 rounded-lg space-y-4">
+                  {createObject && !isEditing && (
+                    <h4 className="font-medium text-slate-700 flex items-center gap-2">
+                      <Home className="w-4 h-4 text-indigo-500" />
+                      Nowy obiekt
+                    </h4>
+                  )}
+                  
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <Label htmlFor="objectName">
+                        Nazwa obiektu <span className="text-red-500">*</span>
+                      </Label>
+                      <Input
+                        id="objectName"
+                        name="objectName"
+                        value={formData.objectName}
+                        onChange={handleChange}
+                        placeholder="Np. Siedziba firmy"
+                        required
+                        className="bg-white"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="objectLocationUrl">Lokalizacja Google (URL)</Label>
+                      <Input
+                        id="objectLocationUrl"
+                        name="objectLocationUrl"
+                        type="url"
+                        value={formData.objectLocationUrl}
+                        onChange={handleChange}
+                        placeholder="https://maps.google.com/..."
+                        className="bg-white"
+                      />
+                    </div>
+                  </div>
+                  
+                  {createObject && !isEditing && (
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-2">
+                        <Label>
+                          Typ ochrony <span className="text-red-500">*</span>
+                        </Label>
+                        <Select
+                          value={formData.objectType}
+                          onValueChange={(value) =>
+                            setFormData((prev) => ({ ...prev, objectType: value as OrderInput["objectType"] }))
+                          }
+                        >
+                          <SelectTrigger className="bg-white">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {Object.entries(objectTypeLabels).map(([value, label]) => (
+                              <SelectItem key={value} value={value}>
+                                {label}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="space-y-2">
+                        <Label>
+                          Typ instalacji <span className="text-red-500">*</span>
+                        </Label>
+                        <Select
+                          value={formData.objectInstallationType}
+                          onValueChange={(value) =>
+                            setFormData((prev) => ({ ...prev, objectInstallationType: value as OrderInput["objectInstallationType"] }))
+                          }
+                        >
+                          <SelectTrigger className="bg-white">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {Object.entries(installationTypeLabels).map(([value, label]) => (
+                              <SelectItem key={value} value={value}>
+                                {label}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    </div>
+                  )}
+                  
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <Label htmlFor="objectAddress">Adres</Label>
+                      <Input
+                        id="objectAddress"
+                        name="objectAddress"
+                        value={formData.objectAddress}
+                        onChange={handleChange}
+                        placeholder="Ulica i numer"
+                        className="bg-white"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="objectCity">Miasto</Label>
+                      <Input
+                        id="objectCity"
+                        name="objectCity"
+                        value={formData.objectCity}
+                        onChange={handleChange}
+                        placeholder="Miasto"
+                        className="bg-white"
+                      />
+                    </div>
+                  </div>
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="objectCity" className="text-slate-700">
-                    Miejscowość
-                  </Label>
-                  <Input
-                    id="objectCity"
-                    name="objectCity"
-                    value={formData.objectCity}
-                    onChange={handleChange}
-                    className="bg-white border-slate-300 focus:border-indigo-500 focus:ring-indigo-500"
-                  />
-                </div>
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="objectLocationUrl" className="text-slate-700">
-                  Lokalizacja Google (URL)
-                </Label>
-                <Input
-                  id="objectLocationUrl"
-                  name="objectLocationUrl"
-                  type="url"
-                  value={formData.objectLocationUrl}
-                  onChange={handleChange}
-                  placeholder="https://maps.google.com/..."
-                  className="bg-white border-slate-300 focus:border-indigo-500 focus:ring-indigo-500"
-                />
-              </div>
+              )}
             </section>
 
             <Separator className="bg-slate-200" />

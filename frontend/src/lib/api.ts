@@ -355,6 +355,9 @@ export interface Order {
   notes: string | null;
   createdAt: string;
   updatedAt: string;
+  // Joined data from backend
+  contractor?: Contractor | null;
+  object?: ObjectRecord | null;
 }
 
 export interface OrderInput {
@@ -382,6 +385,29 @@ export interface OrderInput {
   status?: "new" | "in_progress" | "completed" | "cancelled";
   serviceStartDate?: string;
   notes?: string;
+  // Flags for auto-creating contractor and object
+  createContractor?: boolean;
+  createObject?: boolean;
+  // Additional contractor data when creating new
+  contractorAddress?: string;
+  contractorCity?: string;
+  contractorPostalCode?: string;
+  contractorPhone?: string;
+  contractorEmail?: string;
+  contractorContactPerson?: string;
+  // Additional object data when creating new
+  objectType?: "monitoring" | "physical" | "alarm" | "mixed";
+  objectInstallationType?: "new" | "takeover";
+}
+
+// Check contractor by NIP
+export async function checkContractorByNIP(nip: string) {
+  return request<ApiResponse<{ exists: boolean; normalizedNip: string } & Partial<Contractor>>>(`/contractors/by-nip/${nip}`);
+}
+
+// Get contractor objects with history
+export async function getContractorObjects(contractorId: number) {
+  return request<ApiResponse<Array<ObjectRecord & { latestAction: ObjectHistoryRecord | null }>>>(`/contractors/${contractorId}/objects`);
 }
 
 export async function getOrders(params?: {

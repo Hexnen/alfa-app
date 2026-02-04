@@ -125,6 +125,19 @@ export interface OrderInput {
   status?: OrderStatus;
   serviceStartDate?: string;
   notes?: string;
+  // Flags for auto-creating contractor and object
+  createContractor?: boolean;
+  createObject?: boolean;
+  // Additional contractor data when creating new
+  contractorAddress?: string;
+  contractorCity?: string;
+  contractorPostalCode?: string;
+  contractorPhone?: string;
+  contractorEmail?: string;
+  contractorContactPerson?: string;
+  // Additional object data when creating new
+  objectType?: ObjectType;
+  objectInstallationType?: InstallationType;
 }
 
 export interface WorkflowTransition {

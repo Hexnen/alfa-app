@@ -1,9 +1,45 @@
 import { Hono } from "hono";
 import { db, schema } from "../db/index.js";
-import { eq, like, or, sql } from "drizzle-orm";
+import { eq, like, or, sql, desc } from "drizzle-orm";
 import type { ContractorInput, ApiResponse } from "../types/index.js";
+import { normalizeNIP, validateNIP } from "../utils/nip.js";
 
 const app = new Hono();
+
+// Check contractor by NIP
+app.get("/by-nip/:nip", async (c) => {
+  const nip = c.req.param("nip");
+  const normalizedNip = normalizeNIP(nip);
+  
+  if (!validateNIP(normalizedNip)) {
+    return c.json<ApiResponse<null>>(
+      { success: false, error: "Invalid NIP format" },
+      400
+    );
+  }
+  
+  const contractor = await db
+    .select()
+    .from(schema.contractors)
+    .where(eq(schema.contractors.nip, normalizedNip))
+    .limit(1);
+  
+  if (contractor.length === 0) {
+    return c.json<ApiResponse<{ exists: boolean; normalizedNip: string }>>({
+      success: true,
+      data: { exists: false, normalizedNip },
+    });
+  }
+  
+  return c.json<ApiResponse<typeof contractor[0] & { exists: boolean; normalizedNip: string }>>({
+    success: true,
+    data: {
+      ...contractor[0],
+      exists: true,
+      normalizedNip,
+    },
+  });
+});
 
 // Get all contractors with optional search
 app.get("/", async (c) => {
@@ -64,7 +100,7 @@ app.get("/:id", async (c) => {
   });
 });
 
-// Get contractor with their objects
+// Get contractor with their objects (with latest history action)
 app.get("/:id/objects", async (c) => {
   const id = parseInt(c.req.param("id"));
 
@@ -73,27 +109,55 @@ app.get("/:id/objects", async (c) => {
     .from(schema.objects)
     .where(eq(schema.objects.contractorId, id));
 
+  // Get latest history action for each object
+  const objectsWithHistory = await Promise.all(
+    objects.map(async (obj) => {
+      const history = await db
+        .select()
+        .from(schema.objectHistory)
+        .where(eq(schema.objectHistory.objectId, obj.id))
+        .orderBy(desc(schema.objectHistory.createdAt))
+        .limit(1);
+      
+      return {
+        ...obj,
+        latestAction: history[0] || null,
+      };
+    })
+  );
+
   return c.json({
     success: true,
-    data: objects,
+    data: objectsWithHistory,
   });
 });
 
 // Create contractor
 app.post("/", async (c) => {
   const body = await c.req.json<ContractorInput>();
+  
+  // Normalize NIP
+  const normalizedNip = normalizeNIP(body.nip);
+  
+  // Validate NIP
+  if (!validateNIP(normalizedNip)) {
+    return c.json<ApiResponse<null>>(
+      { success: false, error: "Invalid NIP format or checksum" },
+      400
+    );
+  }
 
   // Check if NIP already exists
   const existing = await db
     .select()
     .from(schema.contractors)
-    .where(eq(schema.contractors.nip, body.nip))
+    .where(eq(schema.contractors.nip, normalizedNip))
     .limit(1);
 
   if (existing.length > 0) {
     return c.json<ApiResponse<null>>(
       { success: false, error: "Contractor with this NIP already exists" },
-      400
+      409
     );
   }
 
@@ -101,7 +165,7 @@ app.post("/", async (c) => {
     .insert(schema.contractors)
     .values({
       name: body.name,
-      nip: body.nip,
+      nip: normalizedNip,
       address: body.address,
       city: body.city,
       postalCode: body.postalCode,
@@ -142,19 +206,32 @@ app.put("/:id", async (c) => {
   }
 
   // Check if NIP is being changed and already exists
-  if (body.nip && body.nip !== existing[0].nip) {
-    const nipExists = await db
-      .select()
-      .from(schema.contractors)
-      .where(eq(schema.contractors.nip, body.nip))
-      .limit(1);
-
-    if (nipExists.length > 0) {
+  if (body.nip) {
+    const normalizedNip = normalizeNIP(body.nip);
+    
+    if (!validateNIP(normalizedNip)) {
       return c.json<ApiResponse<null>>(
-        { success: false, error: "Contractor with this NIP already exists" },
+        { success: false, error: "Invalid NIP format or checksum" },
         400
       );
     }
+    
+    if (normalizedNip !== existing[0].nip) {
+      const nipExists = await db
+        .select()
+        .from(schema.contractors)
+        .where(eq(schema.contractors.nip, normalizedNip))
+        .limit(1);
+
+      if (nipExists.length > 0) {
+        return c.json<ApiResponse<null>>(
+          { success: false, error: "Contractor with this NIP already exists" },
+          409
+        );
+      }
+    }
+    
+    body.nip = normalizedNip;
   }
 
   const result = await db
