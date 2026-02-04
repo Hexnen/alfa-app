@@ -6,6 +6,8 @@ dist/
 
 # Database
 data/*.db
+data/*.db-shm
+data/*.db-wal
 
 # Environment variables
 .env
@@ -25,3 +27,15 @@ Thumbs.db
 # Logs
 *.log
 npm-debug.log*
+
+# Browser cache & screenshots (Playwright)
+browser-cache/
+screenshots/
+
+# Dev scripts
+check-console.cjs
+check-console.js
+take-screenshots.js
+
+# Planning docs
+plan_zlecenie_auto_create.md
