@@ -1,0 +1,1 @@
+ALTER TABLE `cma_mail_settings` ADD `from_filter` text;

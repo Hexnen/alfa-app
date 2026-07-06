@@ -5,12 +5,15 @@ import {
   Building2,
   FileText,
   ClipboardList,
+  Cctv,
   Menu,
   X,
+  LogOut,
 } from "lucide-react";
 import { useState } from "react";
 import { cn } from "@/lib/utils";
 import { Button } from "./ui/button";
+import { useAuth } from "@/auth/AuthProvider";
 
 const navigation = [
   { name: "Dashboard", href: "/", icon: LayoutDashboard },
@@ -18,6 +21,7 @@ const navigation = [
   { name: "Obiekty", href: "/objects", icon: Building2 },
   { name: "Umowy", href: "/contracts", icon: FileText },
   { name: "Zlecenia", href: "/orders", icon: ClipboardList },
+  { name: "CMA", href: "/cma", icon: Cctv },
 ];
 
 interface LayoutProps {
@@ -27,6 +31,7 @@ interface LayoutProps {
 export function Layout({ children }: LayoutProps) {
   const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const { user, logout } = useAuth();
 
   return (
     <div className="min-h-screen bg-background">
@@ -97,6 +102,15 @@ export function Layout({ children }: LayoutProps) {
           <h1 className="text-lg font-semibold">
             System Wdrozen Obiektow Ochrony
           </h1>
+          <div className="ml-auto flex items-center gap-2 text-sm">
+            <span className="text-muted-foreground max-w-[200px] truncate">
+              {user ? user.displayName || user.email : ""}
+            </span>
+            <Button variant="ghost" size="sm" onClick={() => logout()} title="Wyloguj">
+              <LogOut className="h-4 w-4 mr-1" />
+              Wyloguj
+            </Button>
+          </div>
         </header>
 
         {/* Page content */}

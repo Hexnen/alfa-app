@@ -15,6 +15,41 @@
       "when": 1770191654706,
       "tag": "0001_nostalgic_machine_man",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1783359358229,
+      "tag": "0002_huge_randall_flagg",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1783360793480,
+      "tag": "0003_burly_wallop",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1783361778020,
+      "tag": "0004_mysterious_wendell_vaughn",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1783363422471,
+      "tag": "0005_elite_kronos",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1783366721131,
+      "tag": "0006_thick_lady_mastermind",
+      "breakpoints": true
     }
   ]
 }

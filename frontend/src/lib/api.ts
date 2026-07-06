@@ -28,10 +28,12 @@ async function request<T>(
     },
   });
 
-  const data = await response.json();
+  // Bezpieczny parse — błąd (np. 401 "Wymagane logowanie") ma dać czytelny
+  // Error zamiast wykładać aplikację na nie-JSON-owej odpowiedzi.
+  const data = await response.json().catch(() => ({}));
 
   if (!response.ok || !data.success) {
-    throw new Error(data.error || "Request failed");
+    throw new Error(data.error || `Request failed (${response.status})`);
   }
 
   return data;
@@ -457,4 +459,376 @@ export async function deleteOrder(id: number) {
   return request<ApiResponse<null>>(`/orders/${id}`, {
     method: "DELETE",
   });
+}
+
+// CMA (camera monitoring reports)
+export interface CmaReport {
+  id: number;
+  fileName: string;
+  title: string;
+  dateFrom: string | null;
+  dateTo: string | null;
+  entryCount: number;
+  importedAt: string;
+}
+
+export interface CmaReportEntry {
+  id: number;
+  reportId: number;
+  objectCategory: string | null;
+  objectName: string;
+  address: string | null;
+  identifier1: string | null;
+  identifier2: string | null;
+  identifier3: string | null;
+  generatedAt: string | null;
+  patrolName: string | null;
+  startedAt: string | null;
+  endedAt: string | null;
+  endType: string | null;
+  description: string | null;
+  videoDevice: string | null;
+  videoChannel: string | null;
+  userName: string | null;
+}
+
+export interface CmaReportStats {
+  entryCount: number;
+  objectCount: number;
+  userCount: number;
+  operatorHandled: number;
+  byEndType: { endType: string | null; count: number }[];
+  byObject: { objectName: string; count: number }[];
+  byUser: { userName: string; count: number }[];
+}
+
+export interface CmaCameraIssueCamera {
+  videoChannel: string | null;
+  videoDevice: string | null;
+  count: number;
+  firstAt: string | null;
+  lastAt: string | null;
+}
+
+export interface CmaCameraIssueObject {
+  objectName: string;
+  address: string | null;
+  totalCount: number;
+  cameras: CmaCameraIssueCamera[];
+}
+
+export interface CmaCameraIssues {
+  classifications: { classification: string; count: number }[];
+  classification: string;
+  issues: CmaCameraIssueObject[];
+}
+
+export const cmaApi = {
+  async getReports(params?: {
+    search?: string;
+    page?: number;
+    pageSize?: number;
+  }) {
+    const searchParams = new URLSearchParams();
+    if (params?.search) searchParams.set("search", params.search);
+    if (params?.page) searchParams.set("page", String(params.page));
+    if (params?.pageSize) searchParams.set("pageSize", String(params.pageSize));
+
+    const query = searchParams.toString();
+    return request<PaginatedResponse<CmaReport>>(
+      `/cma/reports${query ? `?${query}` : ""}`
+    );
+  },
+
+  async getReport(id: number) {
+    return request<ApiResponse<{ report: CmaReport; stats: CmaReportStats }>>(
+      `/cma/reports/${id}`
+    );
+  },
+
+  async getReportEntries(
+    id: number,
+    params?: {
+      search?: string;
+      objectName?: string;
+      endType?: string;
+      page?: number;
+      pageSize?: number;
+    }
+  ) {
+    const searchParams = new URLSearchParams();
+    if (params?.search) searchParams.set("search", params.search);
+    if (params?.objectName) searchParams.set("objectName", params.objectName);
+    if (params?.endType) searchParams.set("endType", params.endType);
+    if (params?.page) searchParams.set("page", String(params.page));
+    if (params?.pageSize) searchParams.set("pageSize", String(params.pageSize));
+
+    const query = searchParams.toString();
+    return request<PaginatedResponse<CmaReportEntry>>(
+      `/cma/reports/${id}/entries${query ? `?${query}` : ""}`
+    );
+  },
+
+  async getCameraIssues(id: number, classification?: string) {
+    const searchParams = new URLSearchParams();
+    if (classification) searchParams.set("classification", classification);
+
+    const query = searchParams.toString();
+    return request<ApiResponse<CmaCameraIssues>>(
+      `/cma/reports/${id}/camera-issues${query ? `?${query}` : ""}`
+    );
+  },
+
+  async importReport(file: File) {
+    const formData = new FormData();
+    formData.append("file", file);
+
+    // No manual Content-Type header - the browser sets the multipart boundary.
+    const response = await fetch(`${API_BASE}/cma/reports/import`, {
+      method: "POST",
+      body: formData,
+    });
+
+    const data = await response.json();
+
+    if (!response.ok || !data.success) {
+      throw new Error(data.error || "Import failed");
+    }
+
+    return data as ApiResponse<CmaReport>;
+  },
+
+  async deleteReport(id: number) {
+    return request<ApiResponse<null>>(`/cma/reports/${id}`, {
+      method: "DELETE",
+    });
+  },
+
+  async getTrends() {
+    return request<ApiResponse<CmaTrends>>("/cma/trends");
+  },
+
+  async getCameraOutages() {
+    return request<ApiResponse<CmaCameraOutages | null>>(
+      "/cma/camera-outages/current"
+    );
+  },
+};
+
+// CMA camera outages (aktualne braki obrazu vs poprzedni raport)
+export interface CmaOutageReportRef {
+  id: number;
+  title: string;
+  dateFrom: string | null;
+  dateTo: string | null;
+}
+
+export interface CmaOutageCamera {
+  videoChannel: string | null;
+  status: "new" | "still";
+  occurrences: number;
+  firstAt: string | null;
+  lastAt: string | null;
+}
+
+export interface CmaOutageObject {
+  objectName: string;
+  address: string | null;
+  camerasOutCount: number;
+  /** Szacunek: distinct kanały wideo obiektu z całej historii zdarzeń */
+  totalKnownCameras: number;
+  allOut: boolean;
+  cameras: CmaOutageCamera[];
+  /** Kamery z brakiem w poprzednim raporcie, które już wróciły */
+  resolved: { videoChannel: string | null }[];
+}
+
+export interface CmaCameraOutages {
+  latestReport: CmaOutageReportRef;
+  previousReport: CmaOutageReportRef | null;
+  summary: {
+    objectsWithOutages: number;
+    camerasOut: number;
+    newCameras: number;
+    resolvedCameras: number;
+    allOutObjects: number;
+  };
+  objects: CmaOutageObject[];
+}
+
+// CMA mail (auto-import from mailbox + sending camera issue lists)
+export interface CmaMailSettings {
+  id: number;
+  imapHost: string;
+  imapPort: number;
+  imapSecure: boolean;
+  smtpHost: string;
+  smtpPort: number;
+  smtpSecure: boolean;
+  email: string | null;
+  hasPassword: boolean;
+  folder: string;
+  subjectFilter: string | null;
+  fromFilter: string | null;
+  pollMinutes: number;
+  importEnabled: boolean;
+  sendEnabled: boolean;
+  recipients: string | null;
+  /** Deprecated — zastąpione przez sendMode */
+  autoSendAfterImport: boolean;
+  sendMode: "after_import" | "scheduled";
+  sendTimes: string | null;
+  lastScheduledSendKey: string | null;
+  lastCheckAt: string | null;
+  lastCheckStatus: string | null;
+  lastCheckError: string | null;
+  updatedAt: string;
+}
+
+export interface CmaMailSettingsInput {
+  imapHost?: string;
+  imapPort?: number;
+  imapSecure?: boolean;
+  smtpHost?: string;
+  smtpPort?: number;
+  smtpSecure?: boolean;
+  email?: string;
+  // Send only when the user typed a new password (empty = keep current).
+  password?: string;
+  folder?: string;
+  subjectFilter?: string;
+  fromFilter?: string;
+  pollMinutes?: number;
+  importEnabled?: boolean;
+  sendEnabled?: boolean;
+  recipients?: string;
+  sendMode?: "after_import" | "scheduled";
+  sendTimes?: string;
+}
+
+export interface CmaMailFolderMatch {
+  folder: string;
+  matched: number;
+  error?: string;
+}
+
+export interface CmaMailTestImapResult {
+  folders: string[];
+  /** Suma dopasowań ze wszystkich skonfigurowanych folderów */
+  matchedInFolder: number;
+  matchedPerFolder: CmaMailFolderMatch[];
+}
+
+export interface CmaMailCheckNowResult {
+  checked: number;
+  matched: number;
+  imported: number;
+  skipped: number;
+  errors: number;
+}
+
+export interface CmaMailLogEntry {
+  id: number;
+  direction: "import" | "send";
+  messageUid: number | null;
+  subject: string | null;
+  fileName: string | null;
+  reportId: number | null;
+  status: "ok" | "skipped" | "error";
+  detail: string | null;
+  createdAt: string;
+}
+
+export const cmaMailApi = {
+  async getSettings() {
+    return request<ApiResponse<CmaMailSettings>>("/cma/mail/settings");
+  },
+
+  async saveSettings(data: CmaMailSettingsInput) {
+    return request<ApiResponse<CmaMailSettings>>("/cma/mail/settings", {
+      method: "PUT",
+      body: JSON.stringify(data),
+    });
+  },
+
+  async testImap() {
+    return request<ApiResponse<CmaMailTestImapResult>>(
+      "/cma/mail/test-imap",
+      { method: "POST" }
+    );
+  },
+
+  async testSmtp(to?: string) {
+    return request<ApiResponse<null>>("/cma/mail/test-smtp", {
+      method: "POST",
+      body: JSON.stringify(to ? { to } : {}),
+    });
+  },
+
+  async checkNow() {
+    return request<ApiResponse<CmaMailCheckNowResult>>(
+      "/cma/mail/check-now",
+      { method: "POST" }
+    );
+  },
+
+  async getLog(params?: { page?: number; pageSize?: number }) {
+    const searchParams = new URLSearchParams();
+    if (params?.page) searchParams.set("page", String(params.page));
+    if (params?.pageSize) searchParams.set("pageSize", String(params.pageSize));
+
+    const query = searchParams.toString();
+    return request<PaginatedResponse<CmaMailLogEntry>>(
+      `/cma/mail/log${query ? `?${query}` : ""}`
+    );
+  },
+
+  async sendIssues(
+    reportId: number,
+    data?: { classification?: string; to?: string }
+  ) {
+    return request<ApiResponse<null>>(`/cma/mail/send-issues/${reportId}`, {
+      method: "POST",
+      body: JSON.stringify(data ?? {}),
+    });
+  },
+
+  async sendLatest() {
+    return request<ApiResponse<null>>("/cma/mail/send-latest", {
+      method: "POST",
+    });
+  },
+};
+
+// CMA trends (dashboard trendów po wszystkich zaimportowanych raportach)
+export interface CmaTrendDay {
+  date: string;
+  entries: number;
+  noImage: number;
+  noImageObjects: number;
+  noImageCameras: number;
+  operatorHandled: number;
+}
+
+export interface CmaTrendObject {
+  objectName: string;
+  noImage: number;
+  entries: number;
+}
+
+export interface CmaTrendCamera {
+  objectName: string;
+  videoChannel: string | null;
+  noImage: number;
+  firstDate: string | null;
+  lastDate: string | null;
+}
+
+export interface CmaTrends {
+  range: { from: string | null; to: string | null };
+  reportCount: number;
+  entryCountTotal: number;
+  perDay: CmaTrendDay[];
+  topObjects: CmaTrendObject[];
+  topCameras: CmaTrendCamera[];
 }

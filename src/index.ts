@@ -3,6 +3,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import api from "./routes/index.js";
+import { startMailPoller } from "./services/cma-mail.js";
 
 const app = new Hono();
 
@@ -62,3 +63,7 @@ serve({
   port,
   hostname: host,
 });
+
+// Start the CMA mail poller (no-op when import is disabled
+// or credentials are missing; never throws)
+void startMailPoller();

@@ -4,10 +4,22 @@ import objectsRoutes from "./objects.js";
 import contractsRoutes from "./contracts.js";
 import historyRoutes from "./history.js";
 import ordersRoutes from "./orders.js";
+import cmaRoutes from "./cma.js";
+import cmaMailRoutes from "./cma-mail.js";
+import authRoutes from "./auth.js";
+import { requireAuth } from "../middleware/auth.js";
 import { db, schema } from "../db/index.js";
 import { sql, eq } from "drizzle-orm";
 
 const api = new Hono();
+
+// --- AUTH (rejestracja / logowanie / sesja) — publiczne ---
+// Musi być zamontowane PRZED api.use("*", requireAuth): w Hono middleware
+// zarejestrowane później nie obejmuje tras zarejestrowanych wcześniej.
+api.route("/auth", authRoutes);
+
+// --- Wszystkie pozostałe trasy API — chronione sesją ---
+api.use("*", requireAuth);
 
 // Dashboard statistics
 api.get("/stats", async (c) => {
@@ -110,5 +122,7 @@ api.route("/objects", objectsRoutes);
 api.route("/contracts", contractsRoutes);
 api.route("/history", historyRoutes);
 api.route("/orders", ordersRoutes);
+api.route("/cma/mail", cmaMailRoutes);
+api.route("/cma", cmaRoutes);
 
 export default api;

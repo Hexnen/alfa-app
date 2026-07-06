@@ -8,6 +8,9 @@ FRONTEND_DIR="$PROJECT_DIR/frontend"
 BACKEND_LOG="/tmp/alfa-backend.log"
 FRONTEND_LOG="/tmp/alfa-frontend.log"
 
+# better-sqlite3 jest skompilowany pod Node 22 — wymuszamy właściwą wersję Node
+export PATH="/config/.nvm/versions/node/v22.22.0/bin:$PATH"
+
 case "$1" in
   start)
     echo "🚀 Uruchamianie Alfa App..."
