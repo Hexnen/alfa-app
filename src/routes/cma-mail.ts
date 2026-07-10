@@ -6,7 +6,7 @@ import {
   getSettings,
   saveSettings,
   sanitizeSettings,
-  checkMailbox,
+  checkMailboxShared,
   testImapConnection,
   testSmtpConnection,
   sendIssuesEmail,
@@ -226,7 +226,9 @@ app.post("/test-smtp", async (c) => {
 // Run a mailbox check immediately
 app.post("/check-now", async (c) => {
   try {
-    const summary = await checkMailbox();
+    // Single-flight: reuses an in-progress scan instead of opening a
+    // second concurrent IMAP session and clobbering last-check status.
+    const summary = await checkMailboxShared();
     return c.json({ success: true, data: summary });
   } catch (error) {
     return c.json<ApiResponse<null>>(

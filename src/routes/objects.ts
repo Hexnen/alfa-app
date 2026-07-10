@@ -133,43 +133,53 @@ app.get("/:id", async (c) => {
 app.post("/", async (c) => {
   const body = await c.req.json<ObjectInput>();
 
-  // Verify contractor exists
-  const contractor = await db
-    .select()
-    .from(schema.contractors)
-    .where(eq(schema.contractors.id, body.contractorId))
-    .limit(1);
+  // Kontrola kontrahenta, wstawienie obiektu i wpis historii w jednej
+  // synchronicznej transakcji — obiekt i jego wpis "created" powstają atomowo,
+  // więc nie ma obiektu bez historii ani przeplotu między dwoma zapisami.
+  const result = db.transaction((tx) => {
+    const contractor = tx
+      .select()
+      .from(schema.contractors)
+      .where(eq(schema.contractors.id, body.contractorId))
+      .get();
 
-  if (contractor.length === 0) {
+    if (!contractor) return null;
+
+    const inserted = tx
+      .insert(schema.objects)
+      .values({
+        contractorId: body.contractorId,
+        name: body.name,
+        address: body.address,
+        city: body.city,
+        type: body.type,
+        installationType: body.installationType,
+        status: body.status || "pending",
+        department: body.department || "sales",
+        monthlyValue: body.monthlyValue,
+        notes: body.notes,
+      })
+      .returning()
+      .all();
+
+    tx.insert(schema.objectHistory)
+      .values({
+        objectId: inserted[0].id,
+        action: "created",
+        description: `Object created in ${body.department || "sales"} department`,
+        newValue: JSON.stringify(inserted[0]),
+      })
+      .run();
+
+    return inserted;
+  });
+
+  if (!result) {
     return c.json<ApiResponse<null>>(
       { success: false, error: "Contractor not found" },
       400
     );
   }
-
-  const result = await db
-    .insert(schema.objects)
-    .values({
-      contractorId: body.contractorId,
-      name: body.name,
-      address: body.address,
-      city: body.city,
-      type: body.type,
-      installationType: body.installationType,
-      status: body.status || "pending",
-      department: body.department || "sales",
-      monthlyValue: body.monthlyValue,
-      notes: body.notes,
-    })
-    .returning();
-
-  // Create history entry
-  await db.insert(schema.objectHistory).values({
-    objectId: result[0].id,
-    action: "created",
-    description: `Object created in ${body.department || "sales"} department`,
-    newValue: JSON.stringify(result[0]),
-  });
 
   return c.json<ApiResponse<typeof result[0]>>(
     {
@@ -186,36 +196,47 @@ app.put("/:id", async (c) => {
   const id = parseInt(c.req.param("id"));
   const body = await c.req.json<Partial<ObjectInput>>();
 
-  const existing = await db
-    .select()
-    .from(schema.objects)
-    .where(eq(schema.objects.id, id))
-    .limit(1);
+  // Odczyt, zapis i wpis historii w jednej synchronicznej transakcji —
+  // serializuje równoległe edycje (drugi PUT widzi zapis pierwszego) i buduje
+  // oldValue z tego samego odczytu, więc audyt nie kłamie o przejściu.
+  const result = db.transaction((tx) => {
+    const existing = tx
+      .select()
+      .from(schema.objects)
+      .where(eq(schema.objects.id, id))
+      .get();
 
-  if (existing.length === 0) {
+    if (!existing) return null;
+
+    const updated = tx
+      .update(schema.objects)
+      .set({
+        ...body,
+        updatedAt: new Date().toISOString(),
+      })
+      .where(eq(schema.objects.id, id))
+      .returning()
+      .all();
+
+    tx.insert(schema.objectHistory)
+      .values({
+        objectId: id,
+        action: "updated",
+        description: "Object details updated",
+        oldValue: JSON.stringify(existing),
+        newValue: JSON.stringify(updated[0]),
+      })
+      .run();
+
+    return updated;
+  });
+
+  if (!result) {
     return c.json<ApiResponse<null>>(
       { success: false, error: "Object not found" },
       404
     );
   }
-
-  const result = await db
-    .update(schema.objects)
-    .set({
-      ...body,
-      updatedAt: new Date().toISOString(),
-    })
-    .where(eq(schema.objects.id, id))
-    .returning();
-
-  // Create history entry
-  await db.insert(schema.objectHistory).values({
-    objectId: id,
-    action: "updated",
-    description: "Object details updated",
-    oldValue: JSON.stringify(existing[0]),
-    newValue: JSON.stringify(result[0]),
-  });
 
   return c.json<ApiResponse<typeof result[0]>>({
     success: true,
@@ -229,45 +250,56 @@ app.post("/:id/transition", async (c) => {
   const id = parseInt(c.req.param("id"));
   const body = await c.req.json<WorkflowTransition>();
 
-  const existing = await db
-    .select()
-    .from(schema.objects)
-    .where(eq(schema.objects.id, id))
-    .limit(1);
+  // Odczyt, zapis i wpis historii w jednej synchronicznej transakcji —
+  // oldStatus/oldDepartment pochodzą z tego samego odczytu co zapis, więc
+  // równoległe przejścia się serializują, a audyt jest spójny.
+  const result = db.transaction((tx) => {
+    const existing = tx
+      .select()
+      .from(schema.objects)
+      .where(eq(schema.objects.id, id))
+      .get();
 
-  if (existing.length === 0) {
+    if (!existing) return null;
+
+    const oldStatus = existing.status;
+    const oldDepartment = existing.department;
+
+    const updated = tx
+      .update(schema.objects)
+      .set({
+        status: body.newStatus,
+        department: body.newDepartment,
+        updatedAt: new Date().toISOString(),
+      })
+      .where(eq(schema.objects.id, id))
+      .returning()
+      .all();
+
+    tx.insert(schema.objectHistory)
+      .values({
+        objectId: id,
+        action: "transition",
+        description:
+          body.description ||
+          `Status: ${oldStatus} → ${body.newStatus}, Department: ${oldDepartment} → ${body.newDepartment}`,
+        oldValue: JSON.stringify({ status: oldStatus, department: oldDepartment }),
+        newValue: JSON.stringify({
+          status: body.newStatus,
+          department: body.newDepartment,
+        }),
+      })
+      .run();
+
+    return updated;
+  });
+
+  if (!result) {
     return c.json<ApiResponse<null>>(
       { success: false, error: "Object not found" },
       404
     );
   }
-
-  const oldStatus = existing[0].status;
-  const oldDepartment = existing[0].department;
-
-  const result = await db
-    .update(schema.objects)
-    .set({
-      status: body.newStatus,
-      department: body.newDepartment,
-      updatedAt: new Date().toISOString(),
-    })
-    .where(eq(schema.objects.id, id))
-    .returning();
-
-  // Create history entry for transition
-  await db.insert(schema.objectHistory).values({
-    objectId: id,
-    action: "transition",
-    description:
-      body.description ||
-      `Status: ${oldStatus} → ${body.newStatus}, Department: ${oldDepartment} → ${body.newDepartment}`,
-    oldValue: JSON.stringify({ status: oldStatus, department: oldDepartment }),
-    newValue: JSON.stringify({
-      status: body.newStatus,
-      department: body.newDepartment,
-    }),
-  });
 
   return c.json<ApiResponse<typeof result[0]>>({
     success: true,
@@ -280,14 +312,26 @@ app.post("/:id/transition", async (c) => {
 app.delete("/:id", async (c) => {
   const id = parseInt(c.req.param("id"));
 
-  // Check if object has contracts
-  const contracts = await db
-    .select()
-    .from(schema.contracts)
-    .where(eq(schema.contracts.objectId, id))
-    .limit(1);
+  // Kontrola istnienia umów i usunięcie obiektu w jednej synchronicznej
+  // transakcji — inaczej równoległy POST /contracts mógłby wstawić umowę między
+  // sprawdzeniem a usunięciem, a kaskada (contracts.objectId onDelete:cascade)
+  // po cichu skasowałaby świeżo dodaną umowę mimo guardu. Atomowo: albo delete
+  // jest zablokowany, albo umowa nie mogła powstać.
+  const blocked = db.transaction((tx) => {
+    const child = tx
+      .select()
+      .from(schema.contracts)
+      .where(eq(schema.contracts.objectId, id))
+      .limit(1)
+      .all();
 
-  if (contracts.length > 0) {
+    if (child.length > 0) return true;
+
+    tx.delete(schema.objects).where(eq(schema.objects.id, id)).run();
+    return false;
+  });
+
+  if (blocked) {
     return c.json<ApiResponse<null>>(
       {
         success: false,
@@ -296,8 +340,6 @@ app.delete("/:id", async (c) => {
       400
     );
   }
-
-  await db.delete(schema.objects).where(eq(schema.objects.id, id));
 
   return c.json<ApiResponse<null>>({
     success: true,

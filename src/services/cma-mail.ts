@@ -562,6 +562,23 @@ export async function checkMailbox(): Promise<MailCheckSummary> {
   return summary;
 }
 
+// Shared in-flight mailbox scan. The manual /check-now route, the poll
+// tick and any other caller funnel through checkMailboxShared so at most
+// one IMAP scan runs at a time — concurrent scans would open duplicate
+// connections, re-download/re-flag the same messages and clobber each
+// other's lastCheck status. Callers racing an in-progress scan get its
+// result instead of starting a second one.
+let inFlightMailboxCheck: Promise<MailCheckSummary> | null = null;
+
+export function checkMailboxShared(): Promise<MailCheckSummary> {
+  if (inFlightMailboxCheck) return inFlightMailboxCheck;
+  const run = checkMailbox().finally(() => {
+    inFlightMailboxCheck = null;
+  });
+  inFlightMailboxCheck = run;
+  return run;
+}
+
 /**
  * Import a single report buffer (from an attachment or a downloaded
  * link) with shared dedup/error handling and log entries.
@@ -1171,7 +1188,9 @@ async function runPollTick(): Promise<void> {
   if (state.running) return;
   state.running = true;
   try {
-    const summary = await checkMailbox();
+    // Funnel through the shared single-flight guard so a poll tick and a
+    // manual /check-now cannot run overlapping IMAP scans.
+    const summary = await checkMailboxShared();
     console.log(
       `[cma-mail] Sprawdzono skrzynkę: sprawdzone=${summary.checked}, dopasowane=${summary.matched}, zaimportowane=${summary.imported}, pominięte=${summary.skipped}, błędy=${summary.errors}`
     );
@@ -1289,6 +1308,21 @@ export async function startMailPoller(): Promise<void> {
       error
     );
     return;
+  }
+
+  // Clear again AFTER the await, immediately before re-assigning. Two
+  // interleaving saves both cleared to null before awaiting getSettings;
+  // without this second clear the first-resumed call's interval would be
+  // overwritten (leaked) by the second. Clearing here — with no await
+  // before the setInterval assignments below — makes clear+set atomic on
+  // the event loop.
+  if (state.timer) {
+    clearInterval(state.timer);
+    state.timer = null;
+  }
+  if (state.schedulerTimer) {
+    clearInterval(state.schedulerTimer);
+    state.schedulerTimer = null;
   }
 
   // IMAP import poller

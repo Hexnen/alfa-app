@@ -104,8 +104,13 @@ export function Monitoring() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-3xl font-bold">Projekty — CCTV</h1>
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+          <h1 className="text-3xl font-bold">Projekty — CCTV</h1>
+          <p className="text-muted-foreground">
+            Projekty i oferty systemów CCTV
+          </p>
+        </div>
         {editable && (
           <Button onClick={() => openForm(null)}>
             <Plus className="h-4 w-4 mr-2" />

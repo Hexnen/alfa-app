@@ -187,19 +187,15 @@ app.post("/:id/photos", async (c) => {
       400
     );
   }
-  const [maxOrder] = await db
-    .select({
-      max: sql<number>`COALESCE(max(sort_order), 0)`,
-    })
-    .from(schema.monitoringPhotos)
-    .where(eq(schema.monitoringPhotos.projectId, id));
+  // Compute the next sort_order inside the INSERT so the read-modify-write
+  // is a single atomic statement — concurrent uploads can't collide on it.
   const [photo] = await db
     .insert(schema.monitoringPhotos)
     .values({
       projectId: id,
       caption: typeof body.caption === "string" ? body.caption.trim() : "",
       attention: body.attention === true,
-      sortOrder: maxOrder.max + 1,
+      sortOrder: sql<number>`(SELECT COALESCE(max(sort_order), 0) + 1 FROM monitoring_photos WHERE project_id = ${id})`,
       data,
     })
     .returning();
@@ -278,12 +274,8 @@ app.post("/:id/overlays", async (c) => {
   ) {
     return c.json({ success: false, error: "Brak współrzędnych planu" }, 400);
   }
-  const [maxOrder] = await db
-    .select({
-      max: sql<number>`COALESCE(max(sort_order), 0)`,
-    })
-    .from(schema.monitoringOverlays)
-    .where(eq(schema.monitoringOverlays.projectId, id));
+  // Compute the next sort_order inside the INSERT so the read-modify-write
+  // is a single atomic statement — concurrent uploads can't collide on it.
   const [overlay] = await db
     .insert(schema.monitoringOverlays)
     .values({
@@ -297,7 +289,7 @@ app.post("/:id/overlays", async (c) => {
       rotation: typeof body.rotation === "number" ? body.rotation : 0,
       opacity: typeof body.opacity === "number" ? body.opacity : 0.7,
       visible: true,
-      sortOrder: maxOrder.max + 1,
+      sortOrder: sql<number>`(SELECT COALESCE(max(sort_order), 0) + 1 FROM monitoring_overlays WHERE project_id = ${id})`,
     })
     .returning();
   return c.json({ success: true, data: overlay }, 201);

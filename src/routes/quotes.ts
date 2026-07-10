@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { db, schema } from "../db/index.js";
-import { eq, like, desc, asc } from "drizzle-orm";
+import { eq, and, like, desc, asc } from "drizzle-orm";
 import type { ApiResponse } from "../types/index.js";
 import type { Quote } from "../db/schema.js";
 
@@ -106,16 +106,35 @@ app.post("/", async (c) => {
       }));
   }
 
-  const result = await db
-    .insert(schema.quotes)
-    .values({
-      number: await nextQuoteNumber(date),
-      date,
-      site: typeof body.site === "string" ? body.site : "",
-      address: typeof body.address === "string" ? body.address : "",
-      items: JSON.stringify(items),
-    })
-    .returning();
+  // nextQuoteNumber() reads max(seq) and the insert happens at a later await
+  // boundary, so two concurrent creates can compute the same number and collide
+  // on the quotes.number UNIQUE constraint. Recompute + retry on a UNIQUE
+  // violation instead of surfacing a raw 500 and losing the quote.
+  let result;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      result = await db
+        .insert(schema.quotes)
+        .values({
+          number: await nextQuoteNumber(date),
+          date,
+          site: typeof body.site === "string" ? body.site : "",
+          address: typeof body.address === "string" ? body.address : "",
+          items: JSON.stringify(items),
+        })
+        .returning();
+      break;
+    } catch (err) {
+      if (
+        attempt < 5 &&
+        err instanceof Error &&
+        (err as { code?: string }).code === "SQLITE_CONSTRAINT_UNIQUE"
+      ) {
+        continue;
+      }
+      throw err;
+    }
+  }
 
   return c.json(
     { success: true, data: withComputed(result[0]), message: "Wycena utworzona" },
@@ -149,6 +168,14 @@ app.put("/:id", async (c) => {
   }
   const items = parseItems(body);
 
+  // Optimistic concurrency: when the client echoes the updatedAt it read, only
+  // update if the row has not changed since, otherwise 409 so it reloads. Two
+  // users editing the same quote no longer silently clobber each other.
+  const expectedUpdatedAt =
+    typeof body.expectedUpdatedAt === "string"
+      ? body.expectedUpdatedAt
+      : undefined;
+
   const result = await db
     .update(schema.quotes)
     .set({
@@ -159,8 +186,25 @@ app.put("/:id", async (c) => {
       ...(items !== undefined ? { items: JSON.stringify(items) } : {}),
       updatedAt: new Date().toISOString(),
     })
-    .where(eq(schema.quotes.id, id))
+    .where(
+      expectedUpdatedAt
+        ? and(
+            eq(schema.quotes.id, id),
+            eq(schema.quotes.updatedAt, expectedUpdatedAt)
+          )
+        : eq(schema.quotes.id, id)
+    )
     .returning();
+
+  if (result.length === 0) {
+    return c.json<ApiResponse<null>>(
+      {
+        success: false,
+        error: "Wycena została zmieniona przez innego użytkownika. Odśwież i spróbuj ponownie.",
+      },
+      409
+    );
+  }
 
   return c.json({
     success: true,

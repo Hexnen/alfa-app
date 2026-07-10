@@ -171,7 +171,7 @@ export function AdminUsers() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <div>
+        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
           <h1 className="text-2xl font-bold flex items-center gap-2">
             <Shield className="h-6 w-6" /> Administracja — użytkownicy
           </h1>
@@ -274,10 +274,18 @@ export function AdminUsers() {
                 setBusy(true);
                 setError(null);
                 try {
-                  await updateAdminUser(selected.id, patch);
+                  // Odsyłamy wczytaną wersję; przy kolizji (inny admin zapisał
+                  // w międzyczasie) backend zwróci 409 zamiast po cichu nadpisać.
+                  await updateAdminUser(selected.id, {
+                    ...patch,
+                    expectedVersion: selected.version,
+                  });
                   await reload();
                   setNotice("Zapisano zmiany.");
                 } catch (e) {
+                  // Odśwież listę, by `selected.version` złapało aktualny stan —
+                  // wtedy ponowny zapis (po weryfikacji zmian) przejdzie.
+                  await reload().catch(() => {});
                   flashError(e);
                 } finally {
                   setBusy(false);

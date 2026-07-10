@@ -468,8 +468,11 @@ export function Technical() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
         <h1 className="text-3xl font-bold">Techniczny</h1>
+        <p className="text-muted-foreground">
+          Realizacje, protokoły, wyceny i cennik
+        </p>
       </div>
 
       {!editable && <ReadOnlyBanner className="mb-4" />}

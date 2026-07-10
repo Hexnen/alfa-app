@@ -383,9 +383,9 @@ export function CmaCameraOutages() {
       {!editable && <ReadOnlyBanner className="mb-4" />}
 
       {/* Header */}
-      <div>
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
         <h1 className="text-3xl font-bold text-slate-900">CMA</h1>
-        <p className="text-slate-500 mt-1">
+        <p className="text-slate-500">
           Centrum monitorowania alarmów - aktualne braki obrazu z kamer
         </p>
       </div>

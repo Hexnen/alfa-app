@@ -141,6 +141,10 @@ export function OrderDetails() {
                   <dd className="font-medium">{order.objectName}</dd>
                 </div>
                 <div className="space-y-1">
+                  <dt className="text-sm text-muted-foreground">Rodzaj obiektu</dt>
+                  <dd className="font-medium">{order.objectKind || "-"}</dd>
+                </div>
+                <div className="space-y-1">
                   <dt className="text-sm text-muted-foreground flex items-center gap-2">
                     <MapPin className="h-4 w-4" />
                     Adres
@@ -215,6 +219,29 @@ export function OrderDetails() {
                     </dd>
                   </div>
                 )}
+                {order.installationStartDate && (
+                  <div className="space-y-1">
+                    <dt className="text-sm text-muted-foreground flex items-center gap-2">
+                      <Calendar className="h-4 w-4" />
+                      Przewidywany termin rozpoczęcia montażu
+                    </dt>
+                    <dd className="font-medium">
+                      {new Date(order.installationStartDate).toLocaleDateString("pl-PL")}
+                    </dd>
+                  </div>
+                )}
+                <div className="space-y-1">
+                  <dt className="text-sm text-muted-foreground">Internet</dt>
+                  <dd className="font-medium">{order.internetIncluded ? "Tak" : "Nie"}</dd>
+                </div>
+                <div className="space-y-1">
+                  <dt className="text-sm text-muted-foreground">Grupa interwencyjna</dt>
+                  <dd className="font-medium">{order.interventionGroup ? "Tak" : "Nie"}</dd>
+                </div>
+                <div className="space-y-1">
+                  <dt className="text-sm text-muted-foreground">Wideo recepcja</dt>
+                  <dd className="font-medium">{order.videoReception ? "Tak" : "Nie"}</dd>
+                </div>
               </div>
             </CardContent>
           </Card>

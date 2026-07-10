@@ -110,6 +110,7 @@ export const orders = sqliteTable("orders", {
   
   // Dane obiektu
   objectName: text("object_name").notNull(),
+  objectKind: text("object_kind"),
   objectAddress: text("object_address"),
   objectCity: text("object_city"),
   objectLocationUrl: text("object_location_url"),
@@ -125,6 +126,11 @@ export const orders = sqliteTable("orders", {
   cameraCount: integer("camera_count"),
   megaphoneCount: integer("megaphone_count"),
   vtoolsOfferNumber: text("vtools_offer_number"),
+
+  // Zakres usługi / pytania
+  internetIncluded: integer("internet_included", { mode: "boolean" }).default(false),
+  interventionGroup: integer("intervention_group", { mode: "boolean" }).default(false),
+  videoReception: integer("video_reception", { mode: "boolean" }).default(false),
   
   // Dane finansowe
   monthlyAmount: real("monthly_amount"),
@@ -138,7 +144,8 @@ export const orders = sqliteTable("orders", {
     .default("new")
     .notNull(),
   serviceStartDate: text("service_start_date"),
-  
+  installationStartDate: text("installation_start_date"),
+
   // Uwagi
   notes: text("notes"),
   
@@ -397,6 +404,10 @@ export const users = sqliteTable("users", {
   // Brak klucza = brak dostępu. Admin (role='admin') ma pełny dostęp
   // niezależnie od tej mapy. Klucze zdefiniowane w src/lib/auth/permissions.ts.
   permissions: text("permissions").default("{}").notNull(),
+  // Licznik optimistic-concurrency: każdy UPDATE bumpuje +1. Panel admina odsyła
+  // odczytaną wartość jako expectedVersion; niezgodność => 409 (dwóch adminów
+  // edytujących tego samego usera nie nadpisze się po cichu — lost update).
+  version: integer("version").default(1).notNull(),
   createdAt: text("created_at")
     .default(sql`(datetime('now'))`)
     .notNull(),

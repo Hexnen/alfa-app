@@ -1,132 +1,113 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import {
   submitPublicOrderIntake,
   type PublicOrderIntakeInput,
 } from "@/lib/api";
 import { autoFormatNIP, normalizeNIP, validateNIP } from "@/lib/nip";
-
-const INVOICE_ISSUERS = [
-  "ALFA GROUP SP Z O.O.",
-  "ALFA GROUP S SP Z O.O.",
-] as const;
+import {
+  INVOICE_ISSUERS,
+  OBJECT_KINDS,
+  emptyIntakeState,
+  useOrderIntakeWizard,
+  type OrderIntakeFormState,
+} from "@/lib/orderIntakeSteps";
+import { LocationPicker } from "@/components/LocationPicker";
+import "./PublicOrderForm.css";
 
 const LOGO_URL =
   "https://alfagroup.com.pl/wp-content/uploads/2023/07/alfagroup_logo_navbar.png";
 
-interface PublicFormState {
-  requesterName: string;
-  requesterPhone: string;
-  requesterEmail: string;
-  isCameraInstallation: boolean;
-  vtoolsOfferNumber: string;
-  payerName: string;
-  payerNip: string;
-  monthlyAmount: string;
-  rentalAmount: string;
-  invoiceIssuer: string;
-  cameraCount: string;
-  megaphoneCount: string;
-  objectName: string;
-  objectAddress: string;
-  objectCity: string;
-  objectLocationUrl: string;
-  contactPerson: string;
-  contactPhone: string;
-  contactEmail: string;
-  serviceStartDate: string;
-  notes: string;
-}
-
-const emptyState: PublicFormState = {
-  requesterName: "",
-  requesterPhone: "",
-  requesterEmail: "",
-  isCameraInstallation: false,
-  vtoolsOfferNumber: "",
-  payerName: "",
-  payerNip: "",
-  monthlyAmount: "",
-  rentalAmount: "",
-  invoiceIssuer: INVOICE_ISSUERS[0],
-  cameraCount: "",
-  megaphoneCount: "",
-  objectName: "",
-  objectAddress: "",
-  objectCity: "",
-  objectLocationUrl: "",
-  contactPerson: "",
-  contactPhone: "",
-  contactEmail: "",
-  serviceStartDate: "",
-  notes: "",
-};
-
 const num = (v: string): number | undefined =>
   v.trim() === "" ? undefined : Number(v);
 
-// Inline styles reproduce the legacy blue Alfa Group form (slesh.pl/ZlecenieAlfa.php).
-const fieldLabel: React.CSSProperties = {
-  display: "block",
-  marginBottom: 6,
-  fontWeight: 600,
-  fontSize: 14,
-};
-const inputStyle: React.CSSProperties = {
-  width: "100%",
-  boxSizing: "border-box",
-  padding: "10px 12px",
-  borderRadius: 6,
-  border: "1px solid #cbd5e1",
-  backgroundColor: "#ffffff",
-  color: "#0f172a",
-  fontSize: 15,
-};
-const req = <span style={{ color: "#ff6b6b" }}>*</span>;
+const req = <span className="zdw-req">*</span>;
+
+
+/** Yes/no segmented toggle, blue-theme flavour. */
+function YesNoToggle({
+  value,
+  onChange,
+}: {
+  value: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <div className="zdw-seg">
+      <button
+        type="button"
+        className={`zdw-seg-btn${value ? " on" : ""}`}
+        onClick={() => onChange(true)}
+      >
+        Tak
+      </button>
+      <button
+        type="button"
+        className={`zdw-seg-btn${!value ? " on" : ""}`}
+        onClick={() => onChange(false)}
+      >
+        Nie
+      </button>
+    </div>
+  );
+}
 
 export function PublicOrderForm() {
-  const [form, setForm] = useState<PublicFormState>(emptyState);
+  const [form, setForm] = useState<OrderIntakeFormState>(emptyIntakeState);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [orderNumber, setOrderNumber] = useState<string | null>(null);
 
-  // Load the Alfa Group brand fonts (Roboto + Roboto Slab) from Google Fonts,
-  // matching alfagroup.com.pl. Injected only while this public page is mounted.
-  useEffect(() => {
-    const id = "alfa-brand-fonts";
-    if (document.getElementById(id)) return;
-    const preconnectApi = document.createElement("link");
-    preconnectApi.rel = "preconnect";
-    preconnectApi.href = "https://fonts.googleapis.com";
-    const preconnectStatic = document.createElement("link");
-    preconnectStatic.rel = "preconnect";
-    preconnectStatic.href = "https://fonts.gstatic.com";
-    preconnectStatic.crossOrigin = "anonymous";
-    const sheet = document.createElement("link");
-    sheet.id = id;
-    sheet.rel = "stylesheet";
-    sheet.href =
-      "https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&family=Roboto+Slab:wght@500;600;700&display=swap";
-    document.head.append(preconnectApi, preconnectStatic, sheet);
-  }, []);
+  const wizard = useOrderIntakeWizard(form);
 
-  const set = <K extends keyof PublicFormState>(
+  const set = <K extends keyof OrderIntakeFormState>(
     key: K,
-    value: PublicFormState[K]
+    value: OrderIntakeFormState[K]
   ) => setForm((prev) => ({ ...prev, [key]: value }));
 
   const handleInput =
-    (key: keyof PublicFormState) =>
+    (key: keyof OrderIntakeFormState) =>
     (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
-      set(key, e.target.value as PublicFormState[typeof key]);
+      set(key, e.target.value as OrderIntakeFormState[typeof key]);
+
+  const scrollToTop = () =>
+    window.scrollTo({ top: 0, behavior: "smooth" });
+
+  const handleNext = () => {
+    const result = wizard.validateCurrent();
+    if (!result.ok) {
+      setError(result.message ?? "Uzupełnij wymagane pola.");
+      return;
+    }
+    setError(null);
+    wizard.next();
+    scrollToTop();
+  };
+
+  const handleBack = () => {
+    setError(null);
+    wizard.back();
+    scrollToTop();
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setError(null);
 
+    // Before the last step, submitting (e.g. via Enter) advances the wizard.
+    if (!wizard.isLast) {
+      handleNext();
+      return;
+    }
+
+    const result = wizard.validateCurrent();
+    if (!result.ok) {
+      setError(result.message ?? "Uzupełnij wymagane pola.");
+      return;
+    }
     if (!validateNIP(form.payerNip)) {
       setError("Podaj prawidłowy NIP płatnika (10 cyfr).");
       return;
     }
+    setError(null);
 
     const payload: PublicOrderIntakeInput = {
       requesterName: form.requesterName,
@@ -144,6 +125,7 @@ export function PublicOrderForm() {
       cameraCount: num(form.cameraCount),
       megaphoneCount: num(form.megaphoneCount),
       objectName: form.objectName,
+      objectKind: form.objectKind || undefined,
       objectAddress: form.objectAddress || undefined,
       objectCity: form.objectCity,
       objectLocationUrl: form.objectLocationUrl || undefined,
@@ -152,12 +134,19 @@ export function PublicOrderForm() {
       contactEmail: form.contactEmail || undefined,
       serviceStartDate: form.serviceStartDate || undefined,
       notes: form.notes || undefined,
+      internetIncluded: form.internetIncluded,
+      interventionGroup: form.interventionGroup,
+      videoReception: form.videoReception,
+      installationStartDate: form.isCameraInstallation
+        ? form.installationStartDate || undefined
+        : undefined,
     };
 
     setLoading(true);
     try {
       const res = await submitPublicOrderIntake(payload);
       setOrderNumber(res.data?.orderNumber ?? "");
+      scrollToTop();
     } catch (err) {
       setError(
         err instanceof Error
@@ -169,48 +158,28 @@ export function PublicOrderForm() {
     }
   };
 
-  const pageStyle: React.CSSProperties = {
-    minHeight: "100vh",
-    backgroundColor: "#072c61",
-    color: "#ffffff",
-    padding: "24px 16px",
-    fontFamily:
-      "'Roboto', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif",
-  };
-
-  const containerStyle: React.CSSProperties = {
-    maxWidth: 760,
-    margin: "0 auto",
-  };
-
   if (orderNumber !== null) {
     return (
-      <div style={pageStyle}>
-        <div style={containerStyle}>
-          <img
-            src={LOGO_URL}
-            alt="Alfa Group"
-            style={{ height: 40, marginBottom: 32 }}
-          />
-          <div
-            style={{
-              backgroundColor: "rgba(255,255,255,0.08)",
-              border: "1px solid rgba(255,255,255,0.2)",
-              borderRadius: 10,
-              padding: "40px 24px",
-              textAlign: "center",
-            }}
-          >
-            <h1
-              style={{
-                fontFamily: "'Roboto Slab', Georgia, serif",
-                fontSize: 24,
-                margin: "0 0 12px",
-              }}
-            >
-              Dziękujemy — zlecenie zostało przyjęte.
-            </h1>
-            <p style={{ fontSize: 18, margin: 0 }}>
+      <div className="zdw-page">
+        <div className="zdw-wrap">
+          <div className="zdw-header">
+            <img className="zdw-logo" src={LOGO_URL} alt="Alfa Group" />
+          </div>
+          <div className="zdw-card zdw-done">
+            <div className="zdw-done-ring">
+              <svg width="42" height="42" viewBox="0 0 24 24" fill="none">
+                <path
+                  className="zdw-check"
+                  d="M5 13l4 4L19 7"
+                  stroke="#4ade80"
+                  strokeWidth="2.6"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </div>
+            <h1>Dziękujemy — zlecenie zostało przyjęte.</h1>
+            <p>
               Numer: <strong>{orderNumber}</strong>
             </p>
           </div>
@@ -219,315 +188,393 @@ export function PublicOrderForm() {
     );
   }
 
+  const { currentStep, stepIndex, totalSteps, isFirst, isLast } = wizard;
+  const progress = ((stepIndex + 1) / totalSteps) * 100;
+
   return (
-    <div style={pageStyle}>
-      <div style={containerStyle}>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: 20,
-            marginBottom: 8,
-          }}
-        >
-          <img src={LOGO_URL} alt="Alfa Group" style={{ height: 40 }} />
-          <h1
-            style={{
-              fontFamily: "'Roboto Slab', Georgia, serif",
-              fontSize: 26,
-              fontWeight: 700,
-              margin: 0,
-              textAlign: "right",
-            }}
-          >
-            Zlecenie Zdalnego Dozoru Wideo
-          </h1>
+    <div className="zdw-page">
+      <div className="zdw-wrap">
+        {/* Header: logo + Roboto Slab title */}
+        <div className="zdw-header">
+          <img className="zdw-logo" src={LOGO_URL} alt="Alfa Group" />
+          <h1 className="zdw-title">Zlecenie Zdalnego Dozoru Wideo</h1>
         </div>
-        <p
-          style={{
-            margin: "0 0 24px",
-            color: "#cbd5e1",
-            fontSize: 14,
-            textAlign: "right",
-          }}
-        >
-          Pola oznaczone {req} są wymagane.
-        </p>
 
-        {error && (
-          <div
-            style={{
-              backgroundColor: "#7f1d1d",
-              border: "1px solid #ef4444",
-              borderRadius: 6,
-              padding: "12px 14px",
-              marginBottom: 20,
-              fontSize: 14,
-            }}
-          >
-            {error}
-          </div>
-        )}
+        <div className="zdw-card">
+          <p className="zdw-sub">Pola oznaczone {req} są wymagane.</p>
 
-        <form
-          onSubmit={handleSubmit}
-          style={{ display: "flex", flexDirection: "column", gap: 18 }}
-        >
-          {/* Osoba zlecająca */}
-          <div>
-            <label style={fieldLabel}>Osoba zlecająca {req}</label>
-            <input
-              style={inputStyle}
-              value={form.requesterName}
-              onChange={handleInput("requesterName")}
-              required
-            />
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-            <div>
-              <label style={fieldLabel}>Telefon {req}</label>
-              <input
-                style={inputStyle}
-                type="tel"
-                value={form.requesterPhone}
-                onChange={handleInput("requesterPhone")}
-                required
-              />
+          {/* Step indicator */}
+          <div style={{ marginBottom: 22 }}>
+            <div className="zdw-prog-head">
+              <span className="zdw-kicker">
+                Krok {stepIndex + 1} z {totalSteps}
+              </span>
+              <span className="zdw-step-title">{currentStep.title}</span>
             </div>
-            <div>
-              <label style={fieldLabel}>Email {req}</label>
-              <input
-                style={inputStyle}
-                type="email"
-                value={form.requesterEmail}
-                onChange={handleInput("requesterEmail")}
-                required
-              />
+            <div className="zdw-track">
+              <div className="zdw-fill" style={{ width: `${progress}%` }} />
             </div>
           </div>
 
-          {/* Montaż kamer */}
-          <div>
-            <label style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 600, fontSize: 14 }}>
-              <input
-                type="checkbox"
-                checked={form.isCameraInstallation}
-                onChange={(e) => set("isCameraInstallation", e.target.checked)}
-              />
-              Czy montaż kamer?
-            </label>
-          </div>
-          {form.isCameraInstallation && (
-            <div>
-              <label style={fieldLabel}>Nr oferty Vtools</label>
-              <input
-                style={inputStyle}
-                value={form.vtoolsOfferNumber}
-                onChange={handleInput("vtoolsOfferNumber")}
-              />
+          {error && (
+            <div className="zdw-error" style={{ marginBottom: 20 }}>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10" />
+                <line x1="12" y1="8" x2="12" y2="12" />
+                <line x1="12" y1="16" x2="12.01" y2="16" />
+              </svg>
+              <span>{error}</span>
             </div>
           )}
 
-          {/* Płatnik */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-            <div>
-              <label style={fieldLabel}>Nazwa płatnika {req}</label>
-              <input
-                style={inputStyle}
-                value={form.payerName}
-                onChange={handleInput("payerName")}
-                required
-              />
-            </div>
-            <div>
-              <label style={fieldLabel}>NIP Płatnika {req}</label>
-              <input
-                style={inputStyle}
-                value={autoFormatNIP(form.payerNip)}
-                onChange={(e) => set("payerNip", normalizeNIP(e.target.value))}
-                placeholder="123-456-78-90"
-                maxLength={13}
-                required
-              />
-            </div>
-          </div>
+          <form onSubmit={handleSubmit} className="zdw-form">
+            {/* Animated step body — key re-triggers the enter animation */}
+            <div key={currentStep.id} className="zdw-step zdw-form">
+              {/* Step 1: Osoba zlecająca */}
+              {currentStep.id === "requester" && (
+                <>
+                  <div>
+                    <label className="zdw-label">Osoba zlecająca {req}</label>
+                    <input
+                      className="zdw-input"
+                      value={form.requesterName}
+                      onChange={handleInput("requesterName")}
+                    />
+                  </div>
+                  <div className="zdw-grid2">
+                    <div>
+                      <label className="zdw-label">Telefon {req}</label>
+                      <input
+                        className="zdw-input"
+                        type="tel"
+                        value={form.requesterPhone}
+                        onChange={handleInput("requesterPhone")}
+                      />
+                    </div>
+                    <div>
+                      <label className="zdw-label">Email {req}</label>
+                      <input
+                        className="zdw-input"
+                        type="email"
+                        value={form.requesterEmail}
+                        onChange={handleInput("requesterEmail")}
+                      />
+                    </div>
+                  </div>
+                </>
+              )}
 
-          {/* Finanse */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-            <div>
-              <label style={fieldLabel}>Ustalona kwota abonamentu</label>
-              <input
-                style={inputStyle}
-                type="number"
-                step="0.01"
-                min="0"
-                value={form.monthlyAmount}
-                onChange={handleInput("monthlyAmount")}
-              />
-            </div>
-            <div>
-              <label style={fieldLabel}>Kwota dzierżawy</label>
-              <input
-                style={inputStyle}
-                type="number"
-                step="0.01"
-                min="0"
-                value={form.rentalAmount}
-                onChange={handleInput("rentalAmount")}
-              />
-            </div>
-          </div>
-          <div>
-            <label style={fieldLabel}>Faktury wystawia</label>
-            <select
-              style={inputStyle}
-              value={form.invoiceIssuer}
-              onChange={(e) => set("invoiceIssuer", e.target.value)}
-            >
-              {INVOICE_ISSUERS.map((issuer) => (
-                <option key={issuer} value={issuer}>
-                  {issuer}
-                </option>
-              ))}
-            </select>
-          </div>
+              {/* Step 2: Kontrahent (płatnik) */}
+              {currentStep.id === "payer" && (
+                <>
+                  <div className="zdw-grid2">
+                    <div>
+                      <label className="zdw-label">Nazwa płatnika {req}</label>
+                      <input
+                        className="zdw-input"
+                        value={form.payerName}
+                        onChange={handleInput("payerName")}
+                      />
+                    </div>
+                    <div>
+                      <label className="zdw-label">NIP Płatnika {req}</label>
+                      <input
+                        className="zdw-input"
+                        value={autoFormatNIP(form.payerNip)}
+                        onChange={(e) =>
+                          set("payerNip", normalizeNIP(e.target.value))
+                        }
+                        placeholder="123-456-78-90"
+                        inputMode="numeric"
+                        maxLength={13}
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="zdw-label">Faktury wystawia</label>
+                    <select
+                      className="zdw-select"
+                      value={form.invoiceIssuer}
+                      onChange={(e) => set("invoiceIssuer", e.target.value)}
+                    >
+                      {INVOICE_ISSUERS.map((issuer) => (
+                        <option key={issuer} value={issuer}>
+                          {issuer}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </>
+              )}
 
-          {/* Sprzęt */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-            <div>
-              <label style={fieldLabel}>Ilość kamer</label>
-              <input
-                style={inputStyle}
-                type="number"
-                min="0"
-                value={form.cameraCount}
-                onChange={handleInput("cameraCount")}
-              />
-            </div>
-            <div>
-              <label style={fieldLabel}>Ilość megafonów</label>
-              <input
-                style={inputStyle}
-                type="number"
-                min="0"
-                value={form.megaphoneCount}
-                onChange={handleInput("megaphoneCount")}
-              />
-            </div>
-          </div>
+              {/* Step 3: Pytania */}
+              {currentStep.id === "questions" && (
+                <>
+                  {[
+                    {
+                      key: "isCameraInstallation" as const,
+                      label: "Potrzebny montaż?",
+                    },
+                    { key: "internetIncluded" as const, label: "Internet?" },
+                    {
+                      key: "interventionGroup" as const,
+                      label: "Grupa interwencyjna?",
+                    },
+                  ].map((q) => (
+                    <div key={q.key} className="zdw-toggle-row">
+                      <span className="zdw-toggle-label">{q.label}</span>
+                      <YesNoToggle
+                        value={form[q.key]}
+                        onChange={(v) => set(q.key, v)}
+                      />
+                    </div>
+                  ))}
+                </>
+              )}
 
-          {/* Obiekt */}
-          <div>
-            <label style={fieldLabel}>Nazwa obiektu w SAFESTAR {req}</label>
-            <input
-              style={inputStyle}
-              value={form.objectName}
-              onChange={handleInput("objectName")}
-              required
-            />
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-            <div>
-              <label style={fieldLabel}>Adres obiektu {req}</label>
-              <input
-                style={inputStyle}
-                value={form.objectAddress}
-                onChange={handleInput("objectAddress")}
-                required
-              />
-            </div>
-            <div>
-              <label style={fieldLabel}>Miejscowość {req}</label>
-              <input
-                style={inputStyle}
-                value={form.objectCity}
-                onChange={handleInput("objectCity")}
-                required
-              />
-            </div>
-          </div>
-          <div>
-            <label style={fieldLabel}>Lokalizacja Google</label>
-            <input
-              style={inputStyle}
-              type="url"
-              value={form.objectLocationUrl}
-              onChange={handleInput("objectLocationUrl")}
-              placeholder="https://maps.google.com/..."
-            />
-          </div>
+              {/* Step 4: Dane obiektu */}
+              {currentStep.id === "object" && (
+                <>
+                  <div>
+                    <label className="zdw-label">
+                      Nazwa obiektu w SAFESTAR {req}
+                    </label>
+                    <input
+                      className="zdw-input"
+                      value={form.objectName}
+                      onChange={handleInput("objectName")}
+                    />
+                  </div>
+                  <div className="zdw-grid2">
+                    <div>
+                      <label className="zdw-label">Adres obiektu {req}</label>
+                      <input
+                        className="zdw-input"
+                        value={form.objectAddress}
+                        onChange={handleInput("objectAddress")}
+                      />
+                    </div>
+                    <div>
+                      <label className="zdw-label">Miejscowość {req}</label>
+                      <input
+                        className="zdw-input"
+                        value={form.objectCity}
+                        onChange={handleInput("objectCity")}
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="zdw-label">Rodzaj obiektu</label>
+                    <select
+                      className="zdw-select"
+                      value={form.objectKind}
+                      onChange={(e) => set("objectKind", e.target.value)}
+                    >
+                      <option value="">— wybierz —</option>
+                      {OBJECT_KINDS.map((kind) => (
+                        <option key={kind} value={kind}>
+                          {kind}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
 
-          {/* Osoba kontaktowa */}
-          <div>
-            <label style={fieldLabel}>Osoba kontaktowa {req}</label>
-            <input
-              style={inputStyle}
-              value={form.contactPerson}
-              onChange={handleInput("contactPerson")}
-              required
-            />
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-            <div>
-              <label style={fieldLabel}>Telefon {req}</label>
-              <input
-                style={inputStyle}
-                type="tel"
-                value={form.contactPhone}
-                onChange={handleInput("contactPhone")}
-                required
-              />
-            </div>
-            <div>
-              <label style={fieldLabel}>Adres mailowy</label>
-              <input
-                style={inputStyle}
-                type="email"
-                value={form.contactEmail}
-                onChange={handleInput("contactEmail")}
-              />
-            </div>
-          </div>
+                  <LocationPicker
+                    variant="dark"
+                    value={form.objectLocationUrl}
+                    onChange={(url) => set("objectLocationUrl", url)}
+                  />
 
-          {/* Termin + uwagi */}
-          <div>
-            <label style={fieldLabel}>Początek usługi</label>
-            <input
-              style={inputStyle}
-              type="date"
-              value={form.serviceStartDate}
-              onChange={handleInput("serviceStartDate")}
-            />
-          </div>
-          <div>
-            <label style={fieldLabel}>UWAGI</label>
-            <textarea
-              style={{ ...inputStyle, minHeight: 96, resize: "vertical" }}
-              value={form.notes}
-              onChange={handleInput("notes")}
-            />
-          </div>
+                  <div className="zdw-section">Osoba kontaktowa na miejscu</div>
+                  <div>
+                    <label className="zdw-label">Osoba kontaktowa {req}</label>
+                    <input
+                      className="zdw-input"
+                      value={form.contactPerson}
+                      onChange={handleInput("contactPerson")}
+                    />
+                  </div>
+                  <div className="zdw-grid2">
+                    <div>
+                      <label className="zdw-label">Telefon {req}</label>
+                      <input
+                        className="zdw-input"
+                        type="tel"
+                        value={form.contactPhone}
+                        onChange={handleInput("contactPhone")}
+                      />
+                    </div>
+                    <div>
+                      <label className="zdw-label">Adres mailowy</label>
+                      <input
+                        className="zdw-input"
+                        type="email"
+                        value={form.contactEmail}
+                        onChange={handleInput("contactEmail")}
+                      />
+                    </div>
+                  </div>
+                </>
+              )}
 
-          <button
-            type="submit"
-            disabled={loading}
-            style={{
-              backgroundColor: "#28a745",
-              color: "#ffffff",
-              border: "none",
-              borderRadius: 6,
-              padding: "12px 20px",
-              fontSize: 16,
-              fontWeight: 600,
-              cursor: loading ? "default" : "pointer",
-              opacity: loading ? 0.7 : 1,
-              alignSelf: "flex-start",
-            }}
-          >
-            {loading ? "Wysyłanie..." : "Wyślij zlecenie"}
-          </button>
-        </form>
+              {/* Step 5: Montaż (only when isCameraInstallation) */}
+              {currentStep.id === "installation" && (
+                <div>
+                  <label className="zdw-label">Nr oferty Vtools</label>
+                  <input
+                    className="zdw-input"
+                    value={form.vtoolsOfferNumber}
+                    onChange={handleInput("vtoolsOfferNumber")}
+                  />
+                </div>
+              )}
+
+              {/* Step 6: Zakres i warunki usługi */}
+              {currentStep.id === "scope" && (
+                <>
+                  <div className="zdw-grid2">
+                    <div>
+                      <label className="zdw-label">Ilość kamer</label>
+                      <input
+                        className="zdw-input"
+                        type="number"
+                        min="0"
+                        inputMode="numeric"
+                        value={form.cameraCount}
+                        onChange={handleInput("cameraCount")}
+                      />
+                    </div>
+                    <div>
+                      <label className="zdw-label">Ilość megafonów</label>
+                      <input
+                        className="zdw-input"
+                        type="number"
+                        min="0"
+                        inputMode="numeric"
+                        value={form.megaphoneCount}
+                        onChange={handleInput("megaphoneCount")}
+                      />
+                    </div>
+                  </div>
+                  <div className="zdw-toggle-row">
+                    <span className="zdw-toggle-label">Wideo recepcja</span>
+                    <YesNoToggle
+                      value={form.videoReception}
+                      onChange={(v) => set("videoReception", v)}
+                    />
+                  </div>
+                  <div className="zdw-grid2">
+                    <div>
+                      <label className="zdw-label">Abonament (zł)</label>
+                      <input
+                        className="zdw-input"
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        inputMode="decimal"
+                        value={form.monthlyAmount}
+                        onChange={handleInput("monthlyAmount")}
+                      />
+                    </div>
+                    <div>
+                      <label className="zdw-label">Dzierżawa (zł)</label>
+                      <input
+                        className="zdw-input"
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        inputMode="decimal"
+                        value={form.rentalAmount}
+                        onChange={handleInput("rentalAmount")}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Read-only recap of step-3 answers */}
+                  <div className="zdw-recap">
+                    <span>
+                      Internet:{" "}
+                      <strong>{form.internetIncluded ? "Tak" : "Nie"}</strong>
+                    </span>
+                    <span>
+                      Grupa interwencyjna:{" "}
+                      <strong>{form.interventionGroup ? "Tak" : "Nie"}</strong>
+                    </span>
+                  </div>
+                </>
+              )}
+
+              {/* Step 7: Terminy */}
+              {currentStep.id === "terms" && (
+                <>
+                  {form.isCameraInstallation && (
+                    <div>
+                      <label className="zdw-label">
+                        Przewidywany termin rozpoczęcia montażu
+                      </label>
+                      <input
+                        className="zdw-input"
+                        type="date"
+                        value={form.installationStartDate}
+                        onChange={handleInput("installationStartDate")}
+                      />
+                    </div>
+                  )}
+                  <div>
+                    <label className="zdw-label">
+                      Przewidywany termin rozpoczęcia usługi
+                    </label>
+                    <input
+                      className="zdw-input"
+                      type="date"
+                      value={form.serviceStartDate}
+                      onChange={handleInput("serviceStartDate")}
+                    />
+                  </div>
+                  <div>
+                    <label className="zdw-label">UWAGI</label>
+                    <textarea
+                      className="zdw-textarea"
+                      value={form.notes}
+                      onChange={handleInput("notes")}
+                    />
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* Wizard controls */}
+            <div className="zdw-nav">
+              <button
+                type="button"
+                className="zdw-btn zdw-btn-ghost"
+                onClick={handleBack}
+                disabled={isFirst}
+              >
+                Wstecz
+              </button>
+              {isLast ? (
+                <button
+                  key="submit"
+                  type="submit"
+                  className="zdw-btn zdw-btn-success"
+                  disabled={loading}
+                >
+                  {loading ? "Wysyłanie…" : "Wyślij zlecenie"}
+                </button>
+              ) : (
+                <button
+                  key="next"
+                  type="button"
+                  className="zdw-btn zdw-btn-primary"
+                  onClick={handleNext}
+                >
+                  Dalej
+                </button>
+              )}
+            </div>
+          </form>
+        </div>
       </div>
     </div>
   );

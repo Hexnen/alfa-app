@@ -235,47 +235,74 @@ export async function createOrderFromInput(
     }
 
     // Step 3: Create the order
-    const orderNumber = generateOrderNumber();
-
     const insertOrderStmt = sqlite.prepare(`
       INSERT INTO orders (
         order_number, requester_name, requester_phone, requester_email,
         payer_name, payer_nip, payer_contractor_id,
-        object_name, object_address, object_city, object_location_url, object_id,
+        object_name, object_kind, object_address, object_city, object_location_url, object_id,
         contact_person, contact_phone, contact_email,
         is_camera_installation, camera_count, megaphone_count, vtools_offer_number,
+        internet_included, intervention_group, video_reception,
         monthly_amount, rental_amount, invoice_issuer,
-        status, service_start_date, notes, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+        status, service_start_date, installation_start_date, notes, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
     `);
 
-    const orderInsert = insertOrderStmt.run(
-      orderNumber,
-      body.requesterName,
-      body.requesterPhone,
-      body.requesterEmail,
-      body.payerName,
-      normalizedNip,
-      contractorId,
-      body.objectName,
-      body.objectAddress || null,
-      body.objectCity || null,
-      body.objectLocationUrl || null,
-      objectId,
-      body.contactPerson,
-      body.contactPhone,
-      body.contactEmail || null,
-      body.isCameraInstallation ? 1 : 0,
-      body.cameraCount || null,
-      body.megaphoneCount || null,
-      body.vtoolsOfferNumber || null,
-      body.monthlyAmount || null,
-      body.rentalAmount || null,
-      body.invoiceIssuer || null,
-      body.status || "new",
-      body.serviceStartDate || null,
-      body.notes || null
-    );
+    // generateOrderNumber() draws a random suffix, so two concurrent creates in
+    // the same year can collide on the orders.order_number UNIQUE constraint.
+    // Regenerate and retry a bounded number of times before giving up, so a
+    // birthday-paradox collision no longer surfaces as a 500 / rolled-back order.
+    let orderInsert: Database.RunResult | undefined;
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const orderNumber = generateOrderNumber();
+      try {
+        orderInsert = insertOrderStmt.run(
+          orderNumber,
+          body.requesterName,
+          body.requesterPhone,
+          body.requesterEmail,
+          body.payerName,
+          normalizedNip,
+          contractorId,
+          body.objectName,
+          body.objectKind ?? null,
+          body.objectAddress || null,
+          body.objectCity || null,
+          body.objectLocationUrl || null,
+          objectId,
+          body.contactPerson,
+          body.contactPhone,
+          body.contactEmail || null,
+          body.isCameraInstallation ? 1 : 0,
+          body.cameraCount || null,
+          body.megaphoneCount || null,
+          body.vtoolsOfferNumber || null,
+          body.internetIncluded ? 1 : 0,
+          body.interventionGroup ? 1 : 0,
+          body.videoReception ? 1 : 0,
+          body.monthlyAmount || null,
+          body.rentalAmount || null,
+          body.invoiceIssuer || null,
+          body.status || "new",
+          body.serviceStartDate || null,
+          body.installationStartDate || null,
+          body.notes || null
+        );
+        break;
+      } catch (err) {
+        // A constraint violation aborts only this statement, not the
+        // surrounding transaction, so retrying with a fresh number is safe.
+        const code = (err as { code?: string }).code;
+        if (attempt < 9 && code === "SQLITE_CONSTRAINT_UNIQUE") {
+          continue;
+        }
+        throw err;
+      }
+    }
+
+    if (!orderInsert) {
+      throw new Error("Could not generate a unique order number");
+    }
 
     orderId = Number(orderInsert.lastInsertRowid);
 

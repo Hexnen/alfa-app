@@ -1,9 +1,9 @@
 import { Hono } from "hono";
 import { db, schema } from "../db/index.js";
-import { eq, like, asc } from "drizzle-orm";
+import { eq, like, asc, and } from "drizzle-orm";
 import type { ApiResponse } from "../types/index.js";
 import type { Realization, NewRealization } from "../db/schema.js";
-import { createProtocolForRealization } from "./protocols.js";
+import { createProtocolForRealizationSync } from "./protocols.js";
 
 const app = new Hono();
 
@@ -166,16 +166,22 @@ app.post("/", async (c) => {
     return c.json<ApiResponse<null>>({ success: false, error }, 400);
   }
 
-  const result = await db
-    .insert(schema.realizations)
-    .values(data as NewRealization)
-    .returning();
-
-  // Protokół końcowy tworzy się automatycznie razem z realizacją
-  await createProtocolForRealization(result[0]);
+  // Realizacja i jej protokół powstają w jednej synchronicznej transakcji —
+  // albo oba, albo żadne. Numer protokołu alokowany atomowo (bez wyścigu na
+  // UNIQUE), więc równoległy POST /protocols/sync nie zostawi realizacji bez
+  // protokołu ani nie wywoła 500 z kolizji UNIQUE(realizationId/number).
+  const realization = db.transaction((tx) => {
+    const created = tx
+      .insert(schema.realizations)
+      .values(data as NewRealization)
+      .returning()
+      .get();
+    createProtocolForRealizationSync(tx, created);
+    return created;
+  });
 
   return c.json(
-    { success: true, data: withComputed(result[0]), message: "Realizacja dodana" },
+    { success: true, data: withComputed(realization), message: "Realizacja dodana" },
     201
   );
 });
@@ -202,11 +208,44 @@ app.put("/:id", async (c) => {
     return c.json<ApiResponse<null>>({ success: false, error }, 400);
   }
 
+  // Optymistyczna kontrola współbieżności: klient MUSI odesłać updatedAt, który
+  // odczytał. Zapisujemy tylko gdy wiersz się nie zmienił — inaczej 409. Brak
+  // tokenu odrzucamy (428) zamiast degradować do eq(id): parseBody odtwarza cały
+  // wiersz z body, więc ścieżka bez guardu to pełny lost update kasujący pola
+  // finansowe (amountMaterial/amountHours) drugiego edytora.
+  const expectedUpdatedAt =
+    typeof body.expectedUpdatedAt === "string" ? body.expectedUpdatedAt : undefined;
+
+  if (!expectedUpdatedAt) {
+    return c.json<ApiResponse<null>>(
+      {
+        success: false,
+        error: "Brak expectedUpdatedAt — odśwież realizację i spróbuj ponownie.",
+      },
+      428,
+    );
+  }
+
   const result = await db
     .update(schema.realizations)
     .set({ ...data, updatedAt: new Date().toISOString() })
-    .where(eq(schema.realizations.id, id))
+    .where(
+      and(
+        eq(schema.realizations.id, id),
+        eq(schema.realizations.updatedAt, expectedUpdatedAt),
+      ),
+    )
     .returning();
+
+  if (result.length === 0) {
+    return c.json<ApiResponse<null>>(
+      {
+        success: false,
+        error: "Realizacja została zmieniona przez kogoś innego. Odśwież i spróbuj ponownie.",
+      },
+      409,
+    );
+  }
 
   return c.json({
     success: true,

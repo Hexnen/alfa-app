@@ -108,6 +108,7 @@ export interface OrderInput {
   payerNip: string;
   payerContractorId?: number;
   objectName: string;
+  objectKind?: string;
   objectAddress?: string;
   objectCity?: string;
   objectLocationUrl?: string;
@@ -119,11 +120,15 @@ export interface OrderInput {
   cameraCount?: number;
   megaphoneCount?: number;
   vtoolsOfferNumber?: string;
+  internetIncluded?: boolean;
+  interventionGroup?: boolean;
+  videoReception?: boolean;
   monthlyAmount?: number;
   rentalAmount?: number;
   invoiceIssuer?: string;
   status?: OrderStatus;
   serviceStartDate?: string;
+  installationStartDate?: string;
   notes?: string;
   // Flags for auto-creating contractor and object
   createContractor?: boolean;

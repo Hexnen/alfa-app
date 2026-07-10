@@ -41,6 +41,7 @@ import {
 } from "lucide-react";
 import type { Order, OrderInput, Contractor, ObjectRecord, ObjectHistoryRecord } from "@/lib/api";
 import { getContractorObjects } from "@/lib/api";
+import { OBJECT_KINDS } from "@/lib/orderIntakeSteps";
 import { normalizeNIP } from "@/lib/nip";
 import { objectTypeLabels, installationTypeLabels, statusLabels } from "@/lib/utils";
 
@@ -81,6 +82,7 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
     payerName: "",
     payerNip: "",
     objectName: "",
+    objectKind: "",
     objectAddress: "",
     objectCity: "",
     objectLocationUrl: "",
@@ -88,8 +90,12 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
     contactPhone: "",
     contactEmail: "",
     isCameraInstallation: false,
+    internetIncluded: false,
+    interventionGroup: false,
+    videoReception: false,
     status: "new",
     serviceStartDate: "",
+    installationStartDate: "",
     notes: "",
     // New fields
     createContractor: true,
@@ -126,6 +132,7 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
         payerNip: order?.payerNip || "",
         payerContractorId: order?.payerContractorId ?? undefined,
         objectName: order?.objectName || "",
+        objectKind: order?.objectKind || "",
         objectAddress: order?.objectAddress || "",
         objectCity: order?.objectCity || "",
         objectLocationUrl: order?.objectLocationUrl || "",
@@ -134,6 +141,9 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
         contactPhone: order?.contactPhone || "",
         contactEmail: order?.contactEmail || "",
         isCameraInstallation: order?.isCameraInstallation || false,
+        internetIncluded: order?.internetIncluded || false,
+        interventionGroup: order?.interventionGroup || false,
+        videoReception: order?.videoReception || false,
         cameraCount: order?.cameraCount ?? undefined,
         megaphoneCount: order?.megaphoneCount ?? undefined,
         vtoolsOfferNumber: order?.vtoolsOfferNumber || "",
@@ -142,6 +152,7 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
         invoiceIssuer: order?.invoiceIssuer || "",
         status: order?.status || "new",
         serviceStartDate: order?.serviceStartDate || "",
+        installationStartDate: order?.installationStartDate || "",
         notes: order?.notes || "",
         createContractor: !hasContractor,
         createObject: !hasObject,
@@ -643,6 +654,26 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
                         className="bg-white"
                       />
                     </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="objectKind">Rodzaj obiektu</Label>
+                      <Select
+                        value={formData.objectKind || ""}
+                        onValueChange={(value) =>
+                          setFormData((prev) => ({ ...prev, objectKind: value }))
+                        }
+                      >
+                        <SelectTrigger className="bg-white">
+                          <SelectValue placeholder="— wybierz —" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {OBJECT_KINDS.map((kind) => (
+                            <SelectItem key={kind} value={kind}>
+                              {kind}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
                   </div>
                   
                   {createObject && !isEditing && (
@@ -810,6 +841,67 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
                   Czy montaż kamer?
                 </Label>
               </div>
+              <div className="space-y-2">
+                <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Zakres usługi
+                </h4>
+                <div className="grid grid-cols-3 gap-4">
+                  <div className="flex items-center space-x-2 p-3 bg-white border border-slate-200 rounded-lg">
+                    <Checkbox
+                      id="internetIncluded"
+                      checked={formData.internetIncluded}
+                      onCheckedChange={(checked) =>
+                        setFormData((prev) => ({
+                          ...prev,
+                          internetIncluded: checked as boolean,
+                        }))
+                      }
+                    />
+                    <Label
+                      htmlFor="internetIncluded"
+                      className="text-sm font-medium cursor-pointer"
+                    >
+                      Internet
+                    </Label>
+                  </div>
+                  <div className="flex items-center space-x-2 p-3 bg-white border border-slate-200 rounded-lg">
+                    <Checkbox
+                      id="interventionGroup"
+                      checked={formData.interventionGroup}
+                      onCheckedChange={(checked) =>
+                        setFormData((prev) => ({
+                          ...prev,
+                          interventionGroup: checked as boolean,
+                        }))
+                      }
+                    />
+                    <Label
+                      htmlFor="interventionGroup"
+                      className="text-sm font-medium cursor-pointer"
+                    >
+                      Grupa interwencyjna
+                    </Label>
+                  </div>
+                  <div className="flex items-center space-x-2 p-3 bg-white border border-slate-200 rounded-lg">
+                    <Checkbox
+                      id="videoReception"
+                      checked={formData.videoReception}
+                      onCheckedChange={(checked) =>
+                        setFormData((prev) => ({
+                          ...prev,
+                          videoReception: checked as boolean,
+                        }))
+                      }
+                    />
+                    <Label
+                      htmlFor="videoReception"
+                      className="text-sm font-medium cursor-pointer"
+                    >
+                      Wideo recepcja
+                    </Label>
+                  </div>
+                </div>
+              </div>
               <div className="grid grid-cols-3 gap-4">
                 <div className="space-y-2">
                   <Label htmlFor="cameraCount" className="text-slate-700">
@@ -955,6 +1047,19 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
                     name="serviceStartDate"
                     type="date"
                     value={formData.serviceStartDate}
+                    onChange={handleChange}
+                    className="bg-white border-slate-300 focus:border-indigo-500 focus:ring-indigo-500"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="installationStartDate" className="text-slate-700">
+                    Przewidywany termin rozpoczęcia montażu
+                  </Label>
+                  <Input
+                    id="installationStartDate"
+                    name="installationStartDate"
+                    type="date"
+                    value={formData.installationStartDate}
                     onChange={handleChange}
                     className="bg-white border-slate-300 focus:border-indigo-500 focus:ring-indigo-500"
                   />

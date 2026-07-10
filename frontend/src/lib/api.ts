@@ -338,6 +338,7 @@ export interface Order {
   payerNip: string;
   payerContractorId: number | null;
   objectName: string;
+  objectKind: string | null;
   objectAddress: string | null;
   objectCity: string | null;
   objectLocationUrl: string | null;
@@ -346,6 +347,9 @@ export interface Order {
   contactPhone: string;
   contactEmail: string | null;
   isCameraInstallation: boolean;
+  internetIncluded: boolean | null;
+  interventionGroup: boolean | null;
+  videoReception: boolean | null;
   cameraCount: number | null;
   megaphoneCount: number | null;
   vtoolsOfferNumber: string | null;
@@ -354,6 +358,7 @@ export interface Order {
   invoiceIssuer: string | null;
   status: "new" | "in_progress" | "completed" | "cancelled";
   serviceStartDate: string | null;
+  installationStartDate: string | null;
   notes: string | null;
   createdAt: string;
   updatedAt: string;
@@ -370,6 +375,7 @@ export interface OrderInput {
   payerNip: string;
   payerContractorId?: number;
   objectName: string;
+  objectKind?: string;
   objectAddress?: string;
   objectCity?: string;
   objectLocationUrl?: string;
@@ -387,6 +393,10 @@ export interface OrderInput {
   status?: "new" | "in_progress" | "completed" | "cancelled";
   serviceStartDate?: string;
   notes?: string;
+  internetIncluded?: boolean;
+  interventionGroup?: boolean;
+  videoReception?: boolean;
+  installationStartDate?: string;
   // Flags for auto-creating contractor and object
   createContractor?: boolean;
   createObject?: boolean;
@@ -477,6 +487,7 @@ export interface PublicOrderIntakeInput {
   cameraCount?: number;
   megaphoneCount?: number;
   objectName: string;
+  objectKind?: string;
   objectAddress?: string;
   objectCity: string;
   objectLocationUrl?: string;
@@ -485,6 +496,10 @@ export interface PublicOrderIntakeInput {
   contactEmail?: string;
   serviceStartDate?: string;
   notes?: string;
+  internetIncluded?: boolean;
+  interventionGroup?: boolean;
+  videoReception?: boolean;
+  installationStartDate?: string;
 }
 
 export async function submitPublicOrderIntake(data: PublicOrderIntakeInput) {
@@ -1893,6 +1908,7 @@ export interface AdminUser {
   displayName: string;
   role: "user" | "admin";
   permissions: Record<string, "view" | "edit">;
+  version: number;
   createdAt?: string;
 }
 
@@ -1926,6 +1942,9 @@ export interface AdminUpdateUserInput {
   displayName?: string;
   role?: "user" | "admin";
   permissions?: Record<string, "view" | "edit">;
+  /** Wersja wczytana przez klienta — backend odrzuci zapis (409), jeśli w
+   *  międzyczasie ktoś inny zmienił tego użytkownika (optimistic concurrency). */
+  expectedVersion?: number;
 }
 
 export const updateAdminUser = (id: number, data: AdminUpdateUserInput) =>

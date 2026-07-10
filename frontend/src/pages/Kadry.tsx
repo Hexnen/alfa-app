@@ -465,7 +465,7 @@ export function Kadry() {
     <div className="space-y-6">
       {!editable && <ReadOnlyBanner className="mb-4" />}
       <div className="flex flex-wrap items-center justify-between gap-4">
-        <div>
+        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
           <h1 className="text-2xl font-bold">Kadry</h1>
           <p className="text-muted-foreground">
             Godziny, wynagrodzenia i zestawienia dla księgowości

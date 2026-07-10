@@ -6,6 +6,14 @@ import { normalizeNIP, validateNIP } from "../utils/nip.js";
 
 const app = new Hono();
 
+/** True when a better-sqlite3 error is a UNIQUE-constraint violation. */
+function isUniqueViolation(err: unknown): boolean {
+  return (
+    err instanceof Error &&
+    (err as { code?: string }).code === "SQLITE_CONSTRAINT_UNIQUE"
+  );
+}
+
 // Check contractor by NIP
 app.get("/by-nip/:nip", async (c) => {
   const nip = c.req.param("nip");
@@ -161,20 +169,34 @@ app.post("/", async (c) => {
     );
   }
 
-  const result = await db
-    .insert(schema.contractors)
-    .values({
-      name: body.name,
-      nip: normalizedNip,
-      address: body.address,
-      city: body.city,
-      postalCode: body.postalCode,
-      phone: body.phone,
-      email: body.email,
-      contactPerson: body.contactPerson,
-      notes: body.notes,
-    })
-    .returning();
+  let result;
+  try {
+    result = await db
+      .insert(schema.contractors)
+      .values({
+        name: body.name,
+        nip: normalizedNip,
+        address: body.address,
+        city: body.city,
+        postalCode: body.postalCode,
+        phone: body.phone,
+        email: body.email,
+        contactPerson: body.contactPerson,
+        notes: body.notes,
+      })
+      .returning();
+  } catch (err) {
+    // A concurrent request may have inserted the same NIP after the check
+    // above but before this insert; the UNIQUE constraint enforces integrity,
+    // translate it into the same friendly 409 instead of a raw 500.
+    if (isUniqueViolation(err)) {
+      return c.json<ApiResponse<null>>(
+        { success: false, error: "Contractor with this NIP already exists" },
+        409
+      );
+    }
+    throw err;
+  }
 
   return c.json<ApiResponse<typeof result[0]>>(
     {
@@ -234,14 +256,27 @@ app.put("/:id", async (c) => {
     body.nip = normalizedNip;
   }
 
-  const result = await db
-    .update(schema.contractors)
-    .set({
-      ...body,
-      updatedAt: new Date().toISOString(),
-    })
-    .where(eq(schema.contractors.id, id))
-    .returning();
+  let result;
+  try {
+    result = await db
+      .update(schema.contractors)
+      .set({
+        ...body,
+        updatedAt: new Date().toISOString(),
+      })
+      .where(eq(schema.contractors.id, id))
+      .returning();
+  } catch (err) {
+    // Same NIP UNIQUE race as on create: a concurrent write may claim the NIP
+    // between the check above and this update.
+    if (isUniqueViolation(err)) {
+      return c.json<ApiResponse<null>>(
+        { success: false, error: "Contractor with this NIP already exists" },
+        409
+      );
+    }
+    throw err;
+  }
 
   return c.json<ApiResponse<typeof result[0]>>({
     success: true,
@@ -251,17 +286,25 @@ app.put("/:id", async (c) => {
 });
 
 // Delete contractor
-app.delete("/:id", async (c) => {
+app.delete("/:id", (c) => {
   const id = parseInt(c.req.param("id"));
 
-  // Check if contractor has objects
-  const objects = await db
-    .select()
-    .from(schema.objects)
-    .where(eq(schema.objects.contractorId, id))
-    .limit(1);
+  // Has-children check + delete w jednej synchronicznej transakcji — są atomowe
+  // na połączeniu, więc równoległy POST /objects nie wciśnie insertu między
+  // SELECT a DELETE (co przez onDelete:"cascade" cicho skasowałoby świeży obiekt).
+  const blocked = db.transaction((tx) => {
+    const child = tx
+      .select()
+      .from(schema.objects)
+      .where(eq(schema.objects.contractorId, id))
+      .limit(1)
+      .all();
+    if (child.length > 0) return true;
+    tx.delete(schema.contractors).where(eq(schema.contractors.id, id)).run();
+    return false;
+  });
 
-  if (objects.length > 0) {
+  if (blocked) {
     return c.json<ApiResponse<null>>(
       {
         success: false,
@@ -270,8 +313,6 @@ app.delete("/:id", async (c) => {
       400
     );
   }
-
-  await db.delete(schema.contractors).where(eq(schema.contractors.id, id));
 
   return c.json<ApiResponse<null>>({
     success: true,

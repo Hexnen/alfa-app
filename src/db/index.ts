@@ -14,6 +14,11 @@ if (!existsSync(dir)) {
 
 const sqlite = new Database(DB_PATH);
 sqlite.pragma("journal_mode = WAL");
+// Wait up to 5s for a lock instead of raising SQLITE_BUSY -> 500 when a
+// second OS process (backup/replicator/CLI) holds the write lock.
+sqlite.pragma("busy_timeout = 5000");
+// Recommended pairing with WAL: fewer fsyncs, still crash-safe under WAL.
+sqlite.pragma("synchronous = NORMAL");
 sqlite.pragma("foreign_keys = ON");
 
 export const db = drizzle(sqlite, { schema });

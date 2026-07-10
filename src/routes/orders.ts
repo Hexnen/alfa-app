@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { db, schema } from "../db/index.js";
-import { eq, like, or, sql, desc } from "drizzle-orm";
+import { eq, and, like, or, sql, desc } from "drizzle-orm";
 import type { OrderInput, ApiResponse } from "../types/index.js";
 import { createOrderFromInput } from "../services/orders.js";
 
@@ -146,7 +146,9 @@ app.post("/", async (c) => {
 // Update order
 app.put("/:id", async (c) => {
   const id = parseInt(c.req.param("id"));
-  const body = await c.req.json<Partial<OrderInput>>();
+  const body = await c.req.json<
+    Partial<OrderInput> & { expectedUpdatedAt?: string }
+  >();
 
   // Check if order exists
   const existing = await db
@@ -162,14 +164,46 @@ app.put("/:id", async (c) => {
     );
   }
 
+  // Optimistic concurrency: the client MUST echo the updatedAt it read as
+  // expectedUpdatedAt. We only write if the row is unchanged, otherwise 409.
+  // A missing token is rejected (428) instead of degrading to eq(id) — that
+  // degrade path let two concurrent editors silently overwrite each other
+  // (last-writer-wins), which is exactly the race this guard exists to close.
+  const { expectedUpdatedAt, ...fields } = body;
+
+  if (!expectedUpdatedAt) {
+    return c.json<ApiResponse<null>>(
+      {
+        success: false,
+        error: "Missing expectedUpdatedAt — reload the order and retry.",
+      },
+      428
+    );
+  }
+
   const result = await db
     .update(schema.orders)
     .set({
-      ...body,
+      ...fields,
       updatedAt: new Date().toISOString(),
     })
-    .where(eq(schema.orders.id, id))
+    .where(
+      and(
+        eq(schema.orders.id, id),
+        eq(schema.orders.updatedAt, expectedUpdatedAt)
+      )
+    )
     .returning();
+
+  if (result.length === 0) {
+    return c.json<ApiResponse<null>>(
+      {
+        success: false,
+        error: "Order was modified by someone else. Please reload and retry.",
+      },
+      409
+    );
+  }
 
   return c.json<ApiResponse<typeof result[0]>>({
     success: true,
@@ -207,7 +241,10 @@ app.delete("/:id", async (c) => {
 // Update order status
 app.patch("/:id/status", async (c) => {
   const id = parseInt(c.req.param("id"));
-  const { status } = await c.req.json<{ status: string }>();
+  const { status, expectedUpdatedAt } = await c.req.json<{
+    status: string;
+    expectedUpdatedAt?: string;
+  }>();
 
   const existing = await db
     .select()
@@ -222,14 +259,42 @@ app.patch("/:id/status", async (c) => {
     );
   }
 
+  // Optimistic concurrency guard (see PUT /:id) — the client MUST send the
+  // updatedAt it read; a missing token is rejected (428) instead of degrading
+  // to eq(id), so the last-writer-wins path cannot be reached.
+  if (!expectedUpdatedAt) {
+    return c.json<ApiResponse<null>>(
+      {
+        success: false,
+        error: "Missing expectedUpdatedAt — reload the order and retry.",
+      },
+      428
+    );
+  }
+
   const result = await db
     .update(schema.orders)
     .set({
       status: status as "new" | "in_progress" | "completed" | "cancelled",
       updatedAt: new Date().toISOString(),
     })
-    .where(eq(schema.orders.id, id))
+    .where(
+      and(
+        eq(schema.orders.id, id),
+        eq(schema.orders.updatedAt, expectedUpdatedAt)
+      )
+    )
     .returning();
+
+  if (result.length === 0) {
+    return c.json<ApiResponse<null>>(
+      {
+        success: false,
+        error: "Order was modified by someone else. Please reload and retry.",
+      },
+      409
+    );
+  }
 
   return c.json<ApiResponse<typeof result[0]>>({
     success: true,

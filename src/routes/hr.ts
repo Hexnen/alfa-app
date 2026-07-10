@@ -117,11 +117,30 @@ app.put("/employees/:id", async (c) => {
   if (error || !data) {
     return c.json<ApiResponse<null>>({ success: false, error }, 400);
   }
+  // Optymistyczna kontrola współbieżności: gdy klient odeśle odczytany updatedAt,
+  // zapis przechodzi tylko jeśli wiersz się nie zmienił — inaczej 409. Bez tego
+  // dwóch operatorów zapisujących ten sam wiersz nadpisuje sobie nawzajem cały
+  // payload (lost update).
+  const expectedUpdatedAt =
+    typeof body.expectedUpdatedAt === "string" ? body.expectedUpdatedAt : undefined;
   const result = await db
     .update(schema.hrEmployees)
     .set({ ...data, updatedAt: new Date().toISOString() })
-    .where(eq(schema.hrEmployees.id, id))
+    .where(
+      expectedUpdatedAt
+        ? and(
+            eq(schema.hrEmployees.id, id),
+            eq(schema.hrEmployees.updatedAt, expectedUpdatedAt),
+          )
+        : eq(schema.hrEmployees.id, id),
+    )
     .returning();
+  if (result.length === 0) {
+    return c.json<ApiResponse<null>>(
+      { success: false, error: "Pracownik został zmieniony przez kogoś innego. Odśwież i spróbuj ponownie." },
+      409,
+    );
+  }
   return c.json({ success: true, data: result[0], message: "Pracownik zapisany" });
 });
 
@@ -237,22 +256,30 @@ app.put("/norms", async (c) => {
       400,
     );
   }
-  const [existing] = await db
-    .select()
-    .from(schema.hrMonthNorms)
-    .where(
-      and(eq(schema.hrMonthNorms.year, year), eq(schema.hrMonthNorms.month, month)),
-    );
-  const result = existing
-    ? await db
-        .update(schema.hrMonthNorms)
-        .set({ workNorm, contractNorm, updatedAt: new Date().toISOString() })
-        .where(eq(schema.hrMonthNorms.id, existing.id))
-        .returning()
-    : await db
-        .insert(schema.hrMonthNorms)
-        .values({ year, month, workNorm, contractNorm })
-        .returning();
+  // Upsert w jednej synchronicznej transakcji — select i insert/update są
+  // atomowe, więc równoległe PUT /norms dla tego samego (rok, miesiąc) nie
+  // wstawią dwóch wierszy normy.
+  const result = db.transaction((tx) => {
+    const existing = tx
+      .select()
+      .from(schema.hrMonthNorms)
+      .where(
+        and(eq(schema.hrMonthNorms.year, year), eq(schema.hrMonthNorms.month, month)),
+      )
+      .get();
+    return existing
+      ? tx
+          .update(schema.hrMonthNorms)
+          .set({ workNorm, contractNorm, updatedAt: new Date().toISOString() })
+          .where(eq(schema.hrMonthNorms.id, existing.id))
+          .returning()
+          .all()
+      : tx
+          .insert(schema.hrMonthNorms)
+          .values({ year, month, workNorm, contractNorm })
+          .returning()
+          .all();
+  });
   return c.json({ success: true, data: result[0], message: "Norma zapisana" });
 });
 
@@ -338,11 +365,28 @@ app.put("/hours/:id", async (c) => {
   if (error || !data) {
     return c.json<ApiResponse<null>>({ success: false, error }, 400);
   }
+  // Optymistyczna kontrola współbieżności (patrz PUT /employees/:id) — zapis
+  // tylko gdy odczytany updatedAt wciąż aktualny, inaczej 409.
+  const expectedUpdatedAt =
+    typeof body.expectedUpdatedAt === "string" ? body.expectedUpdatedAt : undefined;
   const result = await db
     .update(schema.hrHours)
     .set({ ...data, updatedAt: new Date().toISOString() })
-    .where(eq(schema.hrHours.id, id))
+    .where(
+      expectedUpdatedAt
+        ? and(
+            eq(schema.hrHours.id, id),
+            eq(schema.hrHours.updatedAt, expectedUpdatedAt),
+          )
+        : eq(schema.hrHours.id, id),
+    )
     .returning();
+  if (result.length === 0) {
+    return c.json<ApiResponse<null>>(
+      { success: false, error: "Wpis godzin został zmieniony przez kogoś innego. Odśwież i spróbuj ponownie." },
+      409,
+    );
+  }
   return c.json({ success: true, data: result[0], message: "Godziny zapisane" });
 });
 
@@ -443,11 +487,28 @@ app.put("/contracts/:id", async (c) => {
   if (error || !data) {
     return c.json<ApiResponse<null>>({ success: false, error }, 400);
   }
+  // Optymistyczna kontrola współbieżności (patrz PUT /employees/:id) — zapis
+  // tylko gdy odczytany updatedAt wciąż aktualny, inaczej 409.
+  const expectedUpdatedAt =
+    typeof body.expectedUpdatedAt === "string" ? body.expectedUpdatedAt : undefined;
   const result = await db
     .update(schema.hrContracts)
     .set({ ...data, updatedAt: new Date().toISOString() })
-    .where(eq(schema.hrContracts.id, id))
+    .where(
+      expectedUpdatedAt
+        ? and(
+            eq(schema.hrContracts.id, id),
+            eq(schema.hrContracts.updatedAt, expectedUpdatedAt),
+          )
+        : eq(schema.hrContracts.id, id),
+    )
     .returning();
+  if (result.length === 0) {
+    return c.json<ApiResponse<null>>(
+      { success: false, error: "Umowa została zmieniona przez kogoś innego. Odśwież i spróbuj ponownie." },
+      409,
+    );
+  }
   return c.json({ success: true, data: result[0], message: "Umowa zapisana" });
 });
 
@@ -579,26 +640,34 @@ app.put("/payroll", async (c) => {
     bonusAmountOverride: toNum(body.bonusAmountOverride),
     notes: typeof body.notes === "string" ? body.notes : "",
   };
-  const [existing] = await db
-    .select()
-    .from(schema.hrPayroll)
-    .where(
-      and(
-        eq(schema.hrPayroll.contractId, contractId),
-        eq(schema.hrPayroll.year, year),
-        eq(schema.hrPayroll.month, month),
-      ),
-    );
-  const result = existing
-    ? await db
-        .update(schema.hrPayroll)
-        .set({ ...values, updatedAt: new Date().toISOString() })
-        .where(eq(schema.hrPayroll.id, existing.id))
-        .returning()
-    : await db
-        .insert(schema.hrPayroll)
-        .values({ contractId, year, month, ...values })
-        .returning();
+  // Upsert w jednej synchronicznej transakcji — select i insert/update są
+  // atomowe, więc równoległe PUT /payroll dla tego samego (umowa, rok, miesiąc)
+  // nie wstawią dwóch wierszy płacowych (co po cichu gubiłoby wpisy księgowości).
+  const result = db.transaction((tx) => {
+    const existing = tx
+      .select()
+      .from(schema.hrPayroll)
+      .where(
+        and(
+          eq(schema.hrPayroll.contractId, contractId),
+          eq(schema.hrPayroll.year, year),
+          eq(schema.hrPayroll.month, month),
+        ),
+      )
+      .get();
+    return existing
+      ? tx
+          .update(schema.hrPayroll)
+          .set({ ...values, updatedAt: new Date().toISOString() })
+          .where(eq(schema.hrPayroll.id, existing.id))
+          .returning()
+          .all()
+      : tx
+          .insert(schema.hrPayroll)
+          .values({ contractId, year, month, ...values })
+          .returning()
+          .all();
+  });
   return c.json({ success: true, data: result[0], message: "Dane płacowe zapisane" });
 });
 
@@ -711,11 +780,28 @@ app.put("/office/:id", async (c) => {
   if (error || !data) {
     return c.json<ApiResponse<null>>({ success: false, error }, 400);
   }
+  // Optymistyczna kontrola współbieżności (patrz PUT /employees/:id) — zapis
+  // tylko gdy odczytany updatedAt wciąż aktualny, inaczej 409.
+  const expectedUpdatedAt =
+    typeof body.expectedUpdatedAt === "string" ? body.expectedUpdatedAt : undefined;
   const result = await db
     .update(schema.hrOfficePayroll)
     .set({ ...data, updatedAt: new Date().toISOString() })
-    .where(eq(schema.hrOfficePayroll.id, id))
+    .where(
+      expectedUpdatedAt
+        ? and(
+            eq(schema.hrOfficePayroll.id, id),
+            eq(schema.hrOfficePayroll.updatedAt, expectedUpdatedAt),
+          )
+        : eq(schema.hrOfficePayroll.id, id),
+    )
     .returning();
+  if (result.length === 0) {
+    return c.json<ApiResponse<null>>(
+      { success: false, error: "Wpis został zmieniony przez kogoś innego. Odśwież i spróbuj ponownie." },
+      409,
+    );
+  }
   return c.json({
     success: true,
     data: withOfficeComputed(result[0]),

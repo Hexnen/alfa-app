@@ -19,12 +19,16 @@ interface PublicOrderIntake {
   payerNip: string;
   isCameraInstallation?: boolean;
   vtoolsOfferNumber?: string;
+  internetIncluded?: boolean;
+  interventionGroup?: boolean;
+  videoReception?: boolean;
   monthlyAmount?: number;
   rentalAmount?: number;
   invoiceIssuer?: string;
   cameraCount?: number;
   megaphoneCount?: number;
   objectName: string;
+  objectKind?: string;
   objectAddress?: string;
   objectCity?: string;
   objectLocationUrl?: string;
@@ -32,6 +36,7 @@ interface PublicOrderIntake {
   contactPhone: string;
   contactEmail?: string;
   serviceStartDate?: string;
+  installationStartDate?: string;
   notes?: string;
 }
 
@@ -100,6 +105,7 @@ app.post("/order-intake", async (c) => {
       payerName: body.payerName,
       payerNip: normalizedNip,
       objectName: body.objectName,
+      objectKind: body.objectKind,
       objectAddress: body.objectAddress,
       objectCity: body.objectCity,
       objectLocationUrl: body.objectLocationUrl,
@@ -110,10 +116,14 @@ app.post("/order-intake", async (c) => {
       cameraCount: body.cameraCount,
       megaphoneCount: body.megaphoneCount,
       vtoolsOfferNumber: body.vtoolsOfferNumber,
+      internetIncluded: body.internetIncluded,
+      interventionGroup: body.interventionGroup,
+      videoReception: body.videoReception,
       monthlyAmount: body.monthlyAmount,
       rentalAmount: body.rentalAmount,
       invoiceIssuer: body.invoiceIssuer,
       serviceStartDate: body.serviceStartDate,
+      installationStartDate: body.installationStartDate,
       notes: body.notes,
       // Forced CRM-linking policy — never trust the client for these
       status: "new",
@@ -125,7 +135,27 @@ app.post("/order-intake", async (c) => {
       payerContractorId: reuseContractor ? existing[0].id : undefined,
     };
 
-    const result = await createOrderFromInput(input);
+    let result = await createOrderFromInput(input);
+
+    // Race guard: our SELECT above and the transaction's own NIP re-check
+    // straddle await points, so two concurrent same-NIP intakes can both
+    // pick createContractor=true. The first commits the contractor; the
+    // second's transaction then re-checks, finds it and returns 409. Per
+    // policy, returning/duplicate-NIP intakes must REUSE the contractor,
+    // not fail — so on that 409 re-select the now-existing contractor and
+    // retry once as a reuse.
+    if (!result.ok && result.status === 409) {
+      const nowExisting = await db
+        .select({ id: schema.contractors.id })
+        .from(schema.contractors)
+        .where(eq(schema.contractors.nip, normalizedNip))
+        .limit(1);
+      if (nowExisting.length > 0) {
+        input.createContractor = false;
+        input.payerContractorId = nowExisting[0].id;
+        result = await createOrderFromInput(input);
+      }
+    }
 
     if (!result.ok) {
       return c.json<ApiResponse<null>>(

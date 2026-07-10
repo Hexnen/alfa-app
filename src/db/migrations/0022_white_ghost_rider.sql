@@ -1,0 +1,1 @@
+ALTER TABLE `orders` ADD `object_kind` text;

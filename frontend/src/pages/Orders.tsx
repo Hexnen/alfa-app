@@ -172,9 +172,9 @@ export function Orders() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div>
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
         <h1 className="text-3xl font-bold text-slate-900">Zlecenia montażu</h1>
-        <p className="text-slate-500 mt-1">
+        <p className="text-slate-500">
           Zarządzaj zleceniami instalacji i montażu systemów
         </p>
       </div>

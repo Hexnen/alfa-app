@@ -1,4 +1,6 @@
 import { Hono } from "hono";
+import { sql } from "drizzle-orm";
+import { db } from "../db/index.js";
 import { requireAdmin, getUser } from "../middleware/auth.js";
 import {
   listUsers,
@@ -9,7 +11,6 @@ import {
   findUserById,
   findUserByEmail,
   publicUser,
-  otherAdminsCount,
 } from "../lib/auth/users.js";
 import { TABS } from "../lib/auth/permissions.js";
 
@@ -46,17 +47,27 @@ admin.post("/users", async (c) => {
   if (displayName.length > 60) {
     return c.json({ success: false, error: "Nazwa wyświetlana: max 60 znaków." }, 400);
   }
+  // Szybka ścieżka; ostateczną wyłączność loginu egzekwuje UNIQUE(email) niżej,
+  // co eliminuje wyścig check-then-insert (dwa równoległe POST z tym samym loginem).
   if (findUserByEmail(email)) {
     return c.json({ success: false, error: "Konto z tym loginem już istnieje." }, 409);
   }
   const role = body.role === "admin" ? "admin" : "user";
-  const user = createUserFull({
-    email,
-    password,
-    displayName,
-    role,
-    permissions: body.permissions,
-  });
+  let user;
+  try {
+    user = createUserFull({
+      email,
+      password,
+      displayName,
+      role,
+      permissions: body.permissions,
+    });
+  } catch (e) {
+    if (e instanceof Error && /UNIQUE|constraint/i.test(e.message)) {
+      return c.json({ success: false, error: "Konto z tym loginem już istnieje." }, 409);
+    }
+    throw e;
+  }
   return c.json({ success: true, data: publicUser(user) });
 });
 
@@ -68,13 +79,21 @@ admin.patch("/users/:id", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
 
   // Zabezpieczenie: nie można zdegradować ostatniego admina.
-  if (
-    body.role !== undefined &&
-    body.role !== "admin" &&
-    target.role === "admin" &&
-    otherAdminsCount(id) === 0
-  ) {
-    return c.json({ success: false, error: "Nie można zdegradować jedynego administratora." }, 400);
+  // Warunek i zapis w jednym atomowym UPDATE (podzapytanie liczy pozostałych
+  // adminów), więc dwa równoległe żądania degradacji nie zostawią 0 adminów.
+  if (body.role !== undefined && body.role !== "admin" && target.role === "admin") {
+    const res = db.run(
+      sql`UPDATE users SET role = 'user' WHERE id = ${id} AND (SELECT COUNT(*) FROM users WHERE role = 'admin' AND id <> ${id}) > 0`,
+    );
+    if (res.changes === 0) {
+      // 0 zmian ma dwie przyczyny: wiersz zniknął (równoległy DELETE między
+      // odczytem body a tym UPDATE) albo to jedyny admin. Rozróżniamy je
+      // ponownym odczytem, aby nie zwracać mylącego komunikatu o adminie.
+      if (!findUserById(id)) {
+        return c.json({ success: false, error: "Nie znaleziono użytkownika." }, 404);
+      }
+      return c.json({ success: false, error: "Nie można zdegradować jedynego administratora." }, 400);
+    }
   }
 
   let displayName: string | undefined;
@@ -85,12 +104,34 @@ admin.patch("/users/:id", async (c) => {
     displayName = body.displayName.trim();
   }
 
-  const updated = updateUser(id, {
-    displayName,
-    role: body.role === "admin" ? "admin" : body.role === "user" ? "user" : undefined,
-    permissions: body.permissions,
-  });
-  return c.json({ success: true, data: updated ? publicUser(updated) : null });
+  // Optimistic concurrency: front odsyła wersję, którą wczytał. Jeśli inny admin
+  // zapisał w międzyczasie, wersja się nie zgadza i zwracamy 409 zamiast po cichu
+  // nadpisać jego zmiany (lost update na mapie uprawnień).
+  const expectedVersion =
+    typeof body.expectedVersion === "number" ? body.expectedVersion : undefined;
+  const result = updateUser(
+    id,
+    {
+      displayName,
+      role: body.role === "admin" ? "admin" : body.role === "user" ? "user" : undefined,
+      permissions: body.permissions,
+    },
+    expectedVersion,
+  );
+  if (!result.ok) {
+    if (result.reason === "conflict") {
+      return c.json(
+        {
+          success: false,
+          error:
+            "Ten użytkownik został zmieniony przez kogoś innego. Odśwież i zapisz ponownie.",
+        },
+        409,
+      );
+    }
+    return c.json({ success: false, error: "Nie znaleziono użytkownika." }, 404);
+  }
+  return c.json({ success: true, data: publicUser(result.user) });
 });
 
 // Reset hasła.
@@ -116,10 +157,18 @@ admin.delete("/users/:id", (c) => {
   if (me.id === id) {
     return c.json({ success: false, error: "Nie można usunąć własnego konta." }, 400);
   }
-  if (target.role === "admin" && otherAdminsCount(id) === 0) {
-    return c.json({ success: false, error: "Nie można usunąć jedynego administratora." }, 400);
+  // Warunek "istnieje inny admin" i samo usunięcie w jednym atomowym DELETE
+  // (podzapytanie), więc dwa równoległe usunięcia nie zostawią 0 adminów.
+  if (target.role === "admin") {
+    const res = db.run(
+      sql`DELETE FROM users WHERE id = ${id} AND (SELECT COUNT(*) FROM users WHERE role = 'admin' AND id <> ${id}) > 0`,
+    );
+    if (res.changes === 0) {
+      return c.json({ success: false, error: "Nie można usunąć jedynego administratora." }, 400);
+    }
+  } else {
+    deleteUser(id);
   }
-  deleteUser(id);
   return c.json({ success: true });
 });
 
