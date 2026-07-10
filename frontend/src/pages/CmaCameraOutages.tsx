@@ -9,7 +9,6 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { CmaTabs } from "@/components/CmaTabs";
 import {
   AlertTriangle,
   Building2,
@@ -384,9 +383,6 @@ export function CmaCameraOutages() {
           Centrum monitorowania alarmów - aktualne braki obrazu z kamer
         </p>
       </div>
-
-      {/* Sub-tabs */}
-      <CmaTabs />
 
       {loading ? (
         <div className="text-center py-8">Ładowanie...</div>

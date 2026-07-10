@@ -7,7 +7,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { CmaTabs } from "@/components/CmaTabs";
 import {
   BarChart3,
   Building2,
@@ -640,9 +639,6 @@ export function CmaTrends() {
           Centrum monitorowania alarmów - trendy z zaimportowanych raportów
         </p>
       </div>
-
-      {/* Sub-tabs */}
-      <CmaTabs />
 
       {loading ? (
         <div className="text-center py-8">Ładowanie...</div>

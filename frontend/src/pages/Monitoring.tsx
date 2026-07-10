@@ -99,7 +99,7 @@ export function Monitoring() {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-3xl font-bold">Monitoring — projekty CCTV</h1>
+        <h1 className="text-3xl font-bold">Projekty — CCTV</h1>
         <Button onClick={() => openForm(null)}>
           <Plus className="h-4 w-4 mr-2" />
           Nowy projekt

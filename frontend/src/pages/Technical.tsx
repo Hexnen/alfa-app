@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
+import { Navigate, useParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tabs, TabsContent } from "@/components/ui/tabs";
 import { RealizationForm } from "@/components/RealizationForm";
 import { TechnicianForm } from "@/components/TechnicianForm";
 import { TechnicalObjects } from "@/components/TechnicalObjects";
@@ -97,7 +98,17 @@ const pln = new Intl.NumberFormat("pl-PL", {
 });
 const money = (v: number | null | undefined) => pln.format(Number(v || 0));
 
+const TECH_TABS = [
+  "realizacje",
+  "protokoly",
+  "wyceny",
+  "cennik",
+  "technicy",
+  "obiekty",
+] as const;
+
 export function Technical() {
+  const { tab } = useParams<{ tab: string }>();
   const now = new Date();
   const [year, setYear] = useState(now.getFullYear());
   const [month, setMonth] = useState(now.getMonth() + 1);
@@ -432,22 +443,17 @@ export function Technical() {
       ]
     : [];
 
+  if (!tab || !TECH_TABS.includes(tab as (typeof TECH_TABS)[number])) {
+    return <Navigate to="/technical/realizacje" replace />;
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold">Techniczny</h1>
       </div>
 
-      <Tabs defaultValue="realizacje">
-        <TabsList>
-          <TabsTrigger value="realizacje">Realizacje</TabsTrigger>
-          <TabsTrigger value="protokoly">Protokoły</TabsTrigger>
-          <TabsTrigger value="wyceny">Wyceny</TabsTrigger>
-          <TabsTrigger value="cennik">Cennik</TabsTrigger>
-          <TabsTrigger value="technicy">Technicy</TabsTrigger>
-          <TabsTrigger value="obiekty">Obiekty</TabsTrigger>
-        </TabsList>
-
+      <Tabs value={tab}>
         <TabsContent value="realizacje" className="space-y-6">
           {/* Pasek: miesiąc + akcje */}
           <div className="flex flex-wrap items-center gap-2">

@@ -2,10 +2,11 @@
 // księgowości → kwoty od księgowości → wynagrodzenia (przelew/gotówka).
 // Każdy nagłówek kolumny ma tooltip (hover) z opisem, z czego się kalkuluje.
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { Navigate, useParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tabs, TabsContent } from "@/components/ui/tabs";
 import {
   HrContractForm,
   HrEmployeeForm,
@@ -120,7 +121,18 @@ function Th({
   );
 }
 
+const KADRY_TABS = [
+  "wynagrodzenia",
+  "godziny",
+  "biuro",
+  "umowy",
+  "pracownicy",
+  "obiekty",
+  "normy",
+] as const;
+
 export function Kadry() {
+  const { tab } = useParams<{ tab: string }>();
   const now = new Date();
   const [year, setYear] = useState(now.getFullYear());
   const [month, setMonth] = useState(now.getMonth() + 1);
@@ -427,6 +439,10 @@ export function Kadry() {
   const sumPrzelew = payrollVisible.reduce((s, r) => s + r.przelew, 0);
   const sumGotowka = payrollVisible.reduce((s, r) => s + r.gotowka, 0);
 
+  if (!tab || !KADRY_TABS.includes(tab as (typeof KADRY_TABS)[number])) {
+    return <Navigate to="/kadry/wynagrodzenia" replace />;
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-4">
@@ -465,17 +481,7 @@ export function Kadry() {
         ))}
       </div>
 
-      <Tabs defaultValue="wynagrodzenia">
-        <TabsList className="flex-wrap">
-          <TabsTrigger value="wynagrodzenia">Wynagrodzenia</TabsTrigger>
-          <TabsTrigger value="godziny">Godziny</TabsTrigger>
-          <TabsTrigger value="biuro">Biuro</TabsTrigger>
-          <TabsTrigger value="umowy">Umowy</TabsTrigger>
-          <TabsTrigger value="pracownicy">Pracownicy</TabsTrigger>
-          <TabsTrigger value="obiekty">Obiekty</TabsTrigger>
-          <TabsTrigger value="normy">Normy</TabsTrigger>
-        </TabsList>
-
+      <Tabs value={tab}>
         {/* ==================== WYNAGRODZENIA ==================== */}
         <TabsContent value="wynagrodzenia" className="space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3">

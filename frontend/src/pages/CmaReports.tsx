@@ -10,7 +10,6 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { CmaTabs } from "@/components/CmaTabs";
 import {
   AlertCircle,
   Cctv,
@@ -136,9 +135,6 @@ export function CmaReports() {
           onChange={handleFileSelected}
         />
       </div>
-
-      {/* Sub-tabs */}
-      <CmaTabs />
 
       {/* Import error */}
       {importError && (

@@ -6,30 +6,81 @@ import {
   FileText,
   ClipboardList,
   Cctv,
-  Camera,
-  MapPinned,
   Wrench,
   IdCard,
+  FolderKanban,
+  ChevronDown,
   Menu,
   X,
   LogOut,
+  type LucideIcon,
 } from "lucide-react";
 import { useState } from "react";
 import { cn } from "@/lib/utils";
 import { Button } from "./ui/button";
 import { useAuth } from "@/auth/AuthProvider";
 
-const navigation = [
+type NavChild = { name: string; href: string };
+type NavItem = {
+  name: string;
+  href: string;
+  icon: LucideIcon;
+  children?: NavChild[];
+};
+
+// Standalone entries shown at the top of the sidebar.
+const topLevel: NavItem[] = [
   { name: "Dashboard", href: "/", icon: LayoutDashboard },
   { name: "Kontrahenci", href: "/contractors", icon: Users },
   { name: "Obiekty", href: "/objects", icon: Building2 },
   { name: "Umowy", href: "/contracts", icon: FileText },
   { name: "Zlecenia", href: "/orders", icon: ClipboardList },
-  { name: "Techniczny", href: "/technical", icon: Wrench },
-  { name: "Kadry", href: "/kadry", icon: IdCard },
-  { name: "Monitoring", href: "/monitoring", icon: MapPinned },
-  { name: "CMA", href: "/cma", icon: Cctv },
-  { name: "Szablony", href: "/templates", icon: Camera },
+];
+
+// Main sections. Their sub-tabs live directly in the sidebar (not on the
+// sub-page) — each child navigates to its own URL.
+const sections: NavItem[] = [
+  {
+    name: "Kadry",
+    href: "/kadry",
+    icon: IdCard,
+    children: [
+      { name: "Wynagrodzenia", href: "/kadry/wynagrodzenia" },
+      { name: "Godziny", href: "/kadry/godziny" },
+      { name: "Biuro", href: "/kadry/biuro" },
+      { name: "Umowy", href: "/kadry/umowy" },
+      { name: "Pracownicy", href: "/kadry/pracownicy" },
+      { name: "Obiekty", href: "/kadry/obiekty" },
+      { name: "Normy", href: "/kadry/normy" },
+    ],
+  },
+  {
+    name: "CMA",
+    href: "/cma",
+    icon: Cctv,
+    children: [
+      { name: "Raporty", href: "/cma/raporty" },
+      { name: "Trendy", href: "/cma/trendy" },
+      { name: "Braki kamer", href: "/cma/braki-kamer" },
+      { name: "Ustawienia", href: "/cma/ustawienia" },
+    ],
+  },
+  {
+    name: "Techniczny",
+    href: "/technical",
+    icon: Wrench,
+    children: [
+      { name: "Realizacje", href: "/technical/realizacje" },
+      { name: "Protokoły", href: "/technical/protokoly" },
+      { name: "Wyceny", href: "/technical/wyceny" },
+      { name: "Cennik", href: "/technical/cennik" },
+      { name: "Technicy", href: "/technical/technicy" },
+      { name: "Obiekty", href: "/technical/obiekty" },
+      { name: "Projekty", href: "/technical/projekty" },
+      { name: "Szablony", href: "/technical/szablony" },
+    ],
+  },
+  { name: "OFI", href: "/ofi", icon: FolderKanban },
 ];
 
 interface LayoutProps {
@@ -39,7 +90,26 @@ interface LayoutProps {
 export function Layout({ children }: LayoutProps) {
   const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
   const { user, logout } = useAuth();
+
+  const isChildActive = (href: string) =>
+    location.pathname === href || location.pathname.startsWith(href + "/");
+
+  const isSectionActive = (item: NavItem) =>
+    location.pathname === item.href ||
+    location.pathname.startsWith(item.href + "/");
+
+  // A section is expanded when the user toggled it, otherwise it auto-opens
+  // whenever the current route lives inside it.
+  const isGroupOpen = (item: NavItem) =>
+    openGroups[item.name] ?? isSectionActive(item);
+
+  const toggleGroup = (item: NavItem) =>
+    setOpenGroups((prev) => ({
+      ...prev,
+      [item.name]: !isGroupOpen(item),
+    }));
 
   return (
     <div className="min-h-screen bg-background">
@@ -72,9 +142,11 @@ export function Layout({ children }: LayoutProps) {
           </Button>
         </div>
         <nav className="flex flex-1 flex-col gap-1 overflow-y-auto p-4">
-          {navigation.map((item) => {
-            const isActive = location.pathname === item.href ||
-              (item.href !== "/" && location.pathname.startsWith(item.href));
+          {topLevel.map((item) => {
+            const isActive =
+              location.pathname === item.href ||
+              (item.href !== "/" &&
+                location.pathname.startsWith(item.href + "/"));
             return (
               <Link
                 key={item.name}
@@ -90,6 +162,94 @@ export function Layout({ children }: LayoutProps) {
                 <item.icon className="h-5 w-5" />
                 {item.name}
               </Link>
+            );
+          })}
+
+          <div className="my-2 border-t" />
+
+          {sections.map((item) => {
+            const sectionActive = isSectionActive(item);
+
+            // Section without sub-tabs behaves like a plain link.
+            if (!item.children) {
+              return (
+                <Link
+                  key={item.name}
+                  to={item.href}
+                  className={cn(
+                    "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
+                    sectionActive
+                      ? "bg-primary text-primary-foreground"
+                      : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+                  )}
+                  onClick={() => setSidebarOpen(false)}
+                >
+                  <item.icon className="h-5 w-5" />
+                  {item.name}
+                </Link>
+              );
+            }
+
+            const open = isGroupOpen(item);
+            return (
+              <div key={item.name}>
+                <div
+                  className={cn(
+                    "flex items-center rounded-lg text-sm font-medium transition-colors",
+                    sectionActive
+                      ? "text-foreground"
+                      : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+                  )}
+                >
+                  <Link
+                    to={item.href}
+                    className="flex flex-1 items-center gap-3 px-3 py-2"
+                    onClick={() => {
+                      setOpenGroups((prev) => ({ ...prev, [item.name]: true }));
+                      setSidebarOpen(false);
+                    }}
+                  >
+                    <item.icon className="h-5 w-5" />
+                    {item.name}
+                  </Link>
+                  <button
+                    type="button"
+                    className="flex h-9 w-9 items-center justify-center rounded-lg hover:bg-accent"
+                    onClick={() => toggleGroup(item)}
+                    aria-label={open ? `Zwiń ${item.name}` : `Rozwiń ${item.name}`}
+                  >
+                    <ChevronDown
+                      className={cn(
+                        "h-4 w-4 transition-transform",
+                        open ? "rotate-0" : "-rotate-90"
+                      )}
+                    />
+                  </button>
+                </div>
+
+                {open && (
+                  <div className="mt-1 flex flex-col gap-1 pl-4">
+                    {item.children.map((child) => {
+                      const childActive = isChildActive(child.href);
+                      return (
+                        <Link
+                          key={child.href}
+                          to={child.href}
+                          className={cn(
+                            "flex items-center gap-3 rounded-lg border-l px-3 py-1.5 text-sm transition-colors",
+                            childActive
+                              ? "border-primary bg-primary/10 font-medium text-primary"
+                              : "border-transparent text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+                          )}
+                          onClick={() => setSidebarOpen(false)}
+                        >
+                          {child.name}
+                        </Link>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
             );
           })}
         </nav>

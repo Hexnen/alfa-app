@@ -24,7 +24,6 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { CmaTabs } from "@/components/CmaTabs";
 import {
   AlertCircle,
   ArrowLeft,
@@ -432,9 +431,6 @@ export function CmaReportDetails() {
           </div>
         </div>
       </div>
-
-      {/* Sub-tabs */}
-      <CmaTabs />
 
       {/* Stats cards */}
       {stats && (

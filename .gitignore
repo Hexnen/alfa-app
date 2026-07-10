@@ -39,3 +39,7 @@ take-screenshots.js
 
 # Planning docs
 plan_zlecenie_auto_create.md
+
+# Stray data artifacts
+images.jpg
+*.xls

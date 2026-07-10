@@ -17,6 +17,7 @@ import { CmaReportDetails } from "./pages/CmaReportDetails";
 import { CmaTrends } from "./pages/CmaTrends";
 import { CmaCameraOutages } from "./pages/CmaCameraOutages";
 import { CmaSettings } from "./pages/CmaSettings";
+import { Ofi } from "./pages/Ofi";
 import { useAuth } from "./auth/AuthProvider";
 import AuthScreen from "./auth/AuthScreen";
 
@@ -44,10 +45,28 @@ function App() {
           <Route path="/contracts/:id" element={<ContractDetails />} />
           <Route path="/orders" element={<Orders />} />
           <Route path="/orders/:id" element={<OrderDetails />} />
-          <Route path="/technical" element={<Technical />} />
-          <Route path="/kadry" element={<Kadry />} />
-          <Route path="/monitoring" element={<Monitoring />} />
-          <Route path="/templates" element={<Templates />} />
+          <Route
+            path="/technical"
+            element={<Navigate to="/technical/realizacje" replace />}
+          />
+          <Route path="/technical/projekty" element={<Monitoring />} />
+          <Route path="/technical/szablony" element={<Templates />} />
+          <Route path="/technical/:tab" element={<Technical />} />
+          {/* Legacy paths → new locations under Techniczny */}
+          <Route
+            path="/monitoring"
+            element={<Navigate to="/technical/projekty" replace />}
+          />
+          <Route
+            path="/templates"
+            element={<Navigate to="/technical/szablony" replace />}
+          />
+          <Route
+            path="/kadry"
+            element={<Navigate to="/kadry/wynagrodzenia" replace />}
+          />
+          <Route path="/kadry/:tab" element={<Kadry />} />
+          <Route path="/ofi" element={<Ofi />} />
           <Route path="/cma" element={<Navigate to="/cma/raporty" replace />} />
           <Route path="/cma/raporty" element={<CmaReports />} />
           <Route path="/cma/raporty/:id" element={<CmaReportDetails />} />

@@ -2008,8 +2008,11 @@ el('btnDelObjPin').onclick=()=>{ if(objPin&&confirm('Usunąć zapisaną pinezkę
         const nP=Math.max(1, Math.ceil(M/Math.max(1,2*spacing)));
         for(let k=0;k<nP;k++){ const s=run.a+range+(k+0.5)*(M/nP); place(s,false); place(s,true); }
       } else {
-        // uniform / overlap: pojedyncze kamery co spacing (− overlap ⇒ krok > zasięg ⇒ luki)
-        for(let p=range;p<run.L-range-1e-6;p+=spacing) place(run.a+p,false);
+        // RÓWNOMIERNIE: N kamer z JEDNAKOWYM zakładem na całym przebiegu. Końce pokrywają kamery
+        // narożne (start 0 i L−zasięg), a środkowe rozkładamy równo ⇒ każdy styk ma ten sam zakład.
+        const N=Math.max(2, Math.ceil((run.L-range)/spacing)+1);             // łącznie kamer na przebiegu (2 rogi + środki)
+        const shift=(run.L-range)/(N-1);                                     // równy odstęp startów ⇒ równy zakład = zasięg−shift
+        for(let i=1;i<=N-2;i++) place(run.a+i*shift,false);                  // tylko środkowe (rogi już postawione)
       }
     });
     return plan;
@@ -2077,6 +2080,8 @@ el('btnDelObjPin').onclick=()=>{ if(objPin&&confirm('Usunąć zapisaną pinezkę
   }
   // przelicz „na żywo" tylko gdy dany obszar MA już kamery perymetru (czyli użytkownik raz je ułożył)
   function autoRelay(){ const z=selectedPerimZone(); if(z && cameras.some(c=>c.perimeterZone===z.id)) layPerimeter(true); }
+  // jak autoRelay, ale układa TAKŻE za pierwszym razem — gdy wybrano obszar i szablon (natychmiastowy podgląd)
+  function autoLay(){ const z=selectedPerimZone(), t=templates.find(x=>String(x.id)===el('perimTpl').value); if(z && z.pts && z.pts.length>=3 && t) layPerimeter(true); }
   // policz kamery/słupy dla KAŻDEGO trybu i pokaż na przyciskach — żeby było wiadomo PRZED kliknięciem
   function updatePerimModeCounts(){
     const z=selectedPerimZone(), t=templates.find(x=>String(x.id)===el('perimTpl').value), ov=+el('perimOverlap').value||0;
@@ -2099,14 +2104,14 @@ el('btnDelObjPin').onclick=()=>{ if(objPin&&confirm('Usunąć zapisaną pinezkę
   el('btnLayPerimeter').onclick=()=>layPerimeter(false);
   el('btnClearPerimeter').onclick=clearPerimeter;
   el('perimZone').onchange=()=>{ updatePerimInfo(selectedPerimZone(),null); updatePerimModeCounts(); autoRelay(); };
-  el('perimTpl').onchange=()=>{ updatePerimModeCounts(); autoRelay(); };     // zmiana szablonu → przelicz podglądy i (jeśli ułożone) kamery
-  el('perimOverlap').onchange=()=>{ updatePerimModeCounts(); autoRelay(); }; // zmiana zakładu/luki → przelicz
+  el('perimTpl').onchange=()=>{ updatePerimModeCounts(); autoLay(); };        // wybór szablonu → od razu układa (obszar wybrany)
+  el('perimOverlap').onchange=()=>{ updatePerimModeCounts(); autoLay(); };    // zmiana zakładu/luki → od razu układa
   // suwak zakładu/luki działa w obu trybach — zawsze widoczny
   function syncPerimMode(){ el('perimOverlapField').style.display='block'; }
-  // przełącznik segmentowy trybu: klik = ustaw aktywny + pokaż/ukryj suwak + przelicz na żywo
+  // przełącznik segmentowy trybu: klik = ustaw aktywny + od razu układa (obszar+szablon wybrane)
   document.querySelectorAll('#perimMode .pseg-btn').forEach(b=>b.onclick=()=>{
     document.querySelectorAll('#perimMode .pseg-btn').forEach(x=>x.classList.toggle('active',x===b));
-    syncPerimMode(); autoRelay();
+    syncPerimMode(); autoLay();
   });
   syncPerimMode();
   // odśwież listę obszarów przy każdym wejściu na zakładkę (addEventListener nie nadpisuje onclick z activateTab)

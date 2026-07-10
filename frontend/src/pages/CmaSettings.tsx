@@ -19,7 +19,6 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { CmaTabs } from "@/components/CmaTabs";
 import {
   AlertCircle,
   CheckCircle2,
@@ -404,9 +403,6 @@ export function CmaSettings() {
           Centrum monitorowania alarmów - ustawienia poczty
         </p>
       </div>
-
-      {/* Sub-tabs */}
-      <CmaTabs />
 
       {loading ? (
         <div className="text-center py-16 text-slate-500">
