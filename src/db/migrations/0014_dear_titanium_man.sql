@@ -1,0 +1,85 @@
+CREATE TABLE `monitored_object_changes` (
+	`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+	`object_id` integer NOT NULL,
+	`import_id` integer,
+	`change_type` text NOT NULL,
+	`field` text,
+	`old_value` text,
+	`new_value` text,
+	`created_at` text DEFAULT (datetime('now')) NOT NULL,
+	FOREIGN KEY (`object_id`) REFERENCES `monitored_objects`(`id`) ON UPDATE no action ON DELETE cascade,
+	FOREIGN KEY (`import_id`) REFERENCES `object_imports`(`id`) ON UPDATE no action ON DELETE set null
+);
+--> statement-breakpoint
+CREATE TABLE `monitored_objects` (
+	`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+	`external_id` integer NOT NULL,
+	`account` text,
+	`category` text,
+	`name` text NOT NULL,
+	`identifier1` text,
+	`identifier2` text,
+	`identifier3` text,
+	`extra_data1` text,
+	`extra_data2` text,
+	`extra_data3` text,
+	`extra_data4` text,
+	`extra_data5` text,
+	`address` text,
+	`street` text,
+	`house_number` text,
+	`postal_code` text,
+	`city` text,
+	`latitude` text,
+	`longitude` text,
+	`location_description` text,
+	`object_description` text,
+	`phones` text,
+	`devices` text,
+	`default_crew` text,
+	`all_crews` text,
+	`groups` text,
+	`monitoring_start` text,
+	`monitoring_end` text,
+	`object_status` text,
+	`added_at` text,
+	`authorized_persons` text,
+	`authorized_phones` text,
+	`authorized_passwords` text,
+	`duress_passwords` text,
+	`day_arrival_time` text,
+	`night_arrival_time` text,
+	`related_objects` text,
+	`service_types` text,
+	`service_monitoring_from` text,
+	`service_monitoring_to` text,
+	`active` integer DEFAULT true NOT NULL,
+	`first_import_id` integer,
+	`last_import_id` integer,
+	`created_at` text DEFAULT (datetime('now')) NOT NULL,
+	`updated_at` text DEFAULT (datetime('now')) NOT NULL,
+	FOREIGN KEY (`first_import_id`) REFERENCES `object_imports`(`id`) ON UPDATE no action ON DELETE set null,
+	FOREIGN KEY (`last_import_id`) REFERENCES `object_imports`(`id`) ON UPDATE no action ON DELETE set null
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `monitored_objects_external_id_unique` ON `monitored_objects` (`external_id`);--> statement-breakpoint
+CREATE TABLE `monitoring_projects` (
+	`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+	`name` text NOT NULL,
+	`address` text DEFAULT '' NOT NULL,
+	`notes` text DEFAULT '' NOT NULL,
+	`data` text DEFAULT '' NOT NULL,
+	`created_at` text DEFAULT (datetime('now')) NOT NULL,
+	`updated_at` text DEFAULT (datetime('now')) NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE `object_imports` (
+	`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+	`file_name` text NOT NULL,
+	`total_count` integer DEFAULT 0 NOT NULL,
+	`new_count` integer DEFAULT 0 NOT NULL,
+	`changed_count` integer DEFAULT 0 NOT NULL,
+	`removed_count` integer DEFAULT 0 NOT NULL,
+	`restored_count` integer DEFAULT 0 NOT NULL,
+	`imported_at` text DEFAULT (datetime('now')) NOT NULL
+);

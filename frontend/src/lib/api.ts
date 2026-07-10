@@ -832,3 +832,1023 @@ export interface CmaTrends {
   topObjects: CmaTrendObject[];
   topCameras: CmaTrendCamera[];
 }
+
+// ---------------------------------------------------------------------------
+// Realizacje (dział Techniczny) — rejestr serwisów i montaży
+// ---------------------------------------------------------------------------
+
+export type RealizationKind = "service" | "warranty" | "installation";
+
+export interface Realization {
+  id: number;
+  date: string; // YYYY-MM-DD
+  site: string;
+  kind: RealizationKind;
+  amountHours: number;
+  amountMaterial: number;
+  amountKm: number;
+  discount: number;
+  note: string | null;
+  invoiced: boolean;
+  invoicedAt: string | null;
+  caretaker: string | null;
+  contractor1: string | null;
+  contractor2: string | null;
+  actualHours: number;
+  actualKm: number;
+  hourlyCost: number;
+  subtotal: number; // suma bez rabatu (liczona w API)
+  total: number; // suma netto (liczona w API)
+  labourCost: number; // koszt roboczogodzin (liczony w API)
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RealizationInput {
+  date: string;
+  site: string;
+  kind: RealizationKind;
+  amountHours: number | string;
+  amountMaterial: number | string;
+  amountKm: number | string;
+  discount: number | string;
+  note?: string;
+  invoiced: boolean;
+  invoicedAt?: string | null;
+  caretaker?: string;
+  contractor1?: string;
+  contractor2?: string;
+  actualHours: number | string;
+  actualKm: number | string;
+  hourlyCost: number | string;
+}
+
+export interface RealizationSummary {
+  paidServices: number;
+  installations: number;
+  revenue: number;
+  freePotential: number;
+  freeCost: number;
+  grandTotal: number;
+  counts: { service: number; warranty: number; installation: number };
+  uninvoicedCount: number;
+  months: { month: number; revenue: number; loss: number }[];
+}
+
+export async function getRealizations(year: number, month: number) {
+  return request<ApiResponse<Realization[]>>(
+    `/realizations?year=${year}&month=${month}`
+  );
+}
+
+export async function getRealizationSummary(year: number, month: number) {
+  return request<ApiResponse<RealizationSummary>>(
+    `/realizations/summary?year=${year}&month=${month}`
+  );
+}
+
+export async function createRealization(data: RealizationInput) {
+  return request<ApiResponse<Realization>>("/realizations", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateRealization(id: number, data: RealizationInput) {
+  return request<ApiResponse<Realization>>(`/realizations/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteRealization(id: number) {
+  return request<ApiResponse<null>>(`/realizations/${id}`, {
+    method: "DELETE",
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Technicy (serwisanci) — słownik wykonawców dla realizacji
+// ---------------------------------------------------------------------------
+
+export type TechnicianType = "internal" | "external";
+
+export interface Technician {
+  id: number;
+  firstName: string;
+  lastName: string;
+  phone: string | null;
+  type: TechnicianType;
+  notes: string | null;
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TechnicianInput {
+  firstName: string;
+  lastName: string;
+  phone?: string;
+  type: TechnicianType;
+  notes?: string;
+  active?: boolean;
+}
+
+export async function getTechnicians(onlyActive = false) {
+  return request<ApiResponse<Technician[]>>(
+    `/technicians${onlyActive ? "?active=true" : ""}`
+  );
+}
+
+export async function createTechnician(data: TechnicianInput) {
+  return request<ApiResponse<Technician>>("/technicians", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateTechnician(id: number, data: TechnicianInput) {
+  return request<ApiResponse<Technician>>(`/technicians/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteTechnician(id: number) {
+  return request<ApiResponse<null>>(`/technicians/${id}`, {
+    method: "DELETE",
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Cennik usług serwisowych
+// ---------------------------------------------------------------------------
+
+export interface PriceItem {
+  id: number;
+  name: string;
+  unit: string;
+  price: number;
+  position: number;
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PriceItemInput {
+  name: string;
+  unit: string;
+  price: number | string;
+  position?: number;
+  active?: boolean;
+}
+
+export async function getPriceList() {
+  return request<ApiResponse<PriceItem[]>>("/pricelist");
+}
+
+export async function createPriceItem(data: PriceItemInput) {
+  return request<ApiResponse<PriceItem>>("/pricelist", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updatePriceItem(id: number, data: PriceItemInput) {
+  return request<ApiResponse<PriceItem>>(`/pricelist/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deletePriceItem(id: number) {
+  return request<ApiResponse<null>>(`/pricelist/${id}`, { method: "DELETE" });
+}
+
+// ---------------------------------------------------------------------------
+// Szablony kamer (standardowe modele kamer i ich parametry)
+// ---------------------------------------------------------------------------
+
+export type CameraModelType = "bullet" | "dome" | "ptz" | "pano";
+
+export interface CameraModel {
+  id: number;
+  name: string;
+  manufacturer: string;
+  type: CameraModelType;
+  resolution: string;
+  lens: string;
+  irRange: string;
+  power: string;
+  interface: string;
+  protocol: string;
+  fov: number;
+  range: number;
+  height: number;
+  color: string;
+  notes: string;
+  position: number;
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CameraModelInput {
+  name: string;
+  manufacturer?: string;
+  type?: CameraModelType;
+  resolution?: string;
+  lens?: string;
+  irRange?: string;
+  power?: string;
+  interface?: string;
+  protocol?: string;
+  fov?: number | string;
+  range?: number | string;
+  height?: number | string;
+  color?: string;
+  notes?: string;
+  position?: number;
+  active?: boolean;
+}
+
+export async function getCameraModels() {
+  return request<ApiResponse<CameraModel[]>>("/camera-models");
+}
+
+export async function createCameraModel(data: CameraModelInput) {
+  return request<ApiResponse<CameraModel>>("/camera-models", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateCameraModel(id: number, data: CameraModelInput) {
+  return request<ApiResponse<CameraModel>>(`/camera-models/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteCameraModel(id: number) {
+  return request<ApiResponse<null>>(`/camera-models/${id}`, {
+    method: "DELETE",
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Protokoły końcowe (generowane automatycznie z realizacji)
+// ---------------------------------------------------------------------------
+
+export type ProtocolWorkType = "serwis" | "montaz" | "wizja" | "inne";
+
+export interface ProtocolItem {
+  name: string;
+  serial: string;
+  unit: string;
+  qty: string;
+}
+
+export interface Protocol {
+  id: number;
+  realizationId: number;
+  number: string;
+  workDate: string;
+  workType: ProtocolWorkType;
+  actualHours: number;
+  actualKm: number;
+  contractor: string | null;
+  salesperson: string | null;
+  clientName: string | null;
+  clientNip: string | null;
+  clientCity: string | null;
+  installationAddress: string | null;
+  contact: string | null;
+  activities: string | null;
+  items: ProtocolItem[];
+  status: "draft" | "final";
+  signaturePng?: string | null;
+  signerName?: string | null;
+  signedAt?: string | null;
+  contentHash?: string | null;
+  site?: string | null; // obiekt z powiązanej realizacji
+  kind?: RealizationKind | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProtocolInput {
+  workDate: string;
+  workType: ProtocolWorkType;
+  actualHours: number | string;
+  actualKm: number | string;
+  contractor?: string;
+  salesperson?: string;
+  clientName?: string;
+  clientNip?: string;
+  clientCity?: string;
+  installationAddress?: string;
+  contact?: string;
+  activities?: string;
+  items: ProtocolItem[];
+  status: "draft" | "final";
+}
+
+export async function getProtocols(year?: number, month?: number) {
+  const params = new URLSearchParams();
+  if (year) params.set("year", String(year));
+  if (month) params.set("month", String(month));
+  const query = params.toString();
+  return request<ApiResponse<Protocol[]>>(
+    `/protocols${query ? `?${query}` : ""}`
+  );
+}
+
+export async function syncProtocols() {
+  return request<ApiResponse<{ created: number }>>("/protocols/sync", {
+    method: "POST",
+  });
+}
+
+export async function updateProtocol(id: number, data: ProtocolInput) {
+  return request<ApiResponse<Protocol>>(`/protocols/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteProtocol(id: number) {
+  return request<ApiResponse<null>>(`/protocols/${id}`, { method: "DELETE" });
+}
+
+// ---------------------------------------------------------------------------
+// Wyceny usług serwisowych
+// ---------------------------------------------------------------------------
+
+export interface QuoteItem {
+  name: string;
+  qty: string;
+  unit: string;
+  price: string;
+}
+
+export interface Quote {
+  id: number;
+  number: string;
+  date: string;
+  site: string;
+  address: string;
+  items: QuoteItem[];
+  total: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface QuoteInput {
+  date: string;
+  site: string;
+  address: string;
+  items?: QuoteItem[];
+}
+
+export async function getQuotes(year?: number, month?: number) {
+  const params = new URLSearchParams();
+  if (year) params.set("year", String(year));
+  if (month) params.set("month", String(month));
+  const query = params.toString();
+  return request<ApiResponse<Quote[]>>(`/quotes${query ? `?${query}` : ""}`);
+}
+
+export async function createQuote(data: Partial<QuoteInput> = {}) {
+  return request<ApiResponse<Quote>>("/quotes", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateQuote(id: number, data: QuoteInput) {
+  return request<ApiResponse<Quote>>(`/quotes/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteQuote(id: number) {
+  return request<ApiResponse<null>>(`/quotes/${id}`, { method: "DELETE" });
+}
+
+// --- Podpisywanie protokołów ---
+
+export async function signProtocol(
+  id: number,
+  data: { signaturePng: string; signerName: string }
+) {
+  return request<ApiResponse<Protocol>>(`/protocols/${id}/sign`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function unsignProtocol(id: number) {
+  return request<ApiResponse<Protocol>>(`/protocols/${id}/unsign`, {
+    method: "POST",
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Projekty monitoringu (designer CCTV na mapie)
+// ---------------------------------------------------------------------------
+
+export interface MonitoringProject {
+  id: number;
+  name: string;
+  address: string;
+  notes: string;
+  cameras: number;
+  points: number;
+  zones: number;
+  cables: number;
+  pinAddress: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MonitoringProjectInput {
+  name: string;
+  address?: string;
+  notes?: string;
+}
+
+export async function getMonitoringProjects() {
+  return request<ApiResponse<MonitoringProject[]>>("/monitoring");
+}
+
+export async function createMonitoringProject(data: MonitoringProjectInput) {
+  return request<ApiResponse<MonitoringProject>>("/monitoring", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateMonitoringProject(
+  id: number,
+  data: Partial<MonitoringProjectInput>
+) {
+  return request<ApiResponse<MonitoringProject>>(`/monitoring/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteMonitoringProject(id: number) {
+  return request<ApiResponse<null>>(`/monitoring/${id}`, { method: "DELETE" });
+}
+
+// --- Rejestr obiektów monitorowanych (Techniczny -> Obiekty) ---
+
+export interface MonitoredObject {
+  id: number;
+  externalId: number;
+  account: string | null;
+  category: string | null;
+  name: string;
+  identifier1: string | null;
+  identifier2: string | null;
+  identifier3: string | null;
+  extraData1: string | null;
+  extraData2: string | null;
+  extraData3: string | null;
+  extraData4: string | null;
+  extraData5: string | null;
+  address: string | null;
+  street: string | null;
+  houseNumber: string | null;
+  postalCode: string | null;
+  city: string | null;
+  latitude: string | null;
+  longitude: string | null;
+  locationDescription: string | null;
+  objectDescription: string | null;
+  phones: string | null;
+  devices: string | null;
+  defaultCrew: string | null;
+  allCrews: string | null;
+  groups: string | null;
+  monitoringStart: string | null;
+  monitoringEnd: string | null;
+  objectStatus: string | null;
+  addedAt: string | null;
+  authorizedPersons: string | null;
+  authorizedPhones: string | null;
+  authorizedPasswords: string | null;
+  duressPasswords: string | null;
+  dayArrivalTime: string | null;
+  nightArrivalTime: string | null;
+  relatedObjects: string | null;
+  serviceTypes: string | null;
+  serviceMonitoringFrom: string | null;
+  serviceMonitoringTo: string | null;
+  active: boolean;
+  firstImportId: number | null;
+  lastImportId: number | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ObjectImport {
+  id: number;
+  fileName: string;
+  totalCount: number;
+  newCount: number;
+  changedCount: number;
+  removedCount: number;
+  restoredCount: number;
+  importedAt: string;
+}
+
+export interface MonitoredObjectChange {
+  id: number;
+  objectId: number;
+  importId: number | null;
+  changeType: "created" | "updated" | "removed" | "restored";
+  field: string | null;
+  oldValue: string | null;
+  newValue: string | null;
+  createdAt: string;
+  importFileName?: string | null;
+  importedAt?: string | null;
+  objectName?: string;
+  objectExternalId?: number;
+}
+
+export const monitoredObjectsApi = {
+  async getObjects(params?: {
+    search?: string;
+    active?: "1" | "0";
+    page?: number;
+    pageSize?: number;
+  }) {
+    const searchParams = new URLSearchParams();
+    if (params?.search) searchParams.set("search", params.search);
+    if (params?.active) searchParams.set("active", params.active);
+    if (params?.page) searchParams.set("page", String(params.page));
+    if (params?.pageSize) searchParams.set("pageSize", String(params.pageSize));
+
+    const query = searchParams.toString();
+    return request<PaginatedResponse<MonitoredObject>>(
+      `/monitored-objects${query ? `?${query}` : ""}`
+    );
+  },
+
+  async getObject(id: number) {
+    return request<
+      ApiResponse<{ object: MonitoredObject; changes: MonitoredObjectChange[] }>
+    >(`/monitored-objects/${id}`);
+  },
+
+  async getImports(params?: { page?: number; pageSize?: number }) {
+    const searchParams = new URLSearchParams();
+    if (params?.page) searchParams.set("page", String(params.page));
+    if (params?.pageSize) searchParams.set("pageSize", String(params.pageSize));
+
+    const query = searchParams.toString();
+    return request<PaginatedResponse<ObjectImport>>(
+      `/monitored-objects/imports${query ? `?${query}` : ""}`
+    );
+  },
+
+  async getChanges(params?: {
+    importId?: number;
+    page?: number;
+    pageSize?: number;
+  }) {
+    const searchParams = new URLSearchParams();
+    if (params?.importId) searchParams.set("importId", String(params.importId));
+    if (params?.page) searchParams.set("page", String(params.page));
+    if (params?.pageSize) searchParams.set("pageSize", String(params.pageSize));
+
+    const query = searchParams.toString();
+    return request<PaginatedResponse<MonitoredObjectChange>>(
+      `/monitored-objects/changes${query ? `?${query}` : ""}`
+    );
+  },
+
+  async importReport(file: File) {
+    const formData = new FormData();
+    formData.append("file", file);
+
+    // No manual Content-Type header - the browser sets the multipart boundary.
+    const response = await fetch(`${API_BASE}/monitored-objects/import`, {
+      method: "POST",
+      body: formData,
+    });
+
+    const data = await response.json();
+
+    if (!response.ok || !data.success) {
+      throw new Error(data.error || "Import failed");
+    }
+
+    return data as ApiResponse<ObjectImport>;
+  },
+};
+
+// --- Oferta monitoringu (zdjęcia + pola tekstowe + generowanie HTML) ---
+
+export interface MonitoringOfferFields {
+  kicker: string;
+  subtitle: string;
+  visitDate: string;
+  purpose: string;
+  contact: string;
+  summary: string;
+  calloutTitle: string;
+  callout: string;
+  existing: string;
+}
+
+export interface MonitoringProjectFull extends Omit<
+    MonitoringProject,
+    "cameras" | "points" | "zones" | "cables"
+  > {
+  data: string;
+  offer: string;
+}
+
+export interface MonitoringPhoto {
+  id: number;
+  projectId: number;
+  caption: string;
+  attention: boolean;
+  sortOrder: number;
+  data: string;
+  createdAt: string;
+}
+
+export async function getMonitoringProject(id: number) {
+  return request<ApiResponse<MonitoringProjectFull>>(`/monitoring/${id}`);
+}
+
+export async function saveMonitoringOffer(
+  id: number,
+  offer: MonitoringOfferFields
+) {
+  return request<ApiResponse<MonitoringProject>>(`/monitoring/${id}`, {
+    method: "PUT",
+    body: JSON.stringify({ offer }),
+  });
+}
+
+export async function getMonitoringPhotos(projectId: number) {
+  return request<ApiResponse<MonitoringPhoto[]>>(
+    `/monitoring/${projectId}/photos`
+  );
+}
+
+export async function addMonitoringPhoto(
+  projectId: number,
+  photo: { caption: string; attention?: boolean; data: string }
+) {
+  return request<ApiResponse<MonitoringPhoto>>(
+    `/monitoring/${projectId}/photos`,
+    { method: "POST", body: JSON.stringify(photo) }
+  );
+}
+
+export async function updateMonitoringPhoto(
+  photoId: number,
+  updates: { caption?: string; attention?: boolean; sortOrder?: number }
+) {
+  return request<ApiResponse<MonitoringPhoto>>(`/monitoring/photos/${photoId}`, {
+    method: "PUT",
+    body: JSON.stringify(updates),
+  });
+}
+
+export async function deleteMonitoringPhoto(photoId: number) {
+  return request<ApiResponse<null>>(`/monitoring/photos/${photoId}`, {
+    method: "DELETE",
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Kadry — pracownicy, obiekty, normy, godziny, umowy, wynagrodzenia, biuro
+// ---------------------------------------------------------------------------
+
+export interface HrEmployee {
+  id: number;
+  fullName: string;
+  code: string;
+  active: boolean;
+  notes: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface HrEmployeeInput {
+  fullName: string;
+  code?: string;
+  active?: boolean;
+  notes?: string;
+}
+
+export interface HrObject {
+  id: number;
+  name: string;
+  active: boolean;
+}
+
+export interface HrMonthNorm {
+  id: number;
+  year: number;
+  month: number;
+  workNorm: number;
+  contractNorm: number;
+}
+
+export interface HrHoursEntry {
+  id: number;
+  employeeId: number;
+  objectId: number | null;
+  year: number;
+  month: number;
+  nightHours: number | null;
+  workedHours: number | null;
+  uwHours: number | null;
+  l4Hours: number | null;
+  maxHours: number | null;
+  deductions: number | null;
+  bonuses: number | null;
+  notes: string;
+  employeeName: string;
+  objectName: string;
+}
+
+export interface HrHoursInput {
+  employeeId: number | string;
+  objectId?: number | string | null;
+  year: number;
+  month: number;
+  nightHours?: number | string | null;
+  workedHours?: number | string | null;
+  uwHours?: number | string | null;
+  l4Hours?: number | string | null;
+  maxHours?: number | string | null;
+  deductions?: number | string | null;
+  bonuses?: number | string | null;
+  notes?: string;
+}
+
+export type HrContractType = "praca" | "zlecenie";
+export type HrChannel = "przelew" | "gotowka";
+export type HrBonusType =
+  | "brak"
+  | "gotowka"
+  | "delegacja_przelew"
+  | "delegacja_gotowka";
+
+export interface HrContract {
+  id: number;
+  employeeId: number;
+  company: string;
+  contractType: HrContractType;
+  chor: boolean;
+  zua: string;
+  zza: string;
+  zwua: string;
+  objectName: string;
+  mainChannel: HrChannel;
+  bonusType: HrBonusType;
+  active: boolean;
+  notes: string;
+  employeeName: string;
+}
+
+export interface HrContractInput {
+  employeeId: number | string;
+  company: string;
+  contractType: HrContractType;
+  chor?: boolean;
+  zua?: string;
+  zza?: string;
+  zwua?: string;
+  objectName?: string;
+  mainChannel: HrChannel;
+  bonusType: HrBonusType;
+  active?: boolean;
+  notes?: string;
+}
+
+export interface HrPayrollInputs {
+  mainAmount: number | null;
+  bonusRate: number | null;
+  bonusRatePending: boolean;
+  rateAdjustment: number | null;
+  maxHoursOverride: number | null;
+  actualHoursOverride: number | null;
+  bonusAmountOverride: number | null;
+  notes: string;
+}
+
+export interface HrPayrollRow {
+  contractId: number;
+  employeeId: number;
+  employeeName: string;
+  company: string;
+  contractType: HrContractType;
+  chor: boolean;
+  zua: string;
+  zza: string;
+  objectName: string;
+  mainChannel: HrChannel;
+  bonusType: HrBonusType;
+  contractActive: boolean;
+  registration: "zua" | "zza" | null;
+  maxHoursSource: "override" | "individual" | "norm";
+  maksGodziny: number;
+  faktGodziny: number | null;
+  godzinyDodatek: number;
+  stawkaNetto: number | null;
+  kwotaGlowna: number | null;
+  kwotaWyrownania: number | null;
+  kwotaDodatku: number | null;
+  bonusPending: boolean;
+  premiaPotracenie: number | null;
+  dodatekFinalny: number | null;
+  przelew: number;
+  gotowka: number;
+  wyplata: number;
+  warnings: string[];
+  inputs: HrPayrollInputs;
+}
+
+export interface HrPayrollSaveInput extends Partial<HrPayrollInputs> {
+  contractId: number;
+  year: number;
+  month: number;
+}
+
+export interface HrOfficeRow {
+  id: number;
+  employeeId: number;
+  employeeName: string;
+  year: number;
+  month: number;
+  company: string;
+  etatHours: number | null;
+  uwL4: number | null;
+  deductions: number | null;
+  bonuses: number | null;
+  hoursForAccounting: number | null;
+  rate: number | null;
+  amount: number | null;
+  rorBase: number | null;
+  cashOverride: number | null;
+  notes: string;
+  amountComputed: number | null;
+  cash: number | null;
+  total: number;
+}
+
+export interface HrOfficeInput {
+  employeeId: number | string;
+  year: number;
+  month: number;
+  company?: string;
+  etatHours?: number | string | null;
+  uwL4?: number | string | null;
+  deductions?: number | string | null;
+  bonuses?: number | string | null;
+  hoursForAccounting?: number | string | null;
+  rate?: number | string | null;
+  amount?: number | string | null;
+  rorBase?: number | string | null;
+  cashOverride?: number | string | null;
+  notes?: string;
+}
+
+export interface HrSummary {
+  year: number;
+  month: number;
+  employeesWithHours: number;
+  hoursEntries: number;
+  totalHours: number;
+  contractsCount: number;
+  przelew: number;
+  gotowka: number;
+  wyplaty: number;
+  missingMain: number;
+  pendingBonus: number;
+  officeTotal: number;
+  officeCount: number;
+}
+
+export const getHrEmployees = (onlyActive = false) =>
+  request<ApiResponse<HrEmployee[]>>(
+    `/hr/employees${onlyActive ? "?active=true" : ""}`,
+  );
+export const createHrEmployee = (data: HrEmployeeInput) =>
+  request<ApiResponse<HrEmployee>>("/hr/employees", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+export const updateHrEmployee = (id: number, data: HrEmployeeInput) =>
+  request<ApiResponse<HrEmployee>>(`/hr/employees/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+export const deleteHrEmployee = (id: number) =>
+  request<ApiResponse<null>>(`/hr/employees/${id}`, { method: "DELETE" });
+
+export const getHrObjects = (onlyActive = false) =>
+  request<ApiResponse<HrObject[]>>(
+    `/hr/objects${onlyActive ? "?active=true" : ""}`,
+  );
+export const createHrObject = (data: { name: string; active?: boolean }) =>
+  request<ApiResponse<HrObject>>("/hr/objects", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+export const updateHrObject = (
+  id: number,
+  data: { name: string; active?: boolean },
+) =>
+  request<ApiResponse<HrObject>>(`/hr/objects/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+export const deleteHrObject = (id: number) =>
+  request<ApiResponse<null>>(`/hr/objects/${id}`, { method: "DELETE" });
+
+export const getHrNorms = (year: number) =>
+  request<ApiResponse<HrMonthNorm[]>>(`/hr/norms?year=${year}`);
+export const saveHrNorm = (data: {
+  year: number;
+  month: number;
+  workNorm: number | string;
+  contractNorm: number | string;
+}) =>
+  request<ApiResponse<HrMonthNorm>>("/hr/norms", {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+
+export const getHrHours = (year: number, month: number) =>
+  request<ApiResponse<HrHoursEntry[]>>(`/hr/hours?year=${year}&month=${month}`);
+export const createHrHours = (data: HrHoursInput) =>
+  request<ApiResponse<HrHoursEntry>>("/hr/hours", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+export const updateHrHours = (id: number, data: HrHoursInput) =>
+  request<ApiResponse<HrHoursEntry>>(`/hr/hours/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+export const deleteHrHours = (id: number) =>
+  request<ApiResponse<null>>(`/hr/hours/${id}`, { method: "DELETE" });
+
+export const getHrContracts = (onlyActive = false) =>
+  request<ApiResponse<HrContract[]>>(
+    `/hr/contracts${onlyActive ? "?active=true" : ""}`,
+  );
+export const createHrContract = (data: HrContractInput) =>
+  request<ApiResponse<HrContract>>("/hr/contracts", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+export const updateHrContract = (id: number, data: HrContractInput) =>
+  request<ApiResponse<HrContract>>(`/hr/contracts/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+export const deleteHrContract = (id: number) =>
+  request<ApiResponse<null>>(`/hr/contracts/${id}`, { method: "DELETE" });
+
+export const getHrPayroll = (year: number, month: number) =>
+  request<ApiResponse<HrPayrollRow[]>>(
+    `/hr/payroll?year=${year}&month=${month}`,
+  );
+export const saveHrPayroll = (data: HrPayrollSaveInput) =>
+  request<ApiResponse<unknown>>("/hr/payroll", {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+
+export const getHrOffice = (year: number, month: number) =>
+  request<ApiResponse<HrOfficeRow[]>>(`/hr/office?year=${year}&month=${month}`);
+export const createHrOffice = (data: HrOfficeInput) =>
+  request<ApiResponse<HrOfficeRow>>("/hr/office", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+export const updateHrOffice = (id: number, data: HrOfficeInput) =>
+  request<ApiResponse<HrOfficeRow>>(`/hr/office/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+export const deleteHrOffice = (id: number) =>
+  request<ApiResponse<null>>(`/hr/office/${id}`, { method: "DELETE" });
+
+export const getHrSummary = (year: number, month: number) =>
+  request<ApiResponse<HrSummary>>(`/hr/summary?year=${year}&month=${month}`);

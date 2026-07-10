@@ -1,0 +1,2121 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Projekt monitoringu</title>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<!-- pdf.js — rasteryzacja jednostronicowego PDF do WebP (plan) -->
+<script src="https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
+
+<style>
+  :root{
+    --bg:#0f172a; --panel:#111827; --panel2:#1f2937; --line:#334155;
+    --txt:#e5e7eb; --muted:#9ca3af; --accent:#22d3ee; --accent2:#f59e0b;
+    --ok:#34d399; --bad:#f87171;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0;font-family:"Segoe UI",Roboto,Arial,sans-serif;color:var(--txt);background:var(--bg)}
+  #app{display:flex;flex-direction:column;height:100vh}
+
+  header{display:flex;align-items:center;gap:.5rem;padding:.4rem .6rem;background:var(--panel);border-bottom:1px solid var(--line);flex-wrap:wrap}
+  header h1{font-size:14px;margin:0 .5rem 0 0;font-weight:600;white-space:nowrap;display:flex;align-items:center;gap:.4rem}
+  .brand-logo{height:24px;width:auto;display:block}
+  header .obj{font-size:12px;color:var(--muted)}
+  .toolbar{display:flex;gap:.35rem;flex-wrap:wrap}
+  button,select,input{font-family:inherit}
+  .btn{background:var(--panel2);color:var(--txt);border:1px solid var(--line);border-radius:6px;padding:.35rem .6rem;font-size:12px;cursor:pointer;white-space:nowrap}
+  .btn:hover{border-color:var(--accent)}
+  /* wyszukiwarka adresów — na lewo od paska narzędzi */
+  .addrbox{position:relative;margin-left:auto;display:flex;gap:.3rem;align-items:center}
+  .addrbox input{background:var(--panel2);color:var(--txt);border:1px solid var(--line);border-radius:6px;padding:.35rem .55rem;font-size:12px;width:230px;outline:none}
+  .addrbox input:focus{border-color:var(--accent)}
+  .addr-results{position:absolute;top:calc(100% + 4px);left:0;right:0;z-index:1200;background:var(--panel);border:1px solid var(--line);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.45);max-height:320px;overflow:auto;display:none}
+  .addr-results.open{display:block}
+  .addr-results .row{padding:.45rem .6rem;font-size:12px;cursor:pointer;border-bottom:1px solid var(--line);line-height:1.35;color:var(--txt)}
+  .addr-results .row:last-child{border-bottom:none}
+  .addr-results .row:hover,.addr-results .row.active{background:var(--panel2)}
+  .addr-results .row small{color:var(--muted)}
+  .addr-results .msg{padding:.55rem .6rem;font-size:12px;color:var(--muted)}
+  .btn.active{background:var(--accent);color:#062;border-color:var(--accent);font-weight:600}
+  .btn.warn{border-color:var(--accent2)}
+  .btn.warn.active{background:var(--accent2);color:#3b1d00}
+  .btn.danger:hover{border-color:var(--bad);color:var(--bad)}
+
+  #main{flex:1;display:flex;min-height:0}
+  #map{flex:1;min-width:0;position:relative;z-index:0}   /* zamknij warstwy Leafleta we własnym kontekście stackingu */
+  /* podświetlenie mapy przy przeciąganiu pliku planu (drag&drop) */
+  #map.plan-dropzone{outline:3px dashed var(--accent);outline-offset:-8px}
+  #map.plan-dropzone::after{content:"Upuść plan tutaj — JPG / PNG / jednostronicowy PDF";position:absolute;inset:0;z-index:700;display:flex;align-items:center;justify-content:center;background:rgba(15,23,42,.5);color:var(--accent);font-size:16px;font-weight:600;pointer-events:none;text-align:center;padding:1rem}
+  #side{width:320px;background:var(--panel);border-left:1px solid var(--line);display:flex;flex-direction:row;overflow:visible;position:relative;z-index:2}   /* z-index:2 > #map(0) => oczka wystające nad mapę są zawsze widoczne */
+  /* zakładki pionowo („zakładeczki") na lewej krawędzi panelu bocznego */
+  .side-tabs{display:flex;flex-direction:column;border-right:1px solid var(--line);flex:0 0 auto;background:var(--panel)}
+  .side-tabs button[data-tab]{writing-mode:vertical-rl;text-orientation:mixed;transform:rotate(180deg);background:none;border:none;border-right:3px solid transparent;color:var(--muted);padding:.8rem .3rem;font-size:12px;cursor:pointer;white-space:nowrap;letter-spacing:.02em}
+  .side-tabs button[data-tab]:hover{color:var(--txt)}
+  .side-tabs button[data-tab].active{color:var(--accent);border-right-color:var(--accent);background:var(--panel2)}
+  .side-actions{margin-top:auto;display:flex;flex-direction:column;gap:.2rem;padding:.4rem .25rem;border-top:1px solid var(--line)}
+  .side-act{background:none;border:none;color:var(--muted);font-size:18px;line-height:1;cursor:pointer;padding:.35rem .2rem;border-radius:6px;text-align:center}
+  .side-act:hover{color:var(--txt);background:var(--panel2)}
+  .side-status{cursor:default}
+  .side-status:hover{background:none}
+  .side-sep{height:1px;background:var(--line);margin:.2rem .15rem}
+  .tabcell{position:relative;display:flex}
+  .tabcell>button[data-tab]{flex:1}
+  /* ikonka oka „wystaje" poziomo w lewo poza zakładki, nad mapą */
+  .tab-eye{position:absolute;left:-28px;top:50%;transform:translateY(-50%);z-index:1000;
+    width:24px;height:24px;display:flex;align-items:center;justify-content:center;
+    background:var(--panel2);border:1px solid var(--line);border-radius:50%;
+    color:var(--muted);cursor:pointer;font-size:12px;line-height:1;box-shadow:0 1px 4px rgba(0,0,0,.55)}
+  .tab-eye:hover{color:var(--txt);border-color:var(--accent)}
+  .tab-eye.off{color:var(--bad);border-color:var(--bad)}
+  .side-body{flex:1;overflow:auto;padding:.7rem}
+  .tabpane{display:none}
+  .tabpane.active{display:block}
+
+  .field{margin-bottom:.6rem}
+  .field label{display:block;font-size:11px;color:var(--muted);margin-bottom:.2rem;text-transform:uppercase;letter-spacing:.03em}
+  .field input[type=text],.field input[type=number],.field select,.field textarea{width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--txt);padding:.4rem;font-size:13px}
+  .field textarea{resize:vertical;min-height:70px}
+  .row2{display:flex;gap:.5rem}
+  .row2>*{flex:1}
+  .slider{display:flex;align-items:center;gap:.5rem}
+  .slider input[type=range]{flex:1}
+  .slider .val{width:52px;text-align:right;font-variant-numeric:tabular-nums;font-size:12px;color:var(--accent)}
+  .hint{font-size:11px;color:var(--muted);line-height:1.4}
+  .empty{color:var(--muted);font-size:13px;text-align:center;padding:2rem 1rem}
+
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  th,td{border-bottom:1px solid var(--line);padding:.35rem .3rem;text-align:left}
+  th{color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase}
+  td .mini{background:var(--panel2);border:1px solid var(--line);color:var(--txt);border-radius:4px;padding:.15rem .3rem;width:100%;font-size:12px}
+  .swatch{display:inline-block;width:11px;height:11px;border-radius:2px;vertical-align:middle;margin-right:4px}
+  .pt-dot{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:4px;font-size:12px;vertical-align:middle}
+  .trow{cursor:pointer}
+  .trow:hover td{background:rgba(34,211,238,.07)}
+  .trow.sel td{background:rgba(34,211,238,.14)}
+  .tot{font-weight:700;color:var(--accent)}
+  .del-x{color:var(--bad);cursor:pointer;font-weight:700}
+
+  /* map markers */
+  .cam-flower{width:24px;height:24px;transform-origin:12px 28.97px;transition:transform .2s cubic-bezier(.34,1.3,.64,1),opacity .18s ease}   /* wrapper obracany wokół czubka pinezki => układ „kwiatka"; animacja rozkładania/zwijania */
+  .cam-cluster{width:26px;height:26px;border-radius:50%;border:2px solid #fff;display:flex;align-items:center;justify-content:center;box-shadow:0 1px 5px rgba(0,0,0,.6);cursor:pointer;transition:transform .2s cubic-bezier(.34,1.3,.64,1),opacity .18s ease}  /* >4 pinezki w jednym miejscu => zwinięte do kółeczka z liczbą */
+  .cam-cluster span{font-size:12px;font-weight:700;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.7);line-height:1}   /* ten sam format numeru co pinezki */
+  .cam-pin{width:24px;height:24px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);border:2px solid #fff;display:flex;align-items:center;justify-content:center;box-shadow:0 1px 4px rgba(0,0,0,.6)}
+  .cam-pin span{transform:rotate(45deg);font-size:11px;font-weight:700;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.7)}
+  .nvr-pin{width:26px;height:26px;border-radius:5px;background:#ef4444;border:2px solid #fff;display:flex;align-items:center;justify-content:center;font-size:13px;box-shadow:0 1px 5px rgba(0,0,0,.6)}
+  .pt-pin{width:26px;height:26px;border-radius:6px;border:2px solid #fff;display:flex;align-items:center;justify-content:center;font-size:14px;box-shadow:0 1px 5px rgba(0,0,0,.6)}
+  .handle{border-radius:50%;width:16px!important;height:16px!important;margin-left:-8px!important;margin-top:-8px!important;cursor:grab;box-shadow:0 1px 3px rgba(0,0,0,.6)}
+  .handle:hover{transform:scale(1.25)}
+  .handle.h-tip{background:#fff;border:2px solid #111}
+  .handle.h-side{background:#22d3ee;border:2px solid #063b44}
+  .cam-label{background:rgba(15,23,42,.85);border:1px solid var(--line);color:#fff;font-size:11px;padding:1px 5px;border-radius:4px}
+  .leaflet-tooltip.cam-label:before{display:none}
+  .measure-label{background:var(--accent2);color:#000;font-weight:700;border:none;padding:2px 6px;border-radius:4px;font-size:12px}
+  .measure-label:before{display:none}
+
+  /* nakładki planów (skany rzutów / planów terenu) */
+  .plan-overlay{pointer-events:auto;cursor:move}
+  .plan-handle{width:18px!important;height:18px!important;margin-left:-9px!important;margin-top:-9px!important;cursor:grab;box-shadow:0 1px 3px rgba(0,0,0,.6)}
+  .plan-handle.p-size{background:var(--accent2);border:2px solid #7c3d00;border-radius:3px}
+  .plan-handle.p-rot{background:var(--ok);border:2px solid #065f46;border-radius:50%}
+  .plan-handle:hover{transform:scale(1.2)}
+  /* uchwyty wierzchołków obszaru (edycja tylko na zakładce „Obszary") */
+  .zone-vertex{width:14px!important;height:14px!important;margin-left:-7px!important;margin-top:-7px!important;background:#fff;border:2px solid var(--accent);border-radius:50%;cursor:grab;box-shadow:0 1px 3px rgba(0,0,0,.6)}
+  .zone-vertex:hover{transform:scale(1.25)}
+  /* etykieta długości boku obszaru */
+  .seg-label{background:rgba(15,23,42,.82);color:var(--accent);border:1px solid var(--line);font-size:10px;font-weight:600;padding:0 4px;border-radius:3px}
+  .seg-label:before{display:none}
+  /* podpis obszaru: nazwa + „obwód N m" wyśrodkowane w dwóch liniach */
+  .zone-label{text-align:center;line-height:1.25}
+  /* podzakładki obszarów (Poboczne / Główne) + drag&drop kolejności i kategorii */
+  .zone-subtabs{display:flex;gap:.35rem;margin:.2rem 0 .5rem}
+  .zsub{flex:1;background:var(--panel2);border:1px solid var(--line);color:var(--muted);border-radius:6px;padding:.4rem;font-size:12px;cursor:pointer;white-space:nowrap}
+  .zsub:hover{border-color:var(--accent)}
+  .zsub.active{background:var(--accent);color:#063;border-color:var(--accent);font-weight:600}
+  .zsub .zc{font-variant-numeric:tabular-nums;opacity:.85;margin-left:.15rem}
+  .zsub.drop-into{outline:2px dashed var(--accent2);outline-offset:1px;background:var(--panel);color:var(--txt)}
+  /* segmentowany przełącznik trybu perymetru: ikonka po lewej, kamery (góra) + słupy (dół) po prawej; opis na hover */
+  .pseg{display:flex;gap:.3rem}
+  .pseg-btn{flex:1;display:flex;align-items:center;justify-content:space-between;gap:.25rem;background:var(--panel2);border:1px solid var(--line);color:var(--txt);border-radius:6px;padding:.4rem .45rem;cursor:pointer}
+  .pseg-btn:hover{border-color:var(--accent)}
+  .pseg-btn.active{background:var(--accent);border-color:var(--accent);color:#063}
+  .pseg-ico{font-size:18px;line-height:1}
+  .pseg-nums{display:flex;flex-direction:column;align-items:flex-end;line-height:1.15}
+  .pseg-cam{font-size:13px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--accent)}
+  .pseg-pole{font-size:10px;font-variant-numeric:tabular-nums;color:var(--muted)}
+  .pseg-btn.active .pseg-cam,.pseg-btn.active .pseg-pole{color:#063}
+  .zdrag{cursor:grab;color:var(--muted);user-select:none;margin-right:.3rem;font-size:13px}
+  .trow.dragging{opacity:.45}
+  .trow.drop-into td{box-shadow:inset 0 2px 0 0 var(--accent)}
+  .plan-row{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:.55rem;margin-bottom:.6rem}
+  .plan-row.sel{border-color:var(--accent)}
+  .plan-row .pr-head{display:flex;align-items:center;gap:.35rem;margin-bottom:.4rem}
+  .plan-row .pr-head input{flex:1}
+  .plan-row .icon-btn{background:none;border:none;color:var(--muted);cursor:pointer;font-size:15px;padding:2px;line-height:1}
+  .plan-row .icon-btn:hover{color:var(--accent)}
+
+  .legend{position:absolute;bottom:22px;left:10px;z-index:500;background:rgba(15,23,42,.9);border:1px solid var(--line);border-radius:8px;padding:.5rem .6rem;font-size:11px;max-width:200px}
+  .legend b{font-size:11px;color:var(--accent)}
+  .legend div{margin-top:3px;color:var(--muted)}
+
+  /* przełącznik podpisów na mapie (nazwy kamer/punktów/obszarów/kabli) */
+  #map.hide-labels .leaflet-tooltip.cam-label{display:none}
+  .print-only{display:none}
+
+  @media print{
+    .no-print,header .toolbar,.side-tabs,.legend,#tab-cam,.leaflet-control-zoom,.plan-handle,.zone-vertex,.zone-subtabs,.zdrag{display:none!important}
+    .print-only{display:block}
+    #main{display:block;height:auto}
+    #map{height:58vh;width:100%}
+    #side{width:100%;border-left:none}
+    .side-body{overflow:visible;padding:.4rem 0}
+    #tab-list,#tab-punkty,#tab-zones,#tab-cable,#tab-info{display:block!important;margin-top:14px;page-break-inside:avoid}
+    body,#side,.side-body,.tabpane{background:#fff!important;color:#000!important}
+    header{background:#fff!important;border-bottom:1px solid #ccc}
+    header h1,.obj,#counts{color:#000!important}
+    th,.field label{color:#333!important}
+    .tot,.trow:hover td{color:#000!important;background:none!important}
+    th,td{border-color:#ccc!important}
+    td .mini,.field input{background:none!important;border:none!important;color:#000!important;padding:0}
+    .field{margin-bottom:.2rem}
+    .empty,.del-x,.hint{display:none!important}
+    .tabpane::before{display:block;font-weight:700;font-size:14px;color:#000;margin-bottom:6px;border-bottom:2px solid #000;padding-bottom:2px}
+    #tab-list::before{content:"Kamery"}
+    #tab-punkty::before{content:"Punkty (szlabany / budki / NVR)"}
+    #tab-zones::before{content:"Obszary do wyceny"}
+    #tab-cable::before{content:"Okablowanie"}
+    #tab-info::before{content:"Notatki z wizji lokalnej"}
+    #tab-info .field,#tab-info .hint{display:none}
+    #printNotes{display:block;white-space:pre-wrap;font-family:inherit;font-size:12px;line-height:1.5;color:#000;margin:0}
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1><img src="../alfa-logo.png" alt="Alfa" class="brand-logo">Projekt <span id="projNum"></span></h1>
+    <span class="obj" id="projName"></span>
+    <div class="addrbox no-print">
+      <select class="btn" id="baseSel" title="Podkład mapy"></select>
+      <input id="addrSearch" type="text" placeholder="🔎 Szukaj adresu…" autocomplete="off" title="Wpisz adres i naciśnij Enter, aby przejść na mapie">
+      <div class="addr-results" id="addrResults"></div>
+      <button class="btn" id="btnSaveObjPin" title="Zapisz jako pinezkę obiektu">📌 Zapisz</button>
+    </div>
+    <div class="toolbar">
+      <button class="btn" id="btnAddCam" title="Skrót: K">➕ Kamera</button>
+      <button class="btn" id="btnAddSzlaban" title="Skrót: S">🚧 Szlaban</button>
+      <button class="btn" id="btnAddBudka" title="Skrót: B">🛡️ Budka ochrony</button>
+      <button class="btn" id="btnAddNvr" title="Skrót: N">🖥️ Punkt NVR</button>
+      <button class="btn" id="btnAddAreaMain" title="Obszar główny — np. cały teren budowy (skrót: G)">▭ Obszar główny</button>
+      <button class="btn" id="btnAddArea" title="Obszar poboczny — np. garaż, plac zabaw (skrót: O)">▦ Obszar poboczny</button>
+      <button class="btn warn" id="btnMeasure" title="Skrót: M">📏 Zmierz kabel</button>
+      <button class="btn active" id="btnLabels" title="Pokaż / ukryj podpisy na mapie (skrót: P)">🏷️ Podpisy</button>
+    </div>
+  </header>
+
+  <div id="main">
+    <div id="map">
+      <div class="legend no-print">
+        <b>Legenda</b>
+        <div>📍 Kamera — przeciągnij pin, aby przesunąć</div>
+        <div>⚪ Biały uchwyt — obrót i zasięg</div>
+        <div>🚧 Szlaban &nbsp; 🛡️ Budka ochrony &nbsp; 🖥️ NVR</div>
+        <div>▭ Obszar główny (teren budowy) &nbsp; ▦ Obszar poboczny (wycena) &nbsp; 📏 Trasa kabla</div>
+        <div><b>PPM (prawy klik)</b> = usuń element / cofnij punkt podczas rysowania</div>
+        <div style="margin-top:5px;color:#22d3ee;line-height:1.5">Skróty: <b>K</b> kamera · <b>S</b> szlaban · <b>B</b> budka · <b>N</b> NVR · <b>O</b> obszar · <b>M</b> kabel · <b>P</b> podpisy · <b>Del</b> usuń · <b>Esc</b> anuluj</div>
+      </div>
+    </div>
+
+    <div id="side">
+      <div class="side-tabs">
+        <button data-tab="cam" class="active">Kamera</button>
+        <div class="tabcell"><button class="tab-eye" data-cat="cam" title="Ukryj kamery na mapie">👁</button><button data-tab="list">Lista</button></div>
+        <div class="tabcell"><button class="tab-eye" data-cat="points" title="Ukryj punkty na mapie">👁</button><button data-tab="punkty">Punkty</button></div>
+        <div class="tabcell"><button class="tab-eye" data-cat="zones" title="Ukryj obszary na mapie">👁</button><button data-tab="zones">Obszary</button></div>
+        <div class="tabcell"><button class="tab-eye" data-cat="cables" title="Ukryj okablowanie na mapie">👁</button><button data-tab="cable">Okablowanie</button></div>
+        <div class="tabcell"><button class="tab-eye" data-cat="plans" title="Ukryj plany na mapie">👁</button><button data-tab="plans">Plany</button></div>
+        <button data-tab="info">Obiekt</button>
+        <button data-tab="templates">Szablony</button>
+        <button data-tab="perimeter">Perymetr</button>
+        <div class="side-actions">
+          <span class="side-act side-status" id="saveStatus" title="Stan zapisu"></span>
+          <div class="side-sep"></div>
+          <button class="side-act" id="btnSave" title="Zapisz">💾</button>
+          <button class="side-act" id="btnLoad" title="Wczytaj">📂</button>
+          <button class="side-act" id="btnPrint" title="Drukuj / PDF">🖨️</button>
+        </div>
+      </div>
+      <div class="side-body">
+
+        <!-- KAMERA -->
+        <div class="tabpane active" id="tab-cam">
+          <div id="camEmpty" class="empty">Kliknij <b>➕ Kamera</b> i wskaż miejsce na mapie,<br>albo wybierz kamerę z listy.</div>
+          <div id="camEdit" style="display:none">
+            <div class="row2" style="align-items:flex-end">
+              <div class="field">
+                <label>Szablon kamery</label>
+                <select id="fApplyTpl"><option value="">— zastosuj szablon —</option></select>
+              </div>
+              <div class="field" style="flex:0 0 auto">
+                <button class="btn" id="btnSaveAsTpl" title="Zapisz tę kamerę jako nowy szablon">💾 Jako szablon</button>
+              </div>
+            </div>
+            <div class="row2">
+              <div class="field" style="max-width:64px">
+                <label>Nr</label>
+                <input type="number" id="fNum" min="1" step="1">
+              </div>
+              <div class="field">
+                <label>Nazwa / oznaczenie</label>
+                <input type="text" id="fName">
+              </div>
+            </div>
+            <div class="row2">
+              <div class="field">
+                <label>Typ</label>
+                <select id="fType">
+                  <option value="bullet">Tubowa (kierunkowa)</option>
+                  <option value="dome">Kopułkowa (kierunkowa)</option>
+                  <option value="ptz">PTZ (obrotowa)</option>
+                  <option value="pano">Panoramiczna 360°</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>Kolor</label>
+                <input type="color" id="fColor" style="height:34px;padding:2px">
+              </div>
+            </div>
+            <div class="field" id="azField">
+              <label>Kierunek (azymut) <span id="vAz" class="val">0°</span></label>
+              <div class="slider"><input type="range" id="fAz" min="0" max="359" value="0"></div>
+            </div>
+            <div class="field" id="fovField">
+              <label>Kąt widzenia (FOV) <span id="vFov" class="val">90°</span></label>
+              <div class="slider"><input type="range" id="fFov" min="10" max="360" value="90"></div>
+            </div>
+            <div class="field">
+              <label>Zasięg <span id="vRange" class="val">20 m</span></label>
+              <div class="slider"><input type="range" id="fRange" min="3" max="120" value="20"></div>
+            </div>
+            <div class="row2">
+              <div class="field">
+                <label>Wys. montażu (m)</label>
+                <input type="number" id="fHeight" step="0.5" value="3">
+              </div>
+              <div class="field">
+                <label>Model / rozdz.</label>
+                <input type="text" id="fModel" placeholder="np. 4MP">
+              </div>
+            </div>
+            <div class="field">
+              <label>Uwagi</label>
+              <textarea id="fNotes" placeholder="np. na słupie oświetleniowym, zasilanie z klatki B"></textarea>
+            </div>
+            <button class="btn danger" id="btnDelCam" style="width:100%">🗑️ Usuń kamerę</button>
+          </div>
+        </div>
+
+        <!-- LISTA -->
+        <div class="tabpane" id="tab-list">
+          <div id="listEmpty" class="empty">Brak kamer.</div>
+          <table id="camTable" style="display:none">
+            <thead><tr><th>#</th><th>Nazwa</th><th>Typ</th><th>FOV</th><th>Zasięg</th></tr></thead>
+            <tbody></tbody>
+          </table>
+          <button class="btn" id="btnRenumber" style="width:100%;margin-top:.6rem">⟲ Przenumeruj po kolei (1…N)</button>
+          <p class="hint" style="margin-top:.8rem">Łącznie kamer: <b id="camCount">0</b>. Kliknij wiersz, aby edytować i podświetlić na mapie. Nowa kamera dostaje najniższy wolny numer.</p>
+        </div>
+
+        <!-- PUNKTY -->
+        <div class="tabpane" id="tab-punkty">
+          <div id="pointEmpty" class="empty">Brak punktów. Dodaj: 🚧 Szlaban, 🛡️ Budka, 🖥️ NVR.</div>
+          <table id="pointTable" style="display:none">
+            <thead><tr><th>Typ</th><th>Nazwa</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+          <p class="hint" style="margin-top:.8rem">Szlabany, budki ochrony i punkty NVR. Kliknij nazwę, aby edytować; ✕ usuwa. Na mapie: przeciągnij pin, PPM usuwa.</p>
+        </div>
+
+        <!-- OBSZARY -->
+        <div class="tabpane" id="tab-zones">
+          <div class="zone-subtabs">
+            <button class="zsub active" data-kind="side">Poboczne <span class="zc" id="zsubCountSide">0</span></button>
+            <button class="zsub" data-kind="main">Główne <span class="zc" id="zsubCountMain">0</span></button>
+          </div>
+          <div id="zoneEmpty" class="empty" style="margin-top:.6rem">Brak obszarów.</div>
+          <table id="zoneTable" style="display:none;margin-top:.4rem">
+            <thead><tr><th>Nazwa</th><th>Pow.</th><th></th></tr></thead>
+            <tbody></tbody>
+            <tfoot>
+              <tr><td class="tot"><span id="zoneTotLabel">RAZEM poboczne</span> (<span id="zoneCount">0</span>)</td><td class="tot" id="zoneTot">0 m²</td><td></td></tr>
+            </tfoot>
+          </table>
+          <p class="hint" style="margin-top:.8rem"><b>▭ Obszar główny</b> (skrót <b>G</b>) — duży teren nadrzędny, np. cały obszar budowy. <b>▦ Obszar poboczny</b> (skrót <b>O</b>) — teren do osobnej wyceny (garaż, plac zabaw). Obrysuj klikając po granicy; dwuklik lub <b>Enter</b> kończy. <b>PPM</b> podczas rysowania = cofnij punkt, <b>PPM</b> na gotowym obszarze = usuń. Klik w obszar = zaznacz. Przeciągnij wiersz (za <b>⠿</b>) = zmień kolejność; upuść na zakładkę „Główne"/„Poboczne" = przenieś między kategoriami.</p>
+        </div>
+
+        <!-- OKABLOWANIE -->
+        <div class="tabpane" id="tab-cable">
+          <div class="field">
+            <label>Cena za metr kabla (zł)</label>
+            <input type="number" id="pricePerM" step="0.1" value="0">
+          </div>
+          <div class="field">
+            <label>Zapas na odcinek (%)</label>
+            <input type="number" id="cableSlack" step="1" value="10" title="Dodatkowa rezerwa na zejścia, zapasy, gięcia">
+          </div>
+          <table id="cableTable" style="margin-top:.4rem">
+            <thead><tr><th>Odcinek</th><th>Dług.</th><th>+zapas</th><th></th></tr></thead>
+            <tbody></tbody>
+            <tfoot>
+              <tr><td class="tot">RAZEM</td><td class="tot" id="cabTotLen">0 m</td><td class="tot" id="cabTotSlack">0 m</td><td></td></tr>
+              <tr><td colspan="3" class="tot">Szac. koszt kabla</td><td class="tot" id="cabCost">0 zł</td></tr>
+            </tfoot>
+          </table>
+          <p class="hint" style="margin-top:.8rem">Kliknij <b>📏 Zmierz kabel</b>, klikaj po trasie prowadzenia przewodu (po dachach, ścianach, w ziemi). Dwuklik lub <b>Enter</b> kończy pomiar i dodaje odcinek do tabeli.</p>
+        </div>
+
+        <!-- PLANY (nakładki rastrowe) -->
+        <div class="tabpane" id="tab-plans">
+          <button class="btn" id="btnAddPlan" style="width:100%;margin:0 0 .5rem">➕ Dodaj plan (JPG/PNG)</button>
+          <div id="planEmpty" class="empty">Brak planów.</div>
+          <div id="planList"></div>
+          <p class="hint" style="margin-top:.8rem">Dodaj skan planu (JPG/PNG) — rzut kondygnacji lub plan terenu. Ustaw położenie i rozmiar bezpośrednio na mapie (uchwyty na wybranym planie), a suwakami reguluj przezroczystość, skalę i obrót. Plany leżą pod kamerami i punktami.</p>
+        </div>
+
+        <!-- OBIEKT -->
+        <div class="tabpane" id="tab-info">
+          <div class="field" id="objAddrField">
+            <label>Adres obiektu</label>
+            <div id="objAddrEmpty" class="empty" style="padding:.5rem 0">Brak zapisanego adresu. Wyszukaj adres na górze i kliknij <b>📌 Zapisz</b>.</div>
+            <div id="objAddrBox" style="display:none">
+              <div id="objAddrText" style="font-size:13px;line-height:1.4;padding:.5rem .6rem;background:var(--panel2);border:1px solid var(--line);border-radius:6px"></div>
+              <div style="display:flex;gap:.35rem;margin-top:.4rem">
+                <button class="btn" id="btnGoObjPin" title="Pokaż obiekt na mapie">🎯 Pokaż na mapie</button>
+                <button class="btn danger" id="btnDelObjPin" title="Usuń pinezkę obiektu">🗑️ Usuń</button>
+              </div>
+            </div>
+          </div>
+          <div class="field">
+            <label>Notatki z wizji lokalnej</label>
+            <textarea id="objInfo" style="min-height:320px"></textarea>
+          </div>
+          <pre class="print-only" id="printNotes"></pre>
+          <p class="hint">Tekst zapisuje się automatycznie i jest dołączany do eksportu / wydruku.</p>
+        </div>
+
+        <!-- SZABLONY -->
+        <div class="tabpane" id="tab-templates">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:.4rem;margin-bottom:.4rem">
+            <b style="font-size:13px">Szablony kamer</b>
+            <button class="btn" id="btnNewTpl">➕ Nowy</button>
+          </div>
+          <p class="hint" style="margin-top:0">Standardowe modele kamer i ich parametry. „➕" na liście stawia gotową kamerę na środku mapy.</p>
+          <div id="tplStatus" class="empty" style="display:none"></div>
+          <div id="tplEmpty" class="empty">Brak szablonów. Kliknij <b>➕ Nowy</b>.</div>
+          <table id="tplTable" style="display:none">
+            <thead><tr><th></th><th>Model</th><th>Typ</th><th>FOV</th><th>Zasięg</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+
+          <div id="tplForm" style="display:none;margin-top:.6rem;border-top:1px solid var(--line);padding-top:.6rem">
+            <div class="row2">
+              <div class="field"><label>Nazwa / model *</label><input type="text" id="tName" placeholder="np. DS-2CD2143G2-I"></div>
+              <div class="field"><label>Producent</label><input type="text" id="tManufacturer" placeholder="np. Hikvision"></div>
+            </div>
+            <div class="row2">
+              <div class="field"><label>Typ</label>
+                <select id="tType">
+                  <option value="bullet">Tubowa (kierunkowa)</option>
+                  <option value="dome">Kopułkowa (kierunkowa)</option>
+                  <option value="ptz">PTZ (obrotowa)</option>
+                  <option value="pano">Panoramiczna 360°</option>
+                </select>
+              </div>
+              <div class="field"><label>Rozdzielczość</label><input type="text" id="tResolution" placeholder="np. 4MP"></div>
+            </div>
+            <div class="row2">
+              <div class="field"><label>Kąt widzenia FOV (°)</label><input type="number" id="tFov" min="10" max="360" value="90"></div>
+              <div class="field"><label>Zasięg (m)</label><input type="number" id="tRange" min="1" max="200" value="20"></div>
+            </div>
+            <div class="row2">
+              <div class="field"><label>Wys. montażu (m)</label><input type="number" id="tHeight" step="0.5" value="3"></div>
+              <div class="field"><label>Kolor na mapie</label><input type="color" id="tColor" value="#22d3ee" style="height:34px;padding:2px"></div>
+            </div>
+            <div class="field"><label>Uwagi</label><textarea id="tNotes" placeholder="np. IR 30m, PoE, ONVIF"></textarea></div>
+            <div style="display:flex;gap:.35rem">
+              <button class="btn" id="btnSaveTpl" style="flex:1">💾 Zapisz szablon</button>
+              <button class="btn" id="btnCancelTpl">Anuluj</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- PERYMETR -->
+        <div class="tabpane" id="tab-perimeter">
+          <p class="hint" style="margin-top:0">Rozstaw kamery wzdłuż <b>obrysu wybranego obszaru</b> (ogrodzenia). Obrys liczony jest jako <b>jedna ciągła pętla</b> (krótkie skosy nie dostają osobnych słupów). Kamery lądują na linii i patrzą <b>ku wnętrzu</b> obszaru wzdłuż ogrodzenia.</p>
+          <div id="perimEmpty" class="empty">Brak obszarów. Najpierw obrysuj obszar (▭ / ▦), a wróć tu, aby ułożyć kamery.</div>
+          <div id="perimBody" style="display:none">
+            <div class="field">
+              <label>Obszar (ogrodzenie)</label>
+              <select id="perimZone"></select>
+            </div>
+            <div class="field">
+              <label>Szablon kamery</label>
+              <select id="perimTpl"><option value="">— wybierz szablon —</option></select>
+            </div>
+            <div class="field">
+              <label>Tryb rozmieszczenia</label>
+              <div class="pseg" id="perimMode">
+                <button type="button" class="pseg-btn active" data-mode="overlap" title="Równomiernie — obwód ÷ zasięg, po jednej kamerze na słupie. Suwakiem % zagęść (zapas) lub dopuść luki (−).">
+                  <span class="pseg-ico">⚖️</span><span class="pseg-nums"><span class="pseg-cam">–</span><span class="pseg-pole">–</span></span>
+                </button>
+                <button type="button" class="pseg-btn" data-mode="fewer" title="Mniej słupów — kamery parowane na wspólnych masztach (patrzą ku rogom), ostry róg = 1 kamera. Suwakiem % steruj gęstością.">
+                  <span class="pseg-ico">📉</span><span class="pseg-nums"><span class="pseg-cam">–</span><span class="pseg-pole">–</span></span>
+                </button>
+              </div>
+              <div class="hint" style="margin-top:.25rem;text-align:right">na przyciskach: <b style="color:var(--accent)">kamery</b> / <span style="color:var(--muted)">słupy</span></div>
+            </div>
+            <div class="field" id="perimOverlapField">
+              <label>Zakład (+) / luka (−) sąsiednich kamer (%)</label>
+              <input type="number" id="perimOverlap" min="-90" max="80" step="5" value="0" title="+% = pola widzenia zachodzą na siebie (gęściej). 0% = stykają się. −% = dopuszczalna luka (rzadziej, mniej słupów).">
+            </div>
+            <button class="btn active" id="btnLayPerimeter" style="width:100%;margin-bottom:.4rem">▦ Ułóż perymetr</button>
+            <button class="btn danger" id="btnClearPerimeter" style="width:100%">🗑️ Usuń kamery perymetru (tego obszaru)</button>
+            <p class="hint" id="perimInfo" style="margin-top:.8rem"></p>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</div>
+
+<input type="file" id="fileInput" accept="application/json" style="display:none">
+<input type="file" id="planInput" accept="image/*,application/pdf" style="display:none">
+
+<script>
+/* ============ DANE STARTOWE ============ */
+/* Projekt z alfa-app: /monitoring/designer.html?id=N — zapis przez /api/monitoring/:id/data.
+   Bez ?id= działa lokalnie (zapis w localStorage). */
+const PROJECT_ID = new URLSearchParams(location.search).get('id');
+document.getElementById('projNum').textContent = PROJECT_ID ? '#'+PROJECT_ID : 'lokalny';
+const DEFAULT_CENTER = [52.2297, 21.0122]; // Warszawa — nowy projekt bez zapisanego widoku
+const DEFAULT_ZOOM = 12;
+const STORAGE_KEY = "monitoring_project_" + (PROJECT_ID || "local") + "_v1";
+let PROJECT_NAME = "";
+const PALETTE = ["#22d3ee","#f59e0b","#34d399","#a78bfa","#f472b6","#fb7185","#60a5fa","#facc15","#4ade80","#f97316"];
+const CAM_COLOR = "#22d3ee"; // jednolity kolor wszystkich kamer (można zmienić na pojedynczej)
+
+const DEFAULT_INFO =
+`OBIEKT:
+KONTAKT:
+WIZJA LOKALNA:
+
+STAN OBECNY:
+-
+
+USTALENIA:
+-
+
+CEL PROJEKTU:
+-`;
+
+/* ============ MAPA ============ */
+const map = L.map('map',{center:DEFAULT_CENTER, zoom:DEFAULT_ZOOM, zoomControl:true, maxZoom:22});
+
+const bases = {
+  "Esri Satelita": L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:22,maxNativeZoom:19,attribution:'Esri'}),
+  "Google Satelita (czysty)": L.tileLayer('https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',{maxZoom:22,maxNativeZoom:21,subdomains:['mt0','mt1','mt2','mt3'],attribution:'Google'}),
+  "Google Hybryda (sat + nazwy)": L.tileLayer('https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}',{maxZoom:22,maxNativeZoom:21,subdomains:['mt0','mt1','mt2','mt3'],attribution:'Google'}),
+  "Mapa OSM": L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'})
+};
+const baseSel = document.getElementById('baseSel');
+Object.keys(bases).forEach((k,i)=>{const o=document.createElement('option');o.value=k;o.textContent=k;baseSel.appendChild(o);});
+let currentBase = bases[Object.keys(bases)[0]].addTo(map);
+baseSel.onchange = ()=>{map.removeLayer(currentBase);currentBase=bases[baseSel.value].addTo(map);};
+
+L.control.scale({metric:true,imperial:false,position:'bottomleft'}).addTo(map);
+
+/* ============ GEOMETRIA ============ */
+const R=6378137, toR=d=>d*Math.PI/180, toD=r=>r*180/Math.PI;
+function destination(lat,lng,brng,dist){
+  const dr=dist/R, br=toR(brng), la1=toR(lat), lo1=toR(lng);
+  const la2=Math.asin(Math.sin(la1)*Math.cos(dr)+Math.cos(la1)*Math.sin(dr)*Math.cos(br));
+  const lo2=lo1+Math.atan2(Math.sin(br)*Math.sin(dr)*Math.cos(la1),Math.cos(dr)-Math.sin(la1)*Math.sin(la2));
+  return [toD(la2),toD(lo2)];
+}
+function bearing(a,b){
+  const la1=toR(a.lat),la2=toR(b.lat),dl=toR(b.lng-a.lng);
+  const y=Math.sin(dl)*Math.cos(la2);
+  const x=Math.cos(la1)*Math.sin(la2)-Math.sin(la1)*Math.cos(la2)*Math.cos(dl);
+  return (toD(Math.atan2(y,x))+360)%360;
+}
+const dist=(a,b)=>map.distance(a,b);
+
+/* ============ STAN ============ */
+let cameras=[], points=[], cables=[];
+let selected=null, camSeq=0, ptSeq={};
+let mode=null; // 'addcam' | 'pt:nvr' | 'pt:szlaban' | 'pt:budka' | 'measure'
+
+const POINT_TYPES = {
+  nvr:     {name:'NVR / Serwerownia', bg:'#ef4444', emoji:'🖥️'},
+  szlaban: {name:'Szlaban',           bg:'#f59e0b', emoji:'🚧'},
+  budka:   {name:'Budka ochrony',     bg:'#3b82f6', emoji:'🛡️'}
+};
+
+/* ============ KAMERA ============ */
+const isPano=cam=>cam.type==='pano'||cam.fov>=360;
+function coverageLatLngs(cam){
+  const c=[cam.lat,cam.lng], pts=[c];
+  const start=cam.az-cam.fov/2, end=cam.az+cam.fov/2, step=Math.max(2,cam.fov/40);
+  for(let a=start;a<=end;a+=step) pts.push(destination(cam.lat,cam.lng,a,cam.range));
+  pts.push(destination(cam.lat,cam.lng,end,cam.range));
+  pts.push(c);
+  return pts;
+}
+function camIcon(cam){
+  const pt=cam._petal||null;
+  if(pt&&pt.count){   // reprezentant zwiniętej grupy (>4) => kółeczko z liczbą kamer (ten sam format numeru co pinezki)
+    return L.divIcon({className:'',iconSize:[26,26],iconAnchor:[13,13],
+      html:`<div class="cam-cluster" title="${pt.count} kamer w tym miejscu — przybliż, aby rozłożyć" style="background:${cam.color}"><span>${pt.count}</span></div>`});
+  }
+  // płatek: obrót wrappera DOKŁADNIE wokół czubka kropli (transform-origin 12px 28.97px z CSS),
+  // by końcówki wszystkich pinezek zeszły się w jeden punkt, a korpusy rozłożyły się wachlarzem
+  const wrap = pt&&pt.theta ? `transform:rotate(${pt.theta}deg);` : '';
+  const txtRot = 45-(pt&&pt.theta?pt.theta:0);   // utrzymaj numer pionowo niezależnie od obrotu płatka
+  return L.divIcon({className:'',iconSize:[24,24],iconAnchor:[12,24],
+    html:`<div class="cam-flower" style="${wrap}"><div class="cam-pin" style="background:${cam.color}"><span style="transform:rotate(${txtRot}deg)">${cam.num}</span></div></div>`});
+}
+/* ====== UKŁAD „KWIATKA" + PŁYNNE ZWIJANIE DO KULKI ====== */
+// Pokaż jako płatek pod kątem „theta". Gdy pinezka już istnieje — animujemy sam transform (bez przebudowy DOM);
+// gdy wyłania się z ukrycia/kulki — budujemy ją i „wyskakuje" ze środka.
+function pinAt(cam,theta){
+  cam._role='pin';
+  const fl=cam.marker._icon&&cam.marker._icon.querySelector('.cam-flower');
+  const t=theta?`rotate(${theta}deg)`:'rotate(0deg)', sr=`rotate(${45-(theta||0)}deg)`;
+  if(fl&&!cam._hidden){
+    fl.style.opacity='1'; fl.style.transform=t;
+    const sp=fl.querySelector('span'); if(sp) sp.style.transform=sr;
+    cam._petal=theta?{theta}:null;
+  }else{
+    if(cam._hidden){ cam.marker.addTo(map); cam._hidden=false; }
+    cam._petal=theta?{theta}:null; cam.marker.setIcon(camIcon(cam));
+    const nf=cam.marker._icon&&cam.marker._icon.querySelector('.cam-flower');
+    if(nf){ nf.style.transition='none'; nf.style.opacity='0'; nf.style.transform=`${t} scale(.1)`;
+      requestAnimationFrame(()=>requestAnimationFrame(()=>{ nf.style.transition=''; nf.style.opacity='1'; nf.style.transform=t; })); }
+  }
+}
+// Pokaż jako kulkę z liczbą (grupa >4). Świeża kulka „wskakuje" ze skali .3.
+function ballAt(cam,count){
+  const cl=cam.marker._icon&&cam.marker._icon.querySelector('.cam-cluster');
+  if(cl&&cam._role==='ball'&&!cam._hidden){ const sp=cl.querySelector('span'); if(sp) sp.textContent=count; cam._petal={count}; return; }
+  cam._role='ball';
+  if(cam._hidden){ cam.marker.addTo(map); cam._hidden=false; }
+  cam._petal={count}; cam.marker.setIcon(camIcon(cam));
+  const nc=cam.marker._icon&&cam.marker._icon.querySelector('.cam-cluster');
+  if(nc){ nc.style.transition='none'; nc.style.opacity='0'; nc.style.transform='scale(.3)';
+    requestAnimationFrame(()=>requestAnimationFrame(()=>{ nc.style.transition=''; nc.style.opacity='1'; nc.style.transform='scale(1)'; })); }
+}
+// „Wchłoń" płatek do środka (kurczy się w czubek = w kulkę), potem zdejmij z mapy.
+function absorb(cam){
+  if(cam._hidden) return;
+  const fl=cam.marker._icon&&cam.marker._icon.querySelector('.cam-flower'), m=cam.marker;
+  cam._hidden=true; cam._petal=null; cam._role=null;
+  if(fl){ fl.style.transform=(fl.style.transform||'').replace(/\s*scale\([^)]*\)/,'')+' scale(.1)'; fl.style.opacity='0';
+    setTimeout(()=>{ if(cam._hidden) map.removeLayer(m); },200); }
+  else map.removeLayer(m);
+}
+function restackCameras(){
+  if(!cameras.length) return;
+  const drawn=cameras.filter(c=>c.marker);
+  if(!drawn.length) return;
+  const pts=drawn.map(c=>({cam:c,p:map.latLngToLayerPoint([c.lat,c.lng])}));
+  const THRESH=20;                       // px — pinezki bliżej niż tyle traktujemy jako „w jednym miejscu"
+  const seen=new Set(), groups=[];
+  for(let i=0;i<pts.length;i++){
+    if(seen.has(i)) continue;
+    const g=[i]; seen.add(i);
+    for(let j=i+1;j<pts.length;j++){
+      if(seen.has(j)) continue;
+      if(pts[i].p.distanceTo(pts[j].p)<THRESH){ g.push(j); seen.add(j); }
+    }
+    groups.push(g);
+  }
+  groups.forEach(g=>{
+    if(g.length===1){                    // pojedyncza pinezka => zwykła, na własnej pozycji
+      const c=pts[g[0]].cam;
+      if(c._hidden){ c.marker.addTo(map); c._hidden=false; }
+      c.marker.setLatLng([c.lat,c.lng]);
+      pinAt(c,0);
+      return;
+    }
+    // Wszystkie pinezki grupy „przyklejamy" do pozycji reprezentanta (setLatLng) — dzięki temu Leaflet
+    // trzyma je razem na każdym zoomie i nie ma przeskoków; rozkład robimy zoom-niezależnym obrotem w px.
+    const rep=pts[g[0]].cam, anchor=[rep.lat,rep.lng];
+    if(g.length>4){                       // >4 => zwiń do jednej kulki z liczbą; resztę wchłoń do środka
+      rep.marker.setLatLng(anchor); ballAt(rep,g.length);
+      g.slice(1).forEach(k=>{ const c=pts[k].cam; c.marker.setLatLng(anchor); absorb(c); });
+      return;
+    }
+    // WACHLARZ (2–4) bez nakładania: czubki w jednym punkcie => korpusy leżą na okręgu R≈17px wokół czubka;
+    // by bąble (Ø≈D) nie stykały się ściankami, sąsiednie płatki dzielą min. kąt = 2·asin(D/2R). Symetrycznie wokół pionu.
+    const n=g.length, R=16.97, D=25;
+    const step=2*Math.asin(Math.min(1,D/(2*R)))*180/Math.PI;  // ~94°
+    const start=-(n-1)*step/2;
+    g.forEach((k,idx)=>{ const c=pts[k].cam; c.marker.setLatLng(anchor); pinAt(c,start+idx*step); });
+  });
+  updateSelHandles();   // nie pokazuj uchwytów edycji dla kamery ukrytej w kulce / zbitej w kłębek
+}
+// aktualizacja geometrii W MIEJSCU — płynnie, bez usuwania/dodawania warstw
+function updateCam(cam){
+  if(!cam.cover)return;
+  const w=cam===selected?3:1;
+  if(cam._circle){cam.cover.setLatLng([cam.lat,cam.lng]);cam.cover.setRadius(cam.range);}
+  else cam.cover.setLatLngs(coverageLatLngs(cam));
+  cam.cover.setStyle({color:cam.color,weight:w,fillColor:cam.color,fillOpacity:.22});
+}
+function drawCam(cam){
+  if(!cam.marker){
+    cam.marker=L.marker([cam.lat,cam.lng],{icon:camIcon(cam),draggable:true,autoPan:false}).addTo(map);
+    cam.marker.on('click',()=>selectCam(cam));
+    cam.marker.on('contextmenu',ev=>{L.DomEvent.stop(ev);if(confirm('Usunąć kamerę: '+cam.name+'?'))delCam(cam);});
+    cam.marker.on('dragstart',()=>{         // zdejmij offset płatka na czas przeciągania (bez setIcon, by nie zerwać draga)
+      cam._petal=null;
+      const el=cam.marker._icon&&cam.marker._icon.querySelector('.cam-flower');
+      if(el){el.style.transform='';const sp=el.querySelector('span');if(sp)sp.style.transform='rotate(45deg)';}
+    });
+    cam.marker.on('drag',e=>{const p=e.target.getLatLng();cam.lat=p.lat;cam.lng=p.lng;updateCam(cam);if(selected===cam)positionHandles(cam,'none');});
+    cam.marker.on('dragend',()=>{restackCameras();save();});
+  }else{
+    cam.marker.setIcon(camIcon(cam));
+    cam.marker.setLatLng([cam.lat,cam.lng]);
+  }
+  const wantCircle=isPano(cam);
+  if(cam.cover && cam._circle!==wantCircle){map.removeLayer(cam.cover);cam.cover=null;}
+  if(!cam.cover){
+    cam._circle=wantCircle;
+    cam.cover=wantCircle?L.circle([cam.lat,cam.lng],{radius:cam.range}):L.polygon(coverageLatLngs(cam),{});
+    cam.cover.addTo(map);
+    cam.cover.on('click',()=>selectCam(cam));
+  }
+  updateCam(cam);
+}
+function nextCamNum(){                 // najniższy wolny numer (uwzględnia usunięte kamery)
+  const used=new Set(cameras.map(c=>c.num));
+  let n=1; while(used.has(n)) n++; return n;
+}
+function addCamera(latlng){
+  camSeq++;
+  const num=nextCamNum();
+  const cam={id:'c'+Date.now()+camSeq,num,name:'K'+num,type:'bullet',
+    lat:latlng.lat,lng:latlng.lng,az:0,fov:90,range:20,height:3,model:'',notes:'',
+    color:CAM_COLOR};
+  cameras.push(cam); drawCam(cam); selectCam(cam); refreshList(); restackCameras(); save();
+}
+
+/* ====== UCHWYTY: biały (tip) = kierunek + zasięg; niebieskie (boki) = kąt widzenia ====== */
+let handles=null;
+const angDiff=(a,b)=>Math.abs(((a-b+540)%360)-180);
+function mkHandle(cls,tip){
+  const h=L.marker([0,0],{icon:L.divIcon({className:'handle '+cls}),draggable:true,zIndexOffset:1000});
+  h.bindTooltip(tip,{direction:'top',offset:[0,-6],className:'cam-label'});
+  return h;
+}
+function positionHandles(cam,except){
+  if(!handles){
+    handles={tip:mkHandle('h-tip','Kierunek + zasięg'),left:mkHandle('h-side','Kąt widzenia'),right:mkHandle('h-side','Kąt widzenia')};
+    handles.tip.on('drag',e=>{
+      if(!selected)return;
+      const h=e.target.getLatLng(), c={lat:selected.lat,lng:selected.lng};
+      selected.range=Math.max(3,Math.min(120,Math.round(dist(c,h))));
+      if(!isPano(selected)) selected.az=Math.round(bearing(c,h))%360;
+      updateCam(selected); positionHandles(selected,'tip'); syncForm(selected);
+    });
+    const sideDrag=(e,which)=>{
+      if(!selected||isPano(selected))return;
+      const h=e.target.getLatLng(), c={lat:selected.lat,lng:selected.lng};
+      selected.fov=Math.max(10,Math.min(350,Math.round(angDiff(bearing(c,h),selected.az)*2)));
+      selected.range=Math.max(3,Math.min(120,Math.round(dist(c,h))));
+      updateCam(selected); positionHandles(selected,which); syncForm(selected); refreshList();
+    };
+    handles.left.on('drag',e=>sideDrag(e,'left'));
+    handles.right.on('drag',e=>sideDrag(e,'right'));
+    ['tip','left','right'].forEach(k=>handles[k].on('dragend',save));
+  }
+  const pano=isPano(cam);
+  if(except!=='tip') handles.tip.setLatLng(destination(cam.lat,cam.lng,pano?0:cam.az,cam.range));
+  handles.tip.addTo(map);
+  if(pano){map.removeLayer(handles.left);map.removeLayer(handles.right);}
+  else{
+    if(except!=='left') handles.left.setLatLng(destination(cam.lat,cam.lng,cam.az-cam.fov/2,cam.range));
+    if(except!=='right') handles.right.setLatLng(destination(cam.lat,cam.lng,cam.az+cam.fov/2,cam.range));
+    handles.left.addTo(map); handles.right.addTo(map);
+  }
+}
+function clearHandles(){if(handles)['tip','left','right'].forEach(k=>map.removeLayer(handles[k]));}
+// kamera „w kłębku": ukryta w kulce albo ma sąsiada w promieniu grupowania => uchwyty edycji zaśmiecałyby widok
+function isClustered(cam){
+  if(cam._hidden) return true;
+  const p=map.latLngToLayerPoint([cam.lat,cam.lng]);
+  return cameras.some(o=>o!==cam&&o.marker&&map.latLngToLayerPoint([o.lat,o.lng]).distanceTo(p)<20);
+}
+function updateSelHandles(){ if(!selected)return; if(isClustered(selected)) clearHandles(); else positionHandles(selected); }
+
+/* ============ WYBÓR / FORMULARZ ============ */
+function selectCam(cam){
+  selected=cam;
+  if(selectedOverlay){selectedOverlay=null;clearPlanHandles();renderPlans();} // odznacz plan, ukryj jego uchwyty
+  document.getElementById('camEmpty').style.display='none';
+  document.getElementById('camEdit').style.display='block';
+  activateTab('cam');
+  syncForm(cam);
+  updateSelHandles();
+  cameras.forEach(c=>updateCam(c));
+}
+function syncForm(cam){
+  fNum.value=cam.num; fName.value=cam.name; fType.value=cam.type; fColor.value=cam.color;
+  fAz.value=cam.az; vAz.textContent=cam.az+'°';
+  fFov.value=Math.min(cam.fov,360); vFov.textContent=cam.fov+'°';
+  fRange.value=cam.range; vRange.textContent=cam.range+' m';
+  fHeight.value=cam.height; fModel.value=cam.model; fNotes.value=cam.notes;
+  const pano=(cam.type==='pano');
+  document.getElementById('fovField').style.opacity=pano?.4:1;
+  document.getElementById('azField').style.opacity=pano?.4:1;
+  fFov.disabled=pano; fAz.disabled=pano;
+}
+const el=id=>document.getElementById(id);
+fNum.oninput=()=>{selected.num=+fNum.value||selected.num;drawCam(selected);restackCameras();refreshList();};
+fName.oninput=()=>{selected.name=fName.value;drawCam(selected);restackCameras();refreshList();};
+fType.onchange=()=>{selected.type=fType.value;if(selected.type==='pano')selected.fov=360;else if(selected.fov>=360)selected.fov=90;syncForm(selected);drawCam(selected);restackCameras();positionHandles(selected);refreshList();};
+fColor.oninput=()=>{selected.color=fColor.value;drawCam(selected);restackCameras();refreshList();};
+fAz.oninput=()=>{selected.az=+fAz.value;vAz.textContent=selected.az+'°';updateCam(selected);positionHandles(selected);};
+fFov.oninput=()=>{selected.fov=+fFov.value;vFov.textContent=selected.fov+'°';updateCam(selected);positionHandles(selected);refreshList();};
+fRange.oninput=()=>{selected.range=+fRange.value;vRange.textContent=selected.range+' m';updateCam(selected);positionHandles(selected);refreshList();};
+fHeight.oninput=()=>{selected.height=+fHeight.value;};
+fModel.oninput=()=>{selected.model=fModel.value;};
+fNotes.oninput=()=>{selected.notes=fNotes.value;};
+[fNum,fAz,fFov,fRange,fHeight,fModel,fNotes,fName].forEach(x=>x.addEventListener('change',save));
+el('btnDelCam').onclick=()=>{if(selected)delCam(selected);};
+el('btnRenumber').onclick=renumberCameras;
+function delCam(cam){
+  map.removeLayer(cam.marker); if(cam.cover)map.removeLayer(cam.cover);
+  cameras=cameras.filter(c=>c!==cam);
+  if(selected===cam){selected=null;clearHandles();document.getElementById('camEmpty').style.display='block';document.getElementById('camEdit').style.display='none';}
+  refreshList(); restackCameras(); save();
+}
+
+/* ============ LISTA ============ */
+function renumberCameras(){          // uporządkuj numery kamer 1…N wg kolejności na liście
+  cameras.forEach((c,i)=>{
+    const nn=i+1;
+    if(c.name===('K'+c.num)) c.name='K'+nn;   // aktualizuj tylko domyślne nazwy „K<num>"
+    c.num=nn; drawCam(c);
+  });
+  refreshList(); if(selected)syncForm(selected); save();
+}
+function refreshList(){
+  const tb=document.querySelector('#camTable tbody'); tb.innerHTML='';
+  document.getElementById('listEmpty').style.display=cameras.length?'none':'block';
+  document.getElementById('camTable').style.display=cameras.length?'table':'none';
+  document.getElementById('camCount').textContent=cameras.length;
+  const typeName={bullet:'Tubowa',dome:'Kopułka',ptz:'PTZ',pano:'360°'};
+  cameras.forEach(c=>{
+    const tr=document.createElement('tr'); tr.className='trow';
+    tr.innerHTML=`<td><span class="swatch" style="background:${c.color}"></span>${c.num}</td>
+      <td>${c.name}</td><td>${typeName[c.type]}</td><td>${c.type==='pano'?'360°':c.fov+'°'}</td><td>${c.range} m</td>`;
+    tr.onclick=()=>{selectCam(c);map.panTo([c.lat,c.lng]);};
+    tb.appendChild(tr);
+  });
+  refreshCamDrag();   // po każdej odbudowie listy ustaw prawo przesuwania kamer wg aktywnej zakładki
+}
+
+/* ============ PUNKTY (NVR / szlaban / budka) ============ */
+function delPoint(p){map.removeLayer(p.marker);points=points.filter(x=>x!==p);refreshPoints();save();}
+function drawPoint(p){
+  const t=POINT_TYPES[p.type]||POINT_TYPES.nvr;
+  const m=L.marker([p.lat,p.lng],{icon:L.divIcon({className:'',iconSize:[26,26],iconAnchor:[13,13],html:`<div class="pt-pin" style="background:${t.bg}">${t.emoji}</div>`}),draggable:true,autoPan:false}).addTo(map);
+  m.bindTooltip(p.name,{permanent:true,direction:'top',offset:[0,-14],className:'cam-label'});
+  m.on('dragend',e=>{const q=e.target.getLatLng();p.lat=q.lat;p.lng=q.lng;save();});
+  m.on('contextmenu',ev=>{L.DomEvent.stop(ev);if(confirm('Usunąć: '+p.name+'?'))delPoint(p);});
+  p.marker=m;
+}
+function addPoint(type,latlng){
+  const t=POINT_TYPES[type]; if(!t)return;
+  ptSeq[type]=(ptSeq[type]||0)+1;
+  const p={id:type+Date.now()+ptSeq[type],type,num:ptSeq[type],lat:latlng.lat,lng:latlng.lng,name:t.name+' '+ptSeq[type]};
+  drawPoint(p); points.push(p); refreshPoints(); save();
+}
+function refreshPoints(){
+  const tb=document.querySelector('#pointTable tbody'); tb.innerHTML='';
+  document.getElementById('pointEmpty').style.display=points.length?'none':'block';
+  document.getElementById('pointTable').style.display=points.length?'table':'none';
+  points.forEach(p=>{
+    const t=POINT_TYPES[p.type]||POINT_TYPES.nvr;
+    const tr=document.createElement('tr'); tr.className='trow';
+    const td1=document.createElement('td'); td1.innerHTML=`<span class="pt-dot" style="background:${t.bg}">${t.emoji}</span>`;
+    td1.style.cursor='pointer'; td1.onclick=()=>map.panTo([p.lat,p.lng]);
+    const td2=document.createElement('td');
+    const inp=document.createElement('input'); inp.className='mini'; inp.value=p.name;
+    inp.oninput=()=>{p.name=inp.value;p.marker.setTooltipContent(p.name);}; inp.onchange=save;
+    td2.appendChild(inp);
+    const td3=document.createElement('td'); const x=document.createElement('span'); x.className='del-x'; x.textContent='✕';
+    x.onclick=()=>delPoint(p); td3.appendChild(x);
+    tr.appendChild(td1); tr.appendChild(td2); tr.appendChild(td3);
+    tb.appendChild(tr);
+  });
+}
+
+/* ============ POMIAR KABLA ============ */
+let measurePts=[], measureLine=null, measureLabel=null;
+function startMeasure(){measurePts=[];if(measureLine){map.removeLayer(measureLine);measureLine=null;}if(measureLabel){map.removeLayer(measureLabel);measureLabel=null;}}
+function measureClick(latlng){
+  measurePts.push([latlng.lat,latlng.lng]);
+  if(!measureLine){measureLine=L.polyline(measurePts,{color:'#f59e0b',weight:3,dashArray:'6,5'}).addTo(map);}
+  else measureLine.setLatLngs(measurePts);
+  const len=measureLen();
+  if(!measureLabel)measureLabel=L.tooltip({permanent:true,direction:'top',className:'measure-label'});
+  measureLabel.setLatLng(latlng).setContent(len+' m'); measureLabel.addTo(map);
+}
+function measureLen(){let s=0;for(let i=1;i<measurePts.length;i++)s+=dist(measurePts[i-1],measurePts[i]);return Math.round(s);}
+function undoMeasurePoint(){
+  if(!measurePts.length)return;
+  measurePts.pop();
+  if(measurePts.length){measureLine.setLatLngs(measurePts);measureLabel.setLatLng(measurePts[measurePts.length-1]).setContent(measureLen()+' m');}
+  else{if(measureLine){map.removeLayer(measureLine);measureLine=null;}if(measureLabel){map.removeLayer(measureLabel);measureLabel=null;}}
+}
+function finishMeasure(){
+  if(measurePts.length<2){startMeasure();return;}
+  const len=measureLen();
+  const label=prompt('Nazwa odcinka kabla (np. „Klatka B → kamera K3”):','Odcinek '+(cables.length+1));
+  if(label!==null){
+    const line=L.polyline(measurePts,{color:'#f59e0b',weight:3}).addTo(map);
+    const cab={id:'k'+Date.now(),label:label||('Odcinek '+(cables.length+1)),len:len,pts:measurePts.slice(),line};
+    line.bindTooltip(cab.label+' — '+len+' m',{className:'cam-label'});
+    line.on('contextmenu',ev=>{L.DomEvent.stop(ev);if(confirm('Usunąć odcinek: '+cab.label+'?')){map.removeLayer(line);cables=cables.filter(x=>x!==cab);refreshCable();save();}});
+    cables.push(cab); refreshCable(); save();
+  }
+  if(measureLine){map.removeLayer(measureLine);measureLine=null;}
+  if(measureLabel){map.removeLayer(measureLabel);measureLabel=null;}
+  measurePts=[]; setMode(null);
+}
+function refreshCable(){
+  const tb=document.querySelector('#cableTable tbody'); tb.innerHTML='';
+  const slack=(+el('cableSlack').value||0)/100, price=+el('pricePerM').value||0;
+  let tot=0,totS=0;
+  cables.forEach(c=>{
+    const withS=Math.round(c.len*(1+slack)); tot+=c.len; totS+=withS;
+    const tr=document.createElement('tr'); tr.className='trow';
+    tr.innerHTML=`<td>${c.label}</td><td>${c.len} m</td><td>${withS} m</td><td><span class="del-x">✕</span></td>`;
+    tr.querySelector('td').onclick=()=>{map.fitBounds(c.line.getBounds().pad(.3));};
+    tr.querySelector('.del-x').onclick=(e)=>{e.stopPropagation();map.removeLayer(c.line);cables=cables.filter(x=>x!==c);refreshCable();save();};
+    tb.appendChild(tr);
+  });
+  el('cabTotLen').textContent=tot+' m';
+  el('cabTotSlack').textContent=totS+' m';
+  el('cabCost').textContent=(totS*price).toLocaleString('pl-PL')+' zł';
+}
+el('pricePerM').oninput=()=>{refreshCable();save();};
+el('cableSlack').oninput=()=>{refreshCable();save();};
+
+/* ============ OBSZARY (strefy) ============ */
+let zones=[], zoneSeq=0, areaKind='side';   // areaKind: 'side' (poboczny) | 'main' (główny) — typ obrysowywanego obszaru
+let areaPts=[], areaPoly=null, areaLabel=null;
+const ZONE_PALETTE=["#f472b6","#a78bfa","#f59e0b","#22d3ee","#34d399","#fb7185","#60a5fa","#facc15"];
+
+function polygonArea(pts){ // pts:[[lat,lng],...] -> m² (geodezyjnie)
+  if(!pts||pts.length<3)return 0;
+  let s=0;
+  for(let i=0;i<pts.length;i++){
+    const a=pts[i], b=pts[(i+1)%pts.length];
+    s+=toR(b[1]-a[1])*(2+Math.sin(toR(a[0]))+Math.sin(toR(b[0])));
+  }
+  return Math.abs(s*R*R/2);
+}
+function fmtArea(a){
+  if(a>=10000)return (a/10000).toLocaleString('pl-PL',{maximumFractionDigits:2})+' ha';
+  return Math.round(a).toLocaleString('pl-PL')+' m²';
+}
+function fmtLen(m){return Math.round(m).toLocaleString('pl-PL')+' m';}
+// obwód obszaru (suma boków wielokąta, z domknięciem) w metrach
+function zonePerimeter(pts){
+  if(!pts||pts.length<2)return 0;
+  let s=0; const n=pts.length;
+  for(let i=0;i<n-1;i++) s+=map.distance(pts[i],pts[i+1]);
+  if(n>=3) s+=map.distance(pts[n-1],pts[0]);
+  return s;
+}
+// podpis obszaru na mapie: nazwa w 1. linii, „obwód N m" w 2. — bez m²/ha
+const zoneTooltip=z=>z.name+'<br>obwód '+fmtLen(zonePerimeter(z.pts));
+function startArea(){areaPts=[];if(areaPoly){map.removeLayer(areaPoly);areaPoly=null;}if(areaLabel){map.removeLayer(areaLabel);areaLabel=null;}}
+function areaClick(latlng){
+  areaPts.push([latlng.lat,latlng.lng]);
+  const col=areaKind==='main'?'#fbbf24':'#f472b6';   // podgląd: główny=bursztyn, poboczny=róż
+  if(!areaPoly)areaPoly=L.polygon(areaPts,{color:col,weight:areaKind==='main'?3:2,dashArray:'6,5',fillColor:col,fillOpacity:.15}).addTo(map);
+  else areaPoly.setLatLngs(areaPts);
+  if(!areaLabel)areaLabel=L.tooltip({permanent:true,direction:'center',className:'measure-label'});
+  areaLabel.setLatLng(latlng).setContent(areaPts.length<3?'klikaj obrys…':fmtArea(polygonArea(areaPts))); areaLabel.addTo(map);
+}
+function undoAreaPoint(){
+  if(!areaPts.length)return;
+  areaPts.pop();
+  if(areaPts.length){areaPoly.setLatLngs(areaPts);areaLabel.setLatLng(areaPts[areaPts.length-1]).setContent(areaPts.length<3?'klikaj obrys…':fmtArea(polygonArea(areaPts)));}
+  else{if(areaPoly){map.removeLayer(areaPoly);areaPoly=null;}if(areaLabel){map.removeLayer(areaLabel);areaLabel=null;}}
+}
+const isMainZone=z=>z.kind==='main';
+function finishArea(){
+  if(areaPts.length<3){startArea();return;}
+  const main=areaKind==='main';
+  const defName=main
+    ?('Obszar budowy '+(zones.filter(isMainZone).length+1))
+    :('Obszar '+(zones.filter(z=>!isMainZone(z)).length+1));
+  const name=prompt(main
+    ?'Nazwa obszaru GŁÓWNEGO (np. „Teren budowy”, „Cała inwestycja”):'
+    :'Nazwa obszaru pobocznego (np. „Garaż wielopoziomowy”, „Plac zabaw”):', defName);
+  if(name!==null){
+    zoneSeq++;
+    const z={id:'z'+Date.now(),kind:main?'main':'side',name:name||defName,color:ZONE_PALETTE[(zoneSeq-1)%ZONE_PALETTE.length],pts:areaPts.slice()};
+    z.area=polygonArea(z.pts);
+    drawZone(z); zones.push(z); selectZone(z); save();
+  }
+  startArea(); setMode(null);
+}
+function drawZone(z){
+  if(z.poly)map.removeLayer(z.poly);
+  // GŁÓWNY (np. cały teren budowy): gruby, przerywany obrys, prawie bez wypełnienia — nie zasłania obszarów pobocznych w środku.
+  // POBOCZNY: pełne wypełnienie jak dotychczas.
+  z.poly=L.polygon(z.pts, isMainZone(z)
+    ?{color:z.color,weight:3,dashArray:'8,6',fillColor:z.color,fillOpacity:.08}
+    :{color:z.color,weight:2,fillColor:z.color,fillOpacity:.25}).addTo(map);
+  z.poly.bindTooltip(zoneTooltip(z),{permanent:true,direction:'center',className:'cam-label zone-label'});
+  z.poly.on('click',()=>selectZone(z));   // klik = wybór obszaru (na zakładce „Obszary" pokazuje uchwyty wierzchołków)
+  z.poly.on('contextmenu',ev=>{L.DomEvent.stop(ev);if(confirm('Usunąć obszar: '+z.name+'?')){map.removeLayer(z.poly);zones=zones.filter(x=>x!==z);if(selectedZone===z){selectedZone=null;clearZoneHandles();}refreshZones();save();}});
+}
+// jeden wiersz obszaru w tabeli
+function zoneRow(z){
+  const tr=document.createElement('tr'); tr.className='trow'+(z===selectedZone?' sel':'');
+  const td1=document.createElement('td');
+  const grip=document.createElement('span'); grip.className='zdrag'; grip.textContent='⠿'; grip.title='Przeciągnij, aby zmienić kolejność / kategorię'; grip.draggable=true;
+  grip.ondragstart=e=>{draggedZone=z;e.dataTransfer.effectAllowed='move';e.dataTransfer.setData('text/plain','z');try{e.dataTransfer.setDragImage(tr,12,12);}catch(_){}tr.classList.add('dragging');};
+  grip.ondragend=()=>{draggedZone=null;tr.classList.remove('dragging');document.querySelectorAll('.drop-into').forEach(x=>x.classList.remove('drop-into'));};
+  const sw=document.createElement('span'); sw.className='swatch'; sw.style.background=z.color; sw.style.cursor='pointer';
+  sw.onclick=()=>selectZone(z);
+  const inp=document.createElement('input'); inp.className='mini'; inp.value=z.name; inp.draggable=false;
+  inp.oninput=()=>{z.name=inp.value;z.poly.setTooltipContent(zoneTooltip(z));};
+  inp.onchange=save;
+  td1.appendChild(grip); td1.appendChild(sw); td1.appendChild(inp);
+  const td2=document.createElement('td'); td2.style.cursor='pointer';
+  td2.innerHTML=`${fmtArea(z.area)}<div style="font-size:10px;color:var(--muted);font-weight:400">obwód ${fmtLen(zonePerimeter(z.pts))}</div>`;
+  td2.onclick=()=>{selectZone(z);map.fitBounds(z.poly.getBounds().pad(.2));};
+  const td3=document.createElement('td'); const x=document.createElement('span'); x.className='del-x'; x.textContent='✕';
+  x.onclick=()=>{map.removeLayer(z.poly);zones=zones.filter(v=>v!==z);if(selectedZone===z){selectedZone=null;clearZoneHandles();}refreshZones();save();};
+  td3.appendChild(x);
+  tr.appendChild(td1); tr.appendChild(td2); tr.appendChild(td3);
+  // wiersz = cel upuszczenia (zmiana kolejności): wstaw przeciągany obszar przed ten wiersz
+  tr.ondragover=e=>{if(!draggedZone||draggedZone===z)return;e.preventDefault();e.dataTransfer.dropEffect='move';tr.classList.add('drop-into');};
+  tr.ondragleave=()=>tr.classList.remove('drop-into');
+  tr.ondrop=e=>{e.preventDefault();tr.classList.remove('drop-into');if(draggedZone&&draggedZone!==z)reorderZoneBefore(draggedZone,z);};
+  return tr;
+}
+function refreshZones(){
+  const tb=document.querySelector('#zoneTable tbody'); tb.innerHTML='';
+  const mainZones=zones.filter(isMainZone), sideZones=zones.filter(z=>!isMainZone(z));
+  const mainC=document.getElementById('zsubCountMain'), sideC=document.getElementById('zsubCountSide');
+  if(mainC)mainC.textContent=mainZones.length; if(sideC)sideC.textContent=sideZones.length;
+  const list=zoneSubTab==='main'?mainZones:sideZones;
+  document.getElementById('zoneEmpty').style.display=list.length?'none':'block';
+  document.getElementById('zoneTable').style.display=list.length?'table':'none';
+  let tot=0; list.forEach(z=>{tot+=z.area;tb.appendChild(zoneRow(z));});
+  document.getElementById('zoneCount').textContent=list.length;
+  document.getElementById('zoneTot').textContent=fmtArea(tot);
+  document.getElementById('zoneTotLabel').textContent=zoneSubTab==='main'?'RAZEM główne':'RAZEM poboczne';
+}
+// widok do wydruku: oba rodzaje w jednej tabeli z nagłówkami i podsumowaniami
+function renderZonesGroupedForPrint(){
+  const tb=document.querySelector('#zoneTable tbody'); tb.innerHTML='';
+  document.getElementById('zoneTable').style.display=zones.length?'table':'none';
+  document.getElementById('zoneEmpty').style.display=zones.length?'none':'block';
+  const grp=(title,arr)=>{
+    if(!arr.length)return;
+    const hr=document.createElement('tr');const c=document.createElement('td');c.colSpan=3;c.textContent=title;
+    c.style.cssText='font-weight:700;text-transform:uppercase;font-size:10.5px;padding-top:.5rem';hr.appendChild(c);tb.appendChild(hr);
+    let s=0;arr.forEach(z=>{s+=z.area;tb.appendChild(zoneRow(z));});
+    const sr=document.createElement('tr');sr.innerHTML=`<td class="tot">Σ (${arr.length})</td><td class="tot">${fmtArea(s)}</td><td></td>`;tb.appendChild(sr);
+  };
+  grp('Obszary główne', zones.filter(isMainZone));
+  grp('Obszary poboczne (do wyceny)', zones.filter(z=>!isMainZone(z)));
+  const side=zones.filter(z=>!isMainZone(z));
+  document.getElementById('zoneCount').textContent=side.length;
+  document.getElementById('zoneTot').textContent=fmtArea(side.reduce((a,z)=>a+z.area,0));
+  document.getElementById('zoneTotLabel').textContent='RAZEM poboczne';
+}
+
+/* ============ PLANY (nakładki rastrowe) ============ */
+/* Każdy plan: {dbId,name,data,sw:[lat,lng],ne:[lat,lng],rotation,opacity,visible,layer,baseHalfLat,baseHalfLng,sizePct}.
+   Obrót realizowany przez doklejenie rotate() do transformu <img>, który Leaflet nadpisuje przy każdym resecie —
+   dlatego applyRot() reaplikowany po zoomend/moveend/viewreset oraz po setBounds/utworzeniu. */
+let overlays=[], selectedOverlay=null, planHandles=null;
+
+function planCenter(ov){return [(ov.sw[0]+ov.ne[0])/2,(ov.sw[1]+ov.ne[1])/2];}
+function initBaseSize(ov){ov.baseHalfLat=(ov.ne[0]-ov.sw[0])/2;ov.baseHalfLng=(ov.ne[1]-ov.sw[1])/2;ov.sizePct=100;}
+function applyRot(ov){
+  const el=ov.layer&&ov.layer.getElement(); if(!el)return;
+  el.style.transformOrigin='50% 50%';
+  el.style.transform=el.style.transform.replace(/\s*rotate\([^)]*\)/,'')+' rotate('+(ov.rotation||0)+'deg)';
+}
+function updateOverlayBounds(ov){if(ov.layer){ov.layer.setBounds(L.latLngBounds(ov.sw,ov.ne));applyRot(ov);}}
+map.on('zoomend moveend viewreset',()=>{overlays.forEach(applyRot);restackCameras();});
+
+function drawOverlay(ov){
+  if(ov.layer)map.removeLayer(ov.layer);
+  ov.layer=L.imageOverlay(ov.data,[ov.sw,ov.ne],{opacity:ov.opacity,interactive:true,className:'plan-overlay',pane:'overlayPane'});
+  ov.layer.on('click',()=>{if(mode)return;selectOverlay(ov);});
+  ov.layer.on('add',()=>bindPlanDrag(ov));   // przeciąganie planu bezpośrednio po jego obrazie
+  if(ov.visible)ov.layer.addTo(map);
+  applyRot(ov);
+}
+// czy jesteśmy w zakładce „Plany" — tylko wtedy plan przechwytuje przeciąganie (poza nią mapa panuje normalnie)
+const plansTabActive=()=>document.getElementById('tab-plans').classList.contains('active');
+function bindPlanDrag(ov){
+  const el=ov.layer&&ov.layer.getElement(); if(!el||el._planDragBound)return;
+  el._planDragBound=true;
+  L.DomEvent.on(el,'mousedown',ev=>startPlanDrag(ov,ev));
+}
+// bezpośrednie przeciąganie planu: przesuwamy jego granice zamiast panować mapą
+function startPlanDrag(ov,ev){
+  if(mode||!plansTabActive())return;   // podczas stawiania kamer/punktów lub poza zakładką Plany — nie przechwytuj
+  L.DomEvent.stop(ev);                  // zatrzymaj mousedown na obrazie: mapa nie zaczyna panningu, brak natywnego „ghost drag" <img>
+  selectOverlay(ov);
+  map.dragging.disable();
+  const start=map.mouseEventToLatLng(ev), sw0=ov.sw.slice(), ne0=ov.ne.slice();
+  let moved=false;
+  function mv(e){
+    const ll=map.mouseEventToLatLng(e), dLat=ll.lat-start.lat, dLng=ll.lng-start.lng;
+    moved=true;
+    ov.sw=[sw0[0]+dLat,sw0[1]+dLng]; ov.ne=[ne0[0]+dLat,ne0[1]+dLng];
+    updateOverlayBounds(ov);
+    if(planHandles)positionPlanHandles(ov);
+  }
+  function up(){
+    L.DomEvent.off(document,'mousemove',mv); L.DomEvent.off(document,'mouseup',up);
+    map.dragging.enable();
+    if(moved)persistOverlay(ov,{geom:1});
+  }
+  L.DomEvent.on(document,'mousemove',mv); L.DomEvent.on(document,'mouseup',up);
+}
+function mkPlanHandle(cls,tip){
+  const h=L.marker([0,0],{icon:L.divIcon({className:'plan-handle '+cls}),draggable:true,zIndexOffset:1200});
+  h.bindTooltip(tip,{direction:'top',offset:[0,-6],className:'cam-label'});
+  return h;
+}
+/* obrót punktu (px) wokół środka o deg — zgodnie z CSS rotate (ekran, oś Y w dół) */
+function rotPt(px,py,cx,cy,deg){
+  const r=deg*Math.PI/180, cos=Math.cos(r), sin=Math.sin(r), dx=px-cx, dy=py-cy;
+  return L.point(cx+dx*cos-dy*sin, cy+dx*sin+dy*cos);
+}
+/* 4 rogi planu (po obrocie) w pikselach: [NE, NW, SW, SE] */
+function overlayCornersPx(ov){
+  const Cpt=map.latLngToContainerPoint(L.latLng(planCenter(ov)));
+  const swPt=map.latLngToContainerPoint(L.latLng(ov.sw)), nePt=map.latLngToContainerPoint(L.latLng(ov.ne));
+  const raw=[[nePt.x,nePt.y],[swPt.x,nePt.y],[swPt.x,swPt.y],[nePt.x,swPt.y]]; // NE,NW,SW,SE (górna krawędź = mniejszy y)
+  return raw.map(p=>rotPt(p[0],p[1],Cpt.x,Cpt.y,ov.rotation||0));
+}
+/* punkt uchwytu obrotu (nad środkiem górnej krawędzi) + punkt zaczepienia łącznika */
+function rotHandlePx(ov){
+  const Cpt=map.latLngToContainerPoint(L.latLng(planCenter(ov)));
+  const swPt=map.latLngToContainerPoint(L.latLng(ov.sw)), nePt=map.latLngToContainerPoint(L.latLng(ov.ne));
+  const midX=(swPt.x+nePt.x)/2, rot=ov.rotation||0;
+  return {pt:rotPt(midX,nePt.y-32,Cpt.x,Cpt.y,rot), edge:rotPt(midX,nePt.y,Cpt.x,Cpt.y,rot)};
+}
+/* ustaw półprzekątną planu na d1 px (skala jednorodna wokół środka => proporcje zachowane) */
+function scaleOverlayTo(ov,d1){
+  if(d1<24)return; // minimalny rozmiar planu
+  const c=planCenter(ov);
+  const swPt=map.latLngToContainerPoint(L.latLng(ov.sw)), nePt=map.latLngToContainerPoint(L.latLng(ov.ne));
+  const d0=Math.hypot((nePt.x-swPt.x)/2,(nePt.y-swPt.y)/2)||1, s=d1/d0;
+  const hLat=(ov.ne[0]-c[0])*s, hLng=(ov.ne[1]-c[1])*s;
+  ov.sw=[c[0]-hLat,c[1]-hLng]; ov.ne=[c[0]+hLat,c[1]+hLng];
+  updateOverlayBounds(ov);
+}
+function positionPlanHandles(ov){
+  if(!planHandles){
+    const corners=[0,1,2,3].map(()=>mkPlanHandle('p-size','Skaluj — złap róg'));
+    corners.forEach(h=>{
+      h.on('drag',e=>{                                   // złapany róg => nowa półprzekątna = jego odległość od środka
+        const o=selectedOverlay; if(!o)return;
+        const Cpt=map.latLngToContainerPoint(L.latLng(planCenter(o))), hp=map.latLngToContainerPoint(e.target.getLatLng());
+        scaleOverlayTo(o,Math.hypot(hp.x-Cpt.x,hp.y-Cpt.y)); positionPlanHandles(o);
+      });
+      h.on('dragend',()=>{const o=selectedOverlay; if(!o)return; initBaseSize(o); renderPlans(); persistOverlay(o,{geom:1});});
+    });
+    const rot=mkPlanHandle('p-rot','Obróć — złap punkt');
+    rot.on('drag',e=>{
+      const o=selectedOverlay; if(!o)return;
+      const Cpt=map.latLngToContainerPoint(L.latLng(planCenter(o))), hp=map.latLngToContainerPoint(e.target.getLatLng());
+      const ang=Math.atan2(hp.y-Cpt.y,hp.x-Cpt.x)*180/Math.PI;   // 0=wschód, dodatnie = zgodnie ze wskazówkami (oś Y w dół)
+      o.rotation=(((Math.round(ang)+90)%360)+360)%360;           // uchwyt nad górną krawędzią => przesunięcie o +90°
+      applyRot(o); positionPlanHandles(o);
+    });
+    rot.on('dragend',()=>{const o=selectedOverlay; if(!o)return; renderPlans(); persistOverlay(o,{rotation:1});});
+    const link=L.polyline([[0,0],[0,0]],{color:'#fff',weight:1.5,dashArray:'3,3',interactive:false});
+    planHandles={corners,rot,link};
+  }
+  const cpx=overlayCornersPx(ov);
+  planHandles.corners.forEach((h,i)=>h.setLatLng(map.containerPointToLatLng(cpx[i])).addTo(map));
+  const rh=rotHandlePx(ov);
+  planHandles.link.setLatLngs([map.containerPointToLatLng(rh.edge),map.containerPointToLatLng(rh.pt)]).addTo(map);
+  planHandles.rot.setLatLng(map.containerPointToLatLng(rh.pt)).addTo(map);
+}
+function clearPlanHandles(){if(planHandles){planHandles.corners.forEach(h=>map.removeLayer(h));map.removeLayer(planHandles.rot);map.removeLayer(planHandles.link);}}
+function selectOverlay(ov){selectedOverlay=ov;positionPlanHandles(ov);renderPlans();activateTab('plans');}
+function deselectOverlay(){if(!selectedOverlay)return;selectedOverlay=null;clearPlanHandles();renderPlans();}
+
+function setOverlayOpacity(ov,o){ov.opacity=o;if(ov.layer)ov.layer.setOpacity(o);}
+function setOverlayRotation(ov,d){ov.rotation=d;applyRot(ov);}
+function setPlanSize(ov,pct){
+  const c=planCenter(ov), f=pct/100, hLat=ov.baseHalfLat*f, hLng=ov.baseHalfLng*f;
+  ov.sw=[c[0]-hLat,c[1]-hLng]; ov.ne=[c[0]+hLat,c[1]+hLng]; ov.sizePct=pct;
+  updateOverlayBounds(ov);
+  if(selectedOverlay===ov)positionPlanHandles(ov);
+}
+function toggleOverlayVisible(ov){
+  ov.visible=!ov.visible;
+  if(ov.visible){ov.layer.addTo(map);applyRot(ov);} else map.removeLayer(ov.layer);
+  if(!ov.visible&&selectedOverlay===ov)deselectOverlay(); else renderPlans();
+  persistOverlay(ov,{visible:1});
+}
+function deleteOverlay(ov){
+  if(SERVER&&ov.dbId) fetch('/api/monitoring/overlays/'+ov.dbId,{method:'DELETE'}).then(r=>markStatus(r.ok)).catch(()=>markStatus(false));
+  if(ov.layer)map.removeLayer(ov.layer);
+  overlays=overlays.filter(x=>x!==ov);
+  if(selectedOverlay===ov){selectedOverlay=null;clearPlanHandles();}
+  renderPlans(); if(!SERVER)save();
+}
+
+/* pole z suwakiem w stylu panelu bocznego (label + .val + .slider) */
+function planSliderField(label,val,min,max,unit,oninput,onchange){
+  const f=document.createElement('div'); f.className='field'; f.style.marginBottom='.45rem';
+  const lab=document.createElement('label'); lab.textContent=label+' ';
+  const valSpan=document.createElement('span'); valSpan.className='val'; valSpan.textContent=val+unit; lab.appendChild(valSpan);
+  const sl=document.createElement('div'); sl.className='slider';
+  const inp=document.createElement('input'); inp.type='range'; inp.min=min; inp.max=max; inp.value=val;
+  inp.oninput=()=>{valSpan.textContent=inp.value+unit;oninput(+inp.value);};
+  inp.onchange=onchange;
+  sl.appendChild(inp); f.appendChild(lab); f.appendChild(sl); return f;
+}
+function renderPlans(){
+  const list=el('planList'); if(!list)return; list.innerHTML='';
+  el('planEmpty').style.display=overlays.length?'none':'block';
+  overlays.forEach(ov=>{
+    const row=document.createElement('div'); row.className='plan-row'+(ov===selectedOverlay?' sel':'');
+    row.onclick=e=>{if(e.target.closest('input,button'))return;selectOverlay(ov);};
+    const head=document.createElement('div'); head.className='pr-head';
+    const nm=document.createElement('input'); nm.className='mini'; nm.value=ov.name; nm.title='Nazwa planu';
+    nm.oninput=()=>{ov.name=nm.value;}; nm.onchange=()=>persistOverlay(ov,{name:1});
+    const vis=document.createElement('button'); vis.className='icon-btn'; vis.textContent=ov.visible?'👁':'🚫'; vis.title='Pokaż / ukryj plan';
+    vis.onclick=()=>toggleOverlayVisible(ov);
+    const del=document.createElement('button'); del.className='icon-btn del-x'; del.textContent='✕'; del.title='Usuń plan';
+    del.onclick=()=>{if(confirm('Usunąć plan: '+ov.name+'?'))deleteOverlay(ov);};
+    head.appendChild(nm); head.appendChild(vis); head.appendChild(del); row.appendChild(head);
+    row.appendChild(planSliderField('Przezroczystość',Math.round(ov.opacity*100),0,100,' %',v=>setOverlayOpacity(ov,v/100),()=>persistOverlay(ov,{opacity:1})));
+    row.appendChild(planSliderField('Rozmiar',Math.round(ov.sizePct||100),20,400,' %',v=>setPlanSize(ov,v),()=>persistOverlay(ov,{geom:1})));
+    row.appendChild(planSliderField('Obrót',Math.round(ov.rotation||0),0,359,'°',v=>setOverlayRotation(ov,v),()=>persistOverlay(ov,{rotation:1})));
+    const cbtn=document.createElement('button'); cbtn.className='btn'; cbtn.style.width='100%'; cbtn.textContent='🎯 Wyśrodkuj na mapie';
+    cbtn.onclick=()=>map.fitBounds(L.latLngBounds(ov.sw,ov.ne).pad(.1));
+    row.appendChild(cbtn);
+    list.appendChild(row);
+  });
+}
+
+/* dodanie planu z gotowego data-URL: początkowo ~55% szerokości mapy;
+   wyśrodkowany na bieżącym widoku lub — przy upuszczeniu pliku — w miejscu kursora (atLL) */
+function addOverlayFromImage(name,dataURL,imgW,imgH,atLL){
+  const size=map.getSize(), wPx=size.x*0.55, hPx=wPx*(imgH/imgW);
+  const c=map.latLngToContainerPoint(atLL||map.getCenter());
+  const swLL=map.containerPointToLatLng(L.point(c.x-wPx/2,c.y+hPx/2)); // dolny-lewy = min lat, min lng
+  const neLL=map.containerPointToLatLng(L.point(c.x+wPx/2,c.y-hPx/2)); // górny-prawy = max lat, max lng
+  const ov={dbId:null,name,data:dataURL,sw:[swLL.lat,swLL.lng],ne:[neLL.lat,neLL.lng],rotation:0,opacity:0.7,visible:true,layer:null};
+  initBaseSize(ov); overlays.push(ov); drawOverlay(ov); createOverlayRecord(ov);
+  selectOverlay(ov); save();
+}
+/* pdf.js: worker z tego samego origin (blob) — unika blokady cross-origin Worker; fallback: fake worker */
+if(window.pdfjsLib){
+  fetch('https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js')
+    .then(r=>r.text())
+    .then(t=>{pdfjsLib.GlobalWorkerOptions.workerSrc=URL.createObjectURL(new Blob([t],{type:'application/javascript'}));})
+    .catch(()=>{pdfjsLib.GlobalWorkerOptions.workerSrc='https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js';});
+}
+const isPlanFile=f=>!!f&&(/^image\//.test(f.type)||f.type==='application/pdf'||/\.pdf$/i.test(f.name));
+const planName=f=>(f.name||'Plan').replace(/\.[^.]+$/,'')||'Plan';
+/* każdy plan zapisujemy do WebP (mniejszy niż JPEG/PNG); przy dużym pliku obniżamy jakość */
+function planFromCanvas(name,cv,atLL){
+  let url=cv.toDataURL('image/webp',0.85);
+  if(url.length>7500000) url=cv.toDataURL('image/webp',0.7);
+  if(url.length>7500000){alert('Plan jest zbyt duży nawet po kompresji. Zmniejsz rozdzielczość i spróbuj ponownie.');return;}
+  addOverlayFromImage(name,url,cv.width,cv.height,atLL);
+}
+/* obraz (JPG/PNG/…): skalowanie na canvasie do 1800 px dłuższego boku, potem WebP */
+function loadImagePlan(f,atLL){
+  const r=new FileReader();
+  r.onload=()=>{
+    const img=new Image();
+    img.onload=()=>{
+      const max=1800; let w=img.naturalWidth,h=img.naturalHeight;
+      const sc=Math.min(1,max/Math.max(w,h)); w=Math.round(w*sc); h=Math.round(h*sc);
+      const cv=document.createElement('canvas'); cv.width=w; cv.height=h;
+      cv.getContext('2d').drawImage(img,0,0,w,h);
+      planFromCanvas(planName(f),cv,atLL);
+    };
+    img.onerror=()=>alert('Nie udało się wczytać obrazu.');
+    img.src=r.result;
+  };
+  r.readAsDataURL(f);
+}
+/* PDF: przyjmujemy tylko JEDNOSTRONICOWY; renderujemy stronę 1 do ~1800 px i zapisujemy jako WebP */
+function loadPdfPlan(f,atLL){
+  if(!window.pdfjsLib){alert('Obsługa PDF nie została załadowana. Odśwież stronę i spróbuj ponownie.');return;}
+  const r=new FileReader();
+  r.onload=()=>{
+    pdfjsLib.getDocument({data:new Uint8Array(r.result)}).promise.then(pdf=>{
+      if(pdf.numPages!==1){alert('PDF ma '+pdf.numPages+' stron — wgraj plik z jedną stroną (lub obraz).');return;}
+      return pdf.getPage(1).then(page=>{
+        const base=page.getViewport({scale:1});
+        const scale=Math.min(3,1800/Math.max(base.width,base.height)); // celuj w ~1800 px dłuższy bok
+        const vp=page.getViewport({scale:Math.max(scale,0.2)});
+        const cv=document.createElement('canvas'); cv.width=Math.round(vp.width); cv.height=Math.round(vp.height);
+        const ctx=cv.getContext('2d'); ctx.fillStyle='#fff'; ctx.fillRect(0,0,cv.width,cv.height); // białe tło pod przezroczystością
+        return page.render({canvasContext:ctx,viewport:vp}).promise.then(()=>planFromCanvas(planName(f),cv,atLL));
+      });
+    }).catch(err=>alert('Nie udało się wczytać PDF: '+(err&&err.message||err)));
+  };
+  r.readAsArrayBuffer(f);
+}
+function loadPlanFile(f,atLL){
+  if(!f)return;
+  if(/^image\//.test(f.type)) loadImagePlan(f,atLL);
+  else if(f.type==='application/pdf'||/\.pdf$/i.test(f.name)) loadPdfPlan(f,atLL);
+  else alert('Wybierz obraz (JPG/PNG) lub jednostronicowy PDF.');
+}
+el('btnAddPlan').onclick=()=>el('planInput').click();
+el('planInput').onchange=e=>{const f=e.target.files[0]; e.target.value=''; loadPlanFile(f);};
+
+/* ====== DRAG & DROP planu z pliku na mapę — upuszczony obraz ląduje w miejscu kursora ====== */
+(function(){
+  const mapEl=map.getContainer();
+  const hasFiles=e=>e.dataTransfer&&Array.from(e.dataTransfer.types||[]).includes('Files');
+  const stop=e=>{e.preventDefault();e.stopPropagation();};
+  let depth=0;
+  mapEl.addEventListener('dragenter',e=>{if(!hasFiles(e))return;stop(e);depth++;mapEl.classList.add('plan-dropzone');});
+  mapEl.addEventListener('dragover',e=>{if(!hasFiles(e))return;stop(e);e.dataTransfer.dropEffect='copy';});
+  mapEl.addEventListener('dragleave',e=>{if(!hasFiles(e))return;stop(e);if(--depth<=0){depth=0;mapEl.classList.remove('plan-dropzone');}});
+  mapEl.addEventListener('drop',e=>{
+    if(!hasFiles(e))return; stop(e); depth=0; mapEl.classList.remove('plan-dropzone');
+    const atLL=map.mouseEventToLatLng(e);
+    const files=Array.from(e.dataTransfer.files||[]).filter(isPlanFile);
+    if(!files.length){alert('Upuść obraz (JPG/PNG) lub jednostronicowy PDF, aby dodać plan.');return;}
+    activateTab('plans');
+    files.forEach((f,i)=>loadPlanFile(f, i===0?atLL:null)); // kolejne pliki: wyśrodkowane, by się nie nakładały 1:1
+  });
+})();
+
+/* ====== PERSYSTENCJA planów: SERWER (REST) vs LOKALNIE (save) ====== */
+function debouncePut(ov,body){
+  ov._pending=Object.assign(ov._pending||{},body);
+  clearTimeout(ov._putTimer);
+  ov._putTimer=setTimeout(()=>{
+    const b=ov._pending; ov._pending=null;
+    fetch('/api/monitoring/overlays/'+ov.dbId,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)})
+      .then(r=>markStatus(r.ok)).catch(()=>markStatus(false));
+  },400);
+}
+function persistOverlay(ov,fields){
+  if(SERVER){
+    if(!ov.dbId)return; // POST jeszcze nie wrócił — po jego powrocie wysyłamy pełną synchronizację
+    const b={};
+    if(fields.name)b.name=ov.name;
+    if(fields.opacity)b.opacity=ov.opacity;
+    if(fields.rotation)b.rotation=ov.rotation;
+    if(fields.visible)b.visible=ov.visible;
+    if(fields.geom){b.swLat=ov.sw[0];b.swLng=ov.sw[1];b.neLat=ov.ne[0];b.neLng=ov.ne[1];}
+    debouncePut(ov,b);
+  }else save();
+}
+function createOverlayRecord(ov){
+  if(!SERVER){save();return;}
+  fetch('/api/monitoring/'+PROJECT_ID+'/overlays',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({name:ov.name,data:ov.data,swLat:ov.sw[0],swLng:ov.sw[1],neLat:ov.ne[0],neLng:ov.ne[1],rotation:ov.rotation,opacity:ov.opacity})})
+    .then(r=>r.ok?r.json():Promise.reject()).then(j=>{
+      ov.dbId=j.data.id; markStatus(true);
+      // dosynchronizuj ewentualne zmiany sprzed powrotu POST
+      persistOverlay(ov,{name:1,opacity:1,rotation:1,visible:1,geom:1});
+    }).catch(()=>markStatus(false));
+}
+function loadOverlays(){
+  if(!SERVER)return;
+  fetch('/api/monitoring/'+PROJECT_ID+'/overlays',{cache:'no-store'}).then(r=>r.ok?r.json():Promise.reject())
+    .then(j=>{(j.data||[]).forEach(o=>{
+      const ov={dbId:o.id,name:o.name,data:o.data,sw:[o.swLat,o.swLng],ne:[o.neLat,o.neLng],
+        rotation:o.rotation||0,opacity:o.opacity==null?0.7:o.opacity,visible:o.visible!==false,layer:null};
+      initBaseSize(ov); overlays.push(ov); drawOverlay(ov);
+    }); renderPlans();}).catch(()=>{});
+}
+
+/* ============ TRYBY ============ */
+function setMode(m){
+  mode=m;
+  document.getElementById('btnAddCam').classList.toggle('active',m==='addcam');
+  document.getElementById('btnAddSzlaban').classList.toggle('active',m==='pt:szlaban');
+  document.getElementById('btnAddBudka').classList.toggle('active',m==='pt:budka');
+  document.getElementById('btnAddNvr').classList.toggle('active',m==='pt:nvr');
+  document.getElementById('btnMeasure').classList.toggle('active',m==='measure');
+  document.getElementById('btnAddArea').classList.toggle('active',m==='area'&&areaKind==='side');
+  document.getElementById('btnAddAreaMain').classList.toggle('active',m==='area'&&areaKind==='main');
+  map.getContainer().style.cursor=m?'crosshair':'';
+  // porzuć niedokończony pomiar/obrys przy każdej zmianie trybu (naprawia „wiszące" linie)
+  startMeasure(); startArea();
+  map.doubleClickZoom[(m==='measure'||m==='area')?'disable':'enable']();
+}
+document.getElementById('btnAddCam').onclick=()=>setMode(mode==='addcam'?null:'addcam');
+document.getElementById('btnAddSzlaban').onclick=()=>setMode(mode==='pt:szlaban'?null:'pt:szlaban');
+document.getElementById('btnAddBudka').onclick=()=>setMode(mode==='pt:budka'?null:'pt:budka');
+document.getElementById('btnAddNvr').onclick=()=>setMode(mode==='pt:nvr'?null:'pt:nvr');
+document.getElementById('btnMeasure').onclick=()=>{if(mode==='measure')finishMeasure();else setMode('measure');};
+document.getElementById('btnAddArea').onclick=()=>{if(mode==='area'&&areaKind==='side')finishArea();else{areaKind='side';setMode('area');}};
+document.getElementById('btnAddAreaMain').onclick=()=>{if(mode==='area'&&areaKind==='main')finishArea();else{areaKind='main';setMode('area');}};
+
+map.on('click',e=>{
+  if(mode==='addcam'){addCamera(e.latlng);setMode(null);}
+  else if(mode&&mode.indexOf('pt:')===0){addPoint(mode.slice(3),e.latlng);setMode(null);}
+  else if(mode==='measure'){measureClick(e.latlng);}
+  else if(mode==='area'){areaClick(e.latlng);}
+});
+map.on('dblclick',e=>{
+  if(mode==='measure'){L.DomEvent.stop(e);finishMeasure();}
+  else if(mode==='area'){L.DomEvent.stop(e);finishArea();}
+});
+map.on('contextmenu',e=>{
+  if(mode==='measure')undoMeasurePoint();
+  else if(mode==='area')undoAreaPoint();
+});
+// PPM = akcje aplikacji (usuwanie / cofanie punktu) — bez natywnego menu przeglądarki.
+// W polach tekstowych zostawiamy natywne menu (kopiuj/wklej).
+document.addEventListener('contextmenu',e=>{
+  if(/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName))return;
+  e.preventDefault();
+},true);
+
+document.addEventListener('keydown',e=>{
+  const typing=/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
+  if(e.key==='Escape'){setMode(null);deselectOverlay();return;}
+  if(typing)return;
+  const k=e.key.toLowerCase();
+  if(k==='k')setMode(mode==='addcam'?null:'addcam');
+  else if(k==='s')setMode(mode==='pt:szlaban'?null:'pt:szlaban');
+  else if(k==='b')setMode(mode==='pt:budka'?null:'pt:budka');
+  else if(k==='n')setMode(mode==='pt:nvr'?null:'pt:nvr');
+  else if(k==='m'){if(mode==='measure')finishMeasure();else setMode('measure');}
+  else if(k==='o'){if(mode==='area'&&areaKind==='side')finishArea();else{areaKind='side';setMode('area');}}
+  else if(k==='g'){if(mode==='area'&&areaKind==='main')finishArea();else{areaKind='main';setMode('area');}}
+  else if(k==='p')toggleLabels();
+  else if(e.key==='Enter'&&mode==='measure')finishMeasure();
+  else if(e.key==='Enter'&&mode==='area')finishArea();
+  else if(e.key==='Delete'&&selected)delCam(selected);
+});
+
+/* ============ ZAKŁADKI ============ */
+let activeTab='cam';
+function activateTab(name){
+  activeTab=name;
+  document.querySelectorAll('.side-tabs button[data-tab]').forEach(b=>b.classList.toggle('active',b.dataset.tab===name));
+  document.querySelectorAll('.tabpane').forEach(p=>p.classList.toggle('active',p.id==='tab-'+name));
+  refreshCamDrag(); refreshZoneEdit();   // uprawnienia edycji zależne od aktywnej zakładki
+  if(typeof updateObjPinVisibility==='function')updateObjPinVisibility();
+}
+document.querySelectorAll('.side-tabs button[data-tab]').forEach(b=>b.onclick=()=>activateTab(b.dataset.tab));
+
+/* ====== POKAŻ / UKRYJ KATEGORIĘ NA MAPIE (ikonki oka przy zakładkach) ====== */
+const catVisible={cam:true,points:true,zones:true,cables:true,plans:true};
+const CAT_LABEL={cam:'kamery',points:'punkty',zones:'obszary',cables:'okablowanie',plans:'plany'};
+function applyCatVisibility(cat){
+  const on=catVisible[cat];
+  const setL=l=>{if(!l)return; if(on){if(!map.hasLayer(l))l.addTo(map);} else if(map.hasLayer(l))map.removeLayer(l);};
+  if(cat==='cam'){cameras.forEach(c=>{setL(c.marker);setL(c.cover);}); if(!on)clearHandles(); else{if(selected)positionHandles(selected);refreshCamDrag();}}
+  else if(cat==='points'){points.forEach(p=>setL(p.marker));}
+  else if(cat==='zones'){zones.forEach(z=>setL(z.poly)); if(!on)clearZoneHandles(); else refreshZoneEdit(); refreshZoneSegments();}
+  else if(cat==='cables'){cables.forEach(c=>setL(c.line));}
+  else if(cat==='plans'){overlays.forEach(ov=>{if(!ov.layer)return; const show=on&&ov.visible; if(show){if(!map.hasLayer(ov.layer)){ov.layer.addTo(map);applyRot(ov);}}else if(map.hasLayer(ov.layer))map.removeLayer(ov.layer);}); if(!on)clearPlanHandles(); else if(selectedOverlay)positionPlanHandles(selectedOverlay);}
+  const b=document.querySelector('.tab-eye[data-cat="'+cat+'"]');
+  if(b){b.textContent=on?'👁':'🚫';b.classList.toggle('off',!on);b.title=(on?'Ukryj ':'Pokaż ')+CAT_LABEL[cat]+' na mapie';}
+}
+function toggleCategory(cat){catVisible[cat]=!catVisible[cat];applyCatVisibility(cat);}
+document.querySelectorAll('.tab-eye').forEach(b=>b.onclick=()=>toggleCategory(b.dataset.cat));
+
+/* ====== EDYCJA ZALEŻNA OD ZAKŁADKI ====== */
+// przesuwanie kamer dozwolone tylko na zakładce „Kamera" lub „Lista"
+function camDragAllowed(){return activeTab==='cam'||activeTab==='list';}
+function refreshCamDrag(){
+  const on=camDragAllowed();
+  cameras.forEach(c=>{if(c.marker&&c.marker.dragging){on?c.marker.dragging.enable():c.marker.dragging.disable();}});
+}
+// edycja obszaru (przeciąganie wierzchołków) tylko na zakładce „Obszary" i dla wybranego obszaru
+let selectedZone=null, zoneHandles=[], zoneSegLabels=[];
+function clearZoneSegments(){zoneSegLabels.forEach(t=>map.removeLayer(t));zoneSegLabels=[];}
+function clearZoneHandles(){zoneHandles.forEach(h=>map.removeLayer(h));zoneHandles=[];clearZoneSegments();}
+function styleZones(){zones.forEach(z=>{if(z.poly){const base=isMainZone(z)?3:2;z.poly.setStyle({weight:z===selectedZone?base+2:base});}});}
+function showZoneHandles(z){
+  clearZoneHandles();
+  z.pts.forEach((pt,i)=>{
+    const h=L.marker(pt,{icon:L.divIcon({className:'zone-vertex'}),draggable:true,zIndexOffset:1100});
+    h.on('drag',e=>{const p=e.target.getLatLng();z.pts[i]=[p.lat,p.lng];z.poly.setLatLngs(z.pts);z.poly.setTooltipContent(zoneTooltip({...z,area:polygonArea(z.pts)}));refreshZoneSegments();});
+    h.on('dragend',()=>{z.area=polygonArea(z.pts);z.poly.setTooltipContent(zoneTooltip(z));refreshZones();refreshZoneSegments();save();});
+    h.addTo(map); zoneHandles.push(h);
+  });
+}
+// etykiety długości każdego boku (odcinka) wybranego obszaru
+function showZoneSegments(z){
+  clearZoneSegments();
+  const pts=z.pts; if(!pts||pts.length<2)return;
+  const n=pts.length, edges=n>=3?n:n-1;   // <3 pkt = otwarta linia (bez domknięcia)
+  for(let i=0;i<edges;i++){
+    const a=pts[i], b=pts[(i+1)%n], mid=[(a[0]+b[0])/2,(a[1]+b[1])/2];
+    const t=L.tooltip({permanent:true,direction:'center',className:'seg-label'}).setLatLng(mid).setContent(fmtLen(map.distance(a,b)));
+    t.addTo(map); zoneSegLabels.push(t);
+  }
+}
+function refreshZoneSegments(){
+  clearZoneSegments();
+  if(catVisible.zones && activeTab==='zones' && selectedZone && selectedZone.poly && zones.includes(selectedZone)) showZoneSegments(selectedZone);
+}
+function refreshZoneEdit(){
+  clearZoneHandles(); styleZones();
+  if(activeTab==='zones'&&selectedZone&&selectedZone.poly&&zones.includes(selectedZone)) showZoneHandles(selectedZone);
+  refreshZoneSegments();
+}
+function selectZone(z){selectedZone=z;activateTab('zones');setZoneSubTab(isMainZone(z)?'main':'side');}
+/* podzakładki Poboczne/Główne + drag&drop kolejności i przenoszenia między kategoriami */
+let zoneSubTab='side', draggedZone=null;
+function setZoneSubTab(kind){
+  zoneSubTab=kind;
+  document.querySelectorAll('.zsub').forEach(b=>b.classList.toggle('active',b.dataset.kind===kind));
+  refreshZones();
+}
+function reorderZoneBefore(dz,target){
+  if(dz===target)return;
+  zones.splice(zones.indexOf(dz),1);
+  zones.splice(zones.indexOf(target),0,dz);
+  refreshZones(); save();
+}
+function changeZoneKind(z,kind){
+  if(z.kind===kind)return;
+  z.kind=kind; drawZone(z);                 // odtwarza warstwę wg nowego stylu (główny=przerywany / poboczny=pełny)
+  if(!catVisible.zones&&z.poly)map.removeLayer(z.poly);   // uszanuj ukrytą kategorię obszarów
+  if(selectedZone===z)refreshZoneEdit();    // ponownie podepnij uchwyty do nowego poly
+  setZoneSubTab(kind);                       // pokaż kategorię docelową (obszar tam się przeniósł)
+  save();
+}
+document.querySelectorAll('.zsub').forEach(b=>{
+  b.onclick=()=>setZoneSubTab(b.dataset.kind);
+  b.ondragover=e=>{if(!draggedZone)return;e.preventDefault();e.dataTransfer.dropEffect='move';b.classList.add('drop-into');};
+  b.ondragleave=()=>b.classList.remove('drop-into');
+  b.ondrop=e=>{e.preventDefault();b.classList.remove('drop-into');if(draggedZone)changeZoneKind(draggedZone,b.dataset.kind);};
+});
+el('objInfo').addEventListener('input',save);
+
+/* ============ ZAPIS / ODCZYT ============ */
+function serialize(){
+  const o={
+    center:[map.getCenter().lat,map.getCenter().lng], zoom:map.getZoom(), base:baseSel.value,
+    seq:{cam:camSeq,pt:ptSeq,zone:zoneSeq},
+    info:el('objInfo').value, pricePerM:el('pricePerM').value, slack:el('cableSlack').value,
+    objPin:objPin,
+    cameras:cameras.map(c=>({id:c.id,num:c.num,name:c.name,type:c.type,lat:c.lat,lng:c.lng,az:c.az,fov:c.fov,range:c.range,height:c.height,model:c.model,notes:c.notes,color:c.color,perimeterZone:c.perimeterZone})),
+    points:points.map(p=>({id:p.id,num:p.num,type:p.type,name:p.name,lat:p.lat,lng:p.lng})),
+    cables:cables.map(c=>({id:c.id,label:c.label,len:c.len,pts:c.pts})),
+    zones:zones.map(z=>({id:z.id,kind:isMainZone(z)?'main':'side',name:z.name,color:z.color,pts:z.pts,area:z.area}))
+  };
+  // W trybie SERVER plany trzyma osobna tabela (REST) — nie pakujemy obrazów do auto-zapisu stanu.
+  if(!SERVER) o.overlays=overlays.map(v=>({name:v.name,data:v.data,sw:v.sw,ne:v.ne,rotation:v.rotation,opacity:v.opacity,visible:v.visible}));
+  return o;
+}
+/* tryb aplikacji: otwarty z alfa-app (?id=N) => auto-zapis do bazy przez API */
+const SERVER = !!PROJECT_ID;
+let srvTimer=null, lastSrv='';
+function markStatus(ok){
+  const s=document.getElementById('saveStatus'); if(!s)return;
+  const info = SERVER ? (ok?['🟢','Auto-zapis w alfa-app']:['🔴','Błąd zapisu']) : ['💾','Zapis w przeglądarce'];
+  s.textContent = info[0];
+  s.title = info[1];
+}
+let READY=false; // zapis do API dopiero po wczytaniu projektu w init() — inaczej pusty stan nadpisałby projekt
+function serverSave(){
+  if(!READY)return;
+  clearTimeout(srvTimer);
+  srvTimer=setTimeout(()=>{
+    const body=JSON.stringify(serialize());
+    if(body===lastSrv)return; lastSrv=body;
+    fetch('/api/monitoring/'+PROJECT_ID+'/data',{method:'PUT',headers:{'Content-Type':'application/json'},body}).then(r=>markStatus(r.ok)).catch(()=>markStatus(false));
+  },600);
+}
+function save(){updateCounts();try{localStorage.setItem(STORAGE_KEY,JSON.stringify(serialize()));}catch(e){} if(SERVER)serverSave();}
+/* autozapis na żywo: przy każdej zmianie (save()), dodatkowo co 4 s i przy zamknięciu karty */
+window.addEventListener('beforeunload',save);
+setInterval(save,4000);
+function loadState(d){
+  cameras.forEach(c=>{map.removeLayer(c.marker);if(c.cover)map.removeLayer(c.cover);});
+  points.forEach(p=>map.removeLayer(p.marker));
+  cables.forEach(c=>map.removeLayer(c.line));
+  zones.forEach(z=>{if(z.poly)map.removeLayer(z.poly);});
+  overlays.forEach(o=>{if(o.layer)map.removeLayer(o.layer);});
+  cameras=[];points=[];cables=[];zones=[];overlays=[];clearHandles();clearPlanHandles();clearZoneHandles();selected=null;selectedOverlay=null;selectedZone=null;startArea();
+  if(d.base&&bases[d.base]){map.removeLayer(currentBase);currentBase=bases[d.base].addTo(map);baseSel.value=d.base;}
+  if(d.center)map.setView(d.center,d.zoom||DEFAULT_ZOOM);
+  camSeq=d.seq?.cam||0; ptSeq=d.seq?.pt||{}; zoneSeq=d.seq?.zone||0;
+  el('objInfo').value=d.info||DEFAULT_INFO;
+  setObjPin(d.objPin||null,false);
+  el('pricePerM').value=d.pricePerM||0; el('cableSlack').value=d.slack||10;
+  (d.cameras||[]).forEach(c=>{const cam={...c};cameras.push(cam);drawCam(cam);});
+  (d.points||[]).forEach(p=>{const pt={...p};points.push(pt);drawPoint(pt);});
+  (d.nvrs||[]).forEach(n=>{const pt={...n,type:'nvr'};points.push(pt);drawPoint(pt);}); // wsteczna zgodność
+  (d.cables||[]).forEach(c=>{
+    const cab={...c,line:L.polyline(c.pts,{color:'#f59e0b',weight:3}).addTo(map)};
+    cab.line.bindTooltip(cab.label+' — '+cab.len+' m',{className:'cam-label'});
+    cab.line.on('contextmenu',ev=>{L.DomEvent.stop(ev);if(confirm('Usunąć odcinek: '+cab.label+'?')){map.removeLayer(cab.line);cables=cables.filter(x=>x!==cab);refreshCable();save();}});
+    cables.push(cab);
+  });
+  (d.zones||[]).forEach(z=>{const zn={...z};if(zn.kind!=='main')zn.kind='side';if(zn.area==null)zn.area=polygonArea(zn.pts);zones.push(zn);drawZone(zn);});
+  (d.overlays||[]).forEach(o=>{ // plany z zapisu lokalnego (w trybie SERVER wczytuje je loadOverlays())
+    const ov={dbId:null,name:o.name,data:o.data,sw:o.sw,ne:o.ne,rotation:o.rotation||0,opacity:o.opacity==null?0.7:o.opacity,visible:o.visible!==false,layer:null};
+    initBaseSize(ov); overlays.push(ov); drawOverlay(ov);
+  });
+  refreshList(); refreshPoints(); refreshCable(); refreshZones(); renderPlans(); restackCameras();
+  document.getElementById('camEmpty').style.display='block';
+  document.getElementById('camEdit').style.display='none';
+}
+document.getElementById('btnSave').onclick=()=>{
+  const blob=new Blob([JSON.stringify(serialize(),null,2)],{type:'application/json'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+  a.download='monitoring-'+(PROJECT_NAME||'projekt').toLowerCase().replace(/[^a-z0-9ąćęłńóśźż]+/gi,'-')+'.json'; a.click();
+};
+document.getElementById('btnLoad').onclick=()=>document.getElementById('fileInput').click();
+document.getElementById('fileInput').onchange=e=>{
+  const f=e.target.files[0]; if(!f)return;
+  const r=new FileReader(); r.onload=()=>{try{loadState(JSON.parse(r.result));save();}catch(err){alert('Błędny plik: '+err);}}; r.readAsText(f);
+};
+/* przenieś notatki do elementu drukowanego (pełna treść, bez ucinania) */
+let _printPrevView=null;
+function prepPrint(){
+  el('printNotes').textContent=el('objInfo').value;
+  renderZonesGroupedForPrint();
+  // dopasuj widok mapy do PIERWSZEGO obszaru głównego (np. całego terenu budowy), aby zmieścił się w wydruku
+  const mainZ=zones.find(isMainZone);
+  if(mainZ&&mainZ.poly){
+    _printPrevView={center:map.getCenter(),zoom:map.getZoom()};
+    map.fitBounds(mainZ.poly.getBounds().pad(.04),{animate:false});
+  }
+  setTimeout(()=>map.invalidateSize(),0);
+}
+window.addEventListener('beforeprint',prepPrint);
+window.addEventListener('afterprint',()=>{
+  refreshZones();
+  if(_printPrevView){map.setView(_printPrevView.center,_printPrevView.zoom,{animate:false});_printPrevView=null;}
+});
+document.getElementById('btnPrint').onclick=()=>{prepPrint();setTimeout(()=>window.print(),300);};
+
+/* ============ PODPISY + LICZNIK ============ */
+function toggleLabels(){
+  const on=document.getElementById('map').classList.toggle('hide-labels');
+  document.getElementById('btnLabels').classList.toggle('active',!on);
+}
+document.getElementById('btnLabels').onclick=toggleLabels;
+function updateCounts(){
+  const c=el('counts'); if(!c)return;
+  const kabel=cables.reduce((s,x)=>s+x.len,0);
+  c.textContent=`Kamery: ${cameras.length} · Punkty: ${points.length} · Obszary: ${zones.length} · Kabel: ${kabel} m`+(overlays.length?` · Plany: ${overlays.length}`:'');
+}
+
+/* ============ PINEZKA OBIEKTU ============ */
+let objPin=null;          // {lat, lng, address}
+let objPinMarker=null;
+let lastFoundAddr=null;   // ostatnio wybrany adres z wyszukiwarki
+
+function drawObjPin(){
+  if(objPinMarker){map.removeLayer(objPinMarker);objPinMarker=null;}
+  if(!objPin)return;
+  objPinMarker=L.marker([objPin.lat,objPin.lng],{
+    icon:L.divIcon({className:'',html:'<div style="font-size:30px;line-height:1;filter:drop-shadow(0 1px 3px rgba(0,0,0,.7))">📍</div>',iconSize:[30,30],iconAnchor:[15,28]}),
+    interactive:true,zIndexOffset:900
+  });
+  if(objPin.address)objPinMarker.bindTooltip('📍 '+objPin.address,{className:'cam-label',direction:'top',offset:[0,-24]});
+  updateObjPinVisibility();
+}
+// pinezka obiektu widoczna tylko na zakładce „Obiekt" albo gdy kursor jest w wyszukiwarce adresów
+function updateObjPinVisibility(){
+  if(!objPinMarker)return;
+  const show=activeTab==='info'||document.activeElement===el('addrSearch');
+  if(show){ if(!map.hasLayer(objPinMarker))objPinMarker.addTo(map); }
+  else if(map.hasLayer(objPinMarker)) map.removeLayer(objPinMarker);
+}
+function renderObjInfo(){
+  const empty=el('objAddrEmpty'), box=el('objAddrBox'), txt=el('objAddrText');
+  if(!empty||!box)return;
+  if(objPin&&objPin.address){empty.style.display='none';box.style.display='block';txt.textContent=objPin.address;}
+  else{empty.style.display='block';box.style.display='none';if(txt)txt.textContent='';}
+}
+function setObjPin(pin,persist=true){
+  objPin=pin?{lat:pin.lat,lng:pin.lng,address:pin.address||''}:null;
+  drawObjPin(); renderObjInfo();
+  if(persist)save();
+}
+el('btnSaveObjPin').onclick=()=>{
+  if(!lastFoundAddr){alert('Najpierw wyszukaj i wybierz adres w polu „🔎 Szukaj adresu…".');return;}
+  setObjPin(lastFoundAddr);
+  activateTab('info');   // pokaż zapisany adres w zakładce „Obiekt"
+};
+el('btnGoObjPin').onclick=()=>{ if(objPin)map.setView([objPin.lat,objPin.lng],19); };
+el('btnDelObjPin').onclick=()=>{ if(objPin&&confirm('Usunąć zapisaną pinezkę obiektu?'))setObjPin(null); };
+
+/* ============ WYSZUKIWARKA ADRESÓW (Nominatim / OSM) ============ */
+(function initAddrSearch(){
+  const input=document.getElementById('addrSearch');
+  const box=document.getElementById('addrResults');
+  if(!input||!box)return;
+  let items=[], active=-1, timer=null, seq=0, foundMarker=null;
+
+  function close(){box.classList.remove('open');box.innerHTML='';items=[];active=-1;}
+  function msg(t){box.innerHTML='<div class="msg">'+t+'</div>';box.classList.add('open');}
+
+  function render(){
+    box.innerHTML='';
+    items.forEach((it,i)=>{
+      const parts=it.display_name.split(',');
+      const head=parts.slice(0,2).join(',').trim();
+      const rest=parts.slice(2).join(',').trim();
+      const row=document.createElement('div');
+      row.className='row'+(i===active?' active':'');
+      row.innerHTML='<div>'+head+'</div>'+(rest?'<small>'+rest+'</small>':'');
+      row.onmousedown=e=>{e.preventDefault();pick(it);};
+      box.appendChild(row);
+    });
+    box.classList.add('open');
+  }
+
+  function pick(it){
+    const lat=parseFloat(it.lat), lon=parseFloat(it.lon);
+    if(isNaN(lat)||isNaN(lon))return;
+    lastFoundAddr={lat,lng:lon,address:it.display_name};
+    map.setView([lat,lon],19);
+    if(foundMarker)map.removeLayer(foundMarker);
+    foundMarker=L.marker([lat,lon],{
+      icon:L.divIcon({className:'',html:'<div style="font-size:26px;line-height:1;filter:drop-shadow(0 1px 2px rgba(0,0,0,.6))">📌</div>',iconSize:[26,26],iconAnchor:[13,24]}),
+      interactive:false,zIndexOffset:1000
+    }).addTo(map);
+    input.value=it.display_name.split(',').slice(0,2).join(',').trim();
+    close();
+  }
+
+  function search(q){
+    const my=++seq;
+    msg('Szukam…');
+    const url='https://nominatim.openstreetmap.org/search?format=json&limit=6&accept-language=pl&countrycodes=pl&q='+encodeURIComponent(q);
+    fetch(url,{headers:{'Accept':'application/json'}})
+      .then(r=>r.json())
+      .then(data=>{
+        if(my!==seq)return; // pominięto starszy wynik
+        items=Array.isArray(data)?data:[];
+        active=-1;
+        if(!items.length){msg('Brak wyników');return;}
+        render();
+      })
+      .catch(()=>{if(my===seq)msg('Błąd wyszukiwania');});
+  }
+
+  input.addEventListener('focus',updateObjPinVisibility);
+  input.addEventListener('blur',()=>setTimeout(updateObjPinVisibility,0)); // po ewentualnym kliknięciu przycisku
+  input.addEventListener('input',()=>{
+    const q=input.value.trim();
+    clearTimeout(timer);
+    if(q.length<3){close();return;}
+    timer=setTimeout(()=>search(q),350); // debounce
+  });
+  input.addEventListener('keydown',e=>{
+    if(e.key==='ArrowDown'&&items.length){e.preventDefault();active=(active+1)%items.length;render();}
+    else if(e.key==='ArrowUp'&&items.length){e.preventDefault();active=(active-1+items.length)%items.length;render();}
+    else if(e.key==='Enter'){
+      e.preventDefault();
+      if(active>=0&&items[active])pick(items[active]);
+      else{const q=input.value.trim();if(q.length>=3){clearTimeout(timer);search(q);}}
+    }
+    else if(e.key==='Escape'){close();input.blur();}
+  });
+  document.addEventListener('click',e=>{if(!e.target.closest('.addrbox'))close();});
+})();
+
+/* ============ START ============ */
+(async function init(){
+  if(SERVER){                                   // tryb aplikacji — wczytaj projekt z alfa-app
+    try{
+      const r=await fetch('/api/monitoring/'+PROJECT_ID,{cache:'no-store'});
+      if(r.status===401){document.getElementById('projName').textContent='⛔ Wymagane logowanie w alfa-app';markStatus(false);return;}
+      if(r.ok){
+        const p=(await r.json()).data;
+        PROJECT_NAME=p.name;
+        document.title='Projekt monitoringu — '+p.name;
+        document.getElementById('projName').textContent=p.name+(p.address?' — '+p.address:'');
+        if(p.data&&p.data.trim()){loadState(JSON.parse(p.data));updateCounts();markStatus(true);READY=true;loadOverlays();return;}
+        el('objInfo').value=(p.notes&&p.notes.trim())?p.notes:DEFAULT_INFO;
+        refreshList();refreshPoints();refreshCable();refreshZones();renderPlans();updateCounts();markStatus(true);
+        READY=true;
+        loadOverlays();
+        return;
+      }
+      document.getElementById('projName').textContent='⚠️ Nie znaleziono projektu #'+PROJECT_ID;
+      markStatus(false);return;
+    }catch(e){markStatus(false);}
+  }
+  document.getElementById('projName').textContent='Projekt lokalny';
+  const raw=localStorage.getItem(STORAGE_KEY);
+  if(raw){try{loadState(JSON.parse(raw));updateCounts();markStatus(true);return;}catch(e){}}
+  el('objInfo').value=DEFAULT_INFO;
+  refreshList(); refreshPoints(); refreshCable(); refreshZones(); renderPlans(); updateCounts(); markStatus(true);
+})();
+
+/* ============ SZABLONY KAMER — biblioteka /api/camera-models ============ */
+/* Globalna (niezależna od projektu) lista standardowych modeli kamer.
+   Odczyt z API z fallbackiem do localStorage, gdy brak połączenia/sesji. */
+(function(){
+  const TPL_CACHE_KEY='mon_cam_templates_v1';
+  const TYPE_LABEL={bullet:'Tubowa',dome:'Kopułka',ptz:'PTZ',pano:'360°'};
+  let templates=[], editingTplId=null;
+  const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const cacheGet=()=>{try{return JSON.parse(localStorage.getItem(TPL_CACHE_KEY))||[]}catch(_){return[]}};
+  const cacheSet=l=>{try{localStorage.setItem(TPL_CACHE_KEY,JSON.stringify(l))}catch(_){}};
+
+  async function apiList(){
+    const r=await fetch('/api/camera-models',{cache:'no-store'});
+    if(!r.ok)throw new Error('http '+r.status);
+    return (await r.json()).data||[];
+  }
+  async function apiSave(body,id){
+    const r=await fetch('/api/camera-models'+(id?'/'+id:''),{method:id?'PUT':'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok||!j.success)throw new Error(j.error||('http '+r.status));
+    return j.data;
+  }
+  async function apiDel(id){
+    const r=await fetch('/api/camera-models/'+id,{method:'DELETE'});
+    if(!r.ok)throw new Error('http '+r.status);
+  }
+
+  const ACT_BTN='style="background:none;border:none;cursor:pointer;font-size:14px;padding:2px 3px;line-height:1"';
+  function render(){
+    const tb=el('tplTable').querySelector('tbody'); tb.innerHTML='';
+    el('tplEmpty').style.display=templates.length?'none':'block';
+    el('tplTable').style.display=templates.length?'table':'none';
+    templates.forEach(t=>{
+      const tr=document.createElement('tr'); tr.className='trow';
+      tr.innerHTML=`<td><span class="swatch" style="background:${esc(t.color)}"></span></td>
+        <td>${esc(t.name)}${t.manufacturer?'<br><span class="mini">'+esc(t.manufacturer)+'</span>':''}</td>
+        <td>${TYPE_LABEL[t.type]||esc(t.type)}</td>
+        <td>${t.type==='pano'?'360°':t.fov+'°'}</td>
+        <td>${t.range} m</td>
+        <td style="white-space:nowrap;text-align:right">
+          <button data-a="add" title="Dodaj kamerę na mapę" ${ACT_BTN}>➕</button>
+          <button data-a="edit" title="Edytuj" ${ACT_BTN}>✎</button>
+          <button data-a="del" title="Usuń" ${ACT_BTN}>🗑️</button>
+        </td>`;
+      tr.querySelector('[data-a="add"]').onclick=()=>addFromTemplate(t);
+      tr.querySelector('[data-a="edit"]').onclick=()=>openForm(t);
+      tr.querySelector('[data-a="del"]').onclick=()=>removeTpl(t);
+      tb.appendChild(tr);
+    });
+    const sel=el('fApplyTpl');
+    if(sel){
+      const cur=sel.value;
+      sel.innerHTML='<option value="">— zastosuj szablon —</option>'+
+        templates.map(t=>`<option value="${t.id}">${esc(t.name)}</option>`).join('');
+      sel.value=cur;
+    }
+    const psel=el('perimTpl');   // ta sama biblioteka szablonów na zakładce „Perymetr"
+    if(psel){
+      const cur=psel.value;
+      psel.innerHTML='<option value="">— wybierz szablon —</option>'+
+        templates.map(t=>`<option value="${t.id}">${esc(t.name)}${t.type==='pano'?' · 360°':' · '+t.fov+'°'} / ${t.range} m</option>`).join('');
+      psel.value=cur;
+    }
+  }
+
+  function fillForm(t){
+    el('tName').value=t?t.name:''; el('tManufacturer').value=t?t.manufacturer:'';
+    el('tType').value=t?t.type:'bullet'; el('tResolution').value=t?t.resolution:'';
+    el('tFov').value=t?t.fov:90; el('tRange').value=t?t.range:20; el('tHeight').value=t?t.height:3;
+    el('tColor').value=t&&t.color?t.color:'#22d3ee'; el('tNotes').value=t?t.notes:'';
+  }
+  function openForm(t){ editingTplId=t?t.id:null; fillForm(t); el('tplForm').style.display='block'; activateTab('templates'); el('tName').focus(); }
+  function closeForm(){ el('tplForm').style.display='none'; editingTplId=null; }
+  function readForm(){
+    return {
+      name:el('tName').value.trim(), manufacturer:el('tManufacturer').value.trim(),
+      type:el('tType').value, resolution:el('tResolution').value.trim(),
+      fov:+el('tFov').value||90, range:+el('tRange').value||20, height:+el('tHeight').value||3,
+      color:el('tColor').value, notes:el('tNotes').value.trim(),
+    };
+  }
+  async function saveForm(){
+    const body=readForm();
+    if(!body.name){alert('Podaj nazwę / model kamery');return;}
+    try{ await apiSave(body,editingTplId); closeForm(); await reload(); }
+    catch(e){ alert('Nie udało się zapisać szablonu: '+e.message); }
+  }
+  async function removeTpl(t){
+    if(!confirm('Usunąć szablon „'+t.name+'”?'))return;
+    try{ await apiDel(t.id); await reload(); }
+    catch(e){ alert('Nie udało się usunąć szablonu: '+e.message); }
+  }
+
+  function applyTemplate(cam,t){
+    cam.type=t.type; cam.fov=(t.type==='pano'?360:t.fov); cam.range=t.range; cam.height=t.height;
+    if(t.color)cam.color=t.color;
+    if(t.name)cam.model=t.name;
+  }
+  function stampSelected(t){
+    if(!selected){alert('Najpierw wybierz kamerę z mapy lub listy');return;}
+    applyTemplate(selected,t);
+    syncForm(selected); drawCam(selected); positionHandles(selected); refreshList(); save();
+  }
+  function addFromTemplate(t){
+    addCamera(map.getCenter());   // tworzy i zaznacza nową kamerę (ustawia `selected`)
+    if(selected){ applyTemplate(selected,t); syncForm(selected); drawCam(selected); positionHandles(selected); refreshList(); save(); }
+  }
+
+  async function reload(){
+    try{ templates=await apiList(); cacheSet(templates); el('tplStatus').style.display='none'; }
+    catch(e){
+      templates=cacheGet();
+      const s=el('tplStatus'); s.style.display='block';
+      s.textContent=templates.length?'⚠️ Offline — pokazuję kopię lokalną':'⚠️ Brak połączenia z biblioteką szablonów';
+    }
+    render();
+  }
+
+  el('btnNewTpl').onclick=()=>openForm(null);
+  el('btnSaveTpl').onclick=saveForm;
+  el('btnCancelTpl').onclick=closeForm;
+  const applySel=el('fApplyTpl');
+  if(applySel)applySel.onchange=()=>{
+    const t=templates.find(x=>String(x.id)===applySel.value); applySel.value='';
+    if(t)stampSelected(t);
+  };
+  const saveAsBtn=el('btnSaveAsTpl');
+  if(saveAsBtn)saveAsBtn.onclick=()=>{
+    if(!selected){alert('Najpierw wybierz kamerę');return;}
+    openForm(null);
+    el('tName').value=selected.model||selected.name||'';
+    el('tType').value=selected.type; el('tFov').value=selected.fov;
+    el('tRange').value=selected.range; el('tHeight').value=selected.height;
+    el('tColor').value=selected.color||'#22d3ee';
+  };
+
+  /* ====== PERYMETR — automatyczne układanie kamer wzdłuż obrysu obszaru ======
+     Obrys dzielimy na „przebiegi" (runs) — ciągi boków o zbliżonym kierunku (krótkie
+     skosy i zerowe boki znikają w przebiegu). Każdy przebieg pokrywamy tak, że kamery
+     na jego KOŃCACH patrzą DO WEWNĄTRZ przebiegu — dzięki temu stożki nie wychodzą poza
+     obiekt na końcówkach. Azymut jest dodatkowo odchylony ku środkowi obszaru (optymalne
+     ~0.4·FOV — z analizy: mniejszy = wychodzą na zewnątrz, większy = tracą pokrycie).
+     Tryby: 'uniform' (obwód÷zasięg), 'overlap' (suwak %, − = luka), 'fewer' (słupy
+     dwukierunkowe — z narożników „na siebie", najmniej słupów). */
+  function polyCentroid(pts){ let a=0,b=0; pts.forEach(p=>{a+=p[0];b+=p[1];}); return [a/pts.length,b/pts.length]; }
+  function cleanPts(pts){                       // usuń wierzchołki tworzące ~zerowe boki (duplikaty z rysowania)
+    const out=[]; for(let i=0;i<pts.length;i++) if(map.distance(pts[i],pts[(i+1)%pts.length])>0.5) out.push(pts[i]);
+    return out.length>=3?out:pts;
+  }
+  function buildPath(pts){
+    const n=pts.length, cum=[0];
+    for(let i=0;i<n;i++) cum.push(cum[i]+map.distance(pts[i],pts[(i+1)%n]));
+    return {pts,n,cum,P:cum[n]};
+  }
+  function pointAt(path,s){                     // punkt na obrysie w odległości łukowej s (z zawinięciem pętli)
+    const {pts,n,cum,P}=path; let t=((s%P)+P)%P, e=0;
+    while(e<n-1 && cum[e+1]<=t) e++;
+    const A=pts[e], B=pts[(e+1)%n], local=t-cum[e];
+    const brng=bearing({lat:A[0],lng:A[1]},{lat:B[0],lng:B[1]});
+    const ll=destination(A[0],A[1],brng,local);
+    return {lat:ll[0],lng:ll[1],brng};
+  }
+  // azymut wzdłuż stycznej płotu, ODCHYLONY ku wnętrzu obszaru (0.4·FOV — analiza pokrycie/wyjście poza obiekt)
+  function aimInward(lat,lng,tangent,cen,fov){
+    const toC=bearing({lat,lng},{lat:cen[0],lng:cen[1]});
+    const phi=Math.min(fov*0.4, fov/2-1);
+    const az=(angDiff(tangent+90,toC)<=angDiff(tangent-90,toC)) ? tangent+phi : tangent-phi;
+    return ((Math.round(az)%360)+360)%360;
+  }
+  function planPerimeter(z,t,ov,mode){
+    const pts=cleanPts(z.pts); if(pts.length<3) return [];
+    const range=+t.range||20, fov=(t.type==='pano')?360:(+t.fov||90);
+    const cen=polyCentroid(pts), path=buildPath(pts), P=path.P, n=pts.length, plan=[];
+    // kamera panoramiczna 360° — koło zasięgu, bez kierunku; rozstaw ~2×zasięg
+    if(t.type==='pano'){
+      const cnt=Math.max(1,Math.round(P/Math.max(1,2*range)));
+      for(let k=0;k<cnt;k++){const p=pointAt(path,k*P/cnt); plan.push({lat:p.lat,lng:p.lng,az:0});}
+      return plan;
+    }
+    // stawia kamerę na łuku s; back=true → patrzy „do tyłu" wzdłuż płotu (na rogu = w poprzedni bok)
+    const place=(s,back)=>{
+      const p=pointAt(path,s), tp=pointAt(path,s+(back?-0.5:0.5));
+      const tan=back?(tp.brng+180)%360:tp.brng;
+      plan.push({lat:p.lat,lng:p.lng,az:aimInward(p.lat,p.lng,tan,cen,fov)});
+    };
+    const spacing=(mode==='uniform')?range:Math.max(1,range*(1-ov/100)); // − overlap ⇒ spacing>zasięg ⇒ luki
+    // PRZEBIEGI: „ostry" narożnik = zmiana kierunku ≥ 35° (mniejsze skosy scalamy w przebieg)
+    const brngE=[]; for(let i=0;i<n;i++){const A=pts[i],B=pts[(i+1)%n];brngE.push(bearing({lat:A[0],lng:A[1]},{lat:B[0],lng:B[1]}));}
+    const corners=[]; for(let i=0;i<n;i++) if(angDiff(brngE[i],brngE[(i-1+n)%n])>=35) corners.push(i);
+    // gładka pętla bez naroży (np. koło) — równomiernie dookoła
+    if(corners.length===0){
+      const m=Math.max(1,(mode==='fewer')?Math.ceil(P/Math.max(1,spacing)):Math.round(P/spacing));
+      for(let k=0;k<m;k++) place(k*P/m,false);
+      return plan;
+    }
+    const Rn=corners.length;
+    const runs=corners.map((c,k)=>{ let a=path.cum[c], b=path.cum[corners[(k+1)%Rn]]; if(b<=a) b+=P; return {a,b,L:b-a}; });
+
+    // 1) NAROŻNIKI — każdy stawiany DOKŁADNIE RAZ (bez duplikatu „na szwie" pętli).
+    //    Ostry róg (kąt wewn. ≤ 0.95·FOV) → JEDNA kamera na dwusiecznej łapie oba ogrodzenia;
+    //    szerszy róg → dwie kamery, każda w swój bok. Wspólne dla wszystkich trybów.
+    for(let i=0;i<Rn;i++){
+      const v=corners[i];
+      const dPrev=(brngE[(v-1+n)%n]+180)%360, dNext=brngE[v];                 // dwa boki wychodzące z wierzchołka
+      const theta=angDiff(dPrev,dNext);                                       // kąt wewnętrzny w rogu
+      if(theta<=fov*0.95){                                                    // jedna kamera obejmie oba boki
+        const mx=Math.atan2(Math.sin(toR(dPrev))+Math.sin(toR(dNext)), Math.cos(toR(dPrev))+Math.cos(toR(dNext)));
+        let bis=((toD(mx)%360)+360)%360;                                      // dwusieczna
+        const toC=bearing({lat:pts[v][0],lng:pts[v][1]},{lat:cen[0],lng:cen[1]});
+        if(angDiff(bis,toC)>90) bis=(bis+180)%360;                            // skieruj do wnętrza
+        plan.push({lat:pts[v][0],lng:pts[v][1],az:Math.round(bis)%360});
+      } else {
+        place(path.cum[v],true);                                             // kamera „w tył" (poprzedni bok)
+        place(path.cum[v],false);                                            // kamera „w przód" (kolejny bok)
+      }
+    }
+    // 2) ŚRODKI PRZEBIEGÓW — końce ma pokryte kamerami narożnymi (±zasięg); wypełnij [zasięg, L−zasięg].
+    runs.forEach(run=>{
+      const M=run.L-2*range;                                                 // środek nieobjęty przez rogi
+      if(M<=1e-6) return;
+      if(mode==='fewer'){
+        // MNIEJ SŁUPÓW: słupy DWUKIERUNKOWE — 2 kamery na jednym słupie patrzące KU OBU ROGOM
+        // (rozstaw ≈ 2·zasięg zamiast osobnych słupów co zasięg).
+        const nP=Math.max(1, Math.ceil(M/Math.max(1,2*spacing)));
+        for(let k=0;k<nP;k++){ const s=run.a+range+(k+0.5)*(M/nP); place(s,false); place(s,true); }
+      } else {
+        // uniform / overlap: pojedyncze kamery co spacing (− overlap ⇒ krok > zasięg ⇒ luki)
+        for(let p=range;p<run.L-range-1e-6;p+=spacing) place(run.a+p,false);
+      }
+    });
+    return plan;
+  }
+  // usuń dotychczasowe kamery perymetru danego obszaru (żeby ponowne ułożenie nie dublowało)
+  function removePerimCams(zoneId){
+    cameras.filter(c=>c.perimeterZone===zoneId).forEach(c=>{
+      if(c.marker)map.removeLayer(c.marker);
+      if(c.cover)map.removeLayer(c.cover);
+      if(selected===c){selected=null;clearHandles();
+        document.getElementById('camEmpty').style.display='block';
+        document.getElementById('camEdit').style.display='none';}
+    });
+    cameras=cameras.filter(c=>c.perimeterZone!==zoneId);
+  }
+  function selectedPerimZone(){return zones.find(x=>x.id===el('perimZone').value);}
+  function updatePerimInfo(z,count){
+    const info=el('perimInfo'); if(!info)return;
+    if(!z){info.textContent='';return;}
+    const base='Obwód: <b>'+fmtLen(zonePerimeter(z.pts))+'</b>';
+    const cams=cameras.filter(c=>c.perimeterZone===z.id);
+    const poles=new Set(cams.map(c=>c.lat.toFixed(6)+','+c.lng.toFixed(6))).size; // słup = wspólna pozycja (róg)
+    if(count!=null) info.innerHTML=base+' · <b>'+count+'</b> kamer / <b>'+poles+'</b> słupów';
+    else info.innerHTML=base+(cams.length?' · kamer perymetru: <b>'+cams.length+'</b> / słupów: <b>'+poles+'</b>':'');
+  }
+  function refreshPerimZones(){
+    const sel=el('perimZone'); if(!sel)return;
+    const has=zones.length>0;
+    el('perimEmpty').style.display=has?'none':'block';
+    el('perimBody').style.display=has?'block':'none';
+    if(!has){el('perimInfo').textContent='';return;}
+    const prev=sel.value;
+    sel.innerHTML=zones.map(z=>`<option value="${z.id}">${esc(z.name)} — obwód ${fmtLen(zonePerimeter(z.pts))}</option>`).join('');
+    if(prev && zones.some(z=>z.id===prev)) sel.value=prev;
+    else if(selectedZone) sel.value=selectedZone.id;
+    updatePerimInfo(selectedPerimZone(),null);
+    updatePerimModeCounts();                     // odśwież liczby kamer/słupów na przyciskach trybów
+  }
+  // aktywny tryb z przełącznika segmentowego
+  function getPerimMode(){ const b=document.querySelector('#perimMode .pseg-btn.active'); return b?b.dataset.mode:'uniform'; }
+  function layPerimeter(auto){                 // auto=true → ciche przeliczenie (przy przeklikiwaniu trybu/suwaka), bez alertów/skoku mapy
+    const z=selectedPerimZone();
+    if(!z){ if(!auto)alert('Wybierz obszar.'); return; }
+    if(!z.pts||z.pts.length<3){ if(!auto)alert('Obszar musi mieć co najmniej 3 wierzchołki.'); return; }
+    const t=templates.find(x=>String(x.id)===el('perimTpl').value);
+    if(!t){ if(!auto)alert('Wybierz szablon kamery.'); return; }
+    const ov=+el('perimOverlap').value||0, mode=getPerimMode();
+    const plan=planPerimeter(z,t,ov,mode);
+    if(!plan.length){ if(!auto)alert('Nie udało się wyznaczyć pozycji — obszar jest zbyt mały.'); return; }
+    if(!auto && plan.length>60 && !confirm('Powstanie '+plan.length+' kamer. Kontynuować?'))return;
+    removePerimCams(z.id);
+    plan.forEach(pl=>{
+      camSeq++;
+      const num=nextCamNum();
+      const cam={id:'c'+Date.now()+camSeq,num,name:'K'+num,type:'bullet',
+        lat:pl.lat,lng:pl.lng,az:pl.az,fov:90,range:20,height:3,model:'',notes:'',
+        color:CAM_COLOR,perimeterZone:z.id};
+      applyTemplate(cam,t);
+      if(!isPano(cam)) cam.az=pl.az;         // kierunek wzdłuż boku (pano: bez kierunku)
+      cameras.push(cam); drawCam(cam);
+    });
+    refreshList(); restackCameras(); save();
+    updatePerimInfo(z,plan.length);
+    if(!auto && z.poly) map.fitBounds(z.poly.getBounds().pad(.15));
+  }
+  // przelicz „na żywo" tylko gdy dany obszar MA już kamery perymetru (czyli użytkownik raz je ułożył)
+  function autoRelay(){ const z=selectedPerimZone(); if(z && cameras.some(c=>c.perimeterZone===z.id)) layPerimeter(true); }
+  // policz kamery/słupy dla KAŻDEGO trybu i pokaż na przyciskach — żeby było wiadomo PRZED kliknięciem
+  function updatePerimModeCounts(){
+    const z=selectedPerimZone(), t=templates.find(x=>String(x.id)===el('perimTpl').value), ov=+el('perimOverlap').value||0;
+    document.querySelectorAll('#perimMode .pseg-btn').forEach(b=>{
+      const camEl=b.querySelector('.pseg-cam'), poleEl=b.querySelector('.pseg-pole');
+      if(!z||!t||!z.pts||z.pts.length<3){ camEl.textContent='–'; poleEl.textContent='–'; return; }
+      const plan=planPerimeter(z,t,ov,b.dataset.mode);
+      camEl.textContent=plan.length;
+      poleEl.textContent=new Set(plan.map(c=>c.lat.toFixed(6)+','+c.lng.toFixed(6))).size;
+    });
+  }
+  function clearPerimeter(){
+    const z=selectedPerimZone();
+    if(!z){alert('Wybierz obszar.');return;}
+    const cnt=cameras.filter(c=>c.perimeterZone===z.id).length;
+    if(!cnt){alert('Brak kamer perymetru dla tego obszaru.');return;}
+    if(!confirm('Usunąć '+cnt+' kamer perymetru dla obszaru „'+z.name+'”?'))return;
+    removePerimCams(z.id); refreshList(); save(); updatePerimInfo(z,0);
+  }
+  el('btnLayPerimeter').onclick=()=>layPerimeter(false);
+  el('btnClearPerimeter').onclick=clearPerimeter;
+  el('perimZone').onchange=()=>{ updatePerimInfo(selectedPerimZone(),null); updatePerimModeCounts(); autoRelay(); };
+  el('perimTpl').onchange=()=>{ updatePerimModeCounts(); autoRelay(); };     // zmiana szablonu → przelicz podglądy i (jeśli ułożone) kamery
+  el('perimOverlap').onchange=()=>{ updatePerimModeCounts(); autoRelay(); }; // zmiana zakładu/luki → przelicz
+  // suwak zakładu/luki działa w obu trybach — zawsze widoczny
+  function syncPerimMode(){ el('perimOverlapField').style.display='block'; }
+  // przełącznik segmentowy trybu: klik = ustaw aktywny + pokaż/ukryj suwak + przelicz na żywo
+  document.querySelectorAll('#perimMode .pseg-btn').forEach(b=>b.onclick=()=>{
+    document.querySelectorAll('#perimMode .pseg-btn').forEach(x=>x.classList.toggle('active',x===b));
+    syncPerimMode(); autoRelay();
+  });
+  syncPerimMode();
+  // odśwież listę obszarów przy każdym wejściu na zakładkę (addEventListener nie nadpisuje onclick z activateTab)
+  const perimBtn=document.querySelector('.side-tabs button[data-tab="perimeter"]');
+  if(perimBtn)perimBtn.addEventListener('click',refreshPerimZones);
+  refreshPerimZones();
+
+  reload();
+})();
+</script>
+</body>
+</html>

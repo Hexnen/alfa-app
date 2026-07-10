@@ -7,6 +7,10 @@ import { ObjectDetails } from "./pages/ObjectDetails";
 import { Contracts } from "./pages/Contracts";
 import { ContractDetails } from "./pages/ContractDetails";
 import { Orders } from "./pages/Orders";
+import { Technical } from "./pages/Technical";
+import { Kadry } from "./pages/Kadry";
+import { Monitoring } from "./pages/Monitoring";
+import { Templates } from "./pages/Templates";
 import { OrderDetails } from "./pages/OrderDetails";
 import { CmaReports } from "./pages/CmaReports";
 import { CmaReportDetails } from "./pages/CmaReportDetails";
@@ -40,6 +44,10 @@ function App() {
           <Route path="/contracts/:id" element={<ContractDetails />} />
           <Route path="/orders" element={<Orders />} />
           <Route path="/orders/:id" element={<OrderDetails />} />
+          <Route path="/technical" element={<Technical />} />
+          <Route path="/kadry" element={<Kadry />} />
+          <Route path="/monitoring" element={<Monitoring />} />
+          <Route path="/templates" element={<Templates />} />
           <Route path="/cma" element={<Navigate to="/cma/raporty" replace />} />
           <Route path="/cma/raporty" element={<CmaReports />} />
           <Route path="/cma/raporty/:id" element={<CmaReportDetails />} />

@@ -1,0 +1,21 @@
+CREATE TABLE `realizations` (
+	`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+	`date` text NOT NULL,
+	`site` text NOT NULL,
+	`kind` text DEFAULT 'service' NOT NULL,
+	`amount_hours` real DEFAULT 0 NOT NULL,
+	`amount_material` real DEFAULT 0 NOT NULL,
+	`amount_km` real DEFAULT 0 NOT NULL,
+	`discount` real DEFAULT 0 NOT NULL,
+	`note` text,
+	`invoiced` integer DEFAULT false NOT NULL,
+	`invoiced_at` text,
+	`caretaker` text,
+	`contractor_1` text,
+	`contractor_2` text,
+	`actual_hours` real DEFAULT 0 NOT NULL,
+	`actual_km` real DEFAULT 0 NOT NULL,
+	`hourly_cost` real DEFAULT 0 NOT NULL,
+	`created_at` text DEFAULT (datetime('now')) NOT NULL,
+	`updated_at` text DEFAULT (datetime('now')) NOT NULL
+);
