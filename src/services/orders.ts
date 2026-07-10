@@ -238,14 +238,14 @@ export async function createOrderFromInput(
     const insertOrderStmt = sqlite.prepare(`
       INSERT INTO orders (
         order_number, requester_name, requester_phone, requester_email,
-        payer_name, payer_nip, payer_contractor_id,
+        payer_name, payer_nip, payer_invoice_email, payer_contractor_id,
         object_name, object_kind, object_address, object_city, object_location_url, object_id,
         contact_person, contact_phone, contact_email,
         is_camera_installation, camera_count, megaphone_count, vtools_offer_number,
         internet_included, intervention_group, video_reception,
-        monthly_amount, rental_amount, invoice_issuer,
+        monthly_amount, contract_length_months, rental_amount, rental_length_months, invoice_issuer,
         status, service_start_date, installation_start_date, notes, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
     `);
 
     // generateOrderNumber() draws a random suffix, so two concurrent creates in
@@ -263,6 +263,7 @@ export async function createOrderFromInput(
           body.requesterEmail,
           body.payerName,
           normalizedNip,
+          body.payerInvoiceEmail || null,
           contractorId,
           body.objectName,
           body.objectKind ?? null,
@@ -281,7 +282,9 @@ export async function createOrderFromInput(
           body.interventionGroup ? 1 : 0,
           body.videoReception ? 1 : 0,
           body.monthlyAmount || null,
+          body.contractLengthMonths || null,
           body.rentalAmount || null,
+          body.rentalLengthMonths || null,
           body.invoiceIssuer || null,
           body.status || "new",
           body.serviceStartDate || null,

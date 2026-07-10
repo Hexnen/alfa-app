@@ -1,8 +1,9 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import type { Dispatch, SetStateAction } from "react";
 import { validateNIP } from "./nip";
 
 /**
- * Shared 7-step config for BOTH order-intake forms (internal
+ * Shared 8-step config for BOTH order-intake forms (internal
  * `OrderIntakeForm` app-themed + external `PublicOrderForm` blue-themed).
  * Keeps field grouping + per-step validation in one place; each form renders
  * its own themed inputs per step but shares the flow / validation logic.
@@ -33,6 +34,7 @@ export interface OrderIntakeFormState {
   // 2. Kontrahent (płatnik)
   payerName: string;
   payerNip: string;
+  payerInvoiceEmail: string;
   invoiceIssuer: string;
   // 3. Pytania (gating booleans)
   isCameraInstallation: boolean;
@@ -54,7 +56,9 @@ export interface OrderIntakeFormState {
   videoReception: boolean;
   megaphoneCount: string;
   monthlyAmount: string;
+  contractLengthMonths: string;
   rentalAmount: string;
+  rentalLengthMonths: string;
   // 7. Terminy
   installationStartDate: string;
   serviceStartDate: string;
@@ -67,6 +71,7 @@ export const emptyIntakeState: OrderIntakeFormState = {
   requesterEmail: "",
   payerName: "",
   payerNip: "",
+  payerInvoiceEmail: "",
   invoiceIssuer: INVOICE_ISSUERS[0],
   isCameraInstallation: false,
   internetIncluded: false,
@@ -84,7 +89,9 @@ export const emptyIntakeState: OrderIntakeFormState = {
   videoReception: false,
   megaphoneCount: "",
   monthlyAmount: "",
+  contractLengthMonths: "",
   rentalAmount: "",
+  rentalLengthMonths: "",
   installationStartDate: "",
   serviceStartDate: "",
   notes: "",
@@ -101,6 +108,7 @@ export interface OrderIntakeStep {
     | "requester"
     | "payer"
     | "questions"
+    | "location"
     | "object"
     | "installation"
     | "scope"
@@ -112,7 +120,7 @@ export interface OrderIntakeStep {
   onlyIfInstallation?: boolean;
 }
 
-/** Ordered 7-step spec (same order + fields for both forms). */
+/** Ordered 8-step spec (same order + fields for both forms). */
 export const ORDER_INTAKE_STEPS: OrderIntakeStep[] = [
   {
     id: "requester",
@@ -126,7 +134,10 @@ export const ORDER_INTAKE_STEPS: OrderIntakeStep[] = [
   {
     id: "payer",
     title: "Kontrahent (płatnik)",
-    required: [{ key: "payerName", label: "Nazwa płatnika" }],
+    required: [
+      { key: "payerName", label: "Nazwa płatnika" },
+      { key: "payerInvoiceEmail", label: "Mail do faktur płatnika" },
+    ],
   },
   {
     id: "questions",
@@ -134,12 +145,17 @@ export const ORDER_INTAKE_STEPS: OrderIntakeStep[] = [
     required: [],
   },
   {
+    id: "location",
+    title: "Lokalizacja obiektu",
+    required: [
+      { key: "objectLocationUrl", label: "Pinezka obiektu na mapie" },
+    ],
+  },
+  {
     id: "object",
     title: "Dane obiektu",
     required: [
       { key: "objectName", label: "Nazwa obiektu w SAFESTAR" },
-      { key: "objectAddress", label: "Adres obiektu" },
-      { key: "objectCity", label: "Miejscowość" },
       { key: "contactPerson", label: "Osoba kontaktowa" },
       { key: "contactPhone", label: "Telefon (osoba kontaktowa)" },
     ],
@@ -186,8 +202,13 @@ export function validateStep(
       return { ok: false, message: `Uzupełnij pole: ${field.label}.` };
     }
   }
-  if (step.id === "payer" && !validateNIP(form.payerNip)) {
-    return { ok: false, message: "Podaj prawidłowy NIP płatnika (10 cyfr)." };
+  if (step.id === "payer") {
+    if (!validateNIP(form.payerNip)) {
+      return { ok: false, message: "Podaj prawidłowy NIP płatnika (10 cyfr)." };
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.payerInvoiceEmail.trim())) {
+      return { ok: false, message: "Podaj prawidłowy mail do faktur płatnika." };
+    }
   }
   return { ok: true };
 }
@@ -243,4 +264,51 @@ export function useOrderIntakeWizard(form: OrderIntakeFormState): WizardApi {
     back,
     reset,
   };
+}
+
+/**
+ * Form state that autosaves to localStorage on every change and restores it on
+ * mount — so a half-filled intake survives a reload/navigation. The draft is
+ * kept until the caller invokes `clearDraft()` (do this after a successful
+ * submit). Reaching the empty state also clears the stored draft.
+ */
+export function useOrderIntakeDraft(
+  storageKey: string
+): [
+  OrderIntakeFormState,
+  Dispatch<SetStateAction<OrderIntakeFormState>>,
+  () => void
+] {
+  const [form, setForm] = useState<OrderIntakeFormState>(() => {
+    try {
+      const raw = localStorage.getItem(storageKey);
+      if (raw) return { ...emptyIntakeState, ...JSON.parse(raw) };
+    } catch {
+      /* corrupt/unavailable storage — fall back to a clean form */
+    }
+    return emptyIntakeState;
+  });
+
+  useEffect(() => {
+    try {
+      const serialized = JSON.stringify(form);
+      if (serialized === JSON.stringify(emptyIntakeState)) {
+        localStorage.removeItem(storageKey);
+      } else {
+        localStorage.setItem(storageKey, serialized);
+      }
+    } catch {
+      /* ignore quota / unavailable storage */
+    }
+  }, [storageKey, form]);
+
+  const clearDraft = () => {
+    try {
+      localStorage.removeItem(storageKey);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  return [form, setForm, clearDraft];
 }

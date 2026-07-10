@@ -336,6 +336,7 @@ export interface Order {
   requesterEmail: string;
   payerName: string;
   payerNip: string;
+  payerInvoiceEmail: string | null;
   payerContractorId: number | null;
   objectName: string;
   objectKind: string | null;
@@ -354,7 +355,9 @@ export interface Order {
   megaphoneCount: number | null;
   vtoolsOfferNumber: string | null;
   monthlyAmount: number | null;
+  contractLengthMonths: number | null;
   rentalAmount: number | null;
+  rentalLengthMonths: number | null;
   invoiceIssuer: string | null;
   status: "new" | "in_progress" | "completed" | "cancelled";
   serviceStartDate: string | null;
@@ -373,6 +376,7 @@ export interface OrderInput {
   requesterEmail: string;
   payerName: string;
   payerNip: string;
+  payerInvoiceEmail?: string;
   payerContractorId?: number;
   objectName: string;
   objectKind?: string;
@@ -388,7 +392,9 @@ export interface OrderInput {
   megaphoneCount?: number;
   vtoolsOfferNumber?: string;
   monthlyAmount?: number;
+  contractLengthMonths?: number;
   rentalAmount?: number;
+  rentalLengthMonths?: number;
   invoiceIssuer?: string;
   status?: "new" | "in_progress" | "completed" | "cancelled";
   serviceStartDate?: string;
@@ -481,8 +487,11 @@ export interface PublicOrderIntakeInput {
   vtoolsOfferNumber?: string;
   payerName: string;
   payerNip: string;
+  payerInvoiceEmail?: string;
   monthlyAmount?: number;
+  contractLengthMonths?: number;
   rentalAmount?: number;
+  rentalLengthMonths?: number;
   invoiceIssuer?: string;
   cameraCount?: number;
   megaphoneCount?: number;

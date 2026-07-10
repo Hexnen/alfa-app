@@ -106,6 +106,7 @@ export const orders = sqliteTable("orders", {
   // Dane płatnika
   payerName: text("payer_name").notNull(),
   payerNip: text("payer_nip").notNull(),
+  payerInvoiceEmail: text("payer_invoice_email"),
   payerContractorId: integer("payer_contractor_id").references(() => contractors.id),
   
   // Dane obiektu
@@ -134,7 +135,9 @@ export const orders = sqliteTable("orders", {
   
   // Dane finansowe
   monthlyAmount: real("monthly_amount"),
+  contractLengthMonths: integer("contract_length_months"),
   rentalAmount: real("rental_amount"),
+  rentalLengthMonths: integer("rental_length_months"),
   invoiceIssuer: text("invoice_issuer"),
   
   // Status i daty

@@ -81,6 +81,7 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
     requesterEmail: "",
     payerName: "",
     payerNip: "",
+    payerInvoiceEmail: "",
     objectName: "",
     objectKind: "",
     objectAddress: "",
@@ -130,6 +131,7 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
         requesterEmail: order?.requesterEmail || "",
         payerName: order?.payerName || "",
         payerNip: order?.payerNip || "",
+        payerInvoiceEmail: order?.payerInvoiceEmail || "",
         payerContractorId: order?.payerContractorId ?? undefined,
         objectName: order?.objectName || "",
         objectKind: order?.objectKind || "",
@@ -148,7 +150,9 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
         megaphoneCount: order?.megaphoneCount ?? undefined,
         vtoolsOfferNumber: order?.vtoolsOfferNumber || "",
         monthlyAmount: order?.monthlyAmount ?? undefined,
+        contractLengthMonths: order?.contractLengthMonths ?? undefined,
         rentalAmount: order?.rentalAmount ?? undefined,
+        rentalLengthMonths: order?.rentalLengthMonths ?? undefined,
         invoiceIssuer: order?.invoiceIssuer || "",
         status: order?.status || "new",
         serviceStartDate: order?.serviceStartDate || "",
@@ -962,7 +966,7 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
               <div className="grid grid-cols-3 gap-4">
                 <div className="space-y-2">
                   <Label htmlFor="monthlyAmount" className="text-slate-700">
-                    Ustalona kwota abonamentu (zł)
+                    Ustalona kwota abonamentu (zł netto)
                   </Label>
                   <Input
                     id="monthlyAmount"
@@ -976,8 +980,22 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
                   />
                 </div>
                 <div className="space-y-2">
+                  <Label htmlFor="contractLengthMonths" className="text-slate-700">
+                    Długość kontraktu (mies.)
+                  </Label>
+                  <Input
+                    id="contractLengthMonths"
+                    name="contractLengthMonths"
+                    type="number"
+                    min="0"
+                    value={formData.contractLengthMonths ?? ""}
+                    onChange={handleNumberChange}
+                    className="bg-white border-slate-300 focus:border-indigo-500 focus:ring-indigo-500"
+                  />
+                </div>
+                <div className="space-y-2">
                   <Label htmlFor="rentalAmount" className="text-slate-700">
-                    Kwota dzierżawy (zł)
+                    Kwota dzierżawy (zł netto)
                   </Label>
                   <Input
                     id="rentalAmount"
@@ -987,6 +1005,34 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
                     min="0"
                     value={formData.rentalAmount || ""}
                     onChange={handleNumberChange}
+                    className="bg-white border-slate-300 focus:border-indigo-500 focus:ring-indigo-500"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="rentalLengthMonths" className="text-slate-700">
+                    Długość dzierżawy (mies.)
+                  </Label>
+                  <Input
+                    id="rentalLengthMonths"
+                    name="rentalLengthMonths"
+                    type="number"
+                    min="0"
+                    value={formData.rentalLengthMonths ?? ""}
+                    onChange={handleNumberChange}
+                    className="bg-white border-slate-300 focus:border-indigo-500 focus:ring-indigo-500"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="payerInvoiceEmail" className="text-slate-700">
+                    Mail do faktur płatnika
+                  </Label>
+                  <Input
+                    id="payerInvoiceEmail"
+                    name="payerInvoiceEmail"
+                    type="email"
+                    value={formData.payerInvoiceEmail || ""}
+                    onChange={handleChange}
+                    placeholder="faktury@firma.pl"
                     className="bg-white border-slate-300 focus:border-indigo-500 focus:ring-indigo-500"
                   />
                 </div>

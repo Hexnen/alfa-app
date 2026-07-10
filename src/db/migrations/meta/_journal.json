@@ -169,6 +169,20 @@
       "when": 1783715318158,
       "tag": "0023_long_quasimodo",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "6",
+      "when": 1783716385621,
+      "tag": "0024_tranquil_kylun",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "6",
+      "when": 1783720130263,
+      "tag": "0025_white_black_widow",
+      "breakpoints": true
     }
   ]
 }

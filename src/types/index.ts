@@ -106,6 +106,7 @@ export interface OrderInput {
   requesterEmail: string;
   payerName: string;
   payerNip: string;
+  payerInvoiceEmail?: string;
   payerContractorId?: number;
   objectName: string;
   objectKind?: string;
@@ -124,7 +125,9 @@ export interface OrderInput {
   interventionGroup?: boolean;
   videoReception?: boolean;
   monthlyAmount?: number;
+  contractLengthMonths?: number;
   rentalAmount?: number;
+  rentalLengthMonths?: number;
   invoiceIssuer?: string;
   status?: OrderStatus;
   serviceStartDate?: string;

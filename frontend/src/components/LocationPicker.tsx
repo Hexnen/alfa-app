@@ -12,6 +12,9 @@ const LEAFLET_JS_ID = "leaflet-cdn-js";
 const DEFAULT_CENTER: [number, number] = [52.07, 19.48]; // środek Polski
 const DEFAULT_ZOOM = 6;
 
+/** Remembers the user's base-layer choice (streets ⇄ satellite) across sessions. */
+const MAP_LAYER_KEY = "mapLayerPref";
+
 interface LatLng {
   lat: number;
   lng: number;
@@ -87,6 +90,16 @@ function parseCoords(raw: string): LatLng | null {
     if (inRange(lat, lng)) return { lat, lng };
   }
 
+  // /maps/search/<lat>,+<lng>  ·  /place/<lat>,<lng>  ·  /dir/<lat>,<lng>
+  const path = value.match(
+    /\/(?:search|place|dir)\/(-?\d+(?:\.\d+)?),\+?\s*(-?\d+(?:\.\d+)?)/
+  );
+  if (path) {
+    const lat = parseFloat(path[1]);
+    const lng = parseFloat(path[2]);
+    if (inRange(lat, lng)) return { lat, lng };
+  }
+
   // q=<lat>,<lng>  (?q= or &q=)
   const q = value.match(/[?&]q=(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)/);
   if (q) {
@@ -106,32 +119,103 @@ function parseCoords(raw: string): LatLng | null {
   return null;
 }
 
+/**
+ * True when the raw text is something we can place directly — coordinates or an
+ * http(s) link (Google Maps) — rather than a free-text address to geocode.
+ */
+function isDirectInput(raw: string): boolean {
+  return parseCoords(raw) != null || /^https?:\/\//i.test(raw.trim());
+}
+
 interface NominatimResult {
   lat: string;
   lon: string;
   display_name: string;
 }
 
+/** Format a Polish street line: prepend „ul." unless a type word is present. */
+function polishStreet(road: string, house: string): string {
+  const name = road.trim();
+  if (!name) return "";
+  const hasType =
+    /^(ul\.|ulica|al\.|aleja|aleje|pl\.|plac|rondo|os\.|osiedle|bulwar|skwer|park|droga|szosa|trakt|wybrzeże)\b/i.test(
+      name
+    );
+  const withType = hasType ? name : "ul. " + name;
+  return house ? `${withType} ${house}` : withType;
+}
+
+/**
+ * Reverse-geocode a pin into a normal Polish address via Nominatim.
+ * `address` is the full „ul. nazwa numer, miasto, województwo" form;
+ * `city` is kept separately for the CRM's city column.
+ */
+async function reverseGeocode(
+  lat: number,
+  lng: number
+): Promise<{ address: string; city: string } | null> {
+  const url =
+    "https://nominatim.openstreetmap.org/reverse?format=json&zoom=18&accept-language=pl&lat=" +
+    lat +
+    "&lon=" +
+    lng;
+  try {
+    const res = await fetch(url, { headers: { Accept: "application/json" } });
+    const data = await res.json();
+    const a = data?.address ?? {};
+    const road =
+      a.road || a.pedestrian || a.footway || a.path || a.cycleway || "";
+    const house = a.house_number || "";
+    const city =
+      a.city ||
+      a.town ||
+      a.village ||
+      a.municipality ||
+      a.hamlet ||
+      a.county ||
+      "";
+    // Nominatim returns e.g. „województwo mazowieckie" — keep just „mazowieckie".
+    const voivodeship = (a.state || "").replace(/^województwo\s+/i, "");
+
+    const street =
+      polishStreet(road, house) ||
+      (typeof data?.display_name === "string"
+        ? data.display_name.split(",")[0].trim()
+        : "");
+
+    const address = [street, city, voivodeship].filter(Boolean).join(", ");
+    return { address, city };
+  } catch {
+    return null;
+  }
+}
+
 export interface LocationPickerProps {
   /** Controlled value — the objectLocationUrl (canonical Google Maps URL). */
   value: string;
   onChange: (url: string) => void;
+  /** Called with the address + city reverse-geocoded from the dropped pin. */
+  onAddress?: (address: string, city: string) => void;
+  /** Address to show on mount for an already-placed pin (skips re-geocoding). */
+  initialAddress?: string;
   /** "light" fits the slate/indigo internal card, "dark" the blue public form. */
   variant?: "light" | "dark";
-  label?: string;
 }
 
 export function LocationPicker({
   value,
   onChange,
+  onAddress,
+  initialAddress,
   variant = "light",
-  label = "Lokalizacja obiektu na mapie",
 }: LocationPickerProps) {
   const mapElRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<any>(null);
   const markerRef = useRef<any>(null);
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
+  const onAddressRef = useRef(onAddress);
+  onAddressRef.current = onAddress;
 
   const [ready, setReady] = useState(false);
 
@@ -144,14 +228,41 @@ export function LocationPicker({
   const searchSeq = useRef(0);
   const debounceRef = useRef<number | null>(null);
 
-  // Paste-coords state
-  const [pasteValue, setPasteValue] = useState("");
+  // Direct-input (coords / Google Maps link) state — shares the same field as
+  // the address search; the field auto-detects which kind of input it is.
   const [pasteError, setPasteError] = useState<string | null>(null);
+  const [resolving, setResolving] = useState(false);
+
+  // Address reverse-geocoded from the current pin (address + city are derived
+  // from the pin — there are no manual address inputs).
+  const [resolvedAddr, setResolvedAddr] = useState<{
+    address: string;
+    city: string;
+  } | null>(null);
+  const [addrLoading, setAddrLoading] = useState(false);
+  const reverseSeq = useRef(0);
 
   const dark = variant === "dark";
 
-  /** Place / move the pin, recenter, and emit the canonical URL. */
-  const setPin = (lat: number, lng: number, opts?: { center?: boolean }) => {
+  /** Reverse-geocode the pin and report the address/city upward. */
+  const runReverse = (lat: number, lng: number) => {
+    const my = ++reverseSeq.current;
+    setAddrLoading(true);
+    reverseGeocode(lat, lng).then((res) => {
+      if (my !== reverseSeq.current) return;
+      setAddrLoading(false);
+      if (!res) return;
+      setResolvedAddr(res);
+      onAddressRef.current?.(res.address, res.city);
+    });
+  };
+
+  /** Place / move the pin, recenter, emit the URL, and resolve its address. */
+  const setPin = (
+    lat: number,
+    lng: number,
+    opts?: { center?: boolean; reverse?: boolean }
+  ) => {
     const map = mapRef.current;
     if (!map) return;
     if (markerRef.current) {
@@ -173,6 +284,7 @@ export function LocationPicker({
       map.setView([lat, lng], Math.max(map.getZoom(), 17));
     }
     onChangeRef.current(toMapsUrl(lat, lng));
+    if (opts?.reverse !== false) runReverse(lat, lng);
   };
 
   // Load Leaflet + init the map once.
@@ -187,10 +299,63 @@ export function LocationPicker({
         zoom: start ? 17 : DEFAULT_ZOOM,
         zoomControl: true,
       });
-      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-        maxZoom: 19,
-        attribution: "© OpenStreetMap",
-      }).addTo(map);
+      // Two base layers with a switcher: street map + satellite imagery.
+      const streets = L.tileLayer(
+        "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+        { maxZoom: 19, attribution: "© OpenStreetMap" }
+      );
+      const satellite = L.tileLayer(
+        "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        { maxZoom: 19, attribution: "© Esri, Maxar, Earthstar Geographics" }
+      );
+      // Base layer choice (streets ⇄ satellite) is remembered across sessions.
+      let satOn = false;
+      try {
+        satOn = localStorage.getItem(MAP_LAYER_KEY) === "satellite";
+      } catch {
+        /* ignore unavailable storage */
+      }
+      (satOn ? satellite : streets).addTo(map);
+
+      // A single compact icon button toggles the base layer (takes far less
+      // room than the expanded layer switcher).
+      const ToggleControl = L.Control.extend({
+        options: { position: "topright" },
+        onAdd() {
+          const btn = L.DomUtil.create("button");
+          btn.type = "button";
+          btn.title = "Przełącz: mapa / satelita";
+          btn.innerHTML = satOn ? "🗺️" : "🛰️";
+          btn.style.cssText =
+            "width:34px;height:34px;padding:0;border:none;border-radius:6px;" +
+            "background:#fff;cursor:pointer;font-size:18px;line-height:34px;" +
+            "box-shadow:0 1px 4px rgba(0,0,0,.35);";
+          L.DomEvent.disableClickPropagation(btn);
+          L.DomEvent.on(btn, "click", (e: any) => {
+            L.DomEvent.stop(e);
+            satOn = !satOn;
+            if (satOn) {
+              map.removeLayer(streets);
+              satellite.addTo(map);
+              btn.innerHTML = "🗺️";
+            } else {
+              map.removeLayer(satellite);
+              streets.addTo(map);
+              btn.innerHTML = "🛰️";
+            }
+            try {
+              localStorage.setItem(
+                MAP_LAYER_KEY,
+                satOn ? "satellite" : "streets"
+              );
+            } catch {
+              /* ignore unavailable storage */
+            }
+          });
+          return btn;
+        },
+      });
+      map.addControl(new ToggleControl());
 
       // Click anywhere to place / move the pin.
       map.on("click", (e: any) => {
@@ -198,7 +363,11 @@ export function LocationPicker({
       });
 
       mapRef.current = map;
-      if (start) setPin(start.lat, start.lng, { center: true });
+      // Restore an existing pin + its stored address without re-geocoding.
+      if (start) {
+        setPin(start.lat, start.lng, { center: true, reverse: false });
+        if (initialAddress) setResolvedAddr({ address: initialAddress, city: "" });
+      }
 
       // The map mounts inside a conditionally-rendered step, so tiles need a
       // size recalculation once the container is actually laid out.
@@ -251,8 +420,10 @@ export function LocationPicker({
 
   const onSearchChange = (q: string) => {
     setSearch(q);
+    if (pasteError) setPasteError(null);
     if (debounceRef.current) window.clearTimeout(debounceRef.current);
-    if (q.trim().length < 3) {
+    // Coordinates or a link → no address lookup; the „Ustaw" action places it.
+    if (isDirectInput(q) || q.trim().length < 3) {
       setResults([]);
       setSearchOpen(false);
       return;
@@ -281,29 +452,58 @@ export function LocationPicker({
     } else if (e.key === "Enter") {
       e.preventDefault();
       if (activeIdx >= 0 && results[activeIdx]) pickResult(results[activeIdx]);
+      else if (isDirectInput(search)) applyPaste();
       else if (search.trim().length >= 3) runSearch(search.trim());
     } else if (e.key === "Escape") {
       setSearchOpen(false);
     }
   };
 
-  const applyPaste = () => {
-    const coords = parseCoords(pasteValue);
-    if (!coords) {
-      setPasteError(
-        "Nie rozpoznano współrzędnych. Wklej link Google Maps lub „szer, dł”."
-      );
+  const applyPaste = async () => {
+    // Fast path: the value already carries coordinates (@lat,lng, q=, bare…).
+    const coords = parseCoords(search);
+    if (coords) {
+      setPasteError(null);
+      setPin(coords.lat, coords.lng, { center: true });
+      setSearch(`${coords.lat}, ${coords.lng}`);
+      setSearchOpen(false);
       return;
     }
-    setPasteError(null);
-    setPin(coords.lat, coords.lng, { center: true });
+
+    // Short links (maps.app.goo.gl / goo.gl / g.co) carry no coordinates — they
+    // must be expanded server-side (the browser can't follow them cross-origin).
+    const value = search.trim();
+    if (/^https?:\/\//i.test(value)) {
+      setResolving(true);
+      setPasteError(null);
+      try {
+        const res = await fetch(
+          `/api/public/resolve-location?url=${encodeURIComponent(value)}`
+        );
+        const json = await res.json();
+        if (res.ok && json?.success && json.data) {
+          setPin(json.data.lat, json.data.lng, { center: true });
+          setSearch(`${json.data.lat}, ${json.data.lng}`);
+          setSearchOpen(false);
+          return;
+        }
+        setPasteError(
+          json?.error ?? "Nie udało się odczytać pinezki z tego linku."
+        );
+      } catch {
+        setPasteError("Nie udało się połączyć, aby rozpoznać link.");
+      } finally {
+        setResolving(false);
+      }
+      return;
+    }
+
+    setPasteError(
+      "Nie rozpoznano współrzędnych. Wklej link Google Maps lub „szer, dł”."
+    );
   };
 
   // --- Theming --------------------------------------------------------------
-  const labelStyle: React.CSSProperties = dark
-    ? { display: "block", marginBottom: 6, fontWeight: 600, fontSize: 14, color: "#ffffff" }
-    : { display: "block", marginBottom: 6, fontWeight: 500, fontSize: 14, color: "#334155" };
-
   const inputStyle: React.CSSProperties = {
     width: "100%",
     boxSizing: "border-box",
@@ -327,25 +527,38 @@ export function LocationPicker({
     whiteSpace: "nowrap",
   };
 
-  const hintColor = dark ? "#cbd5e1" : "#64748b";
+  // Coordinates / link pasted → show the „Ustaw" action instead of geocoding.
+  const directMode = isDirectInput(search);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-      <label style={labelStyle}>{label}</label>
-
-      {/* Address search */}
+      {/* One field: address search, coordinates, or a Google Maps link.
+          We auto-detect which was entered — coords/link show the „Ustaw"
+          button, free text runs the address geocoder with a dropdown. */}
       <div style={{ position: "relative" }}>
-        <input
-          style={inputStyle}
-          placeholder="🔎 Szukaj adresu (ulica, miasto)…"
-          value={search}
-          onChange={(e) => onSearchChange(e.target.value)}
-          onKeyDown={onSearchKeyDown}
-          onFocus={() => {
-            if (results.length) setSearchOpen(true);
-          }}
-          onBlur={() => setTimeout(() => setSearchOpen(false), 150)}
-        />
+        <div style={{ display: "flex", gap: 8, alignItems: "stretch" }}>
+          <input
+            style={{ ...inputStyle, flex: 1, width: "auto" }}
+            placeholder="Adres, link lub współrzędne"
+            value={search}
+            onChange={(e) => onSearchChange(e.target.value)}
+            onKeyDown={onSearchKeyDown}
+            onFocus={() => {
+              if (results.length) setSearchOpen(true);
+            }}
+            onBlur={() => setTimeout(() => setSearchOpen(false), 150)}
+          />
+          {directMode && (
+            <button
+              type="button"
+              style={{ ...btnStyle, opacity: resolving ? 0.7 : 1 }}
+              onClick={applyPaste}
+              disabled={resolving}
+            >
+              {resolving ? "Ustawiam…" : "Ustaw"}
+            </button>
+          )}
+        </div>
         {searchOpen && (searching || results.length > 0) && (
           <div
             style={{
@@ -399,56 +612,39 @@ export function LocationPicker({
           </div>
         )}
       </div>
-
-      {/* Paste coords / Google Maps link */}
-      <div
-        style={{
-          display: "flex",
-          gap: 8,
-          alignItems: "flex-start",
-          flexWrap: "wrap",
-        }}
-      >
-        <input
-          style={{ ...inputStyle, flex: "1 1 200px", width: "auto" }}
-          placeholder="Wklej pinezkę / współrzędne (link Google Maps lub „52.23, 21.01”)"
-          value={pasteValue}
-          onChange={(e) => {
-            setPasteValue(e.target.value);
-            if (pasteError) setPasteError(null);
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              e.preventDefault();
-              applyPaste();
-            }
-          }}
-        />
-        <button type="button" style={btnStyle} onClick={applyPaste}>
-          Ustaw
-        </button>
-      </div>
       {pasteError && (
         <div style={{ fontSize: 13, color: dark ? "#fca5a5" : "#dc2626" }}>
           {pasteError}
         </div>
       )}
 
-      {/* Map */}
+      {/* Map — square (height follows width) so it scales up on both mobile
+          and desktop and shows as much map as the card is wide. */}
       <div
         ref={mapElRef}
         style={{
           width: "100%",
-          height: 300,
+          aspectRatio: "1 / 1",
           borderRadius: 8,
           overflow: "hidden",
           border: dark ? "1px solid rgba(255,255,255,0.25)" : "1px solid #cbd5e1",
           zIndex: 0,
         }}
       />
-      <div style={{ fontSize: 12, color: hintColor }}>
-        Kliknij na mapie, aby ustawić pinezkę obiektu.
-      </div>
+      {/* Address derived from the pin (no manual address fields). */}
+      {(addrLoading || resolvedAddr) && (
+        <div
+          style={{
+            fontSize: 13,
+            color: dark ? "#e2e8f0" : "#334155",
+            fontWeight: 500,
+          }}
+        >
+          {addrLoading
+            ? "Rozpoznaję adres z pinezki…"
+            : resolvedAddr?.address || "Nie rozpoznano adresu — dopnij pinezkę"}
+        </div>
+      )}
     </div>
   );
 }

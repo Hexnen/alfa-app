@@ -17,13 +17,16 @@ interface PublicOrderIntake {
   requesterEmail: string;
   payerName: string;
   payerNip: string;
+  payerInvoiceEmail?: string;
   isCameraInstallation?: boolean;
   vtoolsOfferNumber?: string;
   internetIncluded?: boolean;
   interventionGroup?: boolean;
   videoReception?: boolean;
   monthlyAmount?: number;
+  contractLengthMonths?: number;
   rentalAmount?: number;
+  rentalLengthMonths?: number;
   invoiceIssuer?: string;
   cameraCount?: number;
   megaphoneCount?: number;
@@ -104,6 +107,7 @@ app.post("/order-intake", async (c) => {
       requesterEmail: body.requesterEmail,
       payerName: body.payerName,
       payerNip: normalizedNip,
+      payerInvoiceEmail: body.payerInvoiceEmail,
       objectName: body.objectName,
       objectKind: body.objectKind,
       objectAddress: body.objectAddress,
@@ -120,7 +124,9 @@ app.post("/order-intake", async (c) => {
       interventionGroup: body.interventionGroup,
       videoReception: body.videoReception,
       monthlyAmount: body.monthlyAmount,
+      contractLengthMonths: body.contractLengthMonths,
       rentalAmount: body.rentalAmount,
+      rentalLengthMonths: body.rentalLengthMonths,
       invoiceIssuer: body.invoiceIssuer,
       serviceStartDate: body.serviceStartDate,
       installationStartDate: body.installationStartDate,
@@ -173,6 +179,106 @@ app.post("/order-intake", async (c) => {
     return c.json<ApiResponse<null>>(
       { success: false, error: "Nie udało się utworzyć zlecenia" },
       500
+    );
+  }
+});
+
+/**
+ * Extract lat/lng from a Google Maps URL or HTML body. Covers the shapes a
+ * resolved short link can land on: @lat,lng · !3d..!4d.. · ?q=/ll=/center=lat,lng.
+ */
+function extractCoords(text: string): { lat: number; lng: number } | null {
+  const inRange = (lat: number, lng: number) =>
+    Number.isFinite(lat) &&
+    Number.isFinite(lng) &&
+    lat >= -90 &&
+    lat <= 90 &&
+    lng >= -180 &&
+    lng <= 180;
+
+  const patterns = [
+    /!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/,
+    /@(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)/,
+    // /maps/search/<lat>,+<lng> · /place/<lat>,<lng> · /dir/<lat>,<lng>
+    /\/(?:search|place|dir)\/(-?\d+(?:\.\d+)?),\+?\s*(-?\d+(?:\.\d+)?)/,
+    /[?&](?:q|ll|center|destination|query)=(?:loc:)?(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)/,
+  ];
+  for (const re of patterns) {
+    const m = text.match(re);
+    if (m) {
+      const lat = parseFloat(m[1]);
+      const lng = parseFloat(m[2]);
+      if (inRange(lat, lng)) return { lat, lng };
+    }
+  }
+  return null;
+}
+
+// Resolve a Google Maps short link (maps.app.goo.gl / goo.gl/maps / g.co) into
+// coordinates by following the redirect server-side (browsers can't — CORS).
+// Host-allowlisted to Google domains to avoid SSRF. No auth (public form).
+app.get("/resolve-location", async (c) => {
+  const url = c.req.query("url");
+  if (!url || !/^https?:\/\//i.test(url)) {
+    return c.json<ApiResponse<null>>(
+      { success: false, error: "Podaj prawidłowy link" },
+      400
+    );
+  }
+
+  let hostname: string;
+  try {
+    hostname = new URL(url).hostname.toLowerCase();
+  } catch {
+    return c.json<ApiResponse<null>>(
+      { success: false, error: "Podaj prawidłowy link" },
+      400
+    );
+  }
+
+  const allowedHost =
+    /(^|\.)(google\.[a-z.]+|goo\.gl|g\.co)$/.test(hostname) ||
+    hostname === "maps.app.goo.gl";
+  if (!allowedHost) {
+    return c.json<ApiResponse<null>>(
+      { success: false, error: "Obsługiwane są tylko linki Google Maps" },
+      400
+    );
+  }
+
+  try {
+    const res = await fetch(url, {
+      redirect: "follow",
+      headers: {
+        // A real UA — goo.gl serves a bare redirect stub to bots otherwise.
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        "Accept-Language": "pl,en;q=0.9",
+      },
+    });
+
+    let coords = extractCoords(res.url);
+    if (!coords) {
+      const body = await res.text();
+      coords = extractCoords(body);
+    }
+
+    if (!coords) {
+      return c.json<ApiResponse<null>>(
+        { success: false, error: "Nie udało się odczytać współrzędnych z linku" },
+        422
+      );
+    }
+
+    return c.json<ApiResponse<{ lat: number; lng: number }>>({
+      success: true,
+      data: coords,
+    });
+  } catch (error) {
+    console.error("Error resolving location link:", error);
+    return c.json<ApiResponse<null>>(
+      { success: false, error: "Nie udało się rozpoznać linku" },
+      502
     );
   }
 });

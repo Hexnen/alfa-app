@@ -282,6 +282,12 @@ export function OrderDetails() {
                   <dt className="text-sm text-muted-foreground">NIP</dt>
                   <dd className="font-medium">{order.payerNip}</dd>
                 </div>
+                {order.payerInvoiceEmail && (
+                  <div>
+                    <dt className="text-sm text-muted-foreground">Mail do faktur</dt>
+                    <dd className="font-medium">{order.payerInvoiceEmail}</dd>
+                  </div>
+                )}
               </div>
             </CardContent>
           </Card>
@@ -341,6 +347,14 @@ export function OrderDetails() {
                     </dd>
                   </div>
                 )}
+                {order.contractLengthMonths != null && (
+                  <div>
+                    <dt className="text-sm text-muted-foreground">Długość kontraktu</dt>
+                    <dd className="font-medium">
+                      {order.contractLengthMonths} mies.
+                    </dd>
+                  </div>
+                )}
                 {order.rentalAmount && (
                   <div>
                     <dt className="text-sm text-muted-foreground">Kwota najmu</dt>
@@ -349,6 +363,14 @@ export function OrderDetails() {
                         style: "currency",
                         currency: "PLN",
                       })}
+                    </dd>
+                  </div>
+                )}
+                {order.rentalLengthMonths != null && (
+                  <div>
+                    <dt className="text-sm text-muted-foreground">Długość dzierżawy</dt>
+                    <dd className="font-medium">
+                      {order.rentalLengthMonths} mies.
                     </dd>
                   </div>
                 )}

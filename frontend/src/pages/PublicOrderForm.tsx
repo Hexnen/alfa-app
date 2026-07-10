@@ -7,7 +7,7 @@ import { autoFormatNIP, normalizeNIP, validateNIP } from "@/lib/nip";
 import {
   INVOICE_ISSUERS,
   OBJECT_KINDS,
-  emptyIntakeState,
+  useOrderIntakeDraft,
   useOrderIntakeWizard,
   type OrderIntakeFormState,
 } from "@/lib/orderIntakeSteps";
@@ -52,7 +52,7 @@ function YesNoToggle({
 }
 
 export function PublicOrderForm() {
-  const [form, setForm] = useState<OrderIntakeFormState>(emptyIntakeState);
+  const [form, setForm, clearDraft] = useOrderIntakeDraft("zdwPublicOrderDraft");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [orderNumber, setOrderNumber] = useState<string | null>(null);
@@ -119,8 +119,11 @@ export function PublicOrderForm() {
         : undefined,
       payerName: form.payerName,
       payerNip: normalizeNIP(form.payerNip),
+      payerInvoiceEmail: form.payerInvoiceEmail || undefined,
       monthlyAmount: num(form.monthlyAmount),
+      contractLengthMonths: num(form.contractLengthMonths),
       rentalAmount: num(form.rentalAmount),
+      rentalLengthMonths: num(form.rentalLengthMonths),
       invoiceIssuer: form.invoiceIssuer || undefined,
       cameraCount: num(form.cameraCount),
       megaphoneCount: num(form.megaphoneCount),
@@ -145,6 +148,7 @@ export function PublicOrderForm() {
     setLoading(true);
     try {
       const res = await submitPublicOrderIntake(payload);
+      clearDraft();
       setOrderNumber(res.data?.orderNumber ?? "");
       scrollToTop();
     } catch (err) {
@@ -197,12 +201,13 @@ export function PublicOrderForm() {
         {/* Header: logo + Roboto Slab title */}
         <div className="zdw-header">
           <img className="zdw-logo" src={LOGO_URL} alt="Alfa Group" />
-          <h1 className="zdw-title">Zlecenie Zdalnego Dozoru Wideo</h1>
+          <div className="zdw-titlewrap">
+            <h1 className="zdw-title">Zlecenie Zdalnego Dozoru Wideo</h1>
+            <p className="zdw-sub">Pola oznaczone {req} są wymagane.</p>
+          </div>
         </div>
 
         <div className="zdw-card">
-          <p className="zdw-sub">Pola oznaczone {req} są wymagane.</p>
-
           {/* Step indicator */}
           <div style={{ marginBottom: 22 }}>
             <div className="zdw-prog-head">
@@ -269,14 +274,6 @@ export function PublicOrderForm() {
                 <>
                   <div className="zdw-grid2">
                     <div>
-                      <label className="zdw-label">Nazwa płatnika {req}</label>
-                      <input
-                        className="zdw-input"
-                        value={form.payerName}
-                        onChange={handleInput("payerName")}
-                      />
-                    </div>
-                    <div>
                       <label className="zdw-label">NIP Płatnika {req}</label>
                       <input
                         className="zdw-input"
@@ -289,6 +286,24 @@ export function PublicOrderForm() {
                         maxLength={13}
                       />
                     </div>
+                    <div>
+                      <label className="zdw-label">Nazwa płatnika {req}</label>
+                      <input
+                        className="zdw-input"
+                        value={form.payerName}
+                        onChange={handleInput("payerName")}
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="zdw-label">Mail do faktur płatnika {req}</label>
+                    <input
+                      className="zdw-input"
+                      type="email"
+                      value={form.payerInvoiceEmail}
+                      onChange={handleInput("payerInvoiceEmail")}
+                      placeholder="faktury@firma.pl"
+                    />
                   </div>
                   <div>
                     <label className="zdw-label">Faktury wystawia</label>
@@ -320,6 +335,7 @@ export function PublicOrderForm() {
                       key: "interventionGroup" as const,
                       label: "Grupa interwencyjna?",
                     },
+                    { key: "videoReception" as const, label: "Wideo recepcja?" },
                   ].map((q) => (
                     <div key={q.key} className="zdw-toggle-row">
                       <span className="zdw-toggle-label">{q.label}</span>
@@ -332,7 +348,21 @@ export function PublicOrderForm() {
                 </>
               )}
 
-              {/* Step 4: Dane obiektu */}
+              {/* Step 4: Lokalizacja obiektu */}
+              {currentStep.id === "location" && (
+                <LocationPicker
+                  variant="dark"
+                  value={form.objectLocationUrl}
+                  initialAddress={form.objectAddress}
+                  onChange={(url) => set("objectLocationUrl", url)}
+                  onAddress={(address, city) => {
+                    set("objectAddress", address);
+                    set("objectCity", city);
+                  }}
+                />
+              )}
+
+              {/* Step 5: Dane obiektu */}
               {currentStep.id === "object" && (
                 <>
                   <div>
@@ -344,24 +374,6 @@ export function PublicOrderForm() {
                       value={form.objectName}
                       onChange={handleInput("objectName")}
                     />
-                  </div>
-                  <div className="zdw-grid2">
-                    <div>
-                      <label className="zdw-label">Adres obiektu {req}</label>
-                      <input
-                        className="zdw-input"
-                        value={form.objectAddress}
-                        onChange={handleInput("objectAddress")}
-                      />
-                    </div>
-                    <div>
-                      <label className="zdw-label">Miejscowość {req}</label>
-                      <input
-                        className="zdw-input"
-                        value={form.objectCity}
-                        onChange={handleInput("objectCity")}
-                      />
-                    </div>
                   </div>
                   <div>
                     <label className="zdw-label">Rodzaj obiektu</label>
@@ -378,12 +390,6 @@ export function PublicOrderForm() {
                       ))}
                     </select>
                   </div>
-
-                  <LocationPicker
-                    variant="dark"
-                    value={form.objectLocationUrl}
-                    onChange={(url) => set("objectLocationUrl", url)}
-                  />
 
                   <div className="zdw-section">Osoba kontaktowa na miejscu</div>
                   <div>
@@ -417,7 +423,7 @@ export function PublicOrderForm() {
                 </>
               )}
 
-              {/* Step 5: Montaż (only when isCameraInstallation) */}
+              {/* Step 6: Montaż (only when isCameraInstallation) */}
               {currentStep.id === "installation" && (
                 <div>
                   <label className="zdw-label">Nr oferty Vtools</label>
@@ -429,10 +435,10 @@ export function PublicOrderForm() {
                 </div>
               )}
 
-              {/* Step 6: Zakres i warunki usługi */}
+              {/* Step 7: Zakres i warunki usługi */}
               {currentStep.id === "scope" && (
                 <>
-                  <div className="zdw-grid2">
+                  <div className="zdw-grid2-keep">
                     <div>
                       <label className="zdw-label">Ilość kamer</label>
                       <input
@@ -456,16 +462,9 @@ export function PublicOrderForm() {
                       />
                     </div>
                   </div>
-                  <div className="zdw-toggle-row">
-                    <span className="zdw-toggle-label">Wideo recepcja</span>
-                    <YesNoToggle
-                      value={form.videoReception}
-                      onChange={(v) => set("videoReception", v)}
-                    />
-                  </div>
                   <div className="zdw-grid2">
                     <div>
-                      <label className="zdw-label">Abonament (zł)</label>
+                      <label className="zdw-label">Abonament (zł netto)</label>
                       <input
                         className="zdw-input"
                         type="number"
@@ -477,7 +476,7 @@ export function PublicOrderForm() {
                       />
                     </div>
                     <div>
-                      <label className="zdw-label">Dzierżawa (zł)</label>
+                      <label className="zdw-label">Dzierżawa (zł netto)</label>
                       <input
                         className="zdw-input"
                         type="number"
@@ -486,6 +485,28 @@ export function PublicOrderForm() {
                         inputMode="decimal"
                         value={form.rentalAmount}
                         onChange={handleInput("rentalAmount")}
+                      />
+                    </div>
+                    <div>
+                      <label className="zdw-label">Długość kontraktu (mies.)</label>
+                      <input
+                        className="zdw-input"
+                        type="number"
+                        min="0"
+                        inputMode="numeric"
+                        value={form.contractLengthMonths}
+                        onChange={handleInput("contractLengthMonths")}
+                      />
+                    </div>
+                    <div>
+                      <label className="zdw-label">Długość dzierżawy (mies.)</label>
+                      <input
+                        className="zdw-input"
+                        type="number"
+                        min="0"
+                        inputMode="numeric"
+                        value={form.rentalLengthMonths}
+                        onChange={handleInput("rentalLengthMonths")}
                       />
                     </div>
                   </div>
@@ -500,11 +521,15 @@ export function PublicOrderForm() {
                       Grupa interwencyjna:{" "}
                       <strong>{form.interventionGroup ? "Tak" : "Nie"}</strong>
                     </span>
+                    <span>
+                      Wideo recepcja:{" "}
+                      <strong>{form.videoReception ? "Tak" : "Nie"}</strong>
+                    </span>
                   </div>
                 </>
               )}
 
-              {/* Step 7: Terminy */}
+              {/* Step 8: Terminy */}
               {currentStep.id === "terms" && (
                 <>
                   {form.isCameraInstallation && (

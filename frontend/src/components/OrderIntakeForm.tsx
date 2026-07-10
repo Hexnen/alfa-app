@@ -37,6 +37,7 @@ import {
   INVOICE_ISSUERS,
   OBJECT_KINDS,
   emptyIntakeState,
+  useOrderIntakeDraft,
   useOrderIntakeWizard,
   type OrderIntakeFormState,
 } from "@/lib/orderIntakeSteps";
@@ -109,7 +110,7 @@ function SectionHeader({
 }
 
 export function OrderIntakeForm({ onCreated }: OrderIntakeFormProps) {
-  const [form, setForm] = useState<OrderIntakeFormState>(emptyIntakeState);
+  const [form, setForm, clearDraft] = useOrderIntakeDraft("orderIntakeDraft");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [createdNumber, setCreatedNumber] = useState<string | null>(null);
@@ -174,6 +175,7 @@ export function OrderIntakeForm({ onCreated }: OrderIntakeFormProps) {
       requesterEmail: form.requesterEmail,
       payerName: form.payerName,
       payerNip: normalizeNIP(form.payerNip),
+      payerInvoiceEmail: form.payerInvoiceEmail || undefined,
       objectName: form.objectName,
       objectKind: form.objectKind || undefined,
       objectAddress: form.objectAddress || undefined,
@@ -189,7 +191,9 @@ export function OrderIntakeForm({ onCreated }: OrderIntakeFormProps) {
         ? form.vtoolsOfferNumber || undefined
         : undefined,
       monthlyAmount: num(form.monthlyAmount),
+      contractLengthMonths: num(form.contractLengthMonths),
       rentalAmount: num(form.rentalAmount),
+      rentalLengthMonths: num(form.rentalLengthMonths),
       invoiceIssuer: form.invoiceIssuer || undefined,
       serviceStartDate: form.serviceStartDate || undefined,
       notes: form.notes || undefined,
@@ -209,6 +213,7 @@ export function OrderIntakeForm({ onCreated }: OrderIntakeFormProps) {
     setLoading(true);
     try {
       const res = await createOrder(payload);
+      clearDraft();
       setCreatedNumber(res.data?.orderNumber ?? "");
       onCreated?.();
     } catch (err) {
@@ -337,17 +342,6 @@ export function OrderIntakeForm({ onCreated }: OrderIntakeFormProps) {
               <SectionHeader icon={Building2}>Kontrahent (płatnik)</SectionHeader>
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                 <div className="space-y-2">
-                  <Label htmlFor="payerName" className="text-slate-700">
-                    Nazwa płatnika <span className="text-red-500">*</span>
-                  </Label>
-                  <Input
-                    id="payerName"
-                    value={form.payerName}
-                    onChange={handleInput("payerName")}
-                    className={inputCls}
-                  />
-                </div>
-                <div className="space-y-2">
                   <Label htmlFor="payerNip" className="text-slate-700">
                     NIP Płatnika <span className="text-red-500">*</span>
                   </Label>
@@ -360,6 +354,30 @@ export function OrderIntakeForm({ onCreated }: OrderIntakeFormProps) {
                     className={inputCls}
                   />
                 </div>
+                <div className="space-y-2">
+                  <Label htmlFor="payerName" className="text-slate-700">
+                    Nazwa płatnika <span className="text-red-500">*</span>
+                  </Label>
+                  <Input
+                    id="payerName"
+                    value={form.payerName}
+                    onChange={handleInput("payerName")}
+                    className={inputCls}
+                  />
+                </div>
+              </div>
+              <div className="space-y-2 md:max-w-md">
+                <Label htmlFor="payerInvoiceEmail" className="text-slate-700">
+                  Mail do faktur płatnika <span className="text-red-500">*</span>
+                </Label>
+                <Input
+                  id="payerInvoiceEmail"
+                  type="email"
+                  value={form.payerInvoiceEmail}
+                  onChange={handleInput("payerInvoiceEmail")}
+                  placeholder="faktury@firma.pl"
+                  className={inputCls}
+                />
               </div>
               <div className="space-y-2 md:max-w-md">
                 <Label htmlFor="invoiceIssuer" className="text-slate-700">
@@ -399,6 +417,7 @@ export function OrderIntakeForm({ onCreated }: OrderIntakeFormProps) {
                     key: "interventionGroup" as const,
                     label: "Grupa interwencyjna?",
                   },
+                  { key: "videoReception" as const, label: "Wideo recepcja?" },
                 ].map((q) => (
                   <div
                     key={q.key}
@@ -417,10 +436,27 @@ export function OrderIntakeForm({ onCreated }: OrderIntakeFormProps) {
             </section>
           )}
 
-          {/* Step 4: Dane obiektu */}
+          {/* Step 4: Lokalizacja obiektu */}
+          {currentStep.id === "location" && (
+            <section className="space-y-4">
+              <SectionHeader icon={MapPin}>Lokalizacja obiektu</SectionHeader>
+              <LocationPicker
+                variant="light"
+                value={form.objectLocationUrl}
+                initialAddress={form.objectAddress}
+                onChange={(url) => set("objectLocationUrl", url)}
+                onAddress={(address, city) => {
+                  set("objectAddress", address);
+                  set("objectCity", city);
+                }}
+              />
+            </section>
+          )}
+
+          {/* Step 5: Dane obiektu */}
           {currentStep.id === "object" && (
             <section className="space-y-4">
-              <SectionHeader icon={MapPin}>Dane obiektu</SectionHeader>
+              <SectionHeader icon={Building2}>Dane obiektu</SectionHeader>
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                 <div className="space-y-2">
                   <Label htmlFor="objectName" className="text-slate-700">
@@ -431,28 +467,6 @@ export function OrderIntakeForm({ onCreated }: OrderIntakeFormProps) {
                     id="objectName"
                     value={form.objectName}
                     onChange={handleInput("objectName")}
-                    className={inputCls}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="objectAddress" className="text-slate-700">
-                    Adres obiektu <span className="text-red-500">*</span>
-                  </Label>
-                  <Input
-                    id="objectAddress"
-                    value={form.objectAddress}
-                    onChange={handleInput("objectAddress")}
-                    className={inputCls}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="objectCity" className="text-slate-700">
-                    Miejscowość <span className="text-red-500">*</span>
-                  </Label>
-                  <Input
-                    id="objectCity"
-                    value={form.objectCity}
-                    onChange={handleInput("objectCity")}
                     className={inputCls}
                   />
                 </div>
@@ -477,12 +491,6 @@ export function OrderIntakeForm({ onCreated }: OrderIntakeFormProps) {
                   </Select>
                 </div>
               </div>
-
-              <LocationPicker
-                variant="light"
-                value={form.objectLocationUrl}
-                onChange={(url) => set("objectLocationUrl", url)}
-              />
 
               <div className="pt-2">
                 <SectionHeader icon={User}>
@@ -535,7 +543,7 @@ export function OrderIntakeForm({ onCreated }: OrderIntakeFormProps) {
             </section>
           )}
 
-          {/* Step 5: Montaż (only when isCameraInstallation) */}
+          {/* Step 6: Montaż (only when isCameraInstallation) */}
           {currentStep.id === "installation" && (
             <section className="space-y-4">
               <SectionHeader icon={Camera}>Montaż</SectionHeader>
@@ -554,7 +562,7 @@ export function OrderIntakeForm({ onCreated }: OrderIntakeFormProps) {
             </section>
           )}
 
-          {/* Step 6: Zakres i warunki usługi */}
+          {/* Step 7: Zakres i warunki usługi */}
           {currentStep.id === "scope" && (
             <section className="space-y-4">
               <SectionHeader icon={Wallet}>
@@ -591,7 +599,7 @@ export function OrderIntakeForm({ onCreated }: OrderIntakeFormProps) {
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="monthlyAmount" className="text-slate-700">
-                    Abonament (zł)
+                    Abonament (zł netto)
                   </Label>
                   <Input
                     id="monthlyAmount"
@@ -605,7 +613,7 @@ export function OrderIntakeForm({ onCreated }: OrderIntakeFormProps) {
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="rentalAmount" className="text-slate-700">
-                    Dzierżawa (zł)
+                    Dzierżawa (zł netto)
                   </Label>
                   <Input
                     id="rentalAmount"
@@ -617,15 +625,32 @@ export function OrderIntakeForm({ onCreated }: OrderIntakeFormProps) {
                     className={inputCls}
                   />
                 </div>
-              </div>
-              <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-white p-3 md:max-w-md">
-                <Label className="text-sm font-medium text-slate-700">
-                  Wideo recepcja
-                </Label>
-                <YesNoToggle
-                  value={form.videoReception}
-                  onChange={(v) => set("videoReception", v)}
-                />
+                <div className="space-y-2">
+                  <Label htmlFor="contractLengthMonths" className="text-slate-700">
+                    Długość kontraktu (mies.)
+                  </Label>
+                  <Input
+                    id="contractLengthMonths"
+                    type="number"
+                    min="0"
+                    value={form.contractLengthMonths}
+                    onChange={handleInput("contractLengthMonths")}
+                    className={inputCls}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="rentalLengthMonths" className="text-slate-700">
+                    Długość dzierżawy (mies.)
+                  </Label>
+                  <Input
+                    id="rentalLengthMonths"
+                    type="number"
+                    min="0"
+                    value={form.rentalLengthMonths}
+                    onChange={handleInput("rentalLengthMonths")}
+                    className={inputCls}
+                  />
+                </div>
               </div>
 
               {/* Read-only recap of step-3 answers */}
@@ -643,12 +668,18 @@ export function OrderIntakeForm({ onCreated }: OrderIntakeFormProps) {
                       {form.interventionGroup ? "Tak" : "Nie"}
                     </strong>
                   </span>
+                  <span>
+                    Wideo recepcja:{" "}
+                    <strong className="text-slate-900">
+                      {form.videoReception ? "Tak" : "Nie"}
+                    </strong>
+                  </span>
                 </div>
               </div>
             </section>
           )}
 
-          {/* Step 7: Terminy */}
+          {/* Step 8: Terminy */}
           {currentStep.id === "terms" && (
             <section className="space-y-4">
               <SectionHeader icon={Calendar}>Terminy</SectionHeader>
