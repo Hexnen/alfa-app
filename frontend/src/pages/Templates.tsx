@@ -3,6 +3,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
 import { CameraModelForm } from "@/components/CameraModelForm";
+import { usePerms } from "@/auth/permissions";
+import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
 import { Plus, Search, Pencil, Trash2 } from "lucide-react";
 import {
   getCameraModels,
@@ -22,6 +24,8 @@ const typeLabels: Record<CameraModelType, string> = {
 };
 
 export function Templates() {
+  const { canEdit } = usePerms();
+  const editable = canEdit("technical/szablony");
   const [models, setModels] = useState<CameraModel[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -32,7 +36,7 @@ export function Templates() {
     setLoading(true);
     try {
       const res = await getCameraModels();
-      setModels(res.data);
+      setModels(res.data ?? []);
     } catch (error) {
       console.error("Error loading camera models:", error);
     } finally {
@@ -45,11 +49,13 @@ export function Templates() {
   }, [loadModels]);
 
   const handleCreate = async (data: CameraModelInput) => {
+    if (!editable) return;
     await createCameraModel(data);
     loadModels();
   };
 
   const handleUpdate = async (data: CameraModelInput) => {
+    if (!editable) return;
     if (editing) {
       await updateCameraModel(editing.id, data);
       loadModels();
@@ -57,6 +63,7 @@ export function Templates() {
   };
 
   const handleDelete = async (item: CameraModel) => {
+    if (!editable) return;
     if (window.confirm(`Usunąć szablon "${item.name}"?`)) {
       try {
         await deleteCameraModel(item.id);
@@ -92,11 +99,15 @@ export function Templates() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold">Szablony</h1>
-        <Button onClick={() => setFormOpen(true)}>
-          <Plus className="h-4 w-4 mr-2" />
-          Nowy model
-        </Button>
+        {editable && (
+          <Button onClick={() => setFormOpen(true)}>
+            <Plus className="h-4 w-4 mr-2" />
+            Nowy model
+          </Button>
+        )}
       </div>
+
+      {!editable && <ReadOnlyBanner className="mb-4" />}
 
       <p className="text-sm text-muted-foreground">
         Biblioteka standardowych modeli kamer i ich parametrów — używana przy
@@ -176,29 +187,31 @@ export function Templates() {
                       </td>
                       <td className="px-3 py-2">{item.irRange || "—"}</td>
                       <td className="px-3 py-2">
-                        <div
-                          className="flex justify-end gap-1"
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-8 w-8"
-                            onClick={() => openEdit(item)}
-                            title="Edytuj"
+                        {editable && (
+                          <div
+                            className="flex justify-end gap-1"
+                            onClick={(e) => e.stopPropagation()}
                           >
-                            <Pencil className="h-4 w-4" />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-8 w-8"
-                            onClick={() => handleDelete(item)}
-                            title="Usuń"
-                          >
-                            <Trash2 className="h-4 w-4 text-destructive" />
-                          </Button>
-                        </div>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8"
+                              onClick={() => openEdit(item)}
+                              title="Edytuj"
+                            >
+                              <Pencil className="h-4 w-4" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8"
+                              onClick={() => handleDelete(item)}
+                              title="Usuń"
+                            >
+                              <Trash2 className="h-4 w-4 text-destructive" />
+                            </Button>
+                          </div>
+                        )}
                       </td>
                     </tr>
                   ))}

@@ -11,6 +11,8 @@ import { ProtocolForm } from "@/components/ProtocolForm";
 import { QuoteForm } from "@/components/QuoteForm";
 import { printProtocol } from "@/lib/protocolPrint";
 import { printQuote } from "@/lib/quotePrint";
+import { usePerms } from "@/auth/permissions";
+import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
 import {
   Plus,
   ChevronLeft,
@@ -109,6 +111,8 @@ const TECH_TABS = [
 
 export function Technical() {
   const { tab } = useParams<{ tab: string }>();
+  const { canEdit } = usePerms();
+  const editable = canEdit(`technical/${tab}`);
   const now = new Date();
   const [year, setYear] = useState(now.getFullYear());
   const [month, setMonth] = useState(now.getMonth() + 1);
@@ -174,11 +178,13 @@ export function Technical() {
   }, [loadTechnicians]);
 
   const handleTechCreate = async (data: TechnicianInput) => {
+    if (!editable) return;
     await createTechnician(data);
     loadTechnicians();
   };
 
   const handleTechUpdate = async (data: TechnicianInput) => {
+    if (!editable) return;
     if (editingTech) {
       await updateTechnician(editingTech.id, data);
       loadTechnicians();
@@ -186,6 +192,7 @@ export function Technical() {
   };
 
   const handleTechDelete = async (tech: Technician) => {
+    if (!editable) return;
     if (
       window.confirm(
         `Usunąć technika "${`${tech.firstName} ${tech.lastName}`.trim()}"?`
@@ -225,11 +232,13 @@ export function Technical() {
   }, [loadPriceList]);
 
   const handlePriceCreate = async (data: PriceItemInput) => {
+    if (!editable) return;
     await createPriceItem(data);
     loadPriceList();
   };
 
   const handlePriceUpdate = async (data: PriceItemInput) => {
+    if (!editable) return;
     if (editingPrice) {
       await updatePriceItem(editingPrice.id, data);
       loadPriceList();
@@ -237,6 +246,7 @@ export function Technical() {
   };
 
   const handlePriceDelete = async (item: PriceItem) => {
+    if (!editable) return;
     if (window.confirm(`Usunąć pozycję "${item.name}" z cennika?`)) {
       try {
         await deletePriceItem(item.id);
@@ -291,6 +301,7 @@ export function Technical() {
   }, [loadQuotes]);
 
   const handleQuoteNew = async () => {
+    if (!editable) return;
     try {
       const res = await createQuote();
       await loadQuotes();
@@ -303,6 +314,7 @@ export function Technical() {
   };
 
   const handleQuoteUpdate = async (data: QuoteInput) => {
+    if (!editable) return;
     if (editingQuote) {
       await updateQuote(editingQuote.id, data);
       loadQuotes();
@@ -310,6 +322,7 @@ export function Technical() {
   };
 
   const handleQuoteDelete = async (quote: Quote) => {
+    if (!editable) return;
     if (window.confirm(`Usunąć wycenę ${quote.number}?`)) {
       try {
         await deleteQuote(quote.id);
@@ -323,6 +336,7 @@ export function Technical() {
   };
 
   const handleProtoUpdate = async (data: ProtocolInput) => {
+    if (!editable) return;
     if (editingProto) {
       await updateProtocol(editingProto.id, data);
       loadProtocols();
@@ -330,6 +344,7 @@ export function Technical() {
   };
 
   const handleProtoSign = async (signaturePng: string, signerName: string) => {
+    if (!editable) return;
     if (editingProto) {
       const res = await signProtocol(editingProto.id, {
         signaturePng,
@@ -341,6 +356,7 @@ export function Technical() {
   };
 
   const handleProtoUnsign = async () => {
+    if (!editable) return;
     if (editingProto) {
       const res = await unsignProtocol(editingProto.id);
       if (res.data) setEditingProto(res.data);
@@ -365,11 +381,13 @@ export function Technical() {
   };
 
   const handleCreate = async (data: RealizationInput) => {
+    if (!editable) return;
     await createRealization(data);
     load();
   };
 
   const handleUpdate = async (data: RealizationInput) => {
+    if (!editable) return;
     if (editing) {
       await updateRealization(editing.id, data);
       load();
@@ -377,6 +395,7 @@ export function Technical() {
   };
 
   const handleDelete = async (row: Realization) => {
+    if (!editable) return;
     if (
       window.confirm(
         `Usunąć realizację "${row.site}" z ${new Date(row.date).toLocaleDateString("pl-PL")}?`
@@ -453,6 +472,8 @@ export function Technical() {
         <h1 className="text-3xl font-bold">Techniczny</h1>
       </div>
 
+      {!editable && <ReadOnlyBanner className="mb-4" />}
+
       <Tabs value={tab}>
         <TabsContent value="realizacje" className="space-y-6">
           {/* Pasek: miesiąc + akcje */}
@@ -481,12 +502,14 @@ export function Technical() {
                 Do zafakturowania: {summary.uninvoicedCount}
               </span>
             )}
-            <div className="ml-auto">
-              <Button onClick={() => setFormOpen(true)}>
-                <Plus className="h-4 w-4 mr-2" />
-                Dodaj realizację
-              </Button>
-            </div>
+            {editable && (
+              <div className="ml-auto">
+                <Button onClick={() => setFormOpen(true)}>
+                  <Plus className="h-4 w-4 mr-2" />
+                  Dodaj realizację
+                </Button>
+              </div>
+            )}
           </div>
 
           {/* Kafelki podsumowań */}
@@ -604,29 +627,31 @@ export function Technical() {
                             {row.contractor1 || row.caretaker || "—"}
                           </td>
                           <td className="px-3 py-2">
-                            <div
-                              className="flex justify-end gap-1"
-                              onClick={(e) => e.stopPropagation()}
-                            >
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-8 w-8"
-                                onClick={() => openEdit(row)}
-                                title="Edytuj"
+                            {editable && (
+                              <div
+                                className="flex justify-end gap-1"
+                                onClick={(e) => e.stopPropagation()}
                               >
-                                <Pencil className="h-4 w-4" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-8 w-8 text-destructive hover:text-destructive"
-                                onClick={() => handleDelete(row)}
-                                title="Usuń"
-                              >
-                                <Trash2 className="h-4 w-4" />
-                              </Button>
-                            </div>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-8 w-8"
+                                  onClick={() => openEdit(row)}
+                                  title="Edytuj"
+                                >
+                                  <Pencil className="h-4 w-4" />
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-8 w-8 text-destructive hover:text-destructive"
+                                  onClick={() => handleDelete(row)}
+                                  title="Usuń"
+                                >
+                                  <Trash2 className="h-4 w-4" />
+                                </Button>
+                              </div>
+                            )}
                           </td>
                         </tr>
                       ))}
@@ -805,15 +830,17 @@ export function Technical() {
                               >
                                 <Printer className="h-4 w-4" />
                               </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-8 w-8"
-                                onClick={() => setEditingProto(proto)}
-                                title="Edytuj"
-                              >
-                                <Pencil className="h-4 w-4" />
-                              </Button>
+                              {editable && (
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-8 w-8"
+                                  onClick={() => setEditingProto(proto)}
+                                  title="Edytuj"
+                                >
+                                  <Pencil className="h-4 w-4" />
+                                </Button>
+                              )}
                             </div>
                           </td>
                         </tr>
@@ -832,10 +859,12 @@ export function Technical() {
               Nowa wycena startuje z pozycjami z cennika — uzupełnij ilości i
               dopisz sprzęt. Rok {year}.
             </p>
-            <Button onClick={handleQuoteNew}>
-              <Plus className="h-4 w-4 mr-2" />
-              Nowa wycena
-            </Button>
+            {editable && (
+              <Button onClick={handleQuoteNew}>
+                <Plus className="h-4 w-4 mr-2" />
+                Nowa wycena
+              </Button>
+            )}
           </div>
 
           <Card>
@@ -897,24 +926,28 @@ export function Technical() {
                               >
                                 <Printer className="h-4 w-4" />
                               </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-8 w-8"
-                                onClick={() => setEditingQuote(quote)}
-                                title="Edytuj"
-                              >
-                                <Pencil className="h-4 w-4" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-8 w-8 text-destructive hover:text-destructive"
-                                onClick={() => handleQuoteDelete(quote)}
-                                title="Usuń"
-                              >
-                                <Trash2 className="h-4 w-4" />
-                              </Button>
+                              {editable && (
+                                <>
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-8 w-8"
+                                    onClick={() => setEditingQuote(quote)}
+                                    title="Edytuj"
+                                  >
+                                    <Pencil className="h-4 w-4" />
+                                  </Button>
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-8 w-8 text-destructive hover:text-destructive"
+                                    onClick={() => handleQuoteDelete(quote)}
+                                    title="Usuń"
+                                  >
+                                    <Trash2 className="h-4 w-4" />
+                                  </Button>
+                                </>
+                              )}
                             </div>
                           </td>
                         </tr>
@@ -932,10 +965,12 @@ export function Technical() {
             <p className="text-sm text-muted-foreground">
               Cennik usług serwisowych — załącznik do protokołu końcowego.
             </p>
-            <Button onClick={() => setPriceFormOpen(true)}>
-              <Plus className="h-4 w-4 mr-2" />
-              Dodaj pozycję
-            </Button>
+            {editable && (
+              <Button onClick={() => setPriceFormOpen(true)}>
+                <Plus className="h-4 w-4 mr-2" />
+                Dodaj pozycję
+              </Button>
+            )}
           </div>
 
           <Card>
@@ -988,32 +1023,34 @@ export function Technical() {
                             {money(item.price)}
                           </td>
                           <td className="px-3 py-2">
-                            <div
-                              className="flex justify-end gap-1"
-                              onClick={(e) => e.stopPropagation()}
-                            >
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-8 w-8"
-                                onClick={() => {
-                                  setEditingPrice(item);
-                                  setPriceFormOpen(true);
-                                }}
-                                title="Edytuj"
+                            {editable && (
+                              <div
+                                className="flex justify-end gap-1"
+                                onClick={(e) => e.stopPropagation()}
                               >
-                                <Pencil className="h-4 w-4" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-8 w-8 text-destructive hover:text-destructive"
-                                onClick={() => handlePriceDelete(item)}
-                                title="Usuń"
-                              >
-                                <Trash2 className="h-4 w-4" />
-                              </Button>
-                            </div>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-8 w-8"
+                                  onClick={() => {
+                                    setEditingPrice(item);
+                                    setPriceFormOpen(true);
+                                  }}
+                                  title="Edytuj"
+                                >
+                                  <Pencil className="h-4 w-4" />
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-8 w-8 text-destructive hover:text-destructive"
+                                  onClick={() => handlePriceDelete(item)}
+                                  title="Usuń"
+                                >
+                                  <Trash2 className="h-4 w-4" />
+                                </Button>
+                              </div>
+                            )}
                           </td>
                         </tr>
                       ))}
@@ -1030,10 +1067,12 @@ export function Technical() {
             <p className="text-sm text-muted-foreground">
               Serwisanci podpowiadani w polach „Wykonawca" przy realizacjach.
             </p>
-            <Button onClick={() => setTechFormOpen(true)}>
-              <Plus className="h-4 w-4 mr-2" />
-              Dodaj technika
-            </Button>
+            {editable && (
+              <Button onClick={() => setTechFormOpen(true)}>
+                <Plus className="h-4 w-4 mr-2" />
+                Dodaj technika
+              </Button>
+            )}
           </div>
 
           <Card>
@@ -1107,32 +1146,34 @@ export function Technical() {
                             )}
                           </td>
                           <td className="px-3 py-2">
-                            <div
-                              className="flex justify-end gap-1"
-                              onClick={(e) => e.stopPropagation()}
-                            >
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-8 w-8"
-                                onClick={() => {
-                                  setEditingTech(tech);
-                                  setTechFormOpen(true);
-                                }}
-                                title="Edytuj"
+                            {editable && (
+                              <div
+                                className="flex justify-end gap-1"
+                                onClick={(e) => e.stopPropagation()}
                               >
-                                <Pencil className="h-4 w-4" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-8 w-8 text-destructive hover:text-destructive"
-                                onClick={() => handleTechDelete(tech)}
-                                title="Usuń"
-                              >
-                                <Trash2 className="h-4 w-4" />
-                              </Button>
-                            </div>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-8 w-8"
+                                  onClick={() => {
+                                    setEditingTech(tech);
+                                    setTechFormOpen(true);
+                                  }}
+                                  title="Edytuj"
+                                >
+                                  <Pencil className="h-4 w-4" />
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-8 w-8 text-destructive hover:text-destructive"
+                                  onClick={() => handleTechDelete(tech)}
+                                  title="Usuń"
+                                >
+                                  <Trash2 className="h-4 w-4" />
+                                </Button>
+                              </div>
+                            )}
                           </td>
                         </tr>
                       ))}

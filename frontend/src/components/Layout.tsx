@@ -13,14 +13,22 @@ import {
   Menu,
   X,
   LogOut,
+  Shield,
   type LucideIcon,
 } from "lucide-react";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { cn } from "@/lib/utils";
 import { Button } from "./ui/button";
 import { useAuth } from "@/auth/AuthProvider";
+import { usePerms, TABS } from "@/auth/permissions";
 
-type NavChild = { name: string; href: string };
+type NavChild = {
+  name: string;
+  href: string;
+  // Optional custom active matcher (needed when sibling paths overlap, e.g.
+  // "/orders" is a prefix of "/orders/formularz").
+  isActive?: (pathname: string) => boolean;
+};
 type NavItem = {
   name: string;
   href: string;
@@ -34,7 +42,26 @@ const topLevel: NavItem[] = [
   { name: "Kontrahenci", href: "/contractors", icon: Users },
   { name: "Obiekty", href: "/objects", icon: Building2 },
   { name: "Umowy", href: "/contracts", icon: FileText },
-  { name: "Zlecenia", href: "/orders", icon: ClipboardList },
+  {
+    name: "Zlecenia",
+    href: "/orders",
+    icon: ClipboardList,
+    children: [
+      {
+        name: "Lista zleceń",
+        href: "/orders",
+        // Active on the list and on any order detail, but not on the form.
+        isActive: (p) =>
+          p === "/orders" ||
+          (p.startsWith("/orders/") && !p.startsWith("/orders/formularz")),
+      },
+      {
+        name: "Formularz",
+        href: "/orders/formularz",
+        isActive: (p) => p.startsWith("/orders/formularz"),
+      },
+    ],
+  },
 ];
 
 // Main sections. Their sub-tabs live directly in the sidebar (not on the
@@ -92,9 +119,57 @@ export function Layout({ children }: LayoutProps) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
   const { user, logout } = useAuth();
+  const perms = usePerms();
 
-  const isChildActive = (href: string) =>
-    location.pathname === href || location.pathname.startsWith(href + "/");
+  // Mapuje ścieżkę SPA na klucz zakładki z katalogu uprawnień. Ścieżki
+  // szczegółowe bez własnego klucza (np. /orders/formularz) dziedziczą
+  // uprawnienie z nadrzędnej zakładki (/orders → "orders").
+  const tabKeySet = useMemo(() => new Set(TABS.map((t) => t.key)), []);
+  const keyFor = (href: string): string | null => {
+    let key = href.replace(/^\//, "");
+    while (key) {
+      if (tabKeySet.has(key)) return key;
+      const i = key.lastIndexOf("/");
+      if (i < 0) break;
+      key = key.slice(0, i);
+    }
+    return null;
+  };
+  // Dashboard ("/") oraz ścieżki nieobjęte katalogiem są zawsze widoczne.
+  const canSee = (href: string): boolean => {
+    if (href === "/") return true;
+    const key = keyFor(href);
+    return key ? perms.canView(key) : true;
+  };
+
+  // Nawigacja przefiltrowana wg uprawnień: sekcja/pozycja znika, gdy nie ma
+  // żadnej widocznej podzakładki (lub sama nie jest dostępna).
+  const filterNav = (items: NavItem[]): NavItem[] =>
+    items
+      .map((item) => {
+        if (!item.children) return canSee(item.href) ? item : null;
+        const children = item.children.filter((ch) => canSee(ch.href));
+        if (children.length === 0) return null;
+        return { ...item, children };
+      })
+      .filter((x): x is NavItem => x !== null);
+
+  const visibleTopLevel = useMemo(
+    () => filterNav(topLevel),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [perms.user],
+  );
+  const visibleSections = useMemo(
+    () => filterNav(sections),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [perms.user],
+  );
+
+  const isChildActive = (child: NavChild) =>
+    child.isActive
+      ? child.isActive(location.pathname)
+      : location.pathname === child.href ||
+        location.pathname.startsWith(child.href + "/");
 
   const isSectionActive = (item: NavItem) =>
     location.pathname === item.href ||
@@ -110,6 +185,94 @@ export function Layout({ children }: LayoutProps) {
       ...prev,
       [item.name]: !isGroupOpen(item),
     }));
+
+  // Unified renderer used for both the top-level entries and the main
+  // sections, so any entry can carry expandable sub-tabs in the sidebar.
+  const renderNavItem = (item: NavItem) => {
+    const active = isSectionActive(item);
+
+    // Entry without sub-tabs behaves like a plain link.
+    if (!item.children) {
+      return (
+        <Link
+          key={item.name}
+          to={item.href}
+          className={cn(
+            "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
+            active
+              ? "bg-primary text-primary-foreground"
+              : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+          )}
+          onClick={() => setSidebarOpen(false)}
+        >
+          <item.icon className="h-5 w-5" />
+          {item.name}
+        </Link>
+      );
+    }
+
+    const open = isGroupOpen(item);
+    return (
+      <div key={item.name}>
+        <div
+          className={cn(
+            "flex items-center rounded-lg text-sm font-medium transition-colors",
+            active
+              ? "text-foreground"
+              : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+          )}
+        >
+          <Link
+            to={item.href}
+            className="flex flex-1 items-center gap-3 px-3 py-2"
+            onClick={() => {
+              setOpenGroups((prev) => ({ ...prev, [item.name]: true }));
+              setSidebarOpen(false);
+            }}
+          >
+            <item.icon className="h-5 w-5" />
+            {item.name}
+          </Link>
+          <button
+            type="button"
+            className="flex h-9 w-9 items-center justify-center rounded-lg hover:bg-accent"
+            onClick={() => toggleGroup(item)}
+            aria-label={open ? `Zwiń ${item.name}` : `Rozwiń ${item.name}`}
+          >
+            <ChevronDown
+              className={cn(
+                "h-4 w-4 transition-transform",
+                open ? "rotate-0" : "-rotate-90"
+              )}
+            />
+          </button>
+        </div>
+
+        {open && (
+          <div className="mt-1 flex flex-col gap-1 pl-4">
+            {item.children.map((child) => {
+              const childActive = isChildActive(child);
+              return (
+                <Link
+                  key={child.href}
+                  to={child.href}
+                  className={cn(
+                    "flex items-center gap-3 rounded-lg border-l px-3 py-1.5 text-sm transition-colors",
+                    childActive
+                      ? "border-primary bg-primary/10 font-medium text-primary"
+                      : "border-transparent text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+                  )}
+                  onClick={() => setSidebarOpen(false)}
+                >
+                  {child.name}
+                </Link>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div className="min-h-screen bg-background">
@@ -142,116 +305,22 @@ export function Layout({ children }: LayoutProps) {
           </Button>
         </div>
         <nav className="flex flex-1 flex-col gap-1 overflow-y-auto p-4">
-          {topLevel.map((item) => {
-            const isActive =
-              location.pathname === item.href ||
-              (item.href !== "/" &&
-                location.pathname.startsWith(item.href + "/"));
-            return (
-              <Link
-                key={item.name}
-                to={item.href}
-                className={cn(
-                  "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
-                  isActive
-                    ? "bg-primary text-primary-foreground"
-                    : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
-                )}
-                onClick={() => setSidebarOpen(false)}
-              >
-                <item.icon className="h-5 w-5" />
-                {item.name}
-              </Link>
-            );
-          })}
+          {visibleTopLevel.map(renderNavItem)}
 
-          <div className="my-2 border-t" />
+          {visibleSections.length > 0 && <div className="my-2 border-t" />}
 
-          {sections.map((item) => {
-            const sectionActive = isSectionActive(item);
+          {visibleSections.map(renderNavItem)}
 
-            // Section without sub-tabs behaves like a plain link.
-            if (!item.children) {
-              return (
-                <Link
-                  key={item.name}
-                  to={item.href}
-                  className={cn(
-                    "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
-                    sectionActive
-                      ? "bg-primary text-primary-foreground"
-                      : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
-                  )}
-                  onClick={() => setSidebarOpen(false)}
-                >
-                  <item.icon className="h-5 w-5" />
-                  {item.name}
-                </Link>
-              );
-            }
-
-            const open = isGroupOpen(item);
-            return (
-              <div key={item.name}>
-                <div
-                  className={cn(
-                    "flex items-center rounded-lg text-sm font-medium transition-colors",
-                    sectionActive
-                      ? "text-foreground"
-                      : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
-                  )}
-                >
-                  <Link
-                    to={item.href}
-                    className="flex flex-1 items-center gap-3 px-3 py-2"
-                    onClick={() => {
-                      setOpenGroups((prev) => ({ ...prev, [item.name]: true }));
-                      setSidebarOpen(false);
-                    }}
-                  >
-                    <item.icon className="h-5 w-5" />
-                    {item.name}
-                  </Link>
-                  <button
-                    type="button"
-                    className="flex h-9 w-9 items-center justify-center rounded-lg hover:bg-accent"
-                    onClick={() => toggleGroup(item)}
-                    aria-label={open ? `Zwiń ${item.name}` : `Rozwiń ${item.name}`}
-                  >
-                    <ChevronDown
-                      className={cn(
-                        "h-4 w-4 transition-transform",
-                        open ? "rotate-0" : "-rotate-90"
-                      )}
-                    />
-                  </button>
-                </div>
-
-                {open && (
-                  <div className="mt-1 flex flex-col gap-1 pl-4">
-                    {item.children.map((child) => {
-                      const childActive = isChildActive(child.href);
-                      return (
-                        <Link
-                          key={child.href}
-                          to={child.href}
-                          className={cn(
-                            "flex items-center gap-3 rounded-lg border-l px-3 py-1.5 text-sm transition-colors",
-                            childActive
-                              ? "border-primary bg-primary/10 font-medium text-primary"
-                              : "border-transparent text-muted-foreground hover:bg-accent hover:text-accent-foreground"
-                          )}
-                          onClick={() => setSidebarOpen(false)}
-                        >
-                          {child.name}
-                        </Link>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            );
-          })}
+          {perms.isAdmin && (
+            <>
+              <div className="my-2 border-t" />
+              {renderNavItem({
+                name: "Administracja",
+                href: "/admin/users",
+                icon: Shield,
+              })}
+            </>
+          )}
         </nav>
 
         {/* Bottom bar: system name + user + logout (moved from the top bar) */}

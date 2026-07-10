@@ -461,6 +461,39 @@ export async function deleteOrder(id: number) {
   });
 }
 
+// Public order intake (external "Formularz Zlecenia do ZDW" — no auth required).
+// Payload is the subset of OrderInput mapped from the legacy ZDW form.
+export interface PublicOrderIntakeInput {
+  requesterName: string;
+  requesterPhone: string;
+  requesterEmail: string;
+  isCameraInstallation?: boolean;
+  vtoolsOfferNumber?: string;
+  payerName: string;
+  payerNip: string;
+  monthlyAmount?: number;
+  rentalAmount?: number;
+  invoiceIssuer?: string;
+  cameraCount?: number;
+  megaphoneCount?: number;
+  objectName: string;
+  objectAddress?: string;
+  objectCity: string;
+  objectLocationUrl?: string;
+  contactPerson: string;
+  contactPhone: string;
+  contactEmail?: string;
+  serviceStartDate?: string;
+  notes?: string;
+}
+
+export async function submitPublicOrderIntake(data: PublicOrderIntakeInput) {
+  return request<ApiResponse<{ orderNumber: string }>>("/public/order-intake", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
 // CMA (camera monitoring reports)
 export interface CmaReport {
   id: number;
@@ -1852,3 +1885,60 @@ export const deleteHrOffice = (id: number) =>
 
 export const getHrSummary = (year: number, month: number) =>
   request<ApiResponse<HrSummary>>(`/hr/summary?year=${year}&month=${month}`);
+
+// --- ADMIN: zarządzanie użytkownikami ---
+export interface AdminUser {
+  id: number;
+  email: string;
+  displayName: string;
+  role: "user" | "admin";
+  permissions: Record<string, "view" | "edit">;
+  createdAt?: string;
+}
+
+export interface AdminTabDef {
+  key: string;
+  label: string;
+  group: string;
+}
+
+export const getAdminTabs = () =>
+  request<ApiResponse<AdminTabDef[]>>("/admin/tabs");
+
+export const getAdminUsers = () =>
+  request<ApiResponse<AdminUser[]>>("/admin/users");
+
+export interface AdminCreateUserInput {
+  email: string;
+  password: string;
+  displayName?: string;
+  role?: "user" | "admin";
+  permissions?: Record<string, "view" | "edit">;
+}
+
+export const createAdminUser = (data: AdminCreateUserInput) =>
+  request<ApiResponse<AdminUser>>("/admin/users", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+
+export interface AdminUpdateUserInput {
+  displayName?: string;
+  role?: "user" | "admin";
+  permissions?: Record<string, "view" | "edit">;
+}
+
+export const updateAdminUser = (id: number, data: AdminUpdateUserInput) =>
+  request<ApiResponse<AdminUser>>(`/admin/users/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(data),
+  });
+
+export const setAdminUserPassword = (id: number, password: string) =>
+  request<ApiResponse<null>>(`/admin/users/${id}/password`, {
+    method: "PUT",
+    body: JSON.stringify({ password }),
+  });
+
+export const deleteAdminUser = (id: number) =>
+  request<ApiResponse<null>>(`/admin/users/${id}`, { method: "DELETE" });

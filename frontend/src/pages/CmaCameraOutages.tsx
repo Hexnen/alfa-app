@@ -29,6 +29,8 @@ import {
   type CmaCameraOutages as CmaCameraOutagesData,
   type CmaOutageObject,
 } from "@/lib/api";
+import { usePerms } from "@/auth/permissions";
+import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
 
 type OutageFilter = "all" | "new" | "allOut";
 
@@ -286,6 +288,8 @@ function ObjectRow({
 }
 
 export function CmaCameraOutages() {
+  const { canEdit } = usePerms();
+  const editable = canEdit("cma/braki-kamer");
   const [data, setData] = useState<CmaCameraOutagesData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -376,6 +380,8 @@ export function CmaCameraOutages() {
 
   return (
     <div className="space-y-6">
+      {!editable && <ReadOnlyBanner className="mb-4" />}
+
       {/* Header */}
       <div>
         <h1 className="text-3xl font-bold text-slate-900">CMA</h1>

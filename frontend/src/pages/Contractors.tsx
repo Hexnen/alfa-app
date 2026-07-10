@@ -4,6 +4,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { ContractorForm } from "@/components/ContractorForm";
+import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
+import { usePerms } from "@/auth/permissions";
 import { Plus, Search, Pencil, Trash2, Building2 } from "lucide-react";
 import {
   getContractors,
@@ -16,6 +18,8 @@ import {
 
 export function Contractors() {
   const navigate = useNavigate();
+  const { canEdit } = usePerms();
+  const editable = canEdit("contractors");
   const [contractors, setContractors] = useState<Contractor[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -41,11 +45,13 @@ export function Contractors() {
   }, [loadContractors]);
 
   const handleCreate = async (data: ContractorInput) => {
+    if (!editable) return;
     await createContractor(data);
     loadContractors();
   };
 
   const handleUpdate = async (data: ContractorInput) => {
+    if (!editable) return;
     if (editingContractor) {
       await updateContractor(editingContractor.id, data);
       loadContractors();
@@ -53,6 +59,7 @@ export function Contractors() {
   };
 
   const handleDelete = async (id: number) => {
+    if (!editable) return;
     if (window.confirm("Czy na pewno chcesz usunac tego kontrahenta?")) {
       try {
         await deleteContractor(id);
@@ -79,12 +86,15 @@ export function Contractors() {
 
   return (
     <div className="space-y-6">
+      {!editable && <ReadOnlyBanner className="mb-4" />}
       <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold">Kontrahenci</h1>
-        <Button onClick={() => setFormOpen(true)}>
-          <Plus className="h-4 w-4 mr-2" />
-          Nowy kontrahent
-        </Button>
+        {editable && (
+          <Button onClick={() => setFormOpen(true)}>
+            <Plus className="h-4 w-4 mr-2" />
+            Nowy kontrahent
+          </Button>
+        )}
       </div>
 
       <Card>
@@ -157,22 +167,26 @@ export function Contractors() {
                           >
                             <Building2 className="h-4 w-4" />
                           </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={() => openEditForm(contractor)}
-                            title="Edytuj"
-                          >
-                            <Pencil className="h-4 w-4" />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={() => handleDelete(contractor.id)}
-                            title="Usun"
-                          >
-                            <Trash2 className="h-4 w-4 text-destructive" />
-                          </Button>
+                          {editable && (
+                            <>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => openEditForm(contractor)}
+                                title="Edytuj"
+                              >
+                                <Pencil className="h-4 w-4" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => handleDelete(contractor.id)}
+                                title="Usun"
+                              >
+                                <Trash2 className="h-4 w-4 text-destructive" />
+                              </Button>
+                            </>
+                          )}
                         </div>
                       </td>
                     </tr>

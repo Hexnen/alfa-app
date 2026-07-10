@@ -21,6 +21,8 @@ import {
   getOrder,
   type Order,
 } from "@/lib/api";
+import { usePerms } from "@/auth/permissions";
+import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
 
 const orderStatusLabels: Record<string, string> = {
   new: "Nowe",
@@ -39,6 +41,8 @@ const statusColors: Record<string, "default" | "success" | "secondary" | "destru
 export function OrderDetails() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const { canEdit } = usePerms();
+  const editable = canEdit("orders");
   const [order, setOrder] = useState<Order | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -62,6 +66,8 @@ export function OrderDetails() {
 
   return (
     <div className="space-y-6">
+      {!editable && <ReadOnlyBanner className="mb-4" />}
+
       {/* Header */}
       <div className="flex items-center gap-4">
         <Button variant="ghost" size="icon" onClick={() => navigate(-1)}>

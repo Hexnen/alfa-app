@@ -393,6 +393,10 @@ export const users = sqliteTable("users", {
   passwordHash: text("password_hash").notNull(),
   displayName: text("display_name").default("").notNull(),
   role: text("role").default("user").notNull(), // 'user' | 'admin'
+  // Uprawnienia per podzakładka: JSON { [tabKey]: 'view' | 'edit' }.
+  // Brak klucza = brak dostępu. Admin (role='admin') ma pełny dostęp
+  // niezależnie od tej mapy. Klucze zdefiniowane w src/lib/auth/permissions.ts.
+  permissions: text("permissions").default("{}").notNull(),
   createdAt: text("created_at")
     .default(sql`(datetime('now'))`)
     .notNull(),

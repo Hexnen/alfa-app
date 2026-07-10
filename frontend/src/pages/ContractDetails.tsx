@@ -13,6 +13,8 @@ import {
   formatCurrency,
   formatDate,
 } from "@/lib/utils";
+import { usePerms } from "@/auth/permissions";
+import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
 
 const statusColors: Record<string, "default" | "success" | "secondary" | "destructive"> = {
   draft: "secondary",
@@ -24,6 +26,8 @@ const statusColors: Record<string, "default" | "success" | "secondary" | "destru
 export function ContractDetails() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const { canEdit } = usePerms();
+  const editable = canEdit("contracts");
   const [contract, setContract] = useState<ContractWithDetails | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -47,6 +51,7 @@ export function ContractDetails() {
 
   return (
     <div className="space-y-6">
+      {!editable && <ReadOnlyBanner className="mb-4" />}
       {/* Header */}
       <div className="flex items-center gap-4">
         <Button variant="ghost" size="icon" onClick={() => navigate(-1)}>

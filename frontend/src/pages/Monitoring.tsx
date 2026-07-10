@@ -13,6 +13,8 @@ import {
 } from "@/components/ui/dialog";
 import { Plus, Pencil, Trash2, ExternalLink, Cctv, FileText } from "lucide-react";
 import { MonitoringOfferDialog } from "@/components/MonitoringOfferDialog";
+import { usePerms } from "@/auth/permissions";
+import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
 import {
   getMonitoringProjects,
   createMonitoringProject,
@@ -26,6 +28,8 @@ import {
 const designerUrl = (id: number) => `/monitoring/designer.html?id=${id}`;
 
 export function Monitoring() {
+  const { canEdit } = usePerms();
+  const editable = canEdit("technical/projekty");
   const [projects, setProjects] = useState<MonitoringProject[]>([]);
   const [loading, setLoading] = useState(true);
   const [formOpen, setFormOpen] = useState(false);
@@ -63,6 +67,7 @@ export function Monitoring() {
   };
 
   const handleSubmit = async () => {
+    if (!editable) return;
     if (!name.trim()) return;
     setSaving(true);
     try {
@@ -82,6 +87,7 @@ export function Monitoring() {
   };
 
   const handleDelete = async (project: MonitoringProject) => {
+    if (!editable) return;
     if (
       window.confirm(
         `Usunąć projekt "${project.name}" wraz z rozmieszczeniem kamer?`
@@ -100,11 +106,15 @@ export function Monitoring() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold">Projekty — CCTV</h1>
-        <Button onClick={() => openForm(null)}>
-          <Plus className="h-4 w-4 mr-2" />
-          Nowy projekt
-        </Button>
+        {editable && (
+          <Button onClick={() => openForm(null)}>
+            <Plus className="h-4 w-4 mr-2" />
+            Nowy projekt
+          </Button>
+        )}
       </div>
+
+      {!editable && <ReadOnlyBanner className="mb-4" />}
 
       <Card>
         <CardContent className="pt-6">
@@ -183,22 +193,26 @@ export function Monitoring() {
                           >
                             <FileText className="h-4 w-4" />
                           </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={() => openForm(p)}
-                            title="Edytuj dane projektu"
-                          >
-                            <Pencil className="h-4 w-4" />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={() => handleDelete(p)}
-                            title="Usuń projekt"
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </Button>
+                          {editable && (
+                            <>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => openForm(p)}
+                                title="Edytuj dane projektu"
+                              >
+                                <Pencil className="h-4 w-4" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => handleDelete(p)}
+                                title="Usuń projekt"
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </Button>
+                            </>
+                          )}
                         </div>
                       </td>
                     </tr>

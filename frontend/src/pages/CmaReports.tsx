@@ -20,6 +20,8 @@ import {
   X,
 } from "lucide-react";
 import { cmaApi, type CmaReport } from "@/lib/api";
+import { usePerms } from "@/auth/permissions";
+import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
 
 function formatCmaDateTime(value: string | null): string {
   // Backend dates come as "YYYY-MM-DD HH:MM:SS".
@@ -31,6 +33,8 @@ function formatCmaDateTime(value: string | null): string {
 
 export function CmaReports() {
   const navigate = useNavigate();
+  const { canEdit } = usePerms();
+  const editable = canEdit("cma/raporty");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [reports, setReports] = useState<CmaReport[]>([]);
@@ -60,6 +64,7 @@ export function CmaReports() {
   const handleFileSelected = async (
     event: React.ChangeEvent<HTMLInputElement>
   ) => {
+    if (!editable) return;
     const file = event.target.files?.[0];
     // Allow re-selecting the same file next time.
     event.target.value = "";
@@ -85,6 +90,7 @@ export function CmaReports() {
   };
 
   const handleDelete = async (report: CmaReport) => {
+    if (!editable) return;
     if (
       !window.confirm(
         `Czy na pewno chcesz usunąć raport "${report.title}"? Tej operacji nie można cofnąć.`
@@ -102,6 +108,8 @@ export function CmaReports() {
 
   return (
     <div className="space-y-6">
+      {!editable && <ReadOnlyBanner className="mb-4" />}
+
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
@@ -110,23 +118,25 @@ export function CmaReports() {
             Centrum monitorowania alarmów - raporty z przeglądu kamer
           </p>
         </div>
-        <Button
-          onClick={() => fileInputRef.current?.click()}
-          disabled={importing}
-          className="bg-indigo-600 hover:bg-indigo-700 text-white"
-        >
-          {importing ? (
-            <>
-              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-              Importowanie...
-            </>
-          ) : (
-            <>
-              <Upload className="w-4 h-4 mr-2" />
-              Importuj raport
-            </>
-          )}
-        </Button>
+        {editable && (
+          <Button
+            onClick={() => fileInputRef.current?.click()}
+            disabled={importing}
+            className="bg-indigo-600 hover:bg-indigo-700 text-white"
+          >
+            {importing ? (
+              <>
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                Importowanie...
+              </>
+            ) : (
+              <>
+                <Upload className="w-4 h-4 mr-2" />
+                Importuj raport
+              </>
+            )}
+          </Button>
+        )}
         <input
           ref={fileInputRef}
           type="file"
@@ -167,15 +177,17 @@ export function CmaReports() {
             Zaimportuj plik .xls lub .xlsx z raportem z przeglądu kamer, aby
             zobaczyć zestawienie zdarzeń.
           </p>
-          <Button
-            onClick={() => fileInputRef.current?.click()}
-            disabled={importing}
-            variant="outline"
-            className="mt-4"
-          >
-            <Upload className="w-4 h-4 mr-2" />
-            Importuj pierwszy raport
-          </Button>
+          {editable && (
+            <Button
+              onClick={() => fileInputRef.current?.click()}
+              disabled={importing}
+              variant="outline"
+              className="mt-4"
+            >
+              <Upload className="w-4 h-4 mr-2" />
+              Importuj pierwszy raport
+            </Button>
+          )}
         </div>
       ) : (
         <div className="bg-white rounded-lg border border-slate-200 overflow-hidden">
@@ -188,9 +200,11 @@ export function CmaReports() {
                   Zdarzenia
                 </TableHead>
                 <TableHead className="font-semibold">Zaimportowano</TableHead>
-                <TableHead className="font-semibold text-right">
-                  Akcje
-                </TableHead>
+                {editable && (
+                  <TableHead className="font-semibold text-right">
+                    Akcje
+                  </TableHead>
+                )}
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -224,20 +238,22 @@ export function CmaReports() {
                   <TableCell className="text-sm text-slate-500 whitespace-nowrap">
                     {formatCmaDateTime(report.importedAt)}
                   </TableCell>
-                  <TableCell className="text-right">
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleDelete(report);
-                      }}
-                      className="text-slate-600 hover:text-red-600"
-                      title="Usuń raport"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </Button>
-                  </TableCell>
+                  {editable && (
+                    <TableCell className="text-right">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDelete(report);
+                        }}
+                        className="text-slate-600 hover:text-red-600"
+                        title="Usuń raport"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </Button>
+                    </TableCell>
+                  )}
                 </TableRow>
               ))}
             </TableBody>

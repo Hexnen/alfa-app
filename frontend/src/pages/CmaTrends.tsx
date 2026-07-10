@@ -23,6 +23,8 @@ import {
   type CmaTrendDay,
   type CmaTrends as CmaTrendsData,
 } from "@/lib/api";
+import { usePerms } from "@/auth/permissions";
+import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
 
 // Chart palette - validated with the dataviz palette validator
 // (lightness band, chroma floor, CVD separation, >= 3:1 contrast on white).
@@ -588,6 +590,8 @@ function RankBar({
 
 export function CmaTrends() {
   const navigate = useNavigate();
+  const { canEdit } = usePerms();
+  const editable = canEdit("cma/trendy");
   const [trends, setTrends] = useState<CmaTrendsData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -632,6 +636,8 @@ export function CmaTrends() {
 
   return (
     <div className="space-y-6">
+      {!editable && <ReadOnlyBanner className="mb-4" />}
+
       {/* Header */}
       <div>
         <h1 className="text-3xl font-bold text-slate-900">CMA</h1>

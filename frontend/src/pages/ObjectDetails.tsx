@@ -21,6 +21,8 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { ArrowLeft, Send } from "lucide-react";
+import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
+import { usePerms } from "@/auth/permissions";
 import {
   getObject,
   getObjectHistory,
@@ -70,6 +72,8 @@ const workflowOptions: Record<
 export function ObjectDetails() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const { canEdit } = usePerms();
+  const editable = canEdit("objects");
   const [object, setObject] = useState<ObjectWithDetails | null>(null);
   const [history, setHistory] = useState<ObjectHistoryRecord[]>([]);
   const [loading, setLoading] = useState(true);
@@ -92,6 +96,7 @@ export function ObjectDetails() {
   }, [id]);
 
   const handleTransition = async () => {
+    if (!editable) return;
     if (!object) return;
     try {
       await transitionObject(object.id, transitionData);
@@ -129,6 +134,7 @@ export function ObjectDetails() {
 
   return (
     <div className="space-y-6">
+      {!editable && <ReadOnlyBanner className="mb-4" />}
       <div className="flex items-center gap-4">
         <Button variant="ghost" size="icon" onClick={() => navigate(-1)}>
           <ArrowLeft className="h-5 w-5" />
@@ -203,7 +209,7 @@ export function ObjectDetails() {
             <CardTitle>Akcje workflow</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
-            {availableTransitions.length === 0 ? (
+            {availableTransitions.length === 0 || !editable ? (
               <p className="text-sm text-muted-foreground">
                 Brak dostepnych akcji dla obecnego statusu
               </p>

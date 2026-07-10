@@ -32,6 +32,8 @@ import {
   type ObjectWithContractor,
 } from "@/lib/api";
 import { contractStatusLabels, formatCurrency, formatDate } from "@/lib/utils";
+import { usePerms } from "@/auth/permissions";
+import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
 
 const statusColors: Record<string, "default" | "success" | "secondary" | "destructive"> = {
   draft: "secondary",
@@ -42,6 +44,8 @@ const statusColors: Record<string, "default" | "success" | "secondary" | "destru
 
 export function Contracts() {
   const navigate = useNavigate();
+  const { canEdit } = usePerms();
+  const editable = canEdit("contracts");
   const [contracts, setContracts] = useState<ContractWithDetails[]>([]);
   const [objects, setObjects] = useState<ObjectWithContractor[]>([]);
   const [loading, setLoading] = useState(true);
@@ -90,6 +94,7 @@ export function Contracts() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!editable) return;
     if (!formData.objectId) {
       alert("Wybierz obiekt");
       return;
@@ -108,6 +113,7 @@ export function Contracts() {
   };
 
   const handleDelete = async (id: number) => {
+    if (!editable) return;
     if (window.confirm("Czy na pewno chcesz usunac ta umowe?")) {
       try {
         await deleteContract(id);
@@ -121,6 +127,7 @@ export function Contracts() {
   };
 
   const openEditForm = (contract: ContractWithDetails) => {
+    if (!editable) return;
     setEditingContract(contract);
     setFormData({
       objectId: contract.objectId,
@@ -148,12 +155,15 @@ export function Contracts() {
 
   return (
     <div className="space-y-6">
+      {!editable && <ReadOnlyBanner className="mb-4" />}
       <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold">Umowy</h1>
-        <Button onClick={() => setFormOpen(true)}>
-          <Plus className="h-4 w-4 mr-2" />
-          Nowa umowa
-        </Button>
+        {editable && (
+          <Button onClick={() => setFormOpen(true)}>
+            <Plus className="h-4 w-4 mr-2" />
+            Nowa umowa
+          </Button>
+        )}
       </div>
 
       <Card>
@@ -258,22 +268,26 @@ export function Contracts() {
                           >
                             <Eye className="h-4 w-4" />
                           </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={() => openEditForm(contract)}
-                            title="Edytuj"
-                          >
-                            <Pencil className="h-4 w-4" />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={() => handleDelete(contract.id)}
-                            title="Usun"
-                          >
-                            <Trash2 className="h-4 w-4 text-destructive" />
-                          </Button>
+                          {editable && (
+                            <>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => openEditForm(contract)}
+                                title="Edytuj"
+                              >
+                                <Pencil className="h-4 w-4" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => handleDelete(contract.id)}
+                                title="Usun"
+                              >
+                                <Trash2 className="h-4 w-4 text-destructive" />
+                              </Button>
+                            </>
+                          )}
                         </div>
                       </td>
                     </tr>

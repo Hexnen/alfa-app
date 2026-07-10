@@ -12,6 +12,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ObjectForm } from "@/components/ObjectForm";
+import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
+import { usePerms } from "@/auth/permissions";
 import { Plus, Search, Eye, Pencil, Trash2 } from "lucide-react";
 import {
   getObjects,
@@ -43,6 +45,8 @@ const departmentColors: Record<string, "default" | "secondary" | "outline"> = {
 
 export function Objects() {
   const navigate = useNavigate();
+  const { canEdit } = usePerms();
+  const editable = canEdit("objects");
   const [objects, setObjects] = useState<ObjectWithContractor[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -86,11 +90,13 @@ export function Objects() {
   }, [loadObjects]);
 
   const handleCreate = async (data: ObjectInput) => {
+    if (!editable) return;
     await createObject(data);
     loadObjects();
   };
 
   const handleUpdate = async (data: ObjectInput) => {
+    if (!editable) return;
     if (editingObject) {
       await updateObject(editingObject.id, data);
       loadObjects();
@@ -98,6 +104,7 @@ export function Objects() {
   };
 
   const handleDelete = async (id: number) => {
+    if (!editable) return;
     if (window.confirm("Czy na pewno chcesz usunac ten obiekt?")) {
       try {
         await deleteObject(id);
@@ -122,12 +129,15 @@ export function Objects() {
 
   return (
     <div className="space-y-6">
+      {!editable && <ReadOnlyBanner className="mb-4" />}
       <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold">Obiekty</h1>
-        <Button onClick={() => setFormOpen(true)}>
-          <Plus className="h-4 w-4 mr-2" />
-          Nowy obiekt
-        </Button>
+        {editable && (
+          <Button onClick={() => setFormOpen(true)}>
+            <Plus className="h-4 w-4 mr-2" />
+            Nowy obiekt
+          </Button>
+        )}
       </div>
 
       <Card>
@@ -237,22 +247,26 @@ export function Objects() {
                           >
                             <Eye className="h-4 w-4" />
                           </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={() => openEditForm(obj)}
-                            title="Edytuj"
-                          >
-                            <Pencil className="h-4 w-4" />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={() => handleDelete(obj.id)}
-                            title="Usun"
-                          >
-                            <Trash2 className="h-4 w-4 text-destructive" />
-                          </Button>
+                          {editable && (
+                            <>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => openEditForm(obj)}
+                                title="Edytuj"
+                              >
+                                <Pencil className="h-4 w-4" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => handleDelete(obj.id)}
+                                title="Usun"
+                              >
+                                <Trash2 className="h-4 w-4 text-destructive" />
+                              </Button>
+                            </>
+                          )}
                         </div>
                       </td>
                     </tr>

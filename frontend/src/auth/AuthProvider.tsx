@@ -5,6 +5,8 @@ export interface AuthUser {
   email: string;
   displayName: string;
   role: string;
+  /** Mapa uprawnień per podzakładka: { [tabKey]: 'view' | 'edit' }. Admin ma pełny dostęp. */
+  permissions?: Record<string, "view" | "edit">;
 }
 
 interface AuthCtx {

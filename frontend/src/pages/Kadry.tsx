@@ -15,6 +15,8 @@ import {
   HrPayrollForm,
 } from "@/components/KadryForms";
 import { printHrStatement } from "@/lib/hrPrint";
+import { usePerms } from "@/auth/permissions";
+import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
 import { cn } from "@/lib/utils";
 import {
   Plus,
@@ -133,6 +135,8 @@ const KADRY_TABS = [
 
 export function Kadry() {
   const { tab } = useParams<{ tab: string }>();
+  const { canEdit } = usePerms();
+  const editable = canEdit(`kadry/${tab}`);
   const now = new Date();
   const [year, setYear] = useState(now.getFullYear());
   const [month, setMonth] = useState(now.getMonth() + 1);
@@ -256,17 +260,20 @@ export function Kadry() {
   // --- handlery CRUD (wzorzec: zapis → przeładowanie miesiąca/słowników) ---
 
   const handlePayrollSave = async (data: HrPayrollSaveInput) => {
+    if (!editable) return;
     await saveHrPayroll(data);
     await loadMonth();
   };
 
   const handleHoursSubmit = async (data: HrHoursInput) => {
+    if (!editable) return;
     if (hoursEdit) await updateHrHours(hoursEdit.id, data);
     else await createHrHours(data);
     await loadMonth();
   };
 
   const handleHoursDelete = async (row: HrHoursEntry) => {
+    if (!editable) return;
     if (!window.confirm(`Usunąć wpis godzin: ${row.employeeName}?`)) return;
     try {
       await deleteHrHours(row.id);
@@ -277,12 +284,14 @@ export function Kadry() {
   };
 
   const handleEmployeeSubmit = async (data: HrEmployeeInput) => {
+    if (!editable) return;
     if (employeeEdit) await updateHrEmployee(employeeEdit.id, data);
     else await createHrEmployee(data);
     await loadDictionaries();
   };
 
   const handleEmployeeDelete = async (row: HrEmployee) => {
+    if (!editable) return;
     if (
       !window.confirm(
         `Usunąć pracownika ${row.fullName}? Usunie to też jego godziny i umowy.`,
@@ -298,12 +307,14 @@ export function Kadry() {
   };
 
   const handleContractSubmit = async (data: HrContractInput) => {
+    if (!editable) return;
     if (contractEdit) await updateHrContract(contractEdit.id, data);
     else await createHrContract(data);
     await Promise.all([loadDictionaries(), loadMonth()]);
   };
 
   const handleContractDelete = async (row: HrContract) => {
+    if (!editable) return;
     if (
       !window.confirm(
         `Usunąć umowę ${row.employeeName} — ${row.company}? Usunie to też jej dane płacowe.`,
@@ -319,12 +330,14 @@ export function Kadry() {
   };
 
   const handleOfficeSubmit = async (data: HrOfficeInput) => {
+    if (!editable) return;
     if (officeEdit) await updateHrOffice(officeEdit.id, data);
     else await createHrOffice(data);
     await loadMonth();
   };
 
   const handleOfficeDelete = async (row: HrOfficeRow) => {
+    if (!editable) return;
     if (!window.confirm(`Usunąć wpis biura: ${row.employeeName}?`)) return;
     try {
       await deleteHrOffice(row.id);
@@ -335,6 +348,7 @@ export function Kadry() {
   };
 
   const handleObjectAdd = async () => {
+    if (!editable) return;
     const name = newObjectName.trim();
     if (!name) return;
     try {
@@ -347,6 +361,7 @@ export function Kadry() {
   };
 
   const handleObjectRename = async (row: HrObject) => {
+    if (!editable) return;
     const name = window.prompt("Nazwa obiektu:", row.name);
     if (!name || name.trim() === row.name) return;
     try {
@@ -358,6 +373,7 @@ export function Kadry() {
   };
 
   const handleObjectToggle = async (row: HrObject) => {
+    if (!editable) return;
     try {
       await updateHrObject(row.id, { name: row.name, active: !row.active });
       await loadDictionaries();
@@ -367,6 +383,7 @@ export function Kadry() {
   };
 
   const handleObjectDelete = async (row: HrObject) => {
+    if (!editable) return;
     if (!window.confirm(`Usunąć obiekt ${row.name}?`)) return;
     try {
       await deleteHrObject(row.id);
@@ -377,6 +394,7 @@ export function Kadry() {
   };
 
   const handleNormSave = async (m: number) => {
+    if (!editable) return;
     const existing = norms.find((n) => n.month === m);
     const draft = normDraft[m];
     const workNorm = draft?.workNorm ?? String(existing?.workNorm ?? "");
@@ -445,6 +463,7 @@ export function Kadry() {
 
   return (
     <div className="space-y-6">
+      {!editable && <ReadOnlyBanner className="mb-4" />}
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold">Kadry</h1>
@@ -614,8 +633,13 @@ export function Kadry() {
                     payrollVisible.map((r) => (
                       <tr
                         key={r.contractId}
-                        className="cursor-pointer border-b hover:bg-accent/50"
-                        onClick={() => setPayrollEdit(r)}
+                        className={cn(
+                          "border-b hover:bg-accent/50",
+                          editable && "cursor-pointer",
+                        )}
+                        onClick={
+                          editable ? () => setPayrollEdit(r) : undefined
+                        }
                       >
                         <td className="whitespace-nowrap px-3 py-2 font-medium">
                           {r.employeeName}
@@ -742,15 +766,17 @@ export function Kadry() {
               placeholder="Szukaj: pracownik / obiekt…"
               className="max-w-xs"
             />
-            <Button
-              onClick={() => {
-                setHoursEdit(null);
-                setHoursFormOpen(true);
-              }}
-            >
-              <Plus className="mr-2 h-4 w-4" />
-              Dodaj godziny
-            </Button>
+            {editable && (
+              <Button
+                onClick={() => {
+                  setHoursEdit(null);
+                  setHoursFormOpen(true);
+                }}
+              >
+                <Plus className="mr-2 h-4 w-4" />
+                Dodaj godziny
+              </Button>
+            )}
           </div>
           <Card>
             <CardContent className="overflow-x-auto p-0">
@@ -823,11 +849,18 @@ export function Kadry() {
                     hoursVisible.map((r) => (
                       <tr
                         key={r.id}
-                        className="cursor-pointer border-b hover:bg-accent/50"
-                        onClick={() => {
-                          setHoursEdit(r);
-                          setHoursFormOpen(true);
-                        }}
+                        className={cn(
+                          "border-b hover:bg-accent/50",
+                          editable && "cursor-pointer",
+                        )}
+                        onClick={
+                          editable
+                            ? () => {
+                                setHoursEdit(r);
+                                setHoursFormOpen(true);
+                              }
+                            : undefined
+                        }
                       >
                         <td className="whitespace-nowrap px-3 py-2 font-medium">
                           {r.employeeName}
@@ -858,28 +891,30 @@ export function Kadry() {
                           {r.notes}
                         </td>
                         <td className="px-3 py-2">
-                          <div
-                            className="flex justify-end gap-1"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              onClick={() => {
-                                setHoursEdit(r);
-                                setHoursFormOpen(true);
-                              }}
+                          {editable && (
+                            <div
+                              className="flex justify-end gap-1"
+                              onClick={(e) => e.stopPropagation()}
                             >
-                              <Pencil className="h-4 w-4" />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              onClick={() => handleHoursDelete(r)}
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </Button>
-                          </div>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => {
+                                  setHoursEdit(r);
+                                  setHoursFormOpen(true);
+                                }}
+                              >
+                                <Pencil className="h-4 w-4" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => handleHoursDelete(r)}
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </Button>
+                            </div>
+                          )}
                         </td>
                       </tr>
                     ))
@@ -892,17 +927,19 @@ export function Kadry() {
 
         {/* ==================== BIURO ==================== */}
         <TabsContent value="biuro" className="space-y-4">
-          <div className="flex justify-end">
-            <Button
-              onClick={() => {
-                setOfficeEdit(null);
-                setOfficeFormOpen(true);
-              }}
-            >
-              <Plus className="mr-2 h-4 w-4" />
-              Dodaj wpis biura
-            </Button>
-          </div>
+          {editable && (
+            <div className="flex justify-end">
+              <Button
+                onClick={() => {
+                  setOfficeEdit(null);
+                  setOfficeFormOpen(true);
+                }}
+              >
+                <Plus className="mr-2 h-4 w-4" />
+                Dodaj wpis biura
+              </Button>
+            </div>
+          )}
           <Card>
             <CardContent className="overflow-x-auto p-0">
               <table className="w-full min-w-[1080px] text-sm">
@@ -970,11 +1007,18 @@ export function Kadry() {
                     office.map((r) => (
                       <tr
                         key={r.id}
-                        className="cursor-pointer border-b hover:bg-accent/50"
-                        onClick={() => {
-                          setOfficeEdit(r);
-                          setOfficeFormOpen(true);
-                        }}
+                        className={cn(
+                          "border-b hover:bg-accent/50",
+                          editable && "cursor-pointer",
+                        )}
+                        onClick={
+                          editable
+                            ? () => {
+                                setOfficeEdit(r);
+                                setOfficeFormOpen(true);
+                              }
+                            : undefined
+                        }
                       >
                         <td className="whitespace-nowrap px-3 py-2 font-medium">
                           {r.employeeName}
@@ -1011,28 +1055,30 @@ export function Kadry() {
                           {r.total ? money(r.total) : ""}
                         </td>
                         <td className="px-3 py-2">
-                          <div
-                            className="flex justify-end gap-1"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              onClick={() => {
-                                setOfficeEdit(r);
-                                setOfficeFormOpen(true);
-                              }}
+                          {editable && (
+                            <div
+                              className="flex justify-end gap-1"
+                              onClick={(e) => e.stopPropagation()}
                             >
-                              <Pencil className="h-4 w-4" />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              onClick={() => handleOfficeDelete(r)}
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </Button>
-                          </div>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => {
+                                  setOfficeEdit(r);
+                                  setOfficeFormOpen(true);
+                                }}
+                              >
+                                <Pencil className="h-4 w-4" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => handleOfficeDelete(r)}
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </Button>
+                            </div>
+                          )}
                         </td>
                       </tr>
                     ))
@@ -1068,17 +1114,19 @@ export function Kadry() {
 
         {/* ==================== UMOWY ==================== */}
         <TabsContent value="umowy" className="space-y-4">
-          <div className="flex justify-end">
-            <Button
-              onClick={() => {
-                setContractEdit(null);
-                setContractFormOpen(true);
-              }}
-            >
-              <Plus className="mr-2 h-4 w-4" />
-              Dodaj umowę
-            </Button>
-          </div>
+          {editable && (
+            <div className="flex justify-end">
+              <Button
+                onClick={() => {
+                  setContractEdit(null);
+                  setContractFormOpen(true);
+                }}
+              >
+                <Plus className="mr-2 h-4 w-4" />
+                Dodaj umowę
+              </Button>
+            </div>
+          )}
           <Card>
             <CardContent className="overflow-x-auto p-0">
               <table className="w-full min-w-[960px] text-sm">
@@ -1122,11 +1170,18 @@ export function Kadry() {
                     contracts.map((r) => (
                       <tr
                         key={r.id}
-                        className="cursor-pointer border-b hover:bg-accent/50"
-                        onClick={() => {
-                          setContractEdit(r);
-                          setContractFormOpen(true);
-                        }}
+                        className={cn(
+                          "border-b hover:bg-accent/50",
+                          editable && "cursor-pointer",
+                        )}
+                        onClick={
+                          editable
+                            ? () => {
+                                setContractEdit(r);
+                                setContractFormOpen(true);
+                              }
+                            : undefined
+                        }
                       >
                         <td className="whitespace-nowrap px-3 py-2 font-medium">
                           {r.employeeName}
@@ -1155,28 +1210,30 @@ export function Kadry() {
                           </span>
                         </td>
                         <td className="px-3 py-2">
-                          <div
-                            className="flex justify-end gap-1"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              onClick={() => {
-                                setContractEdit(r);
-                                setContractFormOpen(true);
-                              }}
+                          {editable && (
+                            <div
+                              className="flex justify-end gap-1"
+                              onClick={(e) => e.stopPropagation()}
                             >
-                              <Pencil className="h-4 w-4" />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              onClick={() => handleContractDelete(r)}
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </Button>
-                          </div>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => {
+                                  setContractEdit(r);
+                                  setContractFormOpen(true);
+                                }}
+                              >
+                                <Pencil className="h-4 w-4" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => handleContractDelete(r)}
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </Button>
+                            </div>
+                          )}
                         </td>
                       </tr>
                     ))
@@ -1189,17 +1246,19 @@ export function Kadry() {
 
         {/* ==================== PRACOWNICY ==================== */}
         <TabsContent value="pracownicy" className="space-y-4">
-          <div className="flex justify-end">
-            <Button
-              onClick={() => {
-                setEmployeeEdit(null);
-                setEmployeeFormOpen(true);
-              }}
-            >
-              <Plus className="mr-2 h-4 w-4" />
-              Dodaj pracownika
-            </Button>
-          </div>
+          {editable && (
+            <div className="flex justify-end">
+              <Button
+                onClick={() => {
+                  setEmployeeEdit(null);
+                  setEmployeeFormOpen(true);
+                }}
+              >
+                <Plus className="mr-2 h-4 w-4" />
+                Dodaj pracownika
+              </Button>
+            </div>
+          )}
           <Card>
             <CardContent className="overflow-x-auto p-0">
               <table className="w-full min-w-[640px] text-sm">
@@ -1222,11 +1281,18 @@ export function Kadry() {
                   {employees.map((r) => (
                     <tr
                       key={r.id}
-                      className="cursor-pointer border-b hover:bg-accent/50"
-                      onClick={() => {
-                        setEmployeeEdit(r);
-                        setEmployeeFormOpen(true);
-                      }}
+                      className={cn(
+                        "border-b hover:bg-accent/50",
+                        editable && "cursor-pointer",
+                      )}
+                      onClick={
+                        editable
+                          ? () => {
+                              setEmployeeEdit(r);
+                              setEmployeeFormOpen(true);
+                            }
+                          : undefined
+                      }
                     >
                       <td className="px-3 py-2 font-medium">{r.fullName}</td>
                       <td className="px-3 py-2">{r.code}</td>
@@ -1246,28 +1312,30 @@ export function Kadry() {
                         {r.notes}
                       </td>
                       <td className="px-3 py-2">
-                        <div
-                          className="flex justify-end gap-1"
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={() => {
-                              setEmployeeEdit(r);
-                              setEmployeeFormOpen(true);
-                            }}
+                        {editable && (
+                          <div
+                            className="flex justify-end gap-1"
+                            onClick={(e) => e.stopPropagation()}
                           >
-                            <Pencil className="h-4 w-4" />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={() => handleEmployeeDelete(r)}
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </Button>
-                        </div>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => {
+                                setEmployeeEdit(r);
+                                setEmployeeFormOpen(true);
+                              }}
+                            >
+                              <Pencil className="h-4 w-4" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => handleEmployeeDelete(r)}
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                          </div>
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -1279,18 +1347,20 @@ export function Kadry() {
 
         {/* ==================== OBIEKTY ==================== */}
         <TabsContent value="obiekty" className="space-y-4">
-          <div className="flex max-w-md gap-2">
-            <Input
-              value={newObjectName}
-              onChange={(e) => setNewObjectName(e.target.value)}
-              placeholder="Nazwa nowego obiektu…"
-              onKeyDown={(e) => e.key === "Enter" && handleObjectAdd()}
-            />
-            <Button onClick={handleObjectAdd} disabled={!newObjectName.trim()}>
-              <Plus className="mr-2 h-4 w-4" />
-              Dodaj
-            </Button>
-          </div>
+          {editable && (
+            <div className="flex max-w-md gap-2">
+              <Input
+                value={newObjectName}
+                onChange={(e) => setNewObjectName(e.target.value)}
+                placeholder="Nazwa nowego obiektu…"
+                onKeyDown={(e) => e.key === "Enter" && handleObjectAdd()}
+              />
+              <Button onClick={handleObjectAdd} disabled={!newObjectName.trim()}>
+                <Plus className="mr-2 h-4 w-4" />
+                Dodaj
+              </Button>
+            </div>
+          )}
           <Card>
             <CardContent className="p-0">
               <table className="w-full text-sm">
@@ -1313,33 +1383,37 @@ export function Kadry() {
                         <button
                           type="button"
                           onClick={() => handleObjectToggle(r)}
+                          disabled={!editable}
                           className={cn(
                             "inline-flex rounded-md px-2 py-0.5 text-xs font-medium",
                             r.active
                               ? "bg-emerald-100 text-emerald-700"
                               : "bg-muted text-muted-foreground",
+                            !editable && "cursor-default",
                           )}
                         >
                           {r.active ? "aktywny" : "nieaktywny"}
                         </button>
                       </td>
                       <td className="px-3 py-2">
-                        <div className="flex justify-end gap-1">
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={() => handleObjectRename(r)}
-                          >
-                            <Pencil className="h-4 w-4" />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={() => handleObjectDelete(r)}
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </Button>
-                        </div>
+                        {editable && (
+                          <div className="flex justify-end gap-1">
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => handleObjectRename(r)}
+                            >
+                              <Pencil className="h-4 w-4" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => handleObjectDelete(r)}
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                          </div>
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -1384,6 +1458,7 @@ export function Kadry() {
                           <Input
                             className="ml-auto h-8 w-24 text-right"
                             inputMode="decimal"
+                            readOnly={!editable}
                             value={draft?.workNorm ?? String(row?.workNorm ?? "")}
                             onChange={(e) =>
                               setNormDraft((p) => ({
@@ -1403,6 +1478,7 @@ export function Kadry() {
                           <Input
                             className="ml-auto h-8 w-24 text-right"
                             inputMode="decimal"
+                            readOnly={!editable}
                             value={
                               draft?.contractNorm ??
                               String(row?.contractNorm ?? "")
@@ -1422,14 +1498,16 @@ export function Kadry() {
                           />
                         </td>
                         <td className="px-3 py-2 text-right">
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => handleNormSave(m)}
-                            disabled={!draft && !row}
-                          >
-                            Zapisz
-                          </Button>
+                          {editable && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => handleNormSave(m)}
+                              disabled={!draft && !row}
+                            >
+                              Zapisz
+                            </Button>
+                          )}
                         </td>
                       </tr>
                     );

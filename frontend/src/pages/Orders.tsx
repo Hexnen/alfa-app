@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useLocation } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -38,6 +38,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { OrderForm } from "@/components/OrderForm";
+import { OrderIntakeForm } from "@/components/OrderIntakeForm";
 import {
   Plus,
   Search,
@@ -50,6 +51,7 @@ import {
   MapPin,
   Building2,
   User,
+  ExternalLink,
 } from "lucide-react";
 import type { Order, OrderInput } from "@/lib/api";
 import {
@@ -58,6 +60,8 @@ import {
   updateOrder,
   deleteOrder,
 } from "@/lib/api";
+import { usePerms } from "@/auth/permissions";
+import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
 
 const orderStatuses = [
   { value: "all", label: "Wszystkie" },
@@ -69,6 +73,12 @@ const orderStatuses = [
 
 export function Orders() {
   const navigate = useNavigate();
+  const location = useLocation();
+  const { canEdit } = usePerms();
+  const editable = canEdit("orders");
+  const activeTab = location.pathname.endsWith("/formularz")
+    ? "formularz"
+    : "lista";
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -107,12 +117,14 @@ export function Orders() {
   }, [fetchOrders]);
 
   const handleCreateOrder = async (data: OrderInput) => {
+    if (!editable) return;
     await createOrder(data);
     fetchOrders();
     setIsFormOpen(false);
   };
 
   const handleUpdateOrder = async (data: OrderInput) => {
+    if (!editable) return;
     if (editingOrder) {
       await updateOrder(editingOrder.id, data);
       fetchOrders();
@@ -121,6 +133,7 @@ export function Orders() {
   };
 
   const handleDeleteOrder = async () => {
+    if (!editable) return;
     if (orderToDelete) {
       await deleteOrder(orderToDelete.id);
       fetchOrders();
@@ -159,23 +172,49 @@ export function Orders() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold text-slate-900">Zlecenia montażu</h1>
-          <p className="text-slate-500 mt-1">
-            Zarządzaj zleceniami instalacji i montażu systemów
-          </p>
-        </div>
-        <Button
-          onClick={() => setIsFormOpen(true)}
-          className="bg-indigo-600 hover:bg-indigo-700 text-white"
-        >
-          <Plus className="w-4 h-4 mr-2" />
-          Nowe zlecenie
-        </Button>
+      <div>
+        <h1 className="text-3xl font-bold text-slate-900">Zlecenia montażu</h1>
+        <p className="text-slate-500 mt-1">
+          Zarządzaj zleceniami instalacji i montażu systemów
+        </p>
       </div>
 
-      {/* Stats Cards */}
+      {!editable && <ReadOnlyBanner className="mb-4" />}
+
+      {activeTab === "formularz" ? (
+        editable ? (
+          <div className="space-y-4">
+            <div className="flex justify-end">
+              <Button
+                variant="outline"
+                onClick={() => window.open("/formularz/zlecenie", "_blank")}
+              >
+                <ExternalLink className="w-4 h-4 mr-2" />
+                Otwórz samodzielny formularz
+              </Button>
+            </div>
+            <OrderIntakeForm onCreated={fetchOrders} />
+          </div>
+        ) : (
+          <div className="p-8 text-center text-slate-500">
+            Brak uprawnień do tworzenia zleceń.
+          </div>
+        )
+      ) : (
+        <div className="space-y-6">
+          {editable && (
+            <div className="flex justify-end">
+              <Button
+                onClick={() => setIsFormOpen(true)}
+                className="bg-indigo-600 hover:bg-indigo-700 text-white"
+              >
+                <Plus className="w-4 h-4 mr-2" />
+                Nowe zlecenie
+              </Button>
+            </div>
+          )}
+
+          {/* Stats Cards */}
       <div className="grid grid-cols-4 gap-4">
         <Card>
           <CardHeader className="pb-2">
@@ -359,24 +398,28 @@ export function Orders() {
                       >
                         <Eye className="w-4 h-4" />
                       </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => openEditForm(order)}
-                        className="text-slate-600 hover:text-indigo-600"
-                        title="Edytuj"
-                      >
-                        <Edit3 className="w-4 h-4" />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => openDeleteDialog(order)}
-                        className="text-slate-600 hover:text-red-600"
-                        title="Usuń"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </Button>
+                      {editable && (
+                        <>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => openEditForm(order)}
+                            className="text-slate-600 hover:text-indigo-600"
+                            title="Edytuj"
+                          >
+                            <Edit3 className="w-4 h-4" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => openDeleteDialog(order)}
+                            className="text-slate-600 hover:text-red-600"
+                            title="Usuń"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </Button>
+                        </>
+                      )}
                     </div>
                   </TableCell>
                 </TableRow>
@@ -419,6 +462,8 @@ export function Orders() {
           </div>
         )}
       </div>
+        </div>
+      )}
 
       {/* Order Form Dialog */}
       <OrderForm

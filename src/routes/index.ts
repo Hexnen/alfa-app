@@ -16,7 +16,9 @@ import monitoredObjectsRoutes from "./monitored-objects.js";
 import cmaMailRoutes from "./cma-mail.js";
 import hrRoutes from "./hr.js";
 import authRoutes from "./auth.js";
-import { requireAuth } from "../middleware/auth.js";
+import publicRoutes from "./public.js";
+import adminRoutes from "./admin.js";
+import { requireAuth, tabPermissionGuard } from "../middleware/auth.js";
 import { db, schema } from "../db/index.js";
 import { sql, eq } from "drizzle-orm";
 
@@ -27,8 +29,19 @@ const api = new Hono();
 // zarejestrowane później nie obejmuje tras zarejestrowanych wcześniej.
 api.route("/auth", authRoutes);
 
+// --- PUBLIC (bez auth) — zewnętrzny formularz zamówień ZDW ---
+// Musi być zamontowane PRZED api.use("*", requireAuth), tak samo jak /auth.
+api.route("/public", publicRoutes);
+
 // --- Wszystkie pozostałe trasy API — chronione sesją ---
 api.use("*", requireAuth);
+
+// --- ADMIN — panel zarządzania użytkownikami (własny requireAdmin) ---
+// Zamontowane przed strażnikiem zakładek (który i tak nie obejmuje /admin).
+api.route("/admin", adminRoutes);
+
+// --- Strażnik uprawnień do zakładek (view/edit) dla tras modułowych ---
+api.use("*", tabPermissionGuard);
 
 // Dashboard statistics
 api.get("/stats", async (c) => {

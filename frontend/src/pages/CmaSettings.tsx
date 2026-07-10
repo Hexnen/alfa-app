@@ -42,6 +42,8 @@ import {
   type CmaMailSettingsInput,
   type CmaMailTestImapResult,
 } from "@/lib/api";
+import { usePerms } from "@/auth/permissions";
+import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
 
 const LOG_PAGE_SIZE = 20;
 
@@ -154,6 +156,8 @@ function DirectionBadge({
 }
 
 export function CmaSettings() {
+  const { canEdit } = usePerms();
+  const editable = canEdit("cma/ustawienia");
   const [settings, setSettings] = useState<CmaMailSettings | null>(null);
   const [form, setForm] = useState<MailForm | null>(null);
   const [dirty, setDirty] = useState(false);
@@ -261,6 +265,7 @@ export function CmaSettings() {
   };
 
   const handleSave = async () => {
+    if (!editable) return;
     if (!form) return;
     setSaving(true);
     setSaveSuccess(null);
@@ -312,6 +317,7 @@ export function CmaSettings() {
   };
 
   const handleTestImap = async () => {
+    if (!editable) return;
     setImapTesting(true);
     setImapResult(null);
     setImapError(null);
@@ -328,6 +334,7 @@ export function CmaSettings() {
   };
 
   const handleCheckNow = async () => {
+    if (!editable) return;
     setChecking(true);
     setCheckResult(null);
     setCheckError(null);
@@ -350,6 +357,7 @@ export function CmaSettings() {
   };
 
   const handleTestSmtp = async () => {
+    if (!editable) return;
     if (!form) return;
     setSmtpTesting(true);
     setSmtpResult(null);
@@ -367,6 +375,7 @@ export function CmaSettings() {
   };
 
   const handleSendLatest = async () => {
+    if (!editable) return;
     if (!form) return;
     const recipients =
       form.recipients.trim() || "(brak skonfigurowanych odbiorców)";
@@ -396,6 +405,8 @@ export function CmaSettings() {
 
   return (
     <div className="space-y-6">
+      {!editable && <ReadOnlyBanner className="mb-4" />}
+
       {/* Header */}
       <div>
         <h1 className="text-3xl font-bold text-slate-900">CMA</h1>
@@ -426,28 +437,30 @@ export function CmaSettings() {
                   Skrzynka pocztowa (Zenbox)
                 </CardTitle>
                 <div className="flex items-center gap-3">
-                  {dirty && !saving && (
+                  {editable && dirty && !saving && (
                     <span className="text-xs text-amber-600">
                       Niezapisane zmiany
                     </span>
                   )}
-                  <Button
-                    onClick={handleSave}
-                    disabled={anyActionRunning || !dirty}
-                    className="bg-indigo-600 hover:bg-indigo-700 text-white"
-                  >
-                    {saving ? (
-                      <>
-                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                        Zapisywanie...
-                      </>
-                    ) : (
-                      <>
-                        <Save className="w-4 h-4 mr-2" />
-                        Zapisz ustawienia
-                      </>
-                    )}
-                  </Button>
+                  {editable && (
+                    <Button
+                      onClick={handleSave}
+                      disabled={anyActionRunning || !dirty}
+                      className="bg-indigo-600 hover:bg-indigo-700 text-white"
+                    >
+                      {saving ? (
+                        <>
+                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                          Zapisywanie...
+                        </>
+                      ) : (
+                        <>
+                          <Save className="w-4 h-4 mr-2" />
+                          Zapisz ustawienia
+                        </>
+                      )}
+                    </Button>
+                  )}
                 </div>
               </div>
               {saveSuccess && (
@@ -473,6 +486,7 @@ export function CmaSettings() {
                     placeholder="np. raporty@twojafirma.pl"
                     value={form.email}
                     onChange={(e) => update({ email: e.target.value })}
+                    disabled={!editable}
                   />
                 </div>
                 <div className="space-y-1.5">
@@ -488,6 +502,7 @@ export function CmaSettings() {
                     }
                     value={form.password}
                     onChange={(e) => update({ password: e.target.value })}
+                    disabled={!editable}
                   />
                 </div>
               </div>
@@ -524,6 +539,7 @@ export function CmaSettings() {
                           onChange={(e) =>
                             update({ imapHost: e.target.value })
                           }
+                          disabled={!editable}
                         />
                       </div>
                       <div className="space-y-1.5">
@@ -536,6 +552,7 @@ export function CmaSettings() {
                           onChange={(e) =>
                             update({ imapPort: e.target.value })
                           }
+                          disabled={!editable}
                         />
                       </div>
                       <div className="flex items-center gap-2 pt-7">
@@ -545,6 +562,7 @@ export function CmaSettings() {
                           onCheckedChange={(checked) =>
                             update({ imapSecure: checked === true })
                           }
+                          disabled={!editable}
                         />
                         <Label htmlFor="imap-secure" className="font-normal">
                           SSL
@@ -560,6 +578,7 @@ export function CmaSettings() {
                           onChange={(e) =>
                             update({ smtpHost: e.target.value })
                           }
+                          disabled={!editable}
                         />
                       </div>
                       <div className="space-y-1.5">
@@ -572,6 +591,7 @@ export function CmaSettings() {
                           onChange={(e) =>
                             update({ smtpPort: e.target.value })
                           }
+                          disabled={!editable}
                         />
                       </div>
                       <div className="flex items-center gap-2 pt-7">
@@ -581,6 +601,7 @@ export function CmaSettings() {
                           onCheckedChange={(checked) =>
                             update({ smtpSecure: checked === true })
                           }
+                          disabled={!editable}
                         />
                         <Label htmlFor="smtp-secure" className="font-normal">
                           SSL
@@ -609,6 +630,7 @@ export function CmaSettings() {
                   onCheckedChange={(checked) =>
                     update({ importEnabled: checked === true })
                   }
+                  disabled={!editable}
                 />
                 <Label htmlFor="import-enabled" className="font-normal">
                   Włącz automatyczny import raportów z poczty
@@ -623,6 +645,7 @@ export function CmaSettings() {
                     placeholder="INBOX, INBOX.Safestar"
                     value={form.folder}
                     onChange={(e) => update({ folder: e.target.value })}
+                    disabled={!editable}
                   />
                 </div>
                 <div className="space-y-1.5">
@@ -636,6 +659,7 @@ export function CmaSettings() {
                     onChange={(e) =>
                       update({ subjectFilter: e.target.value })
                     }
+                    disabled={!editable}
                   />
                 </div>
                 <div className="space-y-1.5">
@@ -645,6 +669,7 @@ export function CmaSettings() {
                     placeholder='np. "safestar"'
                     value={form.fromFilter}
                     onChange={(e) => update({ fromFilter: e.target.value })}
+                    disabled={!editable}
                   />
                 </div>
                 <div className="space-y-1.5">
@@ -657,46 +682,49 @@ export function CmaSettings() {
                     min={5}
                     value={form.pollMinutes}
                     onChange={(e) => update({ pollMinutes: e.target.value })}
+                    disabled={!editable}
                   />
                 </div>
               </div>
 
-              <div className="flex flex-wrap items-center gap-3">
-                <Button
-                  variant="outline"
-                  onClick={handleTestImap}
-                  disabled={anyActionRunning}
-                >
-                  {imapTesting ? (
-                    <>
-                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                      Testowanie połączenia...
-                    </>
-                  ) : (
-                    <>
-                      <PlugZap className="w-4 h-4 mr-2" />
-                      Testuj połączenie
-                    </>
-                  )}
-                </Button>
-                <Button
-                  variant="outline"
-                  onClick={handleCheckNow}
-                  disabled={anyActionRunning}
-                >
-                  {checking ? (
-                    <>
-                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                      Sprawdzanie skrzynki...
-                    </>
-                  ) : (
-                    <>
-                      <RefreshCw className="w-4 h-4 mr-2" />
-                      Sprawdź teraz
-                    </>
-                  )}
-                </Button>
-              </div>
+              {editable && (
+                <div className="flex flex-wrap items-center gap-3">
+                  <Button
+                    variant="outline"
+                    onClick={handleTestImap}
+                    disabled={anyActionRunning}
+                  >
+                    {imapTesting ? (
+                      <>
+                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                        Testowanie połączenia...
+                      </>
+                    ) : (
+                      <>
+                        <PlugZap className="w-4 h-4 mr-2" />
+                        Testuj połączenie
+                      </>
+                    )}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={handleCheckNow}
+                    disabled={anyActionRunning}
+                  >
+                    {checking ? (
+                      <>
+                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                        Sprawdzanie skrzynki...
+                      </>
+                    ) : (
+                      <>
+                        <RefreshCw className="w-4 h-4 mr-2" />
+                        Sprawdź teraz
+                      </>
+                    )}
+                  </Button>
+                </div>
+              )}
 
               {imapError && (
                 <p className="flex items-center gap-1.5 text-sm text-red-600">
@@ -807,6 +835,7 @@ export function CmaSettings() {
                   onCheckedChange={(checked) =>
                     update({ sendEnabled: checked === true })
                   }
+                  disabled={!editable}
                 />
                 <Label htmlFor="send-enabled" className="font-normal">
                   Włącz wysyłkę listy kamer bez obrazu e-mailem
@@ -823,6 +852,7 @@ export function CmaSettings() {
                       className="h-4 w-4 accent-indigo-600"
                       checked={form.sendMode === "after_import"}
                       onChange={() => update({ sendMode: "after_import" })}
+                      disabled={!editable}
                     />
                     Od razu po zaimportowaniu raportu z poczty
                   </label>
@@ -833,6 +863,7 @@ export function CmaSettings() {
                       className="h-4 w-4 accent-indigo-600"
                       checked={form.sendMode === "scheduled"}
                       onChange={() => update({ sendMode: "scheduled" })}
+                      disabled={!editable}
                     />
                     O wyznaczonych godzinach
                   </label>
@@ -845,6 +876,7 @@ export function CmaSettings() {
                       value={form.sendTimes}
                       onChange={(e) => update({ sendTimes: e.target.value })}
                       className="max-w-xs"
+                      disabled={!editable}
                     />
                     <p className="text-xs text-slate-500">
                       Godziny wysyłki (HH:MM, po przecinku). Wysyłany jest
@@ -861,44 +893,49 @@ export function CmaSettings() {
                   placeholder="adresy po przecinku, np. jan@firma.pl, serwis@firma.pl"
                   value={form.recipients}
                   onChange={(e) => update({ recipients: e.target.value })}
+                  disabled={!editable}
                 />
               </div>
 
               <div className="flex flex-wrap items-center gap-3">
-                <Button
-                  variant="outline"
-                  onClick={handleTestSmtp}
-                  disabled={anyActionRunning}
-                >
-                  {smtpTesting ? (
-                    <>
-                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                      Wysyłanie testu...
-                    </>
-                  ) : (
-                    <>
-                      <Mail className="w-4 h-4 mr-2" />
-                      Wyślij testowy e-mail
-                    </>
-                  )}
-                </Button>
-                <Button
-                  variant="outline"
-                  onClick={handleSendLatest}
-                  disabled={anyActionRunning}
-                >
-                  {sendingLatest ? (
-                    <>
-                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                      Wysyłanie raportu...
-                    </>
-                  ) : (
-                    <>
-                      <Send className="w-4 h-4 mr-2" />
-                      Wyślij aktualny raport
-                    </>
-                  )}
-                </Button>
+                {editable && (
+                  <>
+                    <Button
+                      variant="outline"
+                      onClick={handleTestSmtp}
+                      disabled={anyActionRunning}
+                    >
+                      {smtpTesting ? (
+                        <>
+                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                          Wysyłanie testu...
+                        </>
+                      ) : (
+                        <>
+                          <Mail className="w-4 h-4 mr-2" />
+                          Wyślij testowy e-mail
+                        </>
+                      )}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      onClick={handleSendLatest}
+                      disabled={anyActionRunning}
+                    >
+                      {sendingLatest ? (
+                        <>
+                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                          Wysyłanie raportu...
+                        </>
+                      ) : (
+                        <>
+                          <Send className="w-4 h-4 mr-2" />
+                          Wyślij aktualny raport
+                        </>
+                      )}
+                    </Button>
+                  </>
+                )}
                 {sendLatestResult && (
                   <span className="flex items-center gap-1.5 text-sm text-green-700">
                     <CheckCircle2 className="h-4 w-4 shrink-0" />

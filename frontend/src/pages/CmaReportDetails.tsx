@@ -52,6 +52,8 @@ import {
   type CmaReportEntry,
   type CmaReportStats,
 } from "@/lib/api";
+import { usePerms } from "@/auth/permissions";
+import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
 
 const ENTRIES_PAGE_SIZE = 50;
 const END_TYPES_VISIBLE = 8;
@@ -197,6 +199,8 @@ function DistributionBar({
 export function CmaReportDetails() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const { canEdit } = usePerms();
+  const editable = canEdit("cma/raporty");
   const reportId = id ? parseInt(id, 10) : NaN;
 
   const [report, setReport] = useState<CmaReport | null>(null);
@@ -253,6 +257,7 @@ export function CmaReportDetails() {
   const [issuesSendError, setIssuesSendError] = useState<string | null>(null);
 
   const handleSendIssues = async () => {
+    if (!editable) return;
     if (!reportId) return;
     setIssuesSending(true);
     setIssuesSendResult(null);
@@ -401,6 +406,8 @@ export function CmaReportDetails() {
 
   return (
     <div className="space-y-6">
+      {!editable && <ReadOnlyBanner className="mb-4" />}
+
       {/* Header */}
       <div className="flex items-start gap-4">
         <Button
@@ -888,24 +895,26 @@ export function CmaReportDetails() {
                   ))}
                 </SelectContent>
               </Select>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleSendIssues}
-                disabled={issuesSending}
-              >
-                {issuesSending ? (
-                  <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Wysyłanie...
-                  </>
-                ) : (
-                  <>
-                    <Mail className="mr-2 h-4 w-4" />
-                    Wyślij e-mailem
-                  </>
-                )}
-              </Button>
+              {editable && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleSendIssues}
+                  disabled={issuesSending}
+                >
+                  {issuesSending ? (
+                    <>
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      Wysyłanie...
+                    </>
+                  ) : (
+                    <>
+                      <Mail className="mr-2 h-4 w-4" />
+                      Wyślij e-mailem
+                    </>
+                  )}
+                </Button>
+              )}
               {!issuesLoading && !issuesError && issuesData && (
                 <span className="text-sm text-slate-500">
                   {issueObjects.length.toLocaleString("pl-PL")}{" "}
