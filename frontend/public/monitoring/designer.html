@@ -11,15 +11,27 @@
       integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 <!-- pdf.js — rasteryzacja jednostronicowego PDF do WebP (plan) -->
 <script src="https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
+<!-- dom-to-image-more — zrzut mapki do obrazka dla wydruku per-obszar.
+     Renderuje przez natywny SVG <foreignObject>, więc przeglądarka sama stosuje leafletowe
+     transformy (translate3d) → piny/stożki/obrysy trafiają dokładnie na kafle (html2canvas mylił translację). -->
+<script src="https://unpkg.com/dom-to-image-more@3.3.0/dist/dom-to-image-more.min.js"></script>
 
 <style>
   :root{
     --bg:#0f172a; --panel:#111827; --panel2:#1f2937; --line:#334155;
     --txt:#e5e7eb; --muted:#9ca3af; --accent:#22d3ee; --accent2:#f59e0b;
     --ok:#34d399; --bad:#f87171;
+    --brand:#60a5fa; --brand-2:#3b82f6; --brand-soft:rgba(96,165,250,.14); --brand-line:rgba(96,165,250,.42);
+    --grad-primary:linear-gradient(180deg,#3b82f6,#2563eb);
+    --accent-soft:rgba(34,211,238,.14); --kicker:#93c5fd;
+    --card:rgba(255,255,255,.045); --card-line:rgba(255,255,255,.10); --panel3:#243244; --ok2:#22c55e;
+    --r-sm:8px; --r:12px; --r-lg:16px;
+    --sh-1:0 1px 3px rgba(0,0,0,.4); --sh-2:0 10px 26px -10px rgba(0,0,0,.6);
+    --font-head:'Roboto Slab',"Segoe UI",system-ui,sans-serif;
+    --t:.15s cubic-bezier(.4,0,.2,1); --ring:0 0 0 3px var(--brand-soft);
   }
   *{box-sizing:border-box}
-  html,body{height:100%;margin:0;font-family:"Segoe UI",Roboto,Arial,sans-serif;color:var(--txt);background:var(--bg)}
+  html,body{height:100%;margin:0;font-family:"Segoe UI",Roboto,Arial,"Segoe UI Emoji","Noto Color Emoji","Apple Color Emoji",sans-serif;color:var(--txt);background:var(--bg)}
   #app{display:flex;flex-direction:column;height:100vh}
 
   header{display:flex;align-items:center;gap:.5rem;padding:.4rem .6rem;background:var(--panel);border-bottom:1px solid var(--line);flex-wrap:wrap}
@@ -28,8 +40,14 @@
   header .obj{font-size:12px;color:var(--muted)}
   .toolbar{display:flex;gap:.35rem;flex-wrap:wrap}
   button,select,input{font-family:inherit}
-  .btn{background:var(--panel2);color:var(--txt);border:1px solid var(--line);border-radius:6px;padding:.35rem .6rem;font-size:12px;cursor:pointer;white-space:nowrap}
-  .btn:hover{border-color:var(--accent)}
+  .btn{background:var(--panel2);color:var(--txt);border:1px solid var(--line);border-radius:var(--r-sm);padding:.35rem .6rem;font-size:12px;cursor:pointer;white-space:nowrap;transition:transform .12s,box-shadow var(--t),border-color var(--t),background var(--t)}
+  .btn:hover{border-color:var(--brand);transform:translateY(-1px);box-shadow:var(--sh-1)}
+  .btn:active{transform:translateY(1px);box-shadow:none}
+  .btn:focus-visible{outline:none;box-shadow:var(--ring)}
+  .btn.primary{background:var(--grad-primary);border-color:transparent;color:#fff;font-weight:600;box-shadow:0 9px 22px -9px rgba(37,99,235,.9)}
+  .btn.primary:hover{border-color:transparent;box-shadow:0 12px 26px -9px rgba(37,99,235,1),0 0 0 1px rgba(96,165,250,.4)}
+  .btn.ghost-danger{border-color:rgba(248,113,113,.5);color:var(--bad);background:transparent}
+  .btn.ghost-danger:hover{background:rgba(248,113,113,.12);border-color:var(--bad);color:#fff}
   /* wyszukiwarka adresów — na lewo od paska narzędzi */
   .addrbox{position:relative;margin-left:auto;display:flex;gap:.3rem;align-items:center}
   .addrbox input{background:var(--panel2);color:var(--txt);border:1px solid var(--line);border-radius:6px;padding:.35rem .55rem;font-size:12px;width:230px;outline:none}
@@ -51,54 +69,109 @@
   /* podświetlenie mapy przy przeciąganiu pliku planu (drag&drop) */
   #map.plan-dropzone{outline:3px dashed var(--accent);outline-offset:-8px}
   #map.plan-dropzone::after{content:"Upuść plan tutaj — JPG / PNG / jednostronicowy PDF";position:absolute;inset:0;z-index:700;display:flex;align-items:center;justify-content:center;background:rgba(15,23,42,.5);color:var(--accent);font-size:16px;font-weight:600;pointer-events:none;text-align:center;padding:1rem}
-  #side{width:320px;background:var(--panel);border-left:1px solid var(--line);display:flex;flex-direction:row;overflow:visible;position:relative;z-index:2}   /* z-index:2 > #map(0) => oczka wystające nad mapę są zawsze widoczne */
+  #side{width:336px;background:var(--panel);border-left:1px solid var(--line);display:flex;flex-direction:row;overflow:visible;position:relative;z-index:2}   /* z-index:2 > #map(0) => oczka wystające nad mapę są zawsze widoczne */
   /* zakładki pionowo („zakładeczki") na lewej krawędzi panelu bocznego */
   .side-tabs{display:flex;flex-direction:column;border-right:1px solid var(--line);flex:0 0 auto;background:var(--panel)}
-  .side-tabs button[data-tab]{writing-mode:vertical-rl;text-orientation:mixed;transform:rotate(180deg);background:none;border:none;border-right:3px solid transparent;color:var(--muted);padding:.8rem .3rem;font-size:12px;cursor:pointer;white-space:nowrap;letter-spacing:.02em}
+  .side-tabs button[data-tab]{writing-mode:vertical-rl;text-orientation:mixed;transform:rotate(180deg);background:none;border:none;border-right:3px solid transparent;color:var(--muted);padding:.8rem .3rem;font-size:12px;cursor:pointer;white-space:nowrap;letter-spacing:.02em;transition:color var(--t),border-color var(--t),background var(--t)}
   .side-tabs button[data-tab]:hover{color:var(--txt)}
-  .side-tabs button[data-tab].active{color:var(--accent);border-right-color:var(--accent);background:var(--panel2)}
+  .side-tabs button[data-tab].active{color:var(--brand);border-right-color:var(--brand);background:linear-gradient(90deg,var(--brand-soft),var(--panel2))}
   .side-actions{margin-top:auto;display:flex;flex-direction:column;gap:.2rem;padding:.4rem .25rem;border-top:1px solid var(--line)}
-  .side-act{background:none;border:none;color:var(--muted);font-size:18px;line-height:1;cursor:pointer;padding:.35rem .2rem;border-radius:6px;text-align:center}
+  .side-act{background:none;border:none;color:var(--muted);font-size:18px;line-height:1;cursor:pointer;padding:.35rem .2rem;border-radius:6px;text-align:center;transition:color var(--t),background var(--t),transform .1s}
   .side-act:hover{color:var(--txt);background:var(--panel2)}
+  .side-act:active{transform:scale(.9)}
   .side-status{cursor:default}
   .side-status:hover{background:none}
   .side-sep{height:1px;background:var(--line);margin:.2rem .15rem}
+  .opt-wrap{position:relative}
+  .opt-menu{position:absolute;top:0;left:calc(100% + 6px);z-index:1300;background:var(--panel);border:1px solid var(--line);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.45);min-width:220px;display:none;padding:.3rem;transform-origin:top left}
+  @keyframes optIn{from{opacity:0;transform:scale(.96) translateY(-4px)}to{opacity:1;transform:none}}
+  .opt-menu.open{display:block;animation:optIn .14s ease}
+  .opt-menu button{display:block;width:100%;text-align:left;background:none;border:none;color:var(--txt);font-size:13px;padding:.5rem .6rem;border-radius:6px;cursor:pointer;white-space:nowrap}
+  .opt-menu button:hover{background:var(--panel2)}
+  .opt-menu button.danger{color:#ef4444}
+  .opt-sep{height:1px;background:var(--line);margin:.25rem .3rem}
   .tabcell{position:relative;display:flex}
   .tabcell>button[data-tab]{flex:1}
   /* ikonka oka „wystaje" poziomo w lewo poza zakładki, nad mapą */
   .tab-eye{position:absolute;left:-28px;top:50%;transform:translateY(-50%);z-index:1000;
     width:24px;height:24px;display:flex;align-items:center;justify-content:center;
     background:var(--panel2);border:1px solid var(--line);border-radius:50%;
-    color:var(--muted);cursor:pointer;font-size:12px;line-height:1;box-shadow:0 1px 4px rgba(0,0,0,.55)}
-  .tab-eye:hover{color:var(--txt);border-color:var(--accent)}
+    color:var(--muted);cursor:pointer;font-size:12px;line-height:1;box-shadow:0 1px 4px rgba(0,0,0,.55);transition:.12s}
+  .tab-eye:hover{color:var(--txt);border-color:var(--brand);box-shadow:0 1px 6px rgba(96,165,250,.35)}
   .tab-eye.off{color:var(--bad);border-color:var(--bad)}
-  .side-body{flex:1;overflow:auto;padding:.7rem}
+  .side-body{flex:1;overflow:auto;padding:.7rem;scrollbar-width:thin;scrollbar-color:var(--line) transparent}
+  .side-body::-webkit-scrollbar{width:9px}
+  .side-body::-webkit-scrollbar-thumb{background:var(--line);border-radius:8px;border:2px solid var(--panel)}
+  .side-body::-webkit-scrollbar-thumb:hover{background:var(--panel3)}
   .tabpane{display:none}
-  .tabpane.active{display:block}
+  .tabpane.active{display:block;animation:paneIn .22s cubic-bezier(.22,.61,.36,1)}
+  @keyframes paneIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+  @keyframes flash{0%{transform:scale(1.3);filter:brightness(1.6)}100%{transform:scale(1);filter:none}}
+  .side-status.flash{animation:flash .5s ease}
 
   .field{margin-bottom:.6rem}
   .field label{display:block;font-size:11px;color:var(--muted);margin-bottom:.2rem;text-transform:uppercase;letter-spacing:.03em}
-  .field input[type=text],.field input[type=number],.field select,.field textarea{width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--txt);padding:.4rem;font-size:13px}
+  .field input[type=text],.field input[type=number],.field select,.field textarea{width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:var(--r-sm);color:var(--txt);padding:.5rem .6rem;font-size:13px;transition:border-color var(--t),box-shadow var(--t),background var(--t)}
+  .field input:focus,.field select:focus,.field textarea:focus,.mini:focus,input[type=color]:focus{outline:none;border-color:var(--brand);box-shadow:var(--ring)}
+  .field select{appearance:none;-webkit-appearance:none;padding-right:32px;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%239ca3af' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center}
+  input[type=color]{border:1px solid var(--card-line);border-radius:var(--r-sm);cursor:pointer;padding:2px;background:var(--panel2)}
+  input[type=checkbox]{accent-color:var(--brand);cursor:pointer;width:15px;height:15px}
   .field textarea{resize:vertical;min-height:70px}
+  textarea{background:var(--panel2);color:var(--txt);border:1px solid var(--line);border-radius:var(--r-sm);font-family:inherit;padding:.5rem .6rem;font-size:13px;transition:border-color var(--t),box-shadow var(--t)}
+  textarea:focus{outline:none;border-color:var(--brand);box-shadow:var(--ring)}
   .row2{display:flex;gap:.5rem}
   .row2>*{flex:1}
   .slider{display:flex;align-items:center;gap:.5rem}
-  .slider input[type=range]{flex:1}
-  .slider .val{width:52px;text-align:right;font-variant-numeric:tabular-nums;font-size:12px;color:var(--accent)}
-  .hint{font-size:11px;color:var(--muted);line-height:1.4}
-  .empty{color:var(--muted);font-size:13px;text-align:center;padding:2rem 1rem}
+  .slider input[type=range]{flex:1;-webkit-appearance:none;appearance:none;height:4px;border-radius:3px;background:linear-gradient(90deg,var(--accent-soft),var(--panel2));cursor:pointer}
+  .slider input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:15px;height:15px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 3px rgba(34,211,238,.18);transition:transform .12s}
+  .slider input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.18)}
+  .slider input[type=range]::-moz-range-thumb{width:15px;height:15px;border:none;border-radius:50%;background:var(--accent)}
+  .slider input[type=range]::-moz-range-track{height:4px;border-radius:3px;background:linear-gradient(90deg,var(--accent-soft),var(--panel2))}
+  .slider .val{display:inline-block;min-width:52px;text-align:center;font-variant-numeric:tabular-nums;font-size:11px;font-weight:600;color:var(--accent);background:var(--accent-soft);border:1px solid rgba(34,211,238,.28);border-radius:999px;padding:.08rem .45rem}
+  .hint{font-size:11px;color:var(--muted);line-height:1.45;background:var(--card);border-left:2px solid var(--brand-line);border-radius:0 var(--r-sm) var(--r-sm) 0;padding:.5rem .6rem}
+  .empty{color:var(--muted);font-size:13px;text-align:center;padding:1.6rem 1rem;background:var(--card);border:1px dashed var(--card-line);border-radius:var(--r);line-height:1.5;transition:border-color var(--t)}
+  .empty:hover{border-color:var(--brand-line)}
+  .empty.warn{border-color:rgba(245,158,11,.4);color:var(--accent2)}
+  .empty .empty-ico{display:block;font-size:30px;line-height:1;opacity:.45;margin-bottom:.5rem}
+  .empty .empty-title{display:block;color:var(--txt);font-weight:600;font-size:13px;margin-bottom:.2rem}
+  .empty .empty-cta{font-size:12px}
+  /* komponenty układu (używane przez markup zakładek) */
+  .card{background:var(--card);border:1px solid var(--card-line);border-radius:var(--r);padding:.7rem;margin-bottom:.7rem;box-shadow:inset 0 1px 0 rgba(255,255,255,.04)}
+  .card.action{background:linear-gradient(180deg,rgba(96,165,250,.08),rgba(96,165,250,.02));border-color:var(--brand-line)}
+  .sec-head{font-family:var(--font-head);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--kicker);margin:.1rem 0 .5rem;display:flex;align-items:center;gap:.5rem}
+  .sec-head::after{content:'';flex:1;height:1px;background:linear-gradient(90deg,var(--line),transparent)}
+  .pane-head{display:flex;align-items:center;justify-content:space-between;gap:.5rem;margin-bottom:.7rem;padding-bottom:.5rem;min-height:34px;border-bottom:1px solid transparent;background-image:linear-gradient(90deg,var(--brand-line),transparent);background-size:100% 1px;background-position:bottom left;background-repeat:no-repeat}
+  .pane-head h3{font-family:var(--font-head);font-size:14px;font-weight:700;margin:0;letter-spacing:.02em;color:var(--txt)}
+  .count-chip{font-size:11px;font-weight:600;color:var(--kicker);background:var(--brand-soft);border:1px solid var(--brand-line);border-radius:999px;padding:.12rem .55rem;font-variant-numeric:tabular-nums;white-space:nowrap}
+  details.opt-details{margin-bottom:.7rem;border-top:1px solid var(--line);padding-top:.5rem}
+  details.opt-details>summary{cursor:pointer;list-style:none;font-family:var(--font-head);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--kicker);padding:.2rem 0;display:flex;align-items:center;gap:.45rem;user-select:none}
+  details.opt-details>summary::-webkit-details-marker{display:none}
+  details.opt-details>summary::before{content:'▸';transition:transform var(--t);font-size:10px}
+  details.opt-details[open]>summary::before{transform:rotate(90deg)}
+  details.opt-details>summary:hover{color:var(--brand)}
 
   table{width:100%;border-collapse:collapse;font-size:12px}
-  th,td{border-bottom:1px solid var(--line);padding:.35rem .3rem;text-align:left}
-  th{color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase}
-  td .mini{background:var(--panel2);border:1px solid var(--line);color:var(--txt);border-radius:4px;padding:.15rem .3rem;width:100%;font-size:12px}
+  th,td{border-bottom:1px solid var(--line);padding:.35rem .3rem;text-align:left;font-variant-numeric:tabular-nums}
+  th{color:var(--kicker);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.06em}
+  td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+  thead th{position:sticky;top:0;z-index:1;background:var(--panel);box-shadow:inset 0 -1px 0 var(--line)}
+  tbody tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  tfoot td{border-top:2px solid var(--line);background:var(--panel2)}
+  .mini{background:var(--panel2);border:1px solid var(--line);color:var(--txt);border-radius:6px;padding:.15rem .3rem;width:100%;font-size:12px;transition:border-color var(--t),box-shadow var(--t)}
   .swatch{display:inline-block;width:11px;height:11px;border-radius:2px;vertical-align:middle;margin-right:4px}
-  .pt-dot{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:4px;font-size:12px;vertical-align:middle}
-  .trow{cursor:pointer}
-  .trow:hover td{background:rgba(34,211,238,.07)}
+  .pt-dot{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:4px;font-size:12px;vertical-align:middle;box-shadow:var(--sh-1)}
+  .trow{cursor:pointer;transition:background .12s}
+  .trow:hover td{background:var(--accent-soft)}
+  .trow:hover td:first-child{box-shadow:inset 2px 0 0 var(--accent)}
   .trow.sel td{background:rgba(34,211,238,.14)}
+  .trow.sel td:first-child{box-shadow:inset 3px 0 0 var(--accent)}
   .tot{font-weight:700;color:var(--accent)}
-  .del-x{color:var(--bad);cursor:pointer;font-weight:700}
+  .del-x{color:var(--bad);cursor:pointer;font-weight:700;transition:transform .1s,color var(--t)}
+  .del-x:hover{transform:scale(1.25)}
+  #camTable th,#camTable td{padding:.32rem .26rem;font-size:11.5px}
+  #camTable td.cam-name{max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  #pointTable td:last-child{text-align:center;width:28px}
+  #visInfo{font-variant-numeric:tabular-nums;letter-spacing:.02em;border-left-color:var(--accent)}
 
   /* map markers */
   .cam-flower{width:24px;height:24px;transform-origin:12px 28.97px;transition:transform .2s cubic-bezier(.34,1.3,.64,1),opacity .18s ease}   /* wrapper obracany wokół czubka pinezki => układ „kwiatka"; animacja rozkładania/zwijania */
@@ -111,6 +184,7 @@
   .pt-pin{width:26px;height:26px;border-radius:6px;border:2px solid #fff;display:flex;align-items:center;justify-content:center;font-size:14px;box-shadow:0 1px 5px rgba(0,0,0,.6)}
   .handle{border-radius:50%;width:16px!important;height:16px!important;margin-left:-8px!important;margin-top:-8px!important;cursor:grab;box-shadow:0 1px 3px rgba(0,0,0,.6)}
   .handle:hover{transform:scale(1.25)}
+  body.rotating,body.rotating *{-webkit-user-select:none;user-select:none}  /* tryb obrotu (L): bez natywnego zaznaczania boksem */
   .handle.h-tip{background:#fff;border:2px solid #111}
   .handle.h-side{background:#22d3ee;border:2px solid #063b44}
   .cam-label{background:rgba(15,23,42,.85);border:1px solid var(--line);color:#fff;font-size:11px;padding:1px 5px;border-radius:4px}
@@ -133,31 +207,46 @@
   /* podpis obszaru: nazwa + „obwód N m" wyśrodkowane w dwóch liniach */
   .zone-label{text-align:center;line-height:1.25}
   /* podzakładki obszarów (Poboczne / Główne) + drag&drop kolejności i kategorii */
-  .zone-subtabs{display:flex;gap:.35rem;margin:.2rem 0 .5rem}
-  .zsub{flex:1;background:var(--panel2);border:1px solid var(--line);color:var(--muted);border-radius:6px;padding:.4rem;font-size:12px;cursor:pointer;white-space:nowrap}
-  .zsub:hover{border-color:var(--accent)}
-  .zsub.active{background:var(--accent);color:#063;border-color:var(--accent);font-weight:600}
-  .zsub .zc{font-variant-numeric:tabular-nums;opacity:.85;margin-left:.15rem}
+  .zone-subtabs{display:flex;gap:.25rem;margin:.2rem 0 .6rem;background:rgba(0,0,0,.2);padding:4px;border-radius:var(--r-sm)}
+  .zsub{flex:1;background:transparent;border:1px solid transparent;color:var(--muted);border-radius:6px;padding:.4rem;font-size:12px;cursor:pointer;white-space:nowrap;transition:.15s;display:flex;align-items:center;justify-content:center;gap:.25rem}
+  .zsub:hover{color:var(--txt)}
+  .zsub.active{background:var(--grad-primary);color:#fff;border-color:transparent;font-weight:600;box-shadow:0 2px 10px rgba(37,99,235,.5)}
+  .zsub .zc{font-variant-numeric:tabular-nums;background:rgba(0,0,0,.25);border-radius:999px;padding:0 .35rem;font-size:11px}
+  .zsub.active .zc{background:rgba(255,255,255,.22)}
   .zsub.drop-into{outline:2px dashed var(--accent2);outline-offset:1px;background:var(--panel);color:var(--txt)}
   /* segmentowany przełącznik trybu perymetru: ikonka po lewej, kamery (góra) + słupy (dół) po prawej; opis na hover */
-  .pseg{display:flex;gap:.3rem}
-  .pseg-btn{flex:1;display:flex;align-items:center;justify-content:space-between;gap:.25rem;background:var(--panel2);border:1px solid var(--line);color:var(--txt);border-radius:6px;padding:.4rem .45rem;cursor:pointer}
-  .pseg-btn:hover{border-color:var(--accent)}
-  .pseg-btn.active{background:var(--accent);border-color:var(--accent);color:#063}
+  .pseg{display:flex;gap:.3rem;background:rgba(0,0,0,.18);padding:4px;border-radius:var(--r-sm)}
+  .pseg-btn{flex:1;display:flex;align-items:center;justify-content:space-between;gap:.25rem;background:transparent;border:1px solid transparent;color:var(--txt);border-radius:6px;padding:.4rem .45rem;cursor:pointer;transition:.15s}
+  .pseg-btn:hover{border-color:var(--brand-line)}
+  .pseg-btn.active{background:var(--grad-primary);border-color:transparent;color:#fff;box-shadow:0 2px 10px rgba(37,99,235,.5)}
   .pseg-ico{font-size:18px;line-height:1}
   .pseg-nums{display:flex;flex-direction:column;align-items:flex-end;line-height:1.15}
-  .pseg-cam{font-size:13px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--accent)}
+  .pseg-cam{font-size:13px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--txt)}
   .pseg-pole{font-size:10px;font-variant-numeric:tabular-nums;color:var(--muted)}
-  .pseg-btn.active .pseg-cam,.pseg-btn.active .pseg-pole{color:#063}
+  .pseg-btn.active .pseg-cam,.pseg-btn.active .pseg-pole{color:#fff}
   .zdrag{cursor:grab;color:var(--muted);user-select:none;margin-right:.3rem;font-size:13px}
   .trow.dragging{opacity:.45}
   .trow.drop-into td{box-shadow:inset 0 2px 0 0 var(--accent)}
-  .plan-row{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:.55rem;margin-bottom:.6rem}
-  .plan-row.sel{border-color:var(--accent)}
+  .plan-row{background:var(--card);border:1px solid var(--card-line);border-radius:var(--r);padding:.6rem;margin-bottom:.6rem;transition:border-color var(--t),transform .12s,box-shadow var(--t)}
+  .plan-row:hover{transform:translateY(-1px);border-color:var(--brand-line);box-shadow:var(--sh-1)}
+  .plan-row.sel{border-color:var(--brand);box-shadow:0 0 0 1px var(--brand),0 6px 18px -8px rgba(0,0,0,.6)}
   .plan-row .pr-head{display:flex;align-items:center;gap:.35rem;margin-bottom:.4rem}
   .plan-row .pr-head input{flex:1}
-  .plan-row .icon-btn{background:none;border:none;color:var(--muted);cursor:pointer;font-size:15px;padding:2px;line-height:1}
-  .plan-row .icon-btn:hover{color:var(--accent)}
+  .plan-row .icon-btn{background:none;border:none;color:var(--muted);cursor:pointer;font-size:15px;padding:2px;line-height:1;transition:color var(--t),transform .1s}
+  .plan-row .icon-btn:hover{color:var(--brand);transform:scale(1.15)}
+  .plan-row .icon-btn.del-x:hover{color:var(--bad)}
+  #cabCost{color:var(--ok2);font-size:18px;font-weight:800}
+  #cableTable tfoot tr:last-child td{background:linear-gradient(180deg,rgba(34,197,94,.12),rgba(34,197,94,.04));border-top:1px solid rgba(34,197,94,.35)}
+  .tpl-sub{font-size:10px;color:var(--muted)}
+  #tplTable th,#tplTable td{padding:.3rem .24rem}
+  #tplTable td:nth-child(2){max-width:110px;overflow:hidden;text-overflow:ellipsis}
+  #tplTable td:first-child,#tplTable td:last-child{width:1%;white-space:nowrap}
+  .act-btn{border-radius:6px;transition:transform .1s,background var(--t),filter var(--t)}
+  .act-btn:hover{transform:scale(1.18);background:var(--brand-soft)}
+  #tplTable [data-a="del"]:hover{background:rgba(248,113,113,.15)}
+  #perimCamTable td{padding:.3rem .26rem}
+  #pointTable .pt-dot{border-radius:5px}
+  #zoneTable tfoot td{background:linear-gradient(180deg,rgba(34,211,238,.10),rgba(34,211,238,.03));border-top:1px solid rgba(34,211,238,.30)}
 
   .map-tools{position:absolute;bottom:22px;left:10px;z-index:500;display:flex;flex-direction:column;align-items:flex-start;gap:6px}
   .legend{background:rgba(15,23,42,.9);border:1px solid var(--line);border-radius:8px;padding:.5rem .6rem;font-size:11px;max-width:200px}
@@ -167,9 +256,14 @@
   /* przełącznik podpisów na mapie (nazwy kamer/punktów/obszarów/kabli) */
   #map.hide-labels .leaflet-tooltip.cam-label{display:none}
   .print-only{display:none}
+  #printDoc{display:none}
+
+  @media (prefers-reduced-motion:reduce){*{animation-duration:.001ms!important;transition-duration:.001ms!important}}
 
   @media print{
-    .no-print,header .toolbar,.side-tabs,.legend,#tab-cam,.leaflet-control-zoom,.plan-handle,.zone-vertex,.zone-subtabs,.zdrag{display:none!important}
+    .no-print,header .toolbar,.side-tabs,.legend,#tab-cam,.leaflet-control-zoom,.plan-handle,.zone-vertex,.zone-subtabs,.zdrag,.pane-head{display:none!important}
+    .card,.sec-head,details.opt-details,.hint{background:none!important;border:none!important;box-shadow:none!important;padding-left:0!important;color:#333!important}
+    details.opt-details>summary{display:none!important}
     .print-only{display:block}
     #main{display:block;height:auto}
     #map{height:58vh;width:100%}
@@ -193,6 +287,29 @@
     #tab-info::before{content:"Notatki z wizji lokalnej"}
     #tab-info .field,#tab-info .hint{display:none}
     #printNotes{display:block;white-space:pre-wrap;font-family:inherit;font-size:12px;line-height:1.5;color:#000;margin:0}
+    /* nasz wydruk per-obszar (mapki + dane) — aktywny tylko przy body.printing-doc */
+    body.printing-doc #app{display:none!important}
+    body.printing-doc #printDoc{display:block!important}
+    /* strony mapek: pozioma kartka, mapa wypełnia całą powierzchnię (obraz już wykadrowany do proporcji kartki) */
+    @page{size:A4 landscape;margin:6mm}
+    .print-page{page-break-after:always;break-after:page}
+    .print-page:last-child{page-break-after:auto}
+    .print-map-page{position:relative;width:100%;height:100vh;overflow:hidden;background:#fff}
+    .print-map-page img{position:absolute;inset:0;width:100%;height:100%;object-fit:fill;display:block}
+    /* mały „chip" z podpisem w rogu — zamiast dużej belki nagłówka */
+    .print-cap{position:absolute;left:6px;bottom:6px;display:flex;align-items:center;gap:6px;
+      background:rgba(255,255,255,.88);border:1px solid #000;border-radius:6px;padding:3px 8px;
+      font-weight:700;font-size:11px;color:#000;max-width:70%}
+    .print-cap img{position:static;width:auto;height:18px;object-fit:contain;inset:auto}
+    /* strona danych (mode 'full') zachowuje klasyczny nagłówek */
+    .print-head{display:flex;align-items:center;gap:10px;border-bottom:2px solid #000;padding-bottom:6px;margin-bottom:10px;font-weight:700;color:#000}
+    .print-head img{height:34px}
+    #printDoc,#printDoc *{color:#000!important}
+    #printDoc h2{font-size:14px;margin:0 0 6px;border-bottom:2px solid #000;padding-bottom:2px}
+    #printDoc .print-sec{page-break-inside:avoid;margin-bottom:14px}
+    #printDoc table{width:100%;border-collapse:collapse;font-size:12px;display:table!important}
+    #printDoc th,#printDoc td{border:1px solid #000!important;background:#fff!important;padding:.25rem .3rem;text-align:left}
+    #printDoc pre{white-space:pre-wrap;font-family:inherit;font-size:12px;line-height:1.5;margin:0}
   }
 </style>
 </head>
@@ -221,15 +338,21 @@
   <div id="main">
     <div id="map">
       <div class="map-tools no-print">
+      <div style="display:flex;gap:6px">
+        <button class="btn active" id="btnLayerAn" title="Pokaż / ukryj zasięgi analityki wszystkich kamer">📐 Analityka</button>
+        <button class="btn active" id="btnLayerVis" title="Pokaż / ukryj zasięgi widoczności (kalkulowane) wszystkich kamer">👁 Widoczność</button>
+        <button class="btn active" id="btnLayerBlind" title="Uwzględniaj martwą strefę (ślepy punkt) pod kamerą — przycina analitykę i strefy widoczności">🚫 Martwa strefa</button>
+      </div>
       <button class="btn active" id="btnLabels" title="Pokaż / ukryj podpisy na mapie (skrót: P)">🏷️ Podpisy</button>
       <div class="legend">
         <b>Legenda</b>
-        <div>📍 Kamera — przeciągnij pin, aby przesunąć</div>
-        <div>⚪ Biały uchwyt — obrót i zasięg</div>
+        <div>📍 Kamera — przeciągnij pin, aby przesunąć. Stawianie (<b>K</b>): <b>1. klik</b> = miejsce, ruszasz myszą by wycelować, <b>2. klik</b> = kierunek. Podgląd łezki i stożka podąża za kursorem (<b>Esc</b> anuluje). Wybrana kamera + <b>L</b> = obrót (ruch myszy celuje, klik zatwierdza).</div>
+        <div>⚪ Biały uchwyt — obrót i zasięg analityki</div>
+        <div>▩ Stożek pełny = zasięg analityki · obrys przerywany = zasięg widoczności (kalk.)</div>
         <div>🚧 Szlaban &nbsp; 🛡️ Budka ochrony &nbsp; 🖥️ NVR</div>
         <div>▭ Obszar główny (teren budowy) &nbsp; ▦ Obszar poboczny (wycena) &nbsp; 📏 Trasa kabla</div>
         <div><b>PPM (prawy klik)</b> = usuń element / cofnij punkt podczas rysowania</div>
-        <div style="margin-top:5px;color:#22d3ee;line-height:1.5">Skróty: <b>K</b> kamera · <b>S</b> szlaban · <b>B</b> budka · <b>N</b> NVR · <b>O</b> obszar · <b>M</b> kabel · <b>P</b> podpisy · <b>Del</b> usuń · <b>Esc</b> anuluj</div>
+        <div style="margin-top:5px;color:#22d3ee;line-height:1.5">Skróty: <b>K</b> kamera (2 kliknięcia: miejsce → kierunek) · <b>L</b> obróć kamerę · <b>S</b> szlaban · <b>B</b> budka · <b>N</b> NVR · <b>O</b> obszar · <b>M</b> kabel · <b>P</b> podpisy · <b>Del</b> usuń · <b>Esc</b> anuluj</div>
       </div>
       </div>
     </div>
@@ -246,97 +369,186 @@
         <button data-tab="templates">Szablony</button>
         <button data-tab="perimeter">Perymetr</button>
         <div class="side-actions">
+          <div class="opt-wrap">
+            <button class="side-act" id="btnOptions" title="Opcje">⚙️</button>
+            <div class="opt-menu" id="optMenu">
+              <button id="btnClearCams">🗑️ Wyczyść wszystkie kamery</button>
+              <button id="btnClearZones">🗑️ Wyczyść wszystkie obszary</button>
+              <div class="opt-sep"></div>
+              <button id="btnClearAll" class="danger">🗑️ Wyczyść wszystko</button>
+            </div>
+          </div>
           <span class="side-act side-status" id="saveStatus" title="Stan zapisu"></span>
           <div class="side-sep"></div>
           <button class="side-act" id="btnSave" title="Zapisz">💾</button>
           <button class="side-act" id="btnLoad" title="Wczytaj">📂</button>
-          <button class="side-act" id="btnPrint" title="Drukuj / PDF">🖨️</button>
+          <div class="opt-wrap">
+            <button class="side-act" id="btnPrint" title="Drukuj / PDF">🖨️</button>
+            <div class="opt-menu" id="printMenu">
+              <button id="btnPrintMaps">🗺️ Sam plan (mapki)</button>
+              <button id="btnPrintFull">📄 Wersja opisowa</button>
+            </div>
+          </div>
         </div>
       </div>
       <div class="side-body">
 
         <!-- KAMERA -->
         <div class="tabpane active" id="tab-cam">
-          <div id="camEmpty" class="empty">Kliknij <b>➕ Kamera</b> i wskaż miejsce na mapie,<br>albo wybierz kamerę z listy.</div>
+          <div class="pane-head no-print"><h3>Kamera</h3></div>
+          <div id="camEmpty" class="empty"><span class="empty-ico">🎥</span><span class="empty-title">Brak zaznaczonej kamery</span><span class="empty-cta">Kliknij <b>➕ Kamera</b> i wskaż miejsce na mapie, albo wybierz z <b>Listy</b>.</span></div>
           <div id="camEdit" style="display:none">
-            <div class="row2" style="align-items:flex-end">
+
+            <div class="card action">
+              <div class="sec-head">Szablon</div>
+              <div class="row2">
+                <div class="field">
+                  <label>Zastosuj gotowy</label>
+                  <select id="fApplyTpl"><option value="">— zastosuj szablon —</option></select>
+                </div>
+                <div class="field" style="flex:0 0 auto">
+                  <button class="btn" id="btnSaveAsTpl" title="Zapisz tę kamerę jako nowy szablon">💾 Jako szablon</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="sec-head">Tożsamość</div>
+              <div class="row2">
+                <div class="field" style="max-width:64px">
+                  <label>Nr</label>
+                  <input type="number" id="fNum" min="1" step="1">
+                </div>
+                <div class="field">
+                  <label>Nazwa / oznaczenie</label>
+                  <input type="text" id="fName">
+                </div>
+              </div>
+              <div class="row2">
+                <div class="field">
+                  <label>Typ</label>
+                  <select id="fType">
+                    <option value="bullet">Tubowa (kierunkowa)</option>
+                    <option value="dome">Kopułkowa (kierunkowa)</option>
+                    <option value="ptz">PTZ (obrotowa)</option>
+                    <option value="pano">Panoramiczna 360°</option>
+                  </select>
+                </div>
+                <div class="field" style="flex:0 0 60px">
+                  <label>Kolor</label>
+                  <input type="color" id="fColor" style="height:34px;padding:2px">
+                </div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="sec-head">Pokrycie i geometria</div>
+              <div class="field" id="azField">
+                <label>Kierunek (azymut) <span id="vAz" class="val">0°</span></label>
+                <div class="slider"><input type="range" id="fAz" min="0" max="359" value="0"></div>
+              </div>
+              <div class="field" id="fovField">
+                <label>Kąt widzenia (FOV) <span id="vFov" class="val">90°</span></label>
+                <div class="slider"><input type="range" id="fFov" min="10" max="360" value="90"></div>
+                <div class="hint" id="fovLimit" style="display:none;margin-top:.15rem;background:none;border:none;padding:.1rem 0;font-size:10.5px;color:var(--muted)"></div>
+              </div>
               <div class="field">
-                <label>Szablon kamery</label>
-                <select id="fApplyTpl"><option value="">— zastosuj szablon —</option></select>
-              </div>
-              <div class="field" style="flex:0 0 auto">
-                <button class="btn" id="btnSaveAsTpl" title="Zapisz tę kamerę jako nowy szablon">💾 Jako szablon</button>
+                <label>Zasięg analityki <span id="vRange" class="val">20 m</span></label>
+                <div class="slider"><input type="range" id="fRange" min="3" max="120" value="20"></div>
               </div>
             </div>
-            <div class="row2">
-              <div class="field" style="max-width:64px">
-                <label>Nr</label>
-                <input type="number" id="fNum" min="1" step="1">
+
+            <details class="opt-details">
+              <summary>Optyka i widoczność</summary>
+              <div class="row2">
+                <div class="field">
+                  <label>Wys. montażu (m)</label>
+                  <input type="number" id="fHeight" step="0.5" value="3">
+                </div>
+                <div class="field">
+                  <label>Model / rozdz.</label>
+                  <input type="text" id="fModel" placeholder="np. 4MP">
+                </div>
               </div>
+              <div class="row2">
+                <div class="field">
+                  <label>Rozdzielczość (Mpx)</label>
+                  <input type="number" id="fMpx" min="0.3" step="0.1" value="4">
+                </div>
+                <div class="field">
+                  <label>Ogniskowa (mm)</label>
+                  <input type="number" id="fFocal" min="0.1" step="0.1" value="2.8">
+                </div>
+                <div class="field">
+                  <label>Zasięg IR (m)</label>
+                  <input type="number" id="fIr" min="0" step="1" value="0" title="0 = brak / nie dotyczy">
+                </div>
+              </div>
+              <div class="row2">
+                <div class="field">
+                  <label>Przetwornik</label>
+                  <select id="fSensor"></select>
+                </div>
+                <div class="field">
+                  <label>Kryterium widoczności</label>
+                  <select id="fDori"></select>
+                </div>
+              </div>
+              <div class="row2">
+                <div class="field">
+                  <label>% nieba w kadrze</label>
+                  <input type="number" id="fSky" min="0" max="50" step="1" value="15" title="Praktyka montażowa: 10–20% nieba nad horyzontem (nawet gdy w oddali są drzewa)">
+                </div>
+                <div class="field">
+                  <label>Tilt (° w dół)</label>
+                  <input type="number" id="fTilt" step="0.5" value="0">
+                </div>
+                <div class="field" style="flex:0 0 auto;display:flex;align-items:flex-end">
+                  <label style="display:flex;gap:.3rem;align-items:center;margin:0;cursor:pointer"><input type="checkbox" id="fTiltAuto" checked>auto</label>
+                </div>
+              </div>
+            </details>
+
+            <p class="hint" id="visInfo" style="margin:.1rem 0 .6rem"></p>
+
+            <div class="card">
+              <div class="sec-head">Uwagi</div>
               <div class="field">
-                <label>Nazwa / oznaczenie</label>
-                <input type="text" id="fName">
+                <textarea id="fNotes" placeholder="np. na słupie oświetleniowym, zasilanie z klatki B"></textarea>
               </div>
             </div>
-            <div class="row2">
-              <div class="field">
-                <label>Typ</label>
-                <select id="fType">
-                  <option value="bullet">Tubowa (kierunkowa)</option>
-                  <option value="dome">Kopułkowa (kierunkowa)</option>
-                  <option value="ptz">PTZ (obrotowa)</option>
-                  <option value="pano">Panoramiczna 360°</option>
-                </select>
-              </div>
-              <div class="field">
-                <label>Kolor</label>
-                <input type="color" id="fColor" style="height:34px;padding:2px">
-              </div>
-            </div>
-            <div class="field" id="azField">
-              <label>Kierunek (azymut) <span id="vAz" class="val">0°</span></label>
-              <div class="slider"><input type="range" id="fAz" min="0" max="359" value="0"></div>
-            </div>
-            <div class="field" id="fovField">
-              <label>Kąt widzenia (FOV) <span id="vFov" class="val">90°</span></label>
-              <div class="slider"><input type="range" id="fFov" min="10" max="360" value="90"></div>
-            </div>
-            <div class="field">
-              <label>Zasięg <span id="vRange" class="val">20 m</span></label>
-              <div class="slider"><input type="range" id="fRange" min="3" max="120" value="20"></div>
-            </div>
-            <div class="row2">
-              <div class="field">
-                <label>Wys. montażu (m)</label>
-                <input type="number" id="fHeight" step="0.5" value="3">
-              </div>
-              <div class="field">
-                <label>Model / rozdz.</label>
-                <input type="text" id="fModel" placeholder="np. 4MP">
-              </div>
-            </div>
-            <div class="field">
-              <label>Uwagi</label>
-              <textarea id="fNotes" placeholder="np. na słupie oświetleniowym, zasilanie z klatki B"></textarea>
-            </div>
-            <button class="btn danger" id="btnDelCam" style="width:100%">🗑️ Usuń kamerę</button>
+
+            <button class="btn ghost-danger" id="btnDelCam" style="width:100%;margin-top:.6rem">🗑️ Usuń kamerę</button>
           </div>
         </div>
 
         <!-- LISTA -->
         <div class="tabpane" id="tab-list">
-          <div id="listEmpty" class="empty">Brak kamer.</div>
+          <div class="pane-head no-print"><h3>Kamery</h3><span class="count-chip" id="camCount">0</span></div>
+          <div id="listEmpty" class="empty"><span class="empty-ico">📷</span><span class="empty-title">Brak kamer</span><span class="empty-cta">Naciśnij <b>K</b> lub <b>➕ Kamera</b> i wskaż miejsce na mapie.</span></div>
           <table id="camTable" style="display:none">
-            <thead><tr><th>#</th><th>Nazwa</th><th>Typ</th><th>FOV</th><th>Zasięg</th></tr></thead>
+            <thead><tr><th>#</th><th>Nazwa</th><th>Typ</th><th class="num">FOV</th><th class="num">Zasięg</th></tr></thead>
             <tbody></tbody>
           </table>
-          <button class="btn" id="btnRenumber" style="width:100%;margin-top:.6rem">⟲ Przenumeruj po kolei (1…N)</button>
-          <p class="hint" style="margin-top:.8rem">Łącznie kamer: <b id="camCount">0</b>. Kliknij wiersz, aby edytować i podświetlić na mapie. Nowa kamera dostaje najniższy wolny numer.</p>
+          <div class="card">
+            <div class="sec-head">Numeracja</div>
+            <label style="display:flex;gap:.3rem;align-items:center;margin:0;cursor:pointer;font-size:13px" title="Włączone: numery kamer 1…N są zawsze utrzymywane bez przerw — usunięcie kamery automatycznie przesuwa numery. Wyłączone: numery zostają takie, jak ustawiono ręcznie — przerwy po usunięciu nie są uzupełniane.">
+              <input type="checkbox" id="fAutoRenumber" checked>Auto-numeracja po kolei (bez przerw)
+            </label>
+            <button class="btn" id="btnRenumber" style="width:100%;margin-top:.4rem">⟲ Przenumeruj po kolei (1…N)</button>
+          </div>
+          <p class="hint" style="margin-top:.8rem">Kliknij wiersz, aby edytować i podświetlić na mapie. Nowa kamera dostaje najniższy wolny numer.</p>
         </div>
 
         <!-- PUNKTY -->
         <div class="tabpane" id="tab-punkty">
-          <div id="pointEmpty" class="empty">Brak punktów. Dodaj: 🚧 Szlaban, 🛡️ Budka, 🖥️ NVR.</div>
+          <div class="pane-head no-print"><h3>Punkty</h3><span class="count-chip" id="pointCount">0</span></div>
+          <div class="pt-legend" style="display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:.6rem">
+            <span class="count-chip" style="display:inline-flex;align-items:center;gap:.35rem"><span class="pt-dot" style="width:15px;height:15px;background:#f59e0b;font-size:10px">🚧</span>Szlaban <b id="ptCntSzlaban" style="color:var(--txt)">0</b></span>
+            <span class="count-chip" style="display:inline-flex;align-items:center;gap:.35rem"><span class="pt-dot" style="width:15px;height:15px;background:#3b82f6;font-size:10px">🛡️</span>Budka <b id="ptCntBudka" style="color:var(--txt)">0</b></span>
+            <span class="count-chip" style="display:inline-flex;align-items:center;gap:.35rem"><span class="pt-dot" style="width:15px;height:15px;background:#ef4444;font-size:10px">🖥️</span>NVR <b id="ptCntNvr" style="color:var(--txt)">0</b></span>
+          </div>
+          <div id="pointEmpty" class="empty"><span class="empty-ico">📍</span><span class="empty-title">Brak punktów</span><span class="empty-cta">Dodaj: 🚧 Szlaban, 🛡️ Budka, 🖥️ NVR — z paska narzędzi lub skrótem.</span></div>
           <table id="pointTable" style="display:none">
             <thead><tr><th>Typ</th><th>Nazwa</th><th></th></tr></thead>
             <tbody></tbody>
@@ -346,66 +558,76 @@
 
         <!-- OBSZARY -->
         <div class="tabpane" id="tab-zones">
+          <div class="pane-head no-print"><h3>Obszary do wyceny</h3></div>
           <div class="zone-subtabs">
             <button class="zsub active" data-kind="side">Poboczne <span class="zc" id="zsubCountSide">0</span></button>
             <button class="zsub" data-kind="main">Główne <span class="zc" id="zsubCountMain">0</span></button>
           </div>
-          <div id="zoneEmpty" class="empty" style="margin-top:.6rem">Brak obszarów.</div>
-          <table id="zoneTable" style="display:none;margin-top:.4rem">
-            <thead><tr><th>Nazwa</th><th>Pow.</th><th></th></tr></thead>
+          <div id="zoneEmpty" class="empty" style="margin-top:.5rem"><span class="empty-ico">▦</span><span class="empty-title">Brak obszarów</span><span class="empty-cta">Obrysuj teren (▭ główny / ▦ poboczny) na mapie.</span></div>
+          <table id="zoneTable" style="display:none;margin-top:.5rem">
+            <thead><tr><th>Nazwa</th><th class="num">Pow.</th><th></th></tr></thead>
             <tbody></tbody>
             <tfoot>
-              <tr><td class="tot"><span id="zoneTotLabel">RAZEM poboczne</span> (<span id="zoneCount">0</span>)</td><td class="tot" id="zoneTot">0 m²</td><td></td></tr>
+              <tr><td class="tot"><span id="zoneTotLabel">RAZEM poboczne</span> (<span id="zoneCount">0</span>)</td><td class="tot num" id="zoneTot">0 m²</td><td></td></tr>
             </tfoot>
           </table>
-          <p class="hint" style="margin-top:.8rem"><b>▭ Obszar główny</b> (skrót <b>G</b>) — duży teren nadrzędny, np. cały obszar budowy. <b>▦ Obszar poboczny</b> (skrót <b>O</b>) — teren do osobnej wyceny (garaż, plac zabaw). Obrysuj klikając po granicy; dwuklik lub <b>Enter</b> kończy. <b>PPM</b> podczas rysowania = cofnij punkt, <b>PPM</b> na gotowym obszarze = usuń. Klik w obszar = zaznacz. Przeciągnij wiersz (za <b>⠿</b>) = zmień kolejność; upuść na zakładkę „Główne"/„Poboczne" = przenieś między kategoriami.</p>
+          <p class="hint" style="margin-top:.8rem"><b>▭ Obszar główny</b> (skrót <b>G</b>) — teren nadrzędny. <b>▦ Obszar poboczny</b> (skrót <b>O</b>) — teren do osobnej wyceny. Obrysuj klikając po granicy; dwuklik lub <b>Enter</b> kończy.</p>
+          <details class="opt-details"><summary>Jak rysować i porządkować</summary><p class="hint" style="border:none;padding-left:0"><b>PPM</b> podczas rysowania = cofnij punkt, <b>PPM</b> na gotowym obszarze = usuń. Klik w obszar = zaznacz. Przeciągnij wiersz (za <b>⠿</b>) = zmień kolejność; upuść na zakładkę „Główne"/„Poboczne" = przenieś między kategoriami.</p></details>
         </div>
 
         <!-- OKABLOWANIE -->
         <div class="tabpane" id="tab-cable">
-          <div class="field">
-            <label>Cena za metr kabla (zł)</label>
-            <input type="number" id="pricePerM" step="0.1" value="0">
+          <div class="pane-head no-print"><h3>Okablowanie</h3></div>
+          <div class="card">
+            <div class="sec-head">Wycena kabla</div>
+            <div class="row2">
+              <div class="field">
+                <label>Cena za metr kabla (zł)</label>
+                <input type="number" id="pricePerM" step="0.1" value="0">
+              </div>
+              <div class="field">
+                <label>Zapas na odcinek (%)</label>
+                <input type="number" id="cableSlack" step="1" value="10" title="Dodatkowa rezerwa na zejścia, zapasy, gięcia">
+              </div>
+            </div>
           </div>
-          <div class="field">
-            <label>Zapas na odcinek (%)</label>
-            <input type="number" id="cableSlack" step="1" value="10" title="Dodatkowa rezerwa na zejścia, zapasy, gięcia">
-          </div>
+          <div id="cableEmpty" class="empty"><span class="empty-ico">📏</span><span class="empty-title">Brak odcinków</span><span class="empty-cta">Kliknij <b>📏 Zmierz kabel</b> i klikaj po trasie; dwuklik lub <b>Enter</b> kończy.</span></div>
           <table id="cableTable" style="margin-top:.4rem">
-            <thead><tr><th>Odcinek</th><th>Dług.</th><th>+zapas</th><th></th></tr></thead>
+            <thead><tr><th>Odcinek</th><th class="num">Dług.</th><th class="num">+zapas</th><th></th></tr></thead>
             <tbody></tbody>
             <tfoot>
-              <tr><td class="tot">RAZEM</td><td class="tot" id="cabTotLen">0 m</td><td class="tot" id="cabTotSlack">0 m</td><td></td></tr>
-              <tr><td colspan="3" class="tot">Szac. koszt kabla</td><td class="tot" id="cabCost">0 zł</td></tr>
+              <tr><td class="tot">RAZEM</td><td class="tot num" id="cabTotLen">0 m</td><td class="tot num" id="cabTotSlack">0 m</td><td></td></tr>
+              <tr><td colspan="3" class="tot" style="color:var(--ok2);text-transform:uppercase;letter-spacing:.05em;font-size:11px">Szac. koszt kabla</td><td class="tot num" id="cabCost">0 zł</td></tr>
             </tfoot>
           </table>
-          <p class="hint" style="margin-top:.8rem">Kliknij <b>📏 Zmierz kabel</b>, klikaj po trasie prowadzenia przewodu (po dachach, ścianach, w ziemi). Dwuklik lub <b>Enter</b> kończy pomiar i dodaje odcinek do tabeli.</p>
+          <p class="hint" style="margin-top:.8rem">Do każdego odcinka doliczany jest <b>zapas (%)</b> na zejścia, gięcia i rezerwy. Szacunkowy koszt = łączna długość z zapasem × <b>cena za metr</b>.</p>
         </div>
 
         <!-- PLANY (nakładki rastrowe) -->
         <div class="tabpane" id="tab-plans">
-          <button class="btn" id="btnAddPlan" style="width:100%;margin:0 0 .5rem">➕ Dodaj plan (JPG/PNG)</button>
-          <div id="planEmpty" class="empty">Brak planów.</div>
+          <div class="pane-head"><h3>Plany</h3><button class="btn primary" id="btnAddPlan">➕ Dodaj plan</button></div>
+          <div id="planEmpty" class="empty"><span class="empty-ico">🗺️</span><span class="empty-title">Brak planów</span><span class="empty-cta">Przeciągnij plik na mapę lub użyj <b>➕ Dodaj plan</b> (JPG/PNG).</span></div>
           <div id="planList"></div>
-          <p class="hint" style="margin-top:.8rem">Dodaj skan planu (JPG/PNG) — rzut kondygnacji lub plan terenu. Ustaw położenie i rozmiar bezpośrednio na mapie (uchwyty na wybranym planie), a suwakami reguluj przezroczystość, skalę i obrót. Plany leżą pod kamerami i punktami.</p>
+          <p class="hint" style="margin-top:.8rem">Ustaw położenie i rozmiar planu bezpośrednio na mapie (uchwyty na wybranym planie); suwakami reguluj przezroczystość, skalę i obrót. Plany leżą pod kamerami i punktami.</p>
         </div>
 
         <!-- OBIEKT -->
         <div class="tabpane" id="tab-info">
+          <div class="pane-head no-print"><h3>Obiekt</h3></div>
           <div class="field" id="objAddrField">
             <label>Adres obiektu</label>
-            <div id="objAddrEmpty" class="empty" style="padding:.5rem 0">Brak zapisanego adresu. Wyszukaj adres na górze i kliknij <b>📌 Zapisz</b>.</div>
+            <div id="objAddrEmpty" class="empty" style="padding:.5rem 0"><span class="empty-ico">📍</span><span class="empty-title">Brak adresu</span><span class="empty-cta">Wyszukaj adres na górze i kliknij <b>📌 Zapisz</b>.</span></div>
             <div id="objAddrBox" style="display:none">
-              <div id="objAddrText" style="font-size:13px;line-height:1.4;padding:.5rem .6rem;background:var(--panel2);border:1px solid var(--line);border-radius:6px"></div>
+              <div id="objAddrText" style="font-size:13px;line-height:1.4;padding:.5rem .6rem;background:var(--card);border:1px solid var(--card-line);border-radius:var(--r-sm)"></div>
               <div style="display:flex;gap:.35rem;margin-top:.4rem">
                 <button class="btn" id="btnGoObjPin" title="Pokaż obiekt na mapie">🎯 Pokaż na mapie</button>
-                <button class="btn danger" id="btnDelObjPin" title="Usuń pinezkę obiektu">🗑️ Usuń</button>
+                <button class="btn ghost-danger" id="btnDelObjPin" title="Usuń pinezkę obiektu">🗑️ Usuń</button>
               </div>
             </div>
           </div>
-          <div class="field">
-            <label>Notatki z wizji lokalnej</label>
-            <textarea id="objInfo" style="min-height:320px"></textarea>
+          <div class="card">
+            <div class="sec-head">Notatki z wizji</div>
+            <textarea id="objInfo" style="min-height:320px;line-height:1.55;border-radius:var(--r-sm)" aria-label="Notatki z wizji lokalnej"></textarea>
           </div>
           <pre class="print-only" id="printNotes"></pre>
           <p class="hint">Tekst zapisuje się automatycznie i jest dołączany do eksportu / wydruku.</p>
@@ -413,19 +635,17 @@
 
         <!-- SZABLONY -->
         <div class="tabpane" id="tab-templates">
-          <div style="display:flex;justify-content:space-between;align-items:center;gap:.4rem;margin-bottom:.4rem">
-            <b style="font-size:13px">Szablony kamer</b>
-            <button class="btn" id="btnNewTpl">➕ Nowy</button>
-          </div>
+          <div class="pane-head"><h3>Szablony kamer</h3><button class="btn primary" id="btnNewTpl">➕ Nowy</button></div>
           <p class="hint" style="margin-top:0">Standardowe modele kamer i ich parametry. „➕" na liście stawia gotową kamerę na środku mapy.</p>
           <div id="tplStatus" class="empty" style="display:none"></div>
-          <div id="tplEmpty" class="empty">Brak szablonów. Kliknij <b>➕ Nowy</b>.</div>
+          <div id="tplEmpty" class="empty"><span class="empty-ico">🧩</span><span class="empty-title">Brak szablonów</span><span class="empty-cta">Kliknij <b>➕ Nowy</b>, aby dodać model kamery.</span></div>
           <table id="tplTable" style="display:none">
-            <thead><tr><th></th><th>Model</th><th>Typ</th><th>FOV</th><th>Zasięg</th><th></th></tr></thead>
+            <thead><tr><th></th><th>Model</th><th>Typ</th><th class="num">FOV</th><th class="num">Zasięg</th><th></th></tr></thead>
             <tbody></tbody>
           </table>
 
-          <div id="tplForm" style="display:none;margin-top:.6rem;border-top:1px solid var(--line);padding-top:.6rem">
+          <div id="tplForm" class="card" style="display:none;margin-top:.6rem">
+            <div class="sec-head">Identyfikacja</div>
             <div class="row2">
               <div class="field"><label>Nazwa / model *</label><input type="text" id="tName" placeholder="np. DS-2CD2143G2-I"></div>
               <div class="field"><label>Producent</label><input type="text" id="tManufacturer" placeholder="np. Hikvision"></div>
@@ -441,17 +661,27 @@
               </div>
               <div class="field"><label>Rozdzielczość</label><input type="text" id="tResolution" placeholder="np. 4MP"></div>
             </div>
+            <div class="sec-head">Optyka</div>
             <div class="row2">
               <div class="field"><label>Kąt widzenia FOV (°)</label><input type="number" id="tFov" min="10" max="360" value="90"></div>
-              <div class="field"><label>Zasięg (m)</label><input type="number" id="tRange" min="1" max="200" value="20"></div>
+              <div class="field"><label>Zasięg analityki (m)</label><input type="number" id="tRange" min="1" max="200" value="20"></div>
             </div>
             <div class="row2">
+              <div class="field"><label>Rozdzielczość (Mpx)</label><input type="number" id="tMpx" min="0.3" step="0.1" value="4"></div>
+              <div class="field"><label>Ogniskowa (mm)</label><input type="number" id="tFocal" min="0.1" step="0.1" value="2.8"></div>
+            </div>
+            <div class="row2">
+              <div class="field"><label>Przetwornik</label><select id="tSensor"></select></div>
               <div class="field"><label>Wys. montażu (m)</label><input type="number" id="tHeight" step="0.5" value="3"></div>
+            </div>
+            <div class="sec-head">Wygląd i uwagi</div>
+            <div class="row2">
+              <div class="field"><label>Zasięg IR (m)</label><input type="number" id="tIr" min="0" step="1" value="0" title="0 = brak / nie dotyczy"></div>
               <div class="field"><label>Kolor na mapie</label><input type="color" id="tColor" value="#22d3ee" style="height:34px;padding:2px"></div>
             </div>
             <div class="field"><label>Uwagi</label><textarea id="tNotes" placeholder="np. IR 30m, PoE, ONVIF"></textarea></div>
             <div style="display:flex;gap:.35rem">
-              <button class="btn" id="btnSaveTpl" style="flex:1">💾 Zapisz szablon</button>
+              <button class="btn primary" id="btnSaveTpl" style="flex:1">💾 Zapisz szablon</button>
               <button class="btn" id="btnCancelTpl">Anuluj</button>
             </div>
           </div>
@@ -459,40 +689,43 @@
 
         <!-- PERYMETR -->
         <div class="tabpane" id="tab-perimeter">
-          <p class="hint" style="margin-top:0">Rozstaw kamery wzdłuż <b>obrysu wybranego obszaru</b> (ogrodzenia). Obrys liczony jest jako <b>jedna ciągła pętla</b> (krótkie skosy nie dostają osobnych słupów). Kamery lądują na linii i patrzą <b>ku wnętrzu</b> obszaru wzdłuż ogrodzenia. Przy przesuwaniu kamera <b>trzyma się krawędzi</b> obszaru, a uchwyt pozwala tylko <b>obrócić kierunek</b>. Przytrzymaj <b>Ctrl</b>, aby uwolnić kamerę z krawędzi oraz edytować <b>kąt widzenia i zasięg</b>.</p>
-          <div id="perimEmpty" class="empty">Brak obszarów. Najpierw obrysuj obszar (▭ / ▦), a wróć tu, aby ułożyć kamery.</div>
+          <div class="pane-head no-print"><h3>Perymetr</h3></div>
+          <p class="hint" style="margin-top:0">Rozstaw kamery wzdłuż obrysu wybranego obszaru; kamery patrzą ku wnętrzu i trzymają się krawędzi.</p>
+          <div id="perimEmpty" class="empty"><span class="empty-ico">🛡️</span><span class="empty-title">Brak obszarów</span><span class="empty-cta">Najpierw obrysuj obszar (▭ / ▦), potem wróć tu.</span></div>
           <div id="perimBody" style="display:none">
-            <div class="field">
-              <label>Obszar (ogrodzenie)</label>
-              <select id="perimZone"></select>
-            </div>
-            <div class="field">
-              <label>Szablon kamery</label>
-              <select id="perimTpl"><option value="">— wybierz szablon —</option></select>
-            </div>
-            <div class="field">
-              <label>Tryb rozmieszczenia</label>
-              <div class="pseg" id="perimMode">
-                <button type="button" class="pseg-btn active" data-mode="overlap" title="Równomiernie — obwód ÷ zasięg, po jednej kamerze na słupie. Suwakiem % zagęść (zapas) lub dopuść luki (−).">
+            <details class="opt-details"><summary>Jak działa rozstawianie</summary><p class="hint" style="border:none;padding-left:0">Obrys liczony jest jako <b>jedna ciągła pętla</b> (krótkie skosy nie dostają osobnych słupów). Kamery lądują na linii i patrzą <b>ku wnętrzu</b> obszaru wzdłuż ogrodzenia. Przy przesuwaniu kamera <b>trzyma się krawędzi</b> obszaru, a uchwyt pozwala tylko <b>obrócić kierunek</b>. Przytrzymaj <b>Ctrl</b>, aby uwolnić kamerę z krawędzi oraz edytować <b>kąt widzenia i zasięg analityki</b>.</p></details>
+            <div class="card">
+              <div class="sec-head">Rozmieszczenie</div>
+              <div class="field">
+                <label>Obszar (ogrodzenie)</label>
+                <select id="perimZone"></select>
+              </div>
+              <div class="field">
+                <label>Szablon kamery</label>
+                <select id="perimTpl"><option value="">— wybierz szablon —</option></select>
+              </div>
+              <div class="field">
+                <label>Tryb rozmieszczenia</label>
+                <div class="pseg" id="perimMode">
+                <button type="button" class="pseg-btn active" data-mode="overlap" title="Najmniej kamer — pokrycie mierzone wzdłuż płotu, pojedyncze kamery „w przód”. Suwakiem % zagęść zakład (+) lub dopuść luki (−).">
                   <span class="pseg-ico">⚖️</span><span class="pseg-nums"><span class="pseg-cam">–</span><span class="pseg-pole">–</span></span>
                 </button>
-                <button type="button" class="pseg-btn" data-mode="fewer" title="Mniej słupów — kamery parowane na wspólnych masztach (patrzą ku rogom), ostry róg = 1 kamera. Suwakiem % steruj gęstością.">
+                <button type="button" class="pseg-btn" data-mode="fewer" title="Najmniej słupów — kamery parowane na wspólnych masztach (dwukierunkowe, patrzą od siebie), także na łukach. Suwakiem % steruj gęstością.">
                   <span class="pseg-ico">📉</span><span class="pseg-nums"><span class="pseg-cam">–</span><span class="pseg-pole">–</span></span>
                 </button>
               </div>
-              <div class="hint" style="margin-top:.25rem;text-align:right">na przyciskach: <b style="color:var(--accent)">kamery</b> / <span style="color:var(--muted)">słupy</span></div>
+              <div class="hint" style="margin-top:.35rem;text-align:right;opacity:.85">na przyciskach: <b style="color:var(--accent)">kamery</b> / <span style="color:var(--muted)">słupy</span></div>
             </div>
-            <div class="field" id="perimOverlapField">
-              <label>Zakład (+) / luka (−) sąsiednich kamer (%)</label>
-              <input type="number" id="perimOverlap" min="-90" max="80" step="5" value="0" title="+% = pola widzenia zachodzą na siebie (gęściej). 0% = stykają się. −% = dopuszczalna luka (rzadziej, mniej słupów).">
+              <div class="field" id="perimOverlapField">
+                <label>Zakład (+) / luka (−) sąsiednich kamer (%)</label>
+                <input type="number" id="perimOverlap" min="-90" max="80" step="5" value="0" title="+% = pola widzenia zachodzą na siebie (gęściej). 0% = stykają się. −% = dopuszczalna luka (rzadziej, mniej słupów).">
+              </div>
             </div>
-            <button class="btn active" id="btnLayPerimeter" style="width:100%;margin-bottom:.4rem">▦ Ułóż perymetr</button>
-            <button class="btn danger" id="btnClearPerimeter" style="width:100%">🗑️ Usuń kamery perymetru (tego obszaru)</button>
+            <button class="btn primary" id="btnLayPerimeter" style="width:100%;margin-bottom:.4rem">▦ Ułóż perymetr</button>
+            <button class="btn ghost-danger" id="btnClearPerimeter" style="width:100%">🗑️ Usuń kamery perymetru (tego obszaru)</button>
             <p class="hint" id="perimInfo" style="margin-top:.8rem"></p>
             <div id="perimCamWrap" style="display:none;margin-top:.6rem">
-              <div class="hint" style="display:flex;justify-content:space-between;align-items:center;margin:0 0 .3rem">
-                <span>Kamery tego obszaru</span><b id="perimCamCount" style="color:var(--accent)">0</b>
-              </div>
+              <div class="sec-head" style="justify-content:space-between">Wynik: kamery obszaru <span class="count-chip" id="perimCamCount">0</span></div>
               <table id="perimCamTable" style="width:100%"><tbody></tbody></table>
             </div>
           </div>
@@ -593,9 +826,13 @@ function snapToZoneEdge(latlng,z){   // rzut na najbliższą krawędź obrysu (z
 /* ============ STAN ============ */
 let cameras=[], points=[], cables=[];
 let savedPerim=null;                    // ustawienia zakładki Perymetr wczytane z projektu (odtwarzane w IIFE szablonów)
+let perimSel={tpl:'',zone:'',overlap:'0',mode:'overlap'};   // bieżący wybór zakładki Perymetr — źródło prawdy do zapisu (DOM bywa pusty, nim wczytają się listy)
 let applyPerimSel=null;                 // funkcja odtwarzająca wybór na zakładce Perymetr (przypisana w IIFE szablonów)
+let removePerimCams=null;               // usuwa kamery perymetru obszaru (przypisana w IIFE szablonów — używana też przy usuwaniu obszaru)
 let selected=null, camSeq=0, ptSeq={};
+let autoRenumber=true;                  // true: numery kamer 1…N zawsze bez przerw (auto-renumeruje po usunięciu); false: numery zostają jak ustawiono ręcznie
 let mode=null; // 'addcam' | 'pt:nvr' | 'pt:szlaban' | 'pt:budka' | 'measure'
+let layerToggles={analytics:true,visibility:true,blind:true};   // globalne przełączniki: 📐 analityka / 👁 widoczność / 🚫 martwa strefa
 
 const POINT_TYPES = {
   nvr:     {name:'NVR / Serwerownia', bg:'#ef4444', emoji:'🖥️'},
@@ -605,16 +842,116 @@ const POINT_TYPES = {
 
 /* ============ KAMERA ============ */
 const isPano=cam=>cam.type==='pano'||cam.fov>=360;
+/* ——— zasięg WIDOCZNOŚCI (kalkulowany z Mpx / ogniskowej / przetwornika / kryterium DORI) ——— */
+// szerokość aktywna matrycy [mm] (przybliżenie; 1/2.8" = 5.37 wg datasheetów → z 2.8mm daje ~88° HFOV)
+const SENSORS={'1/4"':3.6,'1/3"':4.8,'1/2.8"':5.37,'1/2.5"':5.76,'1/2"':6.4,'1/1.8"':7.2,'1/1.2"':10.67,'1"':12.8};
+// kryteria DORI (IEC 62676-4) [px/m] + Monitoring (najdalszy, spoza normy)
+const DORI={mon:{name:'Monitoring',pxm:12.5},det:{name:'Detekcja',pxm:25},obs:{name:'Obserwacja',pxm:62.5},rec:{name:'Rozpoznanie',pxm:125},id:{name:'Identyfikacja',pxm:250}};
+const CAM_DEFAULTS={mpx:4,focal:2.8,sensor:'1/2.8"',dori:'det',ir:0,sky:15,tilt:0,tiltAuto:true};   // domyślne parametry (też dla starych projektów); ir=0 → brak IR; sky=15% nieba w kadrze
+// typowe rozdzielczości poziome [px] (klucz = zaokrąglone Mpx, wg kart katalogowych); brak w tabeli → wzór 16:9
+const HPX={2:1920,3:2304,4:2688,5:2880,6:3072,8:3840,12:4000};
+const hpxOf=mpx=>HPX[Math.round(mpx)]||Math.sqrt(mpx*1e6*16/9);
+// optyczny kąt widzenia w poziomie [°] z przetwornika i ogniskowej (null gdy brak danych)
+function optHfov(cam){
+  const w=SENSORS[cam.sensor], f=+cam.focal;
+  if(!w||!(f>0))return null;
+  return 2*Math.atan(w/(2*f))*180/Math.PI;
+}
+// górny limit RĘCZNEGO kąta analityki = kąt optyki; pano (360° z definicji) i ptz (obrotowa) bez limitu
+function maxFov(cam){
+  if(cam.type==='pano'||cam.type==='ptz')return null;
+  const hf=optHfov(cam); return hf==null?null:Math.round(hf);
+}
+function clampFov(cam){ const m=maxFov(cam); if(m!=null&&cam.fov>m){cam.fov=m;return true;} return false; }   // true = obcięto fov
+// pionowy kąt widzenia [°] — wysokość matrycy = szerokość·9/16
+function optVfov(cam){
+  const w=SENSORS[cam.sensor], f=+cam.focal;
+  if(!w||!(f>0))return null;
+  return 2*Math.atan(w*9/16/(2*f))*180/Math.PI;
+}
+/* ——— TILT + reguła „% nieba w kadrze" ———
+   Praktyka montażowa: kadr ustawiamy tak, by sky% górnej części kadru było nad horyzontem
+   (10–20% nieba, nawet gdy w oddali są drzewa). Auto: tilt = VFOV·(0.5 − sky/100). */
+function camTilt(cam){                                   // efektywny tilt w dół [°]
+  if(cam.tiltAuto===false)return +cam.tilt||0;
+  const v=optVfov(cam); if(v==null)return +cam.tilt||0;
+  return v*(0.5-(+(cam.sky??15))/100);
+}
+function blindNear(cam){                                 // martwa strefa pod kamerą [m po ziemi]; Infinity = kadr cały nad horyzontem
+  if(isPano(cam))return 0;
+  const v=optVfov(cam); if(v==null)return 0;
+  const a=camTilt(cam)+v/2, h=+cam.height||0;            // kąt DOLNEJ krawędzi kadru pod horyzont
+  if(a>=90)return 0;
+  return a<=0?Infinity:h/Math.tan(toR(a));
+}
+function farGeom(cam){                                   // geometryczny daleki limit [m po ziemi]; ∞ gdy górna krawędź kadru nad horyzontem
+  if(isPano(cam))return Infinity;
+  const v=optVfov(cam); if(v==null)return Infinity;
+  const a=camTilt(cam)-v/2, h=+cam.height||0;            // kąt GÓRNEJ krawędzi kadru
+  return a>0?h/Math.tan(toR(a)):Infinity;
+}
+// zasięg PO ZIEMI [m] dla zadanego kryterium [px/m] (bez przycinania tiltem); null gdy brak danych
+function doriGround(cam,pxm){
+  const mpx=+cam.mpx, f=+cam.focal;
+  if(!(mpx>0)||!(f>0))return null;
+  let D;                                                  // dystans skośny od obiektywu
+  if(isPano(cam)) D=Math.sqrt(mpx*1e6)/(Math.PI*pxm);     // fisheye equidistant: N=√(Mpx·1e6) (średnica koła obrazu, sensor ~1:1), D=N/(π·C)
+  else{
+    const hf=optHfov(cam); if(hf==null)return null;
+    D=hpxOf(mpx)/(2*pxm*Math.tan(toR(hf/2)));             // 4Mpx → 2688 px z tabeli HPX
+  }
+  const h=+cam.height||0;
+  return Math.sqrt(Math.max(0,D*D-h*h));                  // rzut skośnego dystansu na ziemię
+}
+// „główny" zasięg widoczności wg wybranego kryterium (kolumna listy, noc z IR) — ograniczony dalekim limitem tiltu
+function visRange(cam){
+  const g=doriGround(cam,(DORI[cam.dori]||DORI.det).pxm);
+  if(g==null)return null;
+  return Math.round(Math.min(g,farGeom(cam)));
+}
+/* strefy DORI (koncentryczne, jak w JVSG): od Identyfikacji (najbliżej) po Monitoring (najdalej),
+   przycięte do [martwa strefa, daleki limit tiltu]; strefa o pustym przedziale znika */
+const DORI_ORDER=['id','rec','obs','det','mon'];
+const DORI_FILL={id:.20,rec:.15,obs:.10,det:.06,mon:.03};   // wypełnienie mocniejsze bliżej kamery
+function doriZones(cam){
+  const near=layerToggles.blind?blindNear(cam):0, fg=farGeom(cam);   // toggle 🚫 OFF → rysuj od punktu kamery
+  if(!isFinite(near))return [];                          // cały kadr nad horyzontem — nic nie widać po ziemi
+  const out=[]; let inner=near;
+  for(const k of DORI_ORDER){
+    const g=doriGround(cam,DORI[k].pxm); if(g==null)return [];
+    const outer=Math.min(g,fg);
+    if(outer>inner+0.05){ out.push({key:k,r0:inner,r1:outer}); inner=outer; }
+  }
+  return out;
+}
 // Obrót płatka pojedynczej pinezki tak, by KORPUS (z numerem) leżał po stronie PRZECIWNEJ do pola widzenia
 // => czubek kropli zostaje w punkcie kamery, a numer nie zasłania stożka FOV. Pano: bez kierunku => 0.
 const petalTheta=cam=>isPano(cam)?0:((cam.az+180)%360+360)%360;
-function coverageLatLngs(cam){
-  const c=[cam.lat,cam.lng], pts=[c];
-  const start=cam.az-cam.fov/2, end=cam.az+cam.fov/2, step=Math.max(2,cam.fov/40);
-  for(let a=start;a<=end;a+=step) pts.push(destination(cam.lat,cam.lng,a,cam.range));
-  pts.push(destination(cam.lat,cam.lng,end,cam.range));
-  pts.push(c);
+// pierścieniowy wycinek [r0,r1] w osi azymutu (analityka i strefy DORI); r0≈0 → zwykły wachlarz od kamery
+function ringSectorLatLngs(cam,fov,r0,r1){
+  const pts=[], start=cam.az-fov/2, end=cam.az+fov/2, step=Math.max(2,fov/40);
+  for(let a=start;a<=end;a+=step) pts.push(destination(cam.lat,cam.lng,a,r1));
+  pts.push(destination(cam.lat,cam.lng,end,r1));
+  if(r0>0.05){
+    for(let a=end;a>=start;a-=step) pts.push(destination(cam.lat,cam.lng,a,r0));
+    pts.push(destination(cam.lat,cam.lng,start,r0));
+  }else pts.push([cam.lat,cam.lng]);
   return pts;
+}
+// pierścień [r0,r1] dla pano (r0≈0 → pełne koło); z dziurą przez drugi ring Leafleta
+function annulusLatLngs(cam,r0,r1){
+  const outer=[], inner=[];
+  for(let a=0;a<=360;a+=6){ outer.push(destination(cam.lat,cam.lng,a,r1)); if(r0>0.05) inner.push(destination(cam.lat,cam.lng,a,r0)); }
+  return r0>0.05?[outer,inner]:[outer];
+}
+// geometria warstwy ANALITYKI: od martwej strefy (gdy toggle 🚫 włączony) do cam.range; null → warstwa znika
+function analyticsGeom(cam){
+  const range=+cam.range||0;
+  let near=layerToggles.blind?blindNear(cam):0;          // brak danych optyki → blindNear=0 → pełny wachlarz jak dotąd
+  if(!isFinite(near)||near>=range)return null;           // kadr nad horyzontem / martwa strefa ≥ zasięg analityki
+  if(near<=0.05)near=0;
+  if(isPano(cam))return near>0?{circle:false,latlngs:annulusLatLngs(cam,near,range)}:{circle:true,radius:range};
+  return {circle:false,latlngs:ringSectorLatLngs(cam,cam.fov,near,range)};
 }
 function camIcon(cam){
   const pt=cam._petal||null;
@@ -639,6 +976,8 @@ function camIcon(cam){
 function pinAt(cam,theta){
   cam._role='pin';
   const fl=cam.marker._icon&&cam.marker._icon.querySelector('.cam-flower');
+  // najkrótsza droga: rozwiń docelowy kąt względem już narysowanego, żeby transition CSS nie „okrążał" pełnego koła
+  if(fl&&!cam._hidden){ const prev=(cam._petal&&cam._petal.theta)||0; while(theta-prev>180)theta-=360; while(theta-prev<-180)theta+=360; }
   const t=theta?`rotate(${theta}deg)`:'rotate(0deg)', sr=`rotate(${45-(theta||0)}deg)`;
   if(fl&&!cam._hidden){
     fl.style.opacity='1'; fl.style.transform=t;
@@ -748,13 +1087,50 @@ function restackCameras(){
   });
   updateSelHandles();   // nie pokazuj uchwytów edycji dla kamery ukrytej w kulce / zbitej w kłębek
 }
-// aktualizacja geometrii W MIEJSCU — płynnie, bez usuwania/dodawania warstw
-function updateCam(cam){
-  if(!cam.cover)return;
-  const w=cam===selected?3:1;
-  if(cam._circle){cam.cover.setLatLng([cam.lat,cam.lng]);cam.cover.setRadius(cam.range);}
-  else cam.cover.setLatLngs(coverageLatLngs(cam));
-  cam.cover.setStyle({color:cam.color,weight:w,fillColor:cam.color,fillOpacity:.22});
+// aktualizacja geometrii W MIEJSCU — płynnie, bez usuwania/dodawania warstw (poza zmianą kształtu koło↔wielokąt)
+function updateCam(cam){ updateCover(cam); updateCoverVis(cam); }
+// warstwa ANALITYKI — wachlarz/pierścień od martwej strefy do cam.range (tworzy/aktualizuje/usuwa wg analyticsGeom)
+function updateCover(cam){
+  const g=analyticsGeom(cam);
+  if(!g){ if(cam.cover){map.removeLayer(cam.cover);cam.cover=null;} return; }
+  if(cam.cover && cam._circle!==g.circle){map.removeLayer(cam.cover);cam.cover=null;}
+  if(!cam.cover){
+    cam._circle=g.circle;
+    cam.cover=g.circle?L.circle([cam.lat,cam.lng],{radius:g.radius}):L.polygon(g.latlngs,{});
+    if(layerToggles.analytics&&catVisible.cam)cam.cover.addTo(map);
+    cam.cover.on('click',()=>selectCam(cam));
+  }else{
+    if(g.circle){cam.cover.setLatLng([cam.lat,cam.lng]);cam.cover.setRadius(g.radius);}
+    else cam.cover.setLatLngs(g.latlngs);
+  }
+  cam.cover.setStyle({color:cam.color,weight:cam===selected?3:1,fillColor:cam.color,fillOpacity:.22});
+}
+// warstwa WIDOCZNOŚCI (kalkulowanej) = koncentryczne strefy DORI — POD analityką; obrys przerywany na całości
+const zoneTip=(cam,z)=>DORI[z.key].name+' '+DORI[z.key].pxm.toLocaleString('pl-PL')+' px/m · do '+Math.round(z.r1)+' m';
+function updateCoverVis(cam){
+  const zs=doriZones(cam);
+  if(!zs.length){ if(cam.coverVis){map.removeLayer(cam.coverVis);cam.coverVis=null;} return; }
+  const pano=isPano(cam), hf=pano?null:optHfov(cam);
+  const geo=z=>pano?annulusLatLngs(cam,z.r0,z.r1):ringSectorLatLngs(cam,hf,z.r0,z.r1);
+  const outline={key:'_out',r0:zs[0].r0,r1:zs[zs.length-1].r1};          // obrys całości: martwa strefa → najdalsza strefa
+  const sig=pano+':'+zs.map(z=>z.key).join(',');
+  if(cam.coverVis && cam._visSig!==sig){map.removeLayer(cam.coverVis);cam.coverVis=null;}
+  if(!cam.coverVis){
+    cam._visSig=sig;
+    cam.coverVis=L.layerGroup();
+    cam._visLayers=zs.map(z=>{
+      const p=L.polygon(geo(z),{color:cam.color,stroke:false,fillColor:cam.color,fillOpacity:DORI_FILL[z.key]});
+      p.bindTooltip(zoneTip(cam,z),{sticky:true,className:'cam-label'});
+      p.on('click',()=>selectCam(cam));
+      cam.coverVis.addLayer(p); return p;
+    });
+    cam._visOutline=L.polygon(geo(outline),{color:cam.color,weight:1,dashArray:'6 6',fill:false,interactive:false});
+    cam.coverVis.addLayer(cam._visOutline);
+    if(layerToggles.visibility&&catVisible.cam){cam.coverVis.addTo(map);cam.coverVis.eachLayer(l=>l.bringToBack());}
+  }else{
+    zs.forEach((z,i)=>{const p=cam._visLayers[i];p.setLatLngs(geo(z));p.setTooltipContent(zoneTip(cam,z));p.setStyle({fillColor:cam.color,fillOpacity:DORI_FILL[z.key]});});
+    cam._visOutline.setLatLngs(geo(outline));cam._visOutline.setStyle({color:cam.color});
+  }
 }
 function drawCam(cam){
   if(!cam.marker){
@@ -779,28 +1155,65 @@ function drawCam(cam){
     cam.marker.setIcon(camIcon(cam));
     cam.marker.setLatLng([cam.lat,cam.lng]);
   }
-  const wantCircle=isPano(cam);
-  if(cam.cover && cam._circle!==wantCircle){map.removeLayer(cam.cover);cam.cover=null;}
-  if(!cam.cover){
-    cam._circle=wantCircle;
-    cam.cover=wantCircle?L.circle([cam.lat,cam.lng],{radius:cam.range}):L.polygon(coverageLatLngs(cam),{});
-    cam.cover.addTo(map);
-    cam.cover.on('click',()=>selectCam(cam));
-  }
-  updateCam(cam);
+  updateCam(cam);   // warstwy pokrycia (analityka + strefy DORI) tworzy/aktualizuje updateCover/updateCoverVis
 }
 function nextCamNum(){                 // najniższy wolny numer (uwzględnia usunięte kamery)
   const used=new Set(cameras.map(c=>c.num));
   let n=1; while(used.has(n)) n++; return n;
 }
-function addCamera(latlng){
+function addCamera(latlng,az=0){
   camSeq++;
   const num=nextCamNum();
   const cam={id:'c'+Date.now()+camSeq,num,name:'K'+num,type:'bullet',
-    lat:latlng.lat,lng:latlng.lng,az:0,fov:90,range:20,height:3,model:'',notes:'',
-    color:CAM_COLOR};
+    lat:latlng.lat,lng:latlng.lng,az:((Math.round(az)%360)+360)%360,fov:90,range:20,height:3,model:'',notes:'',
+    ...CAM_DEFAULTS,color:CAM_COLOR};
+  clampFov(cam);   // ręczny FOV nie może przekraczać kąta optyki
   cameras.push(cam); drawCam(cam); selectCam(cam); refreshList(); restackCameras(); save();
 }
+
+/* ====== PODGLĄD (ghost) łezki + stożka FOV podczas stawiania kamery (skrót K) ======
+   Dwa kliknięcia: 1. klik stawia pozycję, ruch myszy celuje, 2. klik zatwierdza kierunek. */
+const GHOST_FOV=90, GHOST_RANGE=20;
+let ghost=null, ghostAz=0, aiming=null;
+function ghostIcon(az){
+  const theta=((az+180)%360+360)%360;                 // korpus łezki po stronie PRZECIWNEJ do FOV (jak w camIcon)
+  const wrap=theta?`transform:rotate(${theta}deg);`:'';
+  return L.divIcon({className:'',iconSize:[24,24],iconAnchor:[12,28.97],
+    html:`<div class="cam-flower cam-ghost" style="${wrap}"><div class="cam-pin" style="background:${CAM_COLOR}"><span style="transform:rotate(${45-theta}deg)">+</span></div></div>`});
+}
+function ghostCov(latlng,az){   // podgląd = przyszła kamera z domyślną optyką → respektuje toggle martwej strefy
+  const g=analyticsGeom({...CAM_DEFAULTS,type:'bullet',lat:latlng.lat,lng:latlng.lng,az,fov:GHOST_FOV,range:GHOST_RANGE,height:3});
+  return g&&!g.circle?g.latlngs:[];
+}
+function showGhost(latlng,az,aim){
+  ghostAz=az;
+  if(!ghost){
+    const cover=L.polygon(ghostCov(latlng,az),{color:CAM_COLOR,weight:1,dashArray:'5,4',fillColor:CAM_COLOR,fillOpacity:.12,interactive:false});
+    const marker=L.marker(latlng,{icon:ghostIcon(az),interactive:false,keyboard:false,zIndexOffset:2000,opacity:.85});
+    ghost={cover,marker,az};
+    cover.addTo(map); marker.addTo(map);
+    marker.bindTooltip('',{permanent:true,direction:'top',offset:[0,-34],className:'measure-label'});
+  }else{
+    ghost.cover.setLatLngs(ghostCov(latlng,az));
+    ghost.marker.setLatLng(latlng);
+    if(ghost.az!==az){ ghost.marker.setIcon(ghostIcon(az)); ghost.az=az; }
+  }
+  if(aim){ ghost.marker.setTooltipContent(Math.round(az)+'°'); if(!ghost.marker.isTooltipOpen())ghost.marker.openTooltip(); }
+  else ghost.marker.closeTooltip();
+}
+function hideGhost(){ if(ghost){ map.removeLayer(ghost.cover); map.removeLayer(ghost.marker); ghost=null; } }
+
+/* ====== TRYB OBROTU wybranej kamery (skrót L) ======
+   Ruch myszy celuje stożkiem (jak sterownik kierunku), klik zatwierdza, Esc przywraca poprzedni kąt. */
+let rotating=null;
+function startRotate(cam){ rotating={cam,az0:cam.az}; setMode('rotate'); }
+function rotateTo(latlng){
+  if(!rotating)return;
+  const cam=rotating.cam;
+  cam.az=((Math.round(bearing({lat:cam.lat,lng:cam.lng},latlng))%360)+360)%360;
+  updateCam(cam); if(selected===cam)positionHandles(cam); syncForm(cam); reorientPetal(cam);
+}
+function confirmRotate(){ if(!rotating)return; rotating=null; refreshList(); save(); setMode(null); }
 
 /* ====== UCHWYTY: biały (tip) = kierunek + zasięg; niebieskie (boki) = kąt widzenia ====== */
 let handles=null;
@@ -812,7 +1225,7 @@ function mkHandle(cls,tip){
 }
 function positionHandles(cam,except){
   if(!handles){
-    handles={tip:mkHandle('h-tip','Kierunek + zasięg'),left:mkHandle('h-side','Kąt widzenia'),right:mkHandle('h-side','Kąt widzenia')};
+    handles={tip:mkHandle('h-tip','Kierunek + zasięg analityki'),left:mkHandle('h-side','Kąt widzenia'),right:mkHandle('h-side','Kąt widzenia')};
     handles.tip.on('drag',e=>{
       if(!selected)return;
       const h=e.target.getLatLng(), c={lat:selected.lat,lng:selected.lng};
@@ -824,7 +1237,8 @@ function positionHandles(cam,except){
     const sideDrag=(e,which)=>{
       if(!selected||isPano(selected))return;
       const h=e.target.getLatLng(), c={lat:selected.lat,lng:selected.lng};
-      selected.fov=Math.max(10,Math.min(350,Math.round(angDiff(bearing(c,h),selected.az)*2)));
+      const mf=maxFov(selected);   // kąt analityki nie może przekroczyć kąta optyki (pano/ptz bez limitu)
+      selected.fov=Math.max(10,Math.min(mf!=null?Math.min(mf,350):350,Math.round(angDiff(bearing(c,h),selected.az)*2)));
       selected.range=Math.max(3,Math.min(120,Math.round(dist(c,h))));
       updateCam(selected); positionHandles(selected,which); syncForm(selected); refreshList();
     };
@@ -835,7 +1249,7 @@ function positionHandles(cam,except){
   const pano=isPano(cam);
   const lockGeom=!ctrlHeld;   // każda kamera bez Ctrl → tylko kierunek (Ctrl = kąt i zasięg)
   if(except!=='tip') handles.tip.setLatLng(destination(cam.lat,cam.lng,pano?0:cam.az,cam.range));
-  handles.tip.setTooltipContent(lockGeom?'Kierunek (Ctrl = kąt i zasięg)':'Kierunek + zasięg');
+  handles.tip.setTooltipContent(lockGeom?'Kierunek (Ctrl = kąt i zasięg analityki)':'Kierunek + zasięg analityki');
   handles.tip.addTo(map);
   if(pano||lockGeom){map.removeLayer(handles.left);map.removeLayer(handles.right);}
   else{
@@ -851,9 +1265,7 @@ function reorientPetal(cam){
   if(!cam||!cam.marker||cam._hidden)return;
   if(isClustered(cam)){ restackCameras(); return; }   // łezka w klastrze leży u nasady swojego stożka => przelicz grupę
   if(cam._role!=='pin')return;
-  let t=petalTheta(cam); const prev=(cam._petal&&cam._petal.theta)||0;
-  while(t-prev>180)t-=360; while(t-prev<-180)t+=360;
-  pinAt(cam,t);
+  pinAt(cam,petalTheta(cam));   // pinAt sam wybiera najkrótszą drogę względem aktualnego obrotu
 }
 // kamera „w kłębku": ukryta w kulce albo ma sąsiada w promieniu grupowania => uchwyty edycji zaśmiecałyby widok
 function isClustered(cam){
@@ -887,35 +1299,99 @@ function selectCam(cam){
   markSel();
 }
 function syncForm(cam){
-  fNum.value=cam.num; fName.value=cam.name; fType.value=cam.type; fColor.value=cam.color;
+  fNum.value=cam.num; fNum.disabled=autoRenumber; fNum.title=autoRenumber?'Numer nadawany automatycznie — wyłącz „Auto-numeracja po kolei", aby edytować ręcznie':'';
+  fName.value=cam.name; fType.value=cam.type; fColor.value=cam.color;
   fAz.value=cam.az; vAz.textContent=cam.az+'°';
+  const mf=maxFov(cam); fFov.max=mf!=null?mf:360;      // suwak FOV ograniczony kątem optyki (pano/ptz bez limitu)
   fFov.value=Math.min(cam.fov,360); vFov.textContent=cam.fov+'°';
   fRange.value=cam.range; vRange.textContent=cam.range+' m';
   fHeight.value=cam.height; fModel.value=cam.model; fNotes.value=cam.notes;
+  fMpx.value=cam.mpx??CAM_DEFAULTS.mpx; fFocal.value=cam.focal??CAM_DEFAULTS.focal;
+  fIr.value=cam.ir??0;
+  fSensor.value=SENSORS[cam.sensor]?cam.sensor:CAM_DEFAULTS.sensor;
+  fDori.value=DORI[cam.dori]?cam.dori:CAM_DEFAULTS.dori;
+  syncTiltFields(cam);
+  updateVisInfo(cam);
   const pano=(cam.type==='pano');
   document.getElementById('fovField').style.opacity=pano?.4:1;
   document.getElementById('azField').style.opacity=pano?.4:1;
   fFov.disabled=pano; fAz.disabled=pano;
 }
 const el=id=>document.getElementById(id);
-fNum.oninput=()=>{selected.num=+fNum.value||selected.num;drawCam(selected);restackCameras();refreshList();};
+/* selecty przetwornika i kryterium DORI (formularz kamery + edytor szablonu) */
+(function(){
+  const opt=(sel,v,txt)=>{const o=document.createElement('option');o.value=v;o.textContent=txt;sel.appendChild(o);};
+  Object.keys(SENSORS).forEach(k=>{opt(el('fSensor'),k,k);opt(el('tSensor'),k,k);});
+  Object.keys(DORI).forEach(k=>opt(el('fDori'),k,DORI[k].name+' '+DORI[k].pxm.toLocaleString('pl-PL')+' px/m'));
+  el('fSensor').value=CAM_DEFAULTS.sensor; el('tSensor').value=CAM_DEFAULTS.sensor; el('fDori').value=CAM_DEFAULTS.dori;
+})();
+// pola tilt/% nieba: w trybie auto tilt jest wyliczany (readonly), ręcznie — edytowalny
+function syncTiltFields(cam){
+  fSky.value=cam.sky??CAM_DEFAULTS.sky;
+  fTiltAuto.checked=cam.tiltAuto!==false;
+  fTilt.readOnly=fTiltAuto.checked;
+  fTilt.style.opacity=fTilt.readOnly?.55:1;
+  fTilt.value=Math.round(camTilt(cam)*10)/10;
+}
+// linia informacyjna „👁 DORI" — na żywo przy zmianie Mpx / ogniskowej / przetwornika / kryterium / wysokości / IR / tiltu
+function updateVisInfo(cam){
+  // hint i limit suwaka FOV = kąt optyki (aktualizowane razem z linią, bo zależą od tych samych pól)
+  const mf=maxFov(cam), fl=el('fovLimit');
+  fFov.max=mf!=null?mf:360;
+  if(fl){ if(mf!=null){fl.style.display='';fl.textContent='maks. '+mf+'° = kąt optyki (HFOV)';} else fl.style.display='none'; }
+  const box=el('visInfo'); if(!box)return;
+  const r=visRange(cam);
+  if(r==null){box.textContent='👁 Widoczność (kalk.): — uzupełnij Mpx i ogniskową';return;}
+  const fg=farGeom(cam), LTR={id:'I',rec:'R',obs:'O',det:'D',mon:'M'};
+  const seg=DORI_ORDER.map(k=>LTR[k]+' '+Math.round(Math.min(doriGround(cam,DORI[k].pxm),fg))).join(' · ');
+  const ang=isPano(cam)?'360°':('HFOV '+Math.round(optHfov(cam))+'°');
+  let txt='👁 DORI: '+seg+' m · '+ang;
+  const ir=+cam.ir||0;
+  if(ir>0) txt+=' · 🌙 noc: '+Math.min(r,Math.round(ir))+' m';   // noc = min(kryterium, zasięg IR)
+  if(!isPano(cam)){
+    const v=optVfov(cam);
+    if(v!=null){
+      const near=blindNear(cam);
+      txt+=' · martwa strefa: '+(isFinite(near)?Math.round(near*10)/10+' m':'∞')+' · VFOV '+Math.round(v)+'°';
+    }
+  }
+  box.textContent=txt;
+}
+// zmiana optyki (ogniskowa/przetwornik) może ZMNIEJSZYĆ kąt optyki poniżej ręcznego FOV → obetnij i odśwież
+function afterOpticsChange(){
+  if(clampFov(selected)){syncForm(selected);updateSelHandles();}
+  else{syncTiltFields(selected);updateVisInfo(selected);}    // optyka zmienia też VFOV → przelicz tilt auto
+  updateCam(selected);refreshList();
+}
+function afterTiltChange(){ syncTiltFields(selected); updateCam(selected); refreshList(); updateVisInfo(selected); }
+fNum.oninput=()=>{if(autoRenumber)return;selected.num=+fNum.value||selected.num;drawCam(selected);restackCameras();refreshList();};
 fName.oninput=()=>{selected.name=fName.value;drawCam(selected);restackCameras();refreshList();};
-fType.onchange=()=>{selected.type=fType.value;if(selected.type==='pano')selected.fov=360;else if(selected.fov>=360)selected.fov=90;syncForm(selected);drawCam(selected);restackCameras();positionHandles(selected);refreshList();};
+fType.onchange=()=>{selected.type=fType.value;if(selected.type==='pano')selected.fov=360;else if(selected.fov>=360)selected.fov=90;clampFov(selected);syncForm(selected);drawCam(selected);restackCameras();positionHandles(selected);refreshList();};
 fColor.oninput=()=>{selected.color=fColor.value;drawCam(selected);restackCameras();refreshList();};
 fAz.oninput=()=>{selected.az=+fAz.value;vAz.textContent=selected.az+'°';updateCam(selected);positionHandles(selected);reorientPetal(selected);};
-fFov.oninput=()=>{selected.fov=+fFov.value;vFov.textContent=selected.fov+'°';updateCam(selected);positionHandles(selected);refreshList();};
+fFov.oninput=()=>{let v=+fFov.value;const mf=maxFov(selected);if(mf!=null&&v>mf){v=mf;fFov.value=v;}selected.fov=v;vFov.textContent=v+'°';updateCam(selected);positionHandles(selected);refreshList();updateVisInfo(selected);};   // fov 360 przełącza model na fisheye → odśwież linię DORI
 fRange.oninput=()=>{selected.range=+fRange.value;vRange.textContent=selected.range+' m';updateCam(selected);positionHandles(selected);refreshList();};
-fHeight.oninput=()=>{selected.height=+fHeight.value;};
+fHeight.oninput=()=>{selected.height=+fHeight.value;updateCam(selected);refreshList();updateVisInfo(selected);};   // wysokość wpływa na zasięg widoczności
 fModel.oninput=()=>{selected.model=fModel.value;};
 fNotes.oninput=()=>{selected.notes=fNotes.value;};
-[fNum,fAz,fFov,fRange,fHeight,fModel,fNotes,fName].forEach(x=>x.addEventListener('change',save));
+fMpx.oninput=()=>{selected.mpx=+fMpx.value||0;updateCam(selected);refreshList();updateVisInfo(selected);};
+fFocal.oninput=()=>{selected.focal=+fFocal.value||0;afterOpticsChange();};      // może obciąć FOV analityki
+fSensor.onchange=()=>{selected.sensor=fSensor.value;afterOpticsChange();};       // jw.
+fDori.onchange=()=>{selected.dori=fDori.value;updateCam(selected);refreshList();updateVisInfo(selected);};
+fIr.oninput=()=>{selected.ir=+fIr.value||0;refreshList();updateVisInfo(selected);};   // IR: tylko informacja (bez warstwy na mapie)
+fSky.oninput=()=>{selected.sky=Math.max(0,Math.min(50,+fSky.value||0));afterTiltChange();};   // % nieba → tilt auto → strefy
+fTilt.oninput=()=>{if(selected.tiltAuto===false){selected.tilt=+fTilt.value||0;updateCam(selected);refreshList();updateVisInfo(selected);}};   // bez syncTiltFields, by nie walczyć z kursorem
+fTiltAuto.onchange=()=>{if(!fTiltAuto.checked)selected.tilt=Math.round(camTilt(selected)*10)/10;selected.tiltAuto=fTiltAuto.checked;afterTiltChange();};   // auto→ręczny: przejmij wyliczony tilt
+[fNum,fAz,fFov,fRange,fHeight,fModel,fNotes,fName,fMpx,fFocal,fSensor,fDori,fIr,fSky,fTilt,fTiltAuto].forEach(x=>x.addEventListener('change',save));
 el('btnDelCam').onclick=()=>{if(selected)delCam(selected);};
 el('btnRenumber').onclick=renumberCameras;
+el('fAutoRenumber').onchange=()=>{autoRenumber=el('fAutoRenumber').checked;if(selected)syncForm(selected);if(autoRenumber)renumberCameras();else save();};
 function delCam(cam){
-  map.removeLayer(cam.marker); if(cam.cover)map.removeLayer(cam.cover);
+  map.removeLayer(cam.marker); if(cam.cover)map.removeLayer(cam.cover); if(cam.coverVis)map.removeLayer(cam.coverVis);
   cameras=cameras.filter(c=>c!==cam);
   if(selected===cam){selected=null;clearHandles();document.getElementById('camEmpty').style.display='block';document.getElementById('camEdit').style.display='none';}
-  refreshList(); restackCameras(); save();
+  if(autoRenumber){renumberCameras();}else{refreshList();}
+  restackCameras(); save();
 }
 
 /* ============ LISTA ============ */
@@ -935,8 +1411,12 @@ function refreshList(){
   const typeName={bullet:'Tubowa',dome:'Kopułka',ptz:'PTZ',pano:'360°'};
   cameras.forEach(c=>{
     const tr=document.createElement('tr'); tr.className='trow';
-    tr.innerHTML=`<td><span class="swatch" style="background:${c.color}"></span>${c.num}</td>
-      <td>${c.name}</td><td>${typeName[c.type]}</td><td>${c.type==='pano'?'360°':c.fov+'°'}</td><td>${c.range} m</td>`;
+    const vr=visRange(c);   // zasięg widoczności (kalkulowany) — „—" gdy brak danych optyki
+    const night=(vr!=null&&+c.ir>0)?Math.min(vr,Math.round(+c.ir)):null;   // noc = min(kryterium, IR)
+    tr.innerHTML=`<td><span class="swatch" style="background:${c.color}"></span>${c.num}</td>`+
+      `<td class="cam-name" title="${c.name}">${c.name}</td><td>${typeName[c.type]}</td>`+
+      `<td class="num">${c.type==='pano'?'360°':c.fov+'°'}</td>`+
+      `<td class="num">${c.range} m<div style="font-size:10px;color:var(--muted);font-weight:400">${vr==null?'—':vr+' m'+(night!=null&&night<vr?' <span style="color:var(--accent2)">🌙'+night+'</span>':'')}</div></td>`;
     tr.onclick=()=>{selectCam(c);map.panTo([c.lat,c.lng]);};
     tb.appendChild(tr);
   });
@@ -963,6 +1443,9 @@ function refreshPoints(){
   const tb=document.querySelector('#pointTable tbody'); tb.innerHTML='';
   document.getElementById('pointEmpty').style.display=points.length?'none':'block';
   document.getElementById('pointTable').style.display=points.length?'table':'none';
+  document.getElementById('pointCount').textContent=points.length;
+  const _cS=points.filter(p=>p.type==='szlaban').length,_cB=points.filter(p=>p.type==='budka').length,_cN=points.filter(p=>p.type==='nvr').length;
+  if(el('ptCntSzlaban'))el('ptCntSzlaban').textContent=_cS; if(el('ptCntBudka'))el('ptCntBudka').textContent=_cB; if(el('ptCntNvr'))el('ptCntNvr').textContent=_cN;
   points.forEach(p=>{
     const t=POINT_TYPES[p.type]||POINT_TYPES.nvr;
     const tr=document.createElement('tr'); tr.className='trow';
@@ -1027,6 +1510,8 @@ function refreshCable(){
   el('cabTotLen').textContent=tot+' m';
   el('cabTotSlack').textContent=totS+' m';
   el('cabCost').textContent=(totS*price).toLocaleString('pl-PL')+' zł';
+  el('cableEmpty').style.display=cables.length?'none':'block';
+  el('cableTable').style.display=cables.length?'table':'none';
 }
 el('pricePerM').oninput=()=>{refreshCable();save();};
 el('cableSlack').oninput=()=>{refreshCable();save();};
@@ -1102,7 +1587,21 @@ function drawZone(z){
     :{color:z.color,weight:2,fillColor:z.color,fillOpacity:.25}).addTo(map);
   z.poly.bindTooltip(zoneTooltip(z),{permanent:true,direction:'center',className:'cam-label zone-label'});
   z.poly.on('click',()=>selectZone(z));   // klik = wybór obszaru (na zakładce „Obszary" pokazuje uchwyty wierzchołków)
-  z.poly.on('contextmenu',ev=>{L.DomEvent.stop(ev);if(confirm('Usunąć obszar: '+z.name+'?')){map.removeLayer(z.poly);zones=zones.filter(x=>x!==z);if(selectedZone===z){selectedZone=null;clearZoneHandles();}refreshZones();save();}});
+  z.poly.on('contextmenu',ev=>{L.DomEvent.stop(ev);deleteZone(z,true);});
+}
+// usunięcie obszaru (menu kontekstowe + ✕ w tabeli) — kamery perymetru obszaru idą razem z nim,
+// inaczej zostałyby z „wiszącym" perimeterZone i nie dałoby się ich już zbiorczo usunąć.
+// ask=true → zawsze pytaj; ask=false (✕ w tabeli) → pytaj tylko, gdy usuwa też kamery
+function deleteZone(z,ask){
+  const pc=cameras.filter(c=>c.perimeterZone===z.id).length;
+  if((ask||pc) && !confirm('Usunąć obszar: '+z.name+'?'+(pc?(' Razem z nim zostanie usuniętych '+pc+' kamer perymetru.'):'')))return;
+  if(pc && typeof removePerimCams==='function')removePerimCams(z.id);
+  map.removeLayer(z.poly);
+  zones=zones.filter(x=>x!==z);
+  if(selectedZone===z){selectedZone=null;clearZoneHandles();}
+  refreshZones();
+  if(pc){refreshList();restackCameras();}   // jak inne przepływy perymetru: odśwież listę kamer i klastry (save() zrobi updateCounts)
+  save();
 }
 // jeden wiersz obszaru w tabeli
 function zoneRow(z){
@@ -1121,7 +1620,7 @@ function zoneRow(z){
   td2.innerHTML=`${fmtArea(z.area)}<div style="font-size:10px;color:var(--muted);font-weight:400">obwód ${fmtLen(zonePerimeter(z.pts))}</div>`;
   td2.onclick=()=>{selectZone(z);map.fitBounds(z.poly.getBounds().pad(.2));};
   const td3=document.createElement('td'); const x=document.createElement('span'); x.className='del-x'; x.textContent='✕';
-  x.onclick=()=>{map.removeLayer(z.poly);zones=zones.filter(v=>v!==z);if(selectedZone===z){selectedZone=null;clearZoneHandles();}refreshZones();save();};
+  x.onclick=()=>deleteZone(z,false);
   td3.appendChild(x);
   tr.appendChild(td1); tr.appendChild(td2); tr.appendChild(td3);
   // wiersz = cel upuszczenia (zmiana kolejności): wstaw przeciągany obszar przed ten wiersz
@@ -1484,6 +1983,9 @@ function setMode(m){
   document.getElementById('btnAddArea').classList.toggle('active',m==='area'&&areaKind==='side');
   document.getElementById('btnAddAreaMain').classList.toggle('active',m==='area'&&areaKind==='main');
   map.getContainer().style.cursor=m?'crosshair':'';
+  const _rot=(m==='rotate'); document.body.classList.toggle('rotating',_rot); map.boxZoom[_rot?'disable':'enable'](); map.dragging[_rot?'disable':'enable']();
+  if(m!=='addcam'){ aiming=null; hideGhost(); }   // sprzątnij podgląd łezki i przerwane celowanie po wyjściu z trybu kamery
+  if(m!=='rotate' && rotating){ const {cam,az0}=rotating; rotating=null; cam.az=az0; updateCam(cam); if(selected===cam)positionHandles(cam); syncForm(cam); reorientPetal(cam); refreshList(); }   // wyjście z obrotu bez zatwierdzenia => przywróć poprzedni kierunek
   // porzuć niedokończony pomiar/obrys przy każdej zmianie trybu (naprawia „wiszące" linie)
   startMeasure(); startArea();
   map.doubleClickZoom[(m==='measure'||m==='area')?'disable':'enable']();
@@ -1497,11 +1999,22 @@ document.getElementById('btnAddArea').onclick=()=>{if(mode==='area'&&areaKind===
 document.getElementById('btnAddAreaMain').onclick=()=>{if(mode==='area'&&areaKind==='main')finishArea();else{areaKind='main';setMode('area');}};
 
 map.on('click',e=>{
-  if(mode==='addcam'){addCamera(e.latlng);setMode(null);}
+  if(mode==='addcam'){
+    if(!aiming){ aiming={latlng:e.latlng}; showGhost(e.latlng,0,true); }                          // 1. klik = miejsce kamery, teraz celujemy
+    else{ const at=aiming.latlng; aiming=null; hideGhost(); addCamera(at,ghostAz); setMode(null); } // 2. klik = zatwierdź kierunek i postaw
+  }
   else if(mode&&mode.indexOf('pt:')===0){addPoint(mode.slice(3),e.latlng);setMode(null);}
   else if(mode==='measure'){measureClick(e.latlng);}
   else if(mode==='area'){areaClick(e.latlng);}
+  else if(mode==='rotate'){confirmRotate();}
 });
+// Stawianie kamery = dwa kliknięcia: 1. pozycja, 2. kierunek. Podgląd łezki + stożka podąża za kursorem.
+map.on('mousemove',e=>{
+  if(mode==='addcam'){ if(aiming) showGhost(aiming.latlng, bearing(aiming.latlng,e.latlng), true); else showGhost(e.latlng, 0, false); }
+  else if(mode==='rotate') rotateTo(e.latlng);
+});
+map.getContainer().addEventListener('mouseleave',()=>{ if(!aiming)hideGhost(); });
+map.on('mousedown',e=>{ if(mode==='rotate') L.DomEvent.preventDefault(e); });
 map.on('dblclick',e=>{
   if(mode==='measure'){L.DomEvent.stop(e);finishMeasure();}
   else if(mode==='area'){L.DomEvent.stop(e);finishArea();}
@@ -1529,6 +2042,7 @@ document.addEventListener('keydown',e=>{
   else if(k==='m'){if(mode==='measure')finishMeasure();else setMode('measure');}
   else if(k==='o'){if(mode==='area'&&areaKind==='side')finishArea();else{areaKind='side';setMode('area');}}
   else if(k==='g'){if(mode==='area'&&areaKind==='main')finishArea();else{areaKind='main';setMode('area');}}
+  else if(k==='l'){ if(mode==='rotate')confirmRotate(); else if(selected && !isPano(selected))startRotate(selected); }   // obrót wybranej kamery
   else if(k==='p')toggleLabels();
   else if(e.key==='Enter'&&mode==='measure')finishMeasure();
   else if(e.key==='Enter'&&mode==='area')finishArea();
@@ -1552,7 +2066,7 @@ const CAT_LABEL={cam:'kamery',points:'punkty',zones:'obszary',cables:'okablowani
 function applyCatVisibility(cat){
   const on=catVisible[cat];
   const setL=l=>{if(!l)return; if(on){if(!map.hasLayer(l))l.addTo(map);} else if(map.hasLayer(l))map.removeLayer(l);};
-  if(cat==='cam'){cameras.forEach(c=>{setL(c.marker);setL(c.cover);}); if(!on)clearHandles(); else{if(selected)positionHandles(selected);refreshCamDrag();}}
+  if(cat==='cam'){cameras.forEach(applyCamLayerVis); if(!on)clearHandles(); else{if(selected)positionHandles(selected);refreshCamDrag();}}
   else if(cat==='points'){points.forEach(p=>setL(p.marker));}
   else if(cat==='zones'){zones.forEach(z=>setL(z.poly)); if(!on)clearZoneHandles(); else refreshZoneEdit(); refreshZoneSegments();}
   else if(cat==='cables'){cables.forEach(c=>setL(c.line));}
@@ -1562,6 +2076,29 @@ function applyCatVisibility(cat){
 }
 function toggleCategory(cat){catVisible[cat]=!catVisible[cat];applyCatVisibility(cat);}
 document.querySelectorAll('.tab-eye').forEach(b=>b.onclick=()=>toggleCategory(b.dataset.cat));
+
+/* ====== GLOBALNE PRZEŁĄCZNIKI WARSTW POKRYCIA: 📐 Analityka / 👁 Widoczność ====== */
+// warstwy jednej kamery wg oka kategorii + przełączników (marker zostaje pod kontrolą klastrowania: pomijamy ukryte w kulce)
+function applyCamLayerVis(c){
+  const setL=(l,want)=>{if(!l)return; if(want){if(!map.hasLayer(l))l.addTo(map);} else if(map.hasLayer(l))map.removeLayer(l);};
+  setL(c.marker,catVisible.cam&&!c._hidden);
+  setL(c.cover,catVisible.cam&&layerToggles.analytics);
+  if(c.coverVis){
+    const was=map.hasLayer(c.coverVis);
+    setL(c.coverVis,catVisible.cam&&layerToggles.visibility);
+    if(!was&&map.hasLayer(c.coverVis))c.coverVis.eachLayer(l=>l.bringToBack&&l.bringToBack());   // świeżo pokazana grupa stref → pod warstwę analityki
+  }
+}
+function applyLayerToggles(){
+  cameras.forEach(applyCamLayerVis);
+  el('btnLayerAn').classList.toggle('active',layerToggles.analytics);
+  el('btnLayerVis').classList.toggle('active',layerToggles.visibility);
+  el('btnLayerBlind').classList.toggle('active',layerToggles.blind);
+}
+el('btnLayerAn').onclick=()=>{layerToggles.analytics=!layerToggles.analytics;applyLayerToggles();save();};
+el('btnLayerVis').onclick=()=>{layerToggles.visibility=!layerToggles.visibility;applyLayerToggles();save();};
+// martwa strefa zmienia GEOMETRIĘ obu warstw → przebuduj wszystkie kamery (nie tylko add/removeLayer)
+el('btnLayerBlind').onclick=()=>{layerToggles.blind=!layerToggles.blind;cameras.forEach(updateCam);applyLayerToggles();save();};
 
 /* ====== EDYCJA ZALEŻNA OD ZAKŁADKI ====== */
 // przesuwanie kamer dozwolone tylko na zakładce „Kamera" lub „Lista"
@@ -1641,14 +2178,15 @@ function serialize(){
     seq:{cam:camSeq,pt:ptSeq,zone:zoneSeq},
     info:el('objInfo').value, pricePerM:el('pricePerM').value, slack:el('cableSlack').value,
     objPin:objPin,
-    cameras:cameras.map(c=>({id:c.id,num:c.num,name:c.name,type:c.type,lat:c.lat,lng:c.lng,az:c.az,fov:c.fov,range:c.range,height:c.height,model:c.model,notes:c.notes,color:c.color,perimeterZone:c.perimeterZone})),
+    autoRenumber,
+    layerToggles:{...layerToggles},
+    cameras:cameras.map(c=>({id:c.id,num:c.num,name:c.name,type:c.type,lat:c.lat,lng:c.lng,az:c.az,fov:c.fov,range:c.range,height:c.height,mpx:c.mpx,focal:c.focal,sensor:c.sensor,dori:c.dori,ir:c.ir,sky:c.sky,tilt:c.tilt,tiltAuto:c.tiltAuto,model:c.model,notes:c.notes,color:c.color,perimeterZone:c.perimeterZone})),
     points:points.map(p=>({id:p.id,num:p.num,type:p.type,name:p.name,lat:p.lat,lng:p.lng})),
     cables:cables.map(c=>({id:c.id,label:c.label,len:c.len,pts:c.pts})),
     zones:zones.map(z=>({id:z.id,kind:isMainZone(z)?'main':'side',name:z.name,color:z.color,pts:z.pts,area:z.area})),
-    perim:{                              // ustawienia zakładki Perymetr (szablon / obszar / zakład-luka / tryb)
-      tpl:(el('perimTpl')||{}).value||'', zone:(el('perimZone')||{}).value||'', overlap:(el('perimOverlap')||{}).value||'0',
-      mode:((document.querySelector('#perimMode .pseg-btn.active')||{}).dataset||{}).mode||'overlap'
-    }
+    // ustawienia zakładki Perymetr (szablon / obszar / zakład-luka / tryb) — z pamięci (perimSel), NIE z DOM:
+    // na starcie selecty bywają jeszcze puste (listy niewczytane) i odczyt DOM nadpisałby zapisany wybór pustką
+    perim:{...(savedPerim?{tpl:'',zone:'',overlap:'0',mode:'overlap',...savedPerim}:perimSel)}
   };
   // W trybie SERVER plany trzyma osobna tabela (REST) — nie pakujemy obrazów do auto-zapisu stanu.
   if(!SERVER) o.overlays=overlays.map(v=>({name:v.name,data:v.data,sw:v.sw,ne:v.ne,rotation:v.rotation,opacity:v.opacity,visible:v.visible}));
@@ -1661,6 +2199,7 @@ function markStatus(ok){
   const s=document.getElementById('saveStatus'); if(!s)return;
   const info = SERVER ? (ok?['🟢','Auto-zapis w alfa-app']:['🔴','Błąd zapisu']) : ['💾','Zapis w przeglądarce'];
   s.textContent = info[0];
+  s.classList.remove('flash'); void s.offsetWidth; s.classList.add('flash');
   s.title = info[1];
 }
 let READY=false; // zapis do API dopiero po wczytaniu projektu w init() — inaczej pusty stan nadpisałby projekt
@@ -1678,7 +2217,7 @@ function save(){updateCounts();try{localStorage.setItem(STORAGE_KEY,JSON.stringi
 window.addEventListener('beforeunload',save);
 setInterval(save,4000);
 function loadState(d){
-  cameras.forEach(c=>{map.removeLayer(c.marker);if(c.cover)map.removeLayer(c.cover);});
+  cameras.forEach(c=>{map.removeLayer(c.marker);if(c.cover)map.removeLayer(c.cover);if(c.coverVis)map.removeLayer(c.coverVis);});
   points.forEach(p=>map.removeLayer(p.marker));
   cables.forEach(c=>map.removeLayer(c.line));
   zones.forEach(z=>{if(z.poly)map.removeLayer(z.poly);});
@@ -1690,7 +2229,9 @@ function loadState(d){
   el('objInfo').value=d.info||DEFAULT_INFO;
   setObjPin(d.objPin||null,false);
   el('pricePerM').value=d.pricePerM||0; el('cableSlack').value=d.slack||10;
-  (d.cameras||[]).forEach(c=>{const cam={...c};cameras.push(cam);drawCam(cam);});
+  layerToggles={analytics:true,visibility:true,blind:true,...(d.layerToggles||{})};   // przed rysowaniem kamer — respektują stan przełączników (stare projekty → domyślne)
+  autoRenumber=d.autoRenumber!==false; el('fAutoRenumber').checked=autoRenumber;
+  (d.cameras||[]).forEach(c=>{const cam={...CAM_DEFAULTS,...c};clampFov(cam);cameras.push(cam);drawCam(cam);});   // CAM_DEFAULTS = optyka dla starych projektów; fov przycięty do kąta optyki
   (d.points||[]).forEach(p=>{const pt={...p};points.push(pt);drawPoint(pt);});
   (d.nvrs||[]).forEach(n=>{const pt={...n,type:'nvr'};points.push(pt);drawPoint(pt);}); // wsteczna zgodność
   (d.cables||[]).forEach(c=>{
@@ -1704,7 +2245,7 @@ function loadState(d){
     const ov={dbId:null,name:o.name,data:o.data,sw:o.sw,ne:o.ne,rotation:o.rotation||0,opacity:o.opacity==null?0.7:o.opacity,visible:o.visible!==false,layer:null};
     initBaseSize(ov); overlays.push(ov); drawOverlay(ov);
   });
-  refreshList(); refreshPoints(); refreshCable(); refreshZones(); renderPlans(); restackCameras();
+  refreshList(); refreshPoints(); refreshCable(); refreshZones(); renderPlans(); restackCameras(); applyLayerToggles();
   savedPerim=d.perim||null;             // ustawienia Perymetru odtworzy IIFE szablonów (applyPerimSel), gdy zbuduje listy
   if(typeof applyPerimSel==='function')applyPerimSel();
   document.getElementById('camEmpty').style.display='block';
@@ -1720,9 +2261,10 @@ document.getElementById('fileInput').onchange=e=>{
   const f=e.target.files[0]; if(!f)return;
   const r=new FileReader(); r.onload=()=>{try{loadState(JSON.parse(r.result));save();}catch(err){alert('Błędny plik: '+err);}}; r.readAsText(f);
 };
-/* przenieś notatki do elementu drukowanego (pełna treść, bez ucinania) */
+/* przenieś notatki do elementu drukowanego (pełna treść, bez ucinania) — ścieżka natywnego Ctrl+P */
 let _printPrevView=null;
 function prepPrint(){
+  if(document.body.classList.contains('printing-doc'))return;   // nasz wydruk per-obszar — nie ruszaj złapanego dokumentu
   el('printNotes').textContent=el('objInfo').value;
   renderZonesGroupedForPrint();
   // dopasuj widok mapy do PIERWSZEGO obszaru głównego (np. całego terenu budowy), aby zmieścił się w wydruku
@@ -1735,10 +2277,261 @@ function prepPrint(){
 }
 window.addEventListener('beforeprint',prepPrint);
 window.addEventListener('afterprint',()=>{
+  if(document.body.classList.contains('printing-doc'))return;
   refreshZones();
   if(_printPrevView){map.setView(_printPrevView.center,_printPrevView.zoom,{animate:false});_printPrevView=null;}
 });
-document.getElementById('btnPrint').onclick=()=>{prepPrint();setTimeout(()=>window.print(),300);};
+
+/* ============ WYDRUK PER-OBSZAR (mapki + opcjonalnie dane) ============ */
+// czeka na „osiadnięcie" kafli warstwy bazowej: event 'load' albo timeout (co pierwsze)
+function waitBaseLoad(layer,ms){
+  return new Promise(res=>{
+    let done=false; const fin=()=>{if(done)return;done=true;layer.off('load',fin);res();};
+    layer.on('load',fin); setTimeout(fin,ms);
+  });
+}
+/* ---- geometria: minimalny prostokąt otaczający (na otoczce wypukłej) ---- */
+// otoczka wypukła (Andrew monotone chain); P: [[x,y],...] w px kontenera mapy
+function convexHull(P){
+  P=P.slice().sort((a,b)=>a[0]-b[0]||a[1]-b[1]);
+  if(P.length<3)return P;
+  const cr=(o,a,b)=>(a[0]-o[0])*(b[1]-o[1])-(a[1]-o[1])*(b[0]-o[0]);
+  const lo=[],hi=[];
+  for(const p of P){while(lo.length>=2&&cr(lo[lo.length-2],lo[lo.length-1],p)<=0)lo.pop();lo.push(p);}
+  for(let i=P.length-1;i>=0;i--){const p=P[i];while(hi.length>=2&&cr(hi[hi.length-2],hi[hi.length-1],p)<=0)hi.pop();hi.push(p);}
+  lo.pop();hi.pop();return lo.concat(hi);
+}
+// minimalny co do pola prostokąt: brute-force po krawędziach otoczki → {cx,cy,w,h,angle} (w≥h, angle = kąt DŁUGIEJ osi)
+function minAreaRect(pts){
+  const h=convexHull(pts);
+  if(h.length<2){const x=pts.map(p=>p[0]),y=pts.map(p=>p[1]);return {cx:(Math.min(...x)+Math.max(...x))/2,cy:(Math.min(...y)+Math.max(...y))/2,w:1,h:1,angle:0};}
+  let best=null;
+  for(let i=0;i<h.length;i++){
+    const a=h[i],b=h[(i+1)%h.length];
+    let ex=b[0]-a[0],ey=b[1]-a[1];const len=Math.hypot(ex,ey)||1;ex/=len;ey/=len;
+    const px=-ey,py=ex;   // oś prostopadła
+    let minU=1e9,maxU=-1e9,minV=1e9,maxV=-1e9;
+    for(const q of h){const u=(q[0]-a[0])*ex+(q[1]-a[1])*ey,v=(q[0]-a[0])*px+(q[1]-a[1])*py;
+      if(u<minU)minU=u;if(u>maxU)maxU=u;if(v<minV)minV=v;if(v>maxV)maxV=v;}
+    const w=maxU-minU,ht=maxV-minV,area=w*ht;
+    if(!best||area<best.area){
+      const cu=(minU+maxU)/2,cv=(minV+maxV)/2;
+      best={area,w,h:ht,angle:Math.atan2(ey,ex),cx:a[0]+cu*ex+cv*px,cy:a[1]+cu*ey+cv*py};
+    }
+  }
+  if(best.w<best.h){const t=best.w;best.w=best.h;best.h=t;best.angle+=Math.PI/2;}  // długa oś → w
+  return best;
+}
+// zrzut mapy dla każdego obszaru głównego (albo bieżącego widoku, gdy brak głównych).
+// Powiększamy #map do dużego kwadratu, centrujemy obszar z zapasem, zrzut przez dom-to-image-more,
+// liczymy min. prostokąt w px i przez canvas obracamy (-angle) + skalujemy tak, by obszar wypełnił
+// poziomą kartkę A4 bez białych rogów. Zwracany url = gotowy, wykadrowany obraz strony.
+const CAP=2400;                 // bok kwadratowego pola zrzutu (px) — duży, by kafle miały ostrość po powiększeniu
+const PAGE_AR=297/210;          // proporcje A4 poziomo (szer./wys.)
+const OUT_W=2400, OUT_H=Math.round(OUT_W/PAGE_AR);   // rozdzielczość obrazu strony (~200 dpi na A4)
+async function rasterMap(mapEl){
+  // dom-to-image-more: natywny SVG foreignObject → transformy leafleta stosuje przeglądarka (piny trafiają na kafle)
+  // pomiń podpis obszaru (zone-label) — obraca się z mapą i staje pionowy; nazwa jest w plakietce w rogu
+  const url=await domtoimage.toPng(mapEl,{width:CAP,height:CAP,bgcolor:'#fff',cacheBust:false,
+    filter:n=>!(n.classList&&(n.classList.contains('map-tools')||n.classList.contains('leaflet-control-zoom')||n.classList.contains('zone-label')))});
+  const img=new Image();
+  await new Promise((res,rej)=>{img.onload=res;img.onerror=rej;img.src=url;});
+  return img;
+}
+async function captureMaps(){
+  const mains=zones.filter(isMainZone);
+  const targets=mains.length?mains.map(z=>({z,bounds:z.poly.getBounds()})):[{z:null,bounds:null}];
+  const prevCenter=map.getCenter(), prevZoom=map.getZoom(), prevBaseKey=baseSel.value;
+  const shots=[];
+  const mapEl=document.getElementById('map');
+  const savedStyle=mapEl.style.cssText;   // przywrócimy layout panelu po zrzutach
+  // podmień podkład na wersję z crossOrigin='anonymous', by kafle dało się wczytać cross-origin
+  const corsBase=L.tileLayer(currentBase._url,{...currentBase.options,crossOrigin:true});
+  map.removeLayer(currentBase); corsBase.addTo(map);
+  try{
+    // powiększ mapę do kwadratowego pola zrzutu (sterujemy proporcją / rozdzielczością)
+    mapEl.style.cssText='position:fixed;left:0;top:0;z-index:99999;width:'+CAP+'px;height:'+CAP+'px';
+    map.invalidateSize();
+    await waitBaseLoad(corsBase,2500);
+    for(const t of targets){
+      if(t.bounds)map.fitBounds(t.bounds.pad(0.8),{animate:false});   // duży zapas wokół obszaru — miejsce na obrót + na piny przy krawędzi
+      else map.setView(prevCenter,prevZoom,{animate:false});
+      await waitBaseLoad(corsBase,1800);
+      await new Promise(r=>setTimeout(r,300));
+      // kąt DŁUGIEJ osi w px kontenera (niezależny od skali) — potrzebny PRZED zrzutem, by wyprostować numery kamer
+      let angle=0; const restore=[];
+      if(t.z){
+        const cpx=t.z.pts.map(p=>{const q=map.latLngToContainerPoint(L.latLng(p[0],p[1]));return [q.x,q.y];});
+        angle=minAreaRect(cpx).angle; const angleDeg=angle*180/Math.PI;
+        // kontr-obrót numerów: dokładam +angle do istniejącego transformu span-u; po ctx.rotate(-angle) numer wyjdzie pionowo (jak plakietka)
+        if(catVisible.cam)cameras.forEach(cam=>{
+          const sp=cam.marker._icon&&cam.marker._icon.querySelector('.cam-flower span');
+          if(sp){restore.push([sp,sp.style.transform]); sp.style.transform=(sp.style.transform+' rotate('+angleDeg+'deg)').trim();}
+        });
+      }
+      try{
+        const img=await rasterMap(mapEl);
+        const rp=img.width/CAP;   // px kontenera → px obrazu (gdyby dom-to-image zwrócił inny rozmiar)
+        const out=document.createElement('canvas'); out.width=OUT_W; out.height=OUT_H;
+        const ctx=out.getContext('2d'); ctx.fillStyle='#fff'; ctx.fillRect(0,0,OUT_W,OUT_H);
+        if(t.z){
+          // ramka obrócona o +angle (długa oś poziomo): mieścimy WSZYSTKIE piny (kotwice + margines łezki) oraz wierzchołki obszaru
+          const rot=(x,y)=>[x*Math.cos(angle)+y*Math.sin(angle), -x*Math.sin(angle)+y*Math.cos(angle)];
+          const PINM=40*rp;   // margines: łezka wystaje ~30px nad kotwicę + numer — cała pinezka ma być w kadrze
+          let xmin=1e9,xmax=-1e9,ymin=1e9,ymax=-1e9;
+          const acc=(x,y,m)=>{const w=rot(x,y);if(w[0]-m<xmin)xmin=w[0]-m;if(w[0]+m>xmax)xmax=w[0]+m;if(w[1]-m<ymin)ymin=w[1]-m;if(w[1]+m>ymax)ymax=w[1]+m;};
+          t.z.pts.forEach(p=>{const q=map.latLngToContainerPoint(L.latLng(p[0],p[1]));acc(q.x*rp,q.y*rp,0);});
+          // tylko kamery widoczne w tym zrzucie (kotwica w polu [0,CAP]) — kamery z innych obszarów są poza kadrem, pomijamy
+          if(catVisible.cam)cameras.forEach(cam=>{const q=map.latLngToContainerPoint(L.latLng(cam.lat,cam.lng));
+            if(q.x>=0&&q.x<=CAP&&q.y>=0&&q.y<=CAP)acc(q.x*rp,q.y*rp,PINM);});
+          const hwx=(xmax-xmin)/2, hwy=(ymax-ymin)/2;
+          const wcx=(xmin+xmax)/2, wcy=(ymin+ymax)/2;
+          const cx=wcx*Math.cos(angle)-wcy*Math.sin(angle), cy=wcx*Math.sin(angle)+wcy*Math.cos(angle);  // środek ramki → z powrotem do px obrazu
+          // skala mieszcząca piny: element ograniczający (pin lub róg obszaru) dopiero dotyka krawędzi kartki
+          const sFit=Math.min(OUT_W/(2*hwx),OUT_H/(2*hwy))*0.98;
+          // straż pełnego spadu: dociągnij skalę, by obraz pokrył kartkę bez bieli — ale NIGDY ponad sFit (piny mają priorytet nad spadem)
+          const c=Math.abs(Math.cos(angle)),sn=Math.abs(Math.sin(angle));
+          const dx=Math.abs(cx-img.width/2), dy=Math.abs(cy-img.height/2);
+          const coverX=((OUT_W/2)*c+(OUT_H/2)*sn)/(img.width/2-2-dx);
+          const coverY=((OUT_W/2)*sn+(OUT_H/2)*c)/(img.height/2-2-dy);
+          const s=Math.min(Math.max(sFit,coverX,coverY),sFit);
+          ctx.translate(OUT_W/2,OUT_H/2); ctx.rotate(-angle); ctx.scale(s,s); ctx.translate(-cx,-cy);
+        }else{
+          // brak obszaru głównego: bez obrotu, zmieść całość (contain)
+          const s=Math.min(OUT_W/img.width,OUT_H/img.height);
+          ctx.translate(OUT_W/2,OUT_H/2); ctx.scale(s,s); ctx.translate(-img.width/2,-img.height/2);
+        }
+        ctx.drawImage(img,0,0);
+        shots.push({name:t.z?(t.z.name||'Obszar'):'Plan sytuacyjny',area:t.z?fmtArea(t.z.area):'',url:out.toDataURL('image/jpeg',0.9)});
+      }finally{ restore.forEach(([sp,v])=>sp.style.transform=v); }   // przywróć oryginalne transformy numerów
+    }
+  }finally{
+    mapEl.style.cssText=savedStyle;
+    map.removeLayer(corsBase);
+    currentBase=bases[prevBaseKey].addTo(map);
+    map.invalidateSize();
+    map.setView(prevCenter,prevZoom,{animate:false});
+  }
+  return shots;
+}
+// zbuduj ukryty #printDoc: strony z mapkami + (dla 'full') strona z danymi
+function buildPrintDoc(shots,mode){
+  let doc=document.getElementById('printDoc');
+  if(!doc){doc=document.createElement('div');doc.id='printDoc';document.body.appendChild(doc);}
+  doc.innerHTML='';
+  const projNum=el('projNum').textContent, projName=el('projName').textContent;
+  const head=extra=>`<div class="print-head"><img src="../alfa-logo.png" alt="Alfa"><span>Projekt ${projNum} — ${projName}</span>${extra}</div>`;
+  shots.forEach(s=>{
+    const pg=document.createElement('div'); pg.className='print-page';
+    const meta=s.area?` · ${s.area}`:'';
+    // strona = mapa na całej powierzchni + mały chip z podpisem w rogu
+    pg.innerHTML=`<div class="print-map-page"><img src="${s.url}">`+
+      `<div class="print-cap"><img src="../alfa-logo.png" alt="Alfa">`+
+      `<span>Projekt ${projNum} — ${projName} · ${s.name}${meta}</span></div></div>`;
+    doc.appendChild(pg);
+  });
+  if(mode==='full'){
+    renderZonesGroupedForPrint();
+    const sec=(title,node)=>{const d=document.createElement('div');d.className='print-sec';d.innerHTML=`<h2>${title}</h2>`;d.appendChild(node);return d;};
+    const pg=document.createElement('div'); pg.className='print-page';
+    pg.innerHTML=head('<span style="margin-left:auto;font-weight:600">Dane projektu</span>');
+    const camT=el('camTable');   if(camT&&camT.style.display!=='none')pg.appendChild(sec('Kamery',camT.cloneNode(true)));
+    const ptT=el('pointTable');  if(ptT&&ptT.style.display!=='none')pg.appendChild(sec('Punkty (szlabany / budki / NVR)',ptT.cloneNode(true)));
+    const znT=el('zoneTable');   if(znT&&znT.style.display!=='none')pg.appendChild(sec('Obszary do wyceny',znT.cloneNode(true)));
+    pg.appendChild(sec('Okablowanie',el('cableTable').cloneNode(true)));
+    const notes=document.createElement('pre'); notes.textContent=el('objInfo').value||'—';
+    pg.appendChild(sec('Notatki z wizji lokalnej',notes));
+    doc.appendChild(pg);
+  }
+}
+// złap mapki, zbuduj dokument, wydrukuj; przywróć stan po afterprint
+async function captureAndPrint(mode){
+  const s=el('saveStatus'); const prevTxt=s?s.textContent:'', prevTitle=s?s.title:'';
+  if(s){s.textContent='⏳'; s.title='Przygotowuję wydruk…';}
+  let shots;
+  try{ shots=await captureMaps(); }
+  catch(err){ if(s){s.textContent=prevTxt;s.title=prevTitle;} alert('Nie udało się przygotować wydruku mapy: '+err); return; }
+  buildPrintDoc(shots,mode);
+  if(s){s.textContent=prevTxt;s.title=prevTitle;}
+  document.body.classList.add('printing-doc');
+  const cleanup=()=>{document.body.classList.remove('printing-doc');window.removeEventListener('afterprint',cleanup);};
+  window.addEventListener('afterprint',cleanup);
+  setTimeout(cleanup,60000);   // awaryjnie, gdyby afterprint nie zadziałał
+  setTimeout(()=>window.print(),150);
+}
+/* menu podręczne 🖨️ (styl jak ⚙️) */
+// pozycjonuj menu tak, by mieściło się w viewport: przy dolnej krawędzi otwieraj w górę, przy prawej — w lewo
+function placeMenu(menu){
+  menu.style.top='0';menu.style.bottom='auto';menu.style.left='calc(100% + 6px)';menu.style.right='auto';
+  const wrap=menu.parentElement.getBoundingClientRect(), h=menu.offsetHeight, w=menu.offsetWidth, pad=8;
+  if(wrap.top+h>window.innerHeight-pad){menu.style.top='auto';menu.style.bottom='0';}          // rośnij w górę od dołu przycisku
+  if(wrap.right+6+w>window.innerWidth-pad){menu.style.left='auto';menu.style.right='calc(100% + 6px)';}
+}
+function closePrintMenu(){document.getElementById('printMenu').classList.remove('open');}
+el('btnPrint').onclick=e=>{e.stopPropagation();const m=el('printMenu');if(m.classList.toggle('open'))placeMenu(m);};
+document.addEventListener('click',e=>{
+  const m=document.getElementById('printMenu');
+  if(m.classList.contains('open')&&!m.contains(e.target)&&e.target.id!=='btnPrint')closePrintMenu();
+});
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closePrintMenu();});
+el('btnPrintMaps').onclick=()=>{closePrintMenu();captureAndPrint('maps');};
+el('btnPrintFull').onclick=()=>{closePrintMenu();captureAndPrint('full');};
+
+/* ============ OPCJE (⚙️) — czyszczenie projektu ============ */
+function closeOptMenu(){document.getElementById('optMenu').classList.remove('open');}
+el('btnOptions').onclick=e=>{e.stopPropagation();const m=el('optMenu');if(m.classList.toggle('open'))placeMenu(m);};
+document.addEventListener('click',e=>{
+  const m=document.getElementById('optMenu');
+  if(m.classList.contains('open')&&!m.contains(e.target)&&e.target.id!=='btnOptions')closeOptMenu();
+});
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeOptMenu();});
+function clearAllCameras(silent){        // usuwa wszystkie kamery z mapy i listy
+  if(!cameras.length)return;
+  cameras.forEach(c=>{map.removeLayer(c.marker);if(c.cover)map.removeLayer(c.cover);if(c.coverVis)map.removeLayer(c.coverVis);});
+  cameras=[]; selected=null; clearHandles();
+  document.getElementById('camEmpty').style.display='block'; document.getElementById('camEdit').style.display='none';
+  refreshList(); restackCameras();
+  if(!silent)save();
+}
+function clearAllZones(silent){          // usuwa wszystkie obszary (główne i poboczne)
+  if(!zones.length)return;
+  zones.forEach(z=>{if(z.poly)map.removeLayer(z.poly);});
+  zones=[]; selectedZone=null; clearZoneHandles();
+  refreshZones();
+  if(!silent)save();
+}
+function clearAllPoints(silent){         // usuwa szlabany / budki / NVR
+  if(!points.length)return;
+  points.forEach(p=>map.removeLayer(p.marker));
+  points=[];
+  refreshPoints();
+  if(!silent)save();
+}
+function clearAllCables(silent){         // usuwa trasy kabli
+  if(!cables.length)return;
+  cables.forEach(c=>map.removeLayer(c.line));
+  cables=[];
+  refreshCable();
+  if(!silent)save();
+}
+el('btnClearCams').onclick=()=>{
+  closeOptMenu();
+  if(!cameras.length){alert('Brak kamer do usunięcia.');return;}
+  if(confirm('Usunąć wszystkie kamery ('+cameras.length+')? Tej operacji nie można cofnąć.'))clearAllCameras();
+};
+el('btnClearZones').onclick=()=>{
+  closeOptMenu();
+  if(!zones.length){alert('Brak obszarów do usunięcia.');return;}
+  if(confirm('Usunąć wszystkie obszary ('+zones.length+')? Tej operacji nie można cofnąć.'))clearAllZones();
+};
+el('btnClearAll').onclick=()=>{
+  closeOptMenu();
+  const n=cameras.length+points.length+cables.length+zones.length;
+  if(!n){alert('Projekt jest już pusty.');return;}
+  if(!confirm('Usunąć WSZYSTKO z projektu (kamery, punkty, okablowanie, obszary)? Tej operacji nie można cofnąć.'))return;
+  clearAllCameras(true); clearAllPoints(true); clearAllCables(true); clearAllZones(true);
+  save();
+};
 
 /* ============ PODPISY + LICZNIK ============ */
 const LABELS_KEY='monitoring_labels_hidden_'+(PROJECT_ID||'local');
@@ -1915,6 +2708,13 @@ el('btnDelObjPin').onclick=()=>{ if(objPin&&confirm('Usunąć zapisaną pinezkę
   const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
   const cacheGet=()=>{try{return JSON.parse(localStorage.getItem(TPL_CACHE_KEY))||[]}catch(_){return[]}};
   const cacheSet=l=>{try{localStorage.setItem(TPL_CACHE_KEY,JSON.stringify(l))}catch(_){}};
+  /* optyka szablonu (mpx/focal/sensor): API może tych pól nie znać (whitelist) — trzymamy też kopię lokalną per id
+     i dosypujemy ją po odczycie z API. Stare szablony bez optyki dostają domyślne przy zastosowaniu na kamerę. */
+  const TPL_EXTRA_KEY='mon_cam_tpl_extra_v1';
+  const extraGet=()=>{try{return JSON.parse(localStorage.getItem(TPL_EXTRA_KEY))||{}}catch(_){return{}}};
+  const extraSet=o=>{try{localStorage.setItem(TPL_EXTRA_KEY,JSON.stringify(o))}catch(_){}};
+  const mergeExtras=list=>{const ex=extraGet();list.forEach(t=>{const e=ex[t.id];if(!e)return;
+    if(t.mpx==null)t.mpx=e.mpx; if(t.focal==null)t.focal=e.focal; if(!t.sensor)t.sensor=e.sensor; if(t.ir==null)t.ir=e.ir;});return list;};
 
   async function apiList(){
     const r=await fetch('/api/camera-models',{cache:'no-store'});
@@ -1933,15 +2733,15 @@ el('btnDelObjPin').onclick=()=>{ if(objPin&&confirm('Usunąć zapisaną pinezkę
     if(!r.ok)throw new Error('http '+r.status);
   }
 
-  const ACT_BTN='style="background:none;border:none;cursor:pointer;font-size:14px;padding:2px 3px;line-height:1"';
+  const ACT_BTN='class="act-btn" style="background:none;border:none;cursor:pointer;font-size:14px;padding:2px 3px;line-height:1"';
   function render(){
     const tb=el('tplTable').querySelector('tbody'); tb.innerHTML='';
-    el('tplEmpty').style.display=templates.length?'none':'block';
+    el('tplEmpty').style.display=(templates.length||el('tplStatus').classList.contains('warn'))?'none':'block';
     el('tplTable').style.display=templates.length?'table':'none';
     templates.forEach(t=>{
       const tr=document.createElement('tr'); tr.className='trow';
       tr.innerHTML=`<td><span class="swatch" style="background:${esc(t.color)}"></span></td>
-        <td>${esc(t.name)}${t.manufacturer?'<br><span class="mini">'+esc(t.manufacturer)+'</span>':''}</td>
+        <td>${esc(t.name)}${t.manufacturer?'<br><span class="tpl-sub">'+esc(t.manufacturer)+'</span>':''}</td>
         <td>${TYPE_LABEL[t.type]||esc(t.type)}</td>
         <td>${t.type==='pano'?'360°':t.fov+'°'}</td>
         <td>${t.range} m</td>
@@ -1976,6 +2776,10 @@ el('btnDelObjPin').onclick=()=>{ if(objPin&&confirm('Usunąć zapisaną pinezkę
     el('tName').value=t?t.name:''; el('tManufacturer').value=t?t.manufacturer:'';
     el('tType').value=t?t.type:'bullet'; el('tResolution').value=t?t.resolution:'';
     el('tFov').value=t?t.fov:90; el('tRange').value=t?t.range:20; el('tHeight').value=t?t.height:3;
+    el('tMpx').value=t&&t.mpx!=null?t.mpx:CAM_DEFAULTS.mpx;             // stare szablony bez optyki → domyślne
+    el('tFocal').value=t&&t.focal!=null?t.focal:CAM_DEFAULTS.focal;
+    el('tSensor').value=t&&SENSORS[t.sensor]?t.sensor:CAM_DEFAULTS.sensor;
+    el('tIr').value=t&&t.ir!=null?t.ir:0;
     el('tColor').value=t&&t.color?t.color:'#22d3ee'; el('tNotes').value=t?t.notes:'';
   }
   function openForm(t){ editingTplId=t?t.id:null; fillForm(t); el('tplForm').style.display='block'; activateTab('templates'); el('tName').focus(); }
@@ -1984,26 +2788,36 @@ el('btnDelObjPin').onclick=()=>{ if(objPin&&confirm('Usunąć zapisaną pinezkę
     return {
       name:el('tName').value.trim(), manufacturer:el('tManufacturer').value.trim(),
       type:el('tType').value, resolution:el('tResolution').value.trim(),
-      fov:+el('tFov').value||90, range:+el('tRange').value||20, height:+el('tHeight').value||3,
+      fov:+el('tFov').value||90, range:Math.max(1,Math.min(200,+el('tRange').value||20)), height:+el('tHeight').value||3,   // zasięg przycięty do [1,200] — wpis z ręki omija min/max inputa
+      mpx:+el('tMpx').value||CAM_DEFAULTS.mpx, focal:+el('tFocal').value||CAM_DEFAULTS.focal, sensor:el('tSensor').value, ir:+el('tIr').value||0,
       color:el('tColor').value, notes:el('tNotes').value.trim(),
     };
   }
   async function saveForm(){
     const body=readForm();
     if(!body.name){alert('Podaj nazwę / model kamery');return;}
-    try{ await apiSave(body,editingTplId); closeForm(); await reload(); }
+    try{
+      const saved=await apiSave(body,editingTplId);
+      if(saved&&saved.id!=null){const ex=extraGet();ex[saved.id]={mpx:body.mpx,focal:body.focal,sensor:body.sensor,ir:body.ir};extraSet(ex);} // kopia optyki (API może ją pominąć)
+      closeForm(); await reload();
+    }
     catch(e){ alert('Nie udało się zapisać szablonu: '+e.message); }
   }
   async function removeTpl(t){
     if(!confirm('Usunąć szablon „'+t.name+'”?'))return;
-    try{ await apiDel(t.id); await reload(); }
+    try{ await apiDel(t.id); const ex=extraGet(); delete ex[t.id]; extraSet(ex); await reload(); }
     catch(e){ alert('Nie udało się usunąć szablonu: '+e.message); }
   }
 
   function applyTemplate(cam,t){
     cam.type=t.type; cam.fov=(t.type==='pano'?360:t.fov); cam.range=t.range; cam.height=t.height;
+    if(t.mpx!=null)cam.mpx=+t.mpx;                    // optyka z szablonu (stare szablony: zostają domyślne kamery)
+    if(t.focal!=null)cam.focal=+t.focal;
+    if(t.sensor&&SENSORS[t.sensor])cam.sensor=t.sensor;
+    if(t.ir!=null)cam.ir=+t.ir;
     if(t.color)cam.color=t.color;
     if(t.name)cam.model=t.name;
+    clampFov(cam);   // szablon z fov > kąta optyki nie może złamać niezmiennika
   }
   function stampSelected(t){
     if(!selected){alert('Najpierw wybierz kamerę z mapy lub listy');return;}
@@ -2016,11 +2830,12 @@ el('btnDelObjPin').onclick=()=>{ if(objPin&&confirm('Usunąć zapisaną pinezkę
   }
 
   async function reload(){
-    try{ templates=await apiList(); cacheSet(templates); el('tplStatus').style.display='none'; }
+    try{ templates=mergeExtras(await apiList()); cacheSet(templates); el('tplStatus').style.display='none'; el('tplStatus').classList.remove('warn'); }
     catch(e){
       templates=cacheGet();
       const s=el('tplStatus'); s.style.display='block';
       s.textContent=templates.length?'⚠️ Offline — pokazuję kopię lokalną':'⚠️ Brak połączenia z biblioteką szablonów';
+      s.classList.add('warn'); el('tplEmpty').style.display='none';
     }
     render();
   }
@@ -2040,21 +2855,46 @@ el('btnDelObjPin').onclick=()=>{ if(objPin&&confirm('Usunąć zapisaną pinezkę
     el('tName').value=selected.model||selected.name||'';
     el('tType').value=selected.type; el('tFov').value=selected.fov;
     el('tRange').value=selected.range; el('tHeight').value=selected.height;
+    el('tMpx').value=selected.mpx??CAM_DEFAULTS.mpx; el('tFocal').value=selected.focal??CAM_DEFAULTS.focal;
+    if(SENSORS[selected.sensor])el('tSensor').value=selected.sensor;
+    el('tIr').value=selected.ir??0;
     el('tColor').value=selected.color||'#22d3ee';
   };
 
   /* ====== PERYMETR — automatyczne układanie kamer wzdłuż obrysu obszaru ======
-     Obrys dzielimy na „przebiegi" (runs) — ciągi boków o zbliżonym kierunku (krótkie
-     skosy i zerowe boki znikają w przebiegu). Każdy przebieg pokrywamy tak, że kamery
-     na jego KOŃCACH patrzą DO WEWNĄTRZ przebiegu — dzięki temu stożki nie wychodzą poza
-     obiekt na końcówkach. Azymut jest dodatkowo odchylony ku środkowi obszaru (optymalne
-     ~0.4·FOV — z analizy: mniejszy = wychodzą na zewnątrz, większy = tracą pokrycie).
-     Tryby: 'uniform' (obwód÷zasięg), 'overlap' (suwak %, − = luka), 'fewer' (słupy
-     dwukierunkowe — z narożników „na siebie", najmniej słupów). */
-  function polyCentroid(pts){ let a=0,b=0; pts.forEach(p=>{a+=p[0];b+=p[1];}); return [a/pts.length,b/pts.length]; }
+     Narożniki („ostry" = skręt ≥35°). KOTWICE — kamery bezwarunkowe: WKLĘSŁY (wcięcie, kąt
+     wewn. ≥180°) → zawsze DWIE „od siebie", bo dwusieczna go nie obejmie; wypukły CIASNY
+     (kąt wewn. ≤0.95·FOV) → JEDNA na dwusiecznej łapie oba ogrodzenia. Wypukły SZEROKI
+     kotwicą NIE jest — kamera odchylona ku wnętrzu widzi PRZEZ takie ścięcie, więc róg
+     rozstrzyga marsz frontu pokrycia porównaniem wariantów (wzorce z ręcznej optymalizacji
+     realnego projektu): „łańcuch domyka płot do wierzchołka ⇒ róg bez kamery «w tył» albo
+     w ogóle bez kamer" vs „słup DWUKIERUNKOWY kilka metrów ZA rogiem kryje wstecz przez róg
+     i zastępuje parę narożną + pierwszy słup łańcucha". Azymut wzdłuż płotu jest odchylony
+     ku wnętrzu (~0.4·FOV), a stronę wnętrza wyznacza ORIENTACJA obwodu (suma skrętów
+     podpisanych) — działa też dla figur WKLĘSŁYCH (środek ciężkości zawodzi).
+     WYPEŁNIANIE steruje się SYMULACJĄ POKRYCIA: płot próbkujemy co ~0,7 m i dla każdej
+     kamery MIERZYMY faktycznie pokryty łuk (dystans ≤ zasięg i kąt ≤ FOV/2) — marsz po
+     realnej ścieżce, więc łagodne załamania (<35°), dwusieczne i przejścia przez rogi nie
+     robią dziur. Kamery dokładamy zachłannie od pierwszego niedomkniętego punktu:
+     ov ≥ 0 ⇒ ZERO luk (dodatnie % skraca „deklarowany" łuk ⇒ zagęszczenie/zakład),
+     ov < 0 ⇒ luka ≤ |ov|%·zasięgu na KAŻDYM styku (pojedynczo, nie podwójnie) — również
+     na stykach przy narożnikach (świadoma mała dziura zamiast kamery). Tryby:
+     'overlap' (Równomiernie) — minimum KAMER: pojedyncze kamery „w przód";
+     'fewer' (Mniej słupów) — minimum SŁUPÓW: słupy DWUKIERUNKOWE (2 kamery „od siebie"),
+     szerokie rogi wypukłe są dla łańcucha PRZEZROCZYSTE; słupy tylko tam, gdzie pokrycie
+     z kotwic nie wystarcza. 'uniform' (legacy) = 'overlap' przy ov=0.
+     Zdegenerowany obrys (P≈0) → 1 kamera. */
   function cleanPts(pts){                       // usuń wierzchołki tworzące ~zerowe boki (duplikaty z rysowania)
-    const out=[]; for(let i=0;i<pts.length;i++) if(map.distance(pts[i],pts[(i+1)%pts.length])>0.5) out.push(pts[i]);
-    return out.length>=3?out:pts;
+    // iteracyjnie: usunięcie wierzchołka potrafi skleić sąsiadów w NOWY bok <0,5 m — czyścimy do skutku
+    // (pętla ograniczona: każdy przebieg usuwa ≥1 wierzchołek, więc maks. tyle przebiegów, ile punktów)
+    let cur=pts;
+    for(let pass=0;pass<pts.length;pass++){
+      const out=[]; for(let i=0;i<cur.length;i++) if(map.distance(cur[i],cur[(i+1)%cur.length])>0.5) out.push(cur[i]);
+      if(out.length<3) return cur;              // nie schodź poniżej trójkąta (1. przebieg: cur===pts, jak dotychczas)
+      if(out.length===cur.length) return out;   // nic nie usunięto — obrys czysty
+      cur=out;
+    }
+    return cur;
   }
   function buildPath(pts){
     const n=pts.length, cum=[0];
@@ -2069,90 +2909,222 @@ el('btnDelObjPin').onclick=()=>{ if(objPin&&confirm('Usunąć zapisaną pinezkę
     const ll=destination(A[0],A[1],brng,local);
     return {lat:ll[0],lng:ll[1],brng};
   }
-  // azymut wzdłuż stycznej płotu, ODCHYLONY ku wnętrzu obszaru (0.4·FOV — analiza pokrycie/wyjście poza obiekt)
-  function aimInward(lat,lng,tangent,cen,fov){
-    const toC=bearing({lat,lng},{lat:cen[0],lng:cen[1]});
+  // azymut wzdłuż stycznej płotu, ODCHYLONY ku wnętrzu obszaru (0.4·FOV — analiza pokrycie/wyjście poza obiekt);
+  // wnętrze leży po stronie tangent+side·90 (side wynika z orientacji obwodu, patrz planPerimeter)
+  function aimInward(tangent,side,fov){
     const phi=Math.min(fov*0.4, fov/2-1);
-    const az=(angDiff(tangent+90,toC)<=angDiff(tangent-90,toC)) ? tangent+phi : tangent-phi;
-    return ((Math.round(az)%360)+360)%360;
+    return ((Math.round(tangent+side*phi)%360)+360)%360;
   }
   function planPerimeter(z,t,ov,mode){
     const pts=cleanPts(z.pts); if(pts.length<3) return [];
     const range=+t.range||20, fov=(t.type==='pano')?360:(+t.fov||90);
-    const cen=polyCentroid(pts), path=buildPath(pts), P=path.P, n=pts.length, plan=[];
-    // kamera panoramiczna 360° — koło zasięgu, bez kierunku; rozstaw ~2×zasięg
+    const path=buildPath(pts), P=path.P, n=pts.length, plan=[];
+    if(!isFinite(P)||P<=0.5) return [{lat:pts[0][0],lng:pts[0][1],az:0}];    // zdegenerowany obrys (P≈0) — bez NaN
+    // kamera panoramiczna 360° — koło zasięgu, bez kierunku; ceil ⇒ rozstaw ≤ 2×zasięg (bez luk)
     if(t.type==='pano'){
-      const cnt=Math.max(1,Math.round(P/Math.max(1,2*range)));
+      const cnt=Math.max(1,Math.ceil(P/Math.max(1,2*range)));
       for(let k=0;k<cnt;k++){const p=pointAt(path,k*P/cnt); plan.push({lat:p.lat,lng:p.lng,az:0});}
       return plan;
     }
-    // stawia kamerę na łuku s; back=true → patrzy „do tyłu" wzdłuż płotu (na rogu = w poprzedni bok)
-    const place=(s,back)=>{
+    if(mode==='uniform'){mode='overlap';ov=0;}                               // legacy = 'overlap' bez zakładu
+    // ORIENTACJA OBWODU: skręty podpisane (−180..180, + = w prawo) — ich suma mówi, czy obchód
+    // jest zgodny z ruchem wskazówek (+1, wnętrze po PRAWEJ) czy przeciwny (−1, wnętrze po LEWEJ).
+    // Dla figur wklęsłych to jedyny pewny test strony wnętrza (środek ciężkości zawodzi przy wcięciach).
+    const brngE=[]; for(let i=0;i<n;i++){const A=pts[i],B=pts[(i+1)%n];brngE.push(bearing({lat:A[0],lng:A[1]},{lat:B[0],lng:B[1]}));}
+    const signedTurn=(a,b)=>((b-a+540)%360)-180;
+    const turns=[]; for(let i=0;i<n;i++) turns.push(signedTurn(brngE[(i-1+n)%n],brngE[i]));
+    const orient=Math.sign(turns.reduce((a,b)=>a+b,0))||1;
+    // kamera na łuku s; back=true → patrzy „do tyłu" wzdłuż płotu (na rogu = w poprzedni bok);
+    // przy odwróconej stycznej wnętrze zmienia stronę, stąd −orient
+    const mkCam=(s,back)=>{
       const p=pointAt(path,s), tp=pointAt(path,s+(back?-0.5:0.5));
       const tan=back?(tp.brng+180)%360:tp.brng;
-      plan.push({lat:p.lat,lng:p.lng,az:aimInward(p.lat,p.lng,tan,cen,fov)});
+      return {lat:p.lat,lng:p.lng,az:aimInward(tan,back?-orient:orient,fov)};
     };
-    const spacing=(mode==='uniform')?range:Math.max(1,range*(1-ov/100)); // − overlap ⇒ spacing>zasięg ⇒ luki
+    const pushCam=c=>{                              // identyczna kamera już stoi (mikro-obrysy) → nie dubluj
+      if(!plan.some(q=>q.az===c.az&&Math.abs(q.lat-c.lat)<1e-9&&Math.abs(q.lng-c.lng)<1e-9)) plan.push(c);
+      return c;};
+    const place=(s,back)=>pushCam(mkCam(s,back));
+    // SYMULACJA POKRYCIA: covAt sprawdza pokrycie punktu łuku a (dystans ≤ zasięg i kąt ≤ FOV/2);
+    // covLen MIERZY łuk faktycznie pokryty od pozycji s w kierunku dir (±1) — marsz co ~0,7 m po
+    // realnej ścieżce + bisekcja granicy, więc łagodne załamania i dwusieczne w rogach skracają
+    // wynik zgodnie z prawdą (bez założenia „róg kryje ±zasięg").
+    const stS=0.7;
+    const covAt=(cam,a)=>{const p=pointAt(path,a), d=map.distance([cam.lat,cam.lng],[p.lat,p.lng]);
+      return d<=range && (d<0.05 || angDiff(bearing({lat:cam.lat,lng:cam.lng},p),cam.az)<=fov/2);};
+    const covLen=(cam,s,dir)=>{
+      const cap=Math.ceil(range/stS)+2; let k=0;
+      while(k<cap && covAt(cam,s+dir*(k+1)*stS)) k++;
+      let lo=k*stS, hi=(k+1)*stS;                // doprecyzuj granicę pokryta/niepokryta (±stS/16)
+      for(let it=0;it<4;it++){const m=(lo+hi)/2; if(covAt(cam,s+dir*m))lo=m; else hi=m;}
+      return lo;
+    };
+    const g=ov<0?range*Math.min(90,-ov)/100:0;   // ov<0: dozwolona luka NA KAŻDYM styku (nie podwójna)
+    const kf=1-Math.max(0,ov)/100;               // ov>0: „deklarowany" łuk ≤ zasięg·kf ⇒ zagęszczenie
+    const claim=l=>Math.min(l,range*kf);         // deklaracja ≤ realnemu pokryciu ⇒ zero luk przy ov≥0
+    // WYPEŁNIENIE łuku [u,T]: u = koniec pokrycia z lewej, T = początek pokrycia z prawej; zachłannie
+    // od pierwszego niedomkniętego punktu. 'overlap': kamery „w przód" (minimum KAMER);
+    // 'fewer': słupy dwukierunkowe — pozycję słupa dobieramy tak (bisekcja po covLen), by kamera
+    // „w tył" domykała lukę przy u, a słup stał jak najdalej (minimum SŁUPÓW).
+    // solveBack: najdalsza pozycja q ≤ hi, z której kamera „w tył" domyka lukę przy u (bisekcja).
+    const solveBack=(u,hi)=>{
+      const ok=q=>q-claim(covLen(mkCam(q,true),q,-1))<=u+g+0.3;
+      if(ok(hi)) return hi;
+      let lo=u+g;
+      for(let it=0;it<6;it++){const m=(lo+hi)/2; if(ok(m))lo=m; else hi=m;}
+      return lo;
+    };
+    // WYPEŁNIENIE łuku [u,T] SYMULACJĄ: fillSim NIE dotyka planu — zwraca pozycje {s,back}
+    // i nowy front pokrycia u; realnie stawia je dopiero commit(). Dzięki temu warianty
+    // obsługi narożnika można porównać kosztowo i wybrać tańszy. 'overlap': kamery „w przód"
+    // od pierwszego niedomkniętego punktu (minimum KAMER); 'fewer': słupy DWUKIERUNKOWE
+    // stawiane najdalej jak się da (solveBack ⇒ minimum SŁUPÓW).
+    const fillSim=(u,T)=>{
+      const cams=[]; let guard=Math.ceil((T-u)/0.5)+8;   // postęp ≥0,6 m/krok ⇒ twardy limit iteracji
+      if(mode==='fewer') while(guard-->0 && u+g<T-0.2){  // 0,2 m = luz próbkowania na ostatnim styku
+        const s=solveBack(u,Math.min(T,u+g+range*kf));
+        cams.push({s,back:false},{s,back:true});
+        u=Math.max(u+0.6,s+claim(covLen(mkCam(s,false),s,1)));
+      } else while(guard-->0 && u+g<T-0.2){
+        const s=u+g, lenF=covLen(mkCam(s,false),s,1);
+        // tuż przed „uciekającym" załamaniem kamera w przód prawie nic nie kryje — wtedy lukę
+        // przy u lepiej domyka kamera „w tył" postawiona ZA załamaniem (kryje przez nie wstecz)
+        if(lenF<range*kf/2){
+          const q=solveBack(u,Math.min(T,u+g+range*kf));
+          if(q-s>lenF+0.5){ cams.push({s:q,back:true}); u=Math.max(u+0.6,q); continue; }
+        }
+        cams.push({s,back:false});
+        u=Math.max(u+0.6,s+claim(lenF));
+      }
+      return {cams,u};
+    };
+    const commit=r=>{ for(const c of r.cams) place(c.s,c.back); return r.u; };
     // PRZEBIEGI: „ostry" narożnik = zmiana kierunku ≥ 35° (mniejsze skosy scalamy w przebieg)
-    const brngE=[]; for(let i=0;i<n;i++){const A=pts[i],B=pts[(i+1)%n];brngE.push(bearing({lat:A[0],lng:A[1]},{lat:B[0],lng:B[1]}));}
-    const corners=[]; for(let i=0;i<n;i++) if(angDiff(brngE[i],brngE[(i-1+n)%n])>=35) corners.push(i);
-    // gładka pętla bez naroży (np. koło) — równomiernie dookoła
+    const corners=[]; for(let i=0;i<n;i++) if(Math.abs(turns[i])>=35) corners.push(i);
+    // GŁADKA PĘTLA bez naroży (koło, wielokąt foremny): kamera-zalążek w 0, dalej domykamy
+    // pokrycie wokół pętli; 'fewer' także tu daje słupy dwukierunkowe (mniej słupów)
     if(corners.length===0){
-      const m=Math.max(1,(mode==='fewer')?Math.ceil(P/Math.max(1,spacing)):Math.round(P/spacing));
-      for(let k=0;k<m;k++) place(k*P/m,false);
+      if(mode==='fewer'){
+        const cf=place(0,false), cb=place(0,true);
+        commit(fillSim(covLen(cf,0,1), P-claim(covLen(cb,0,-1))));
+      } else {
+        const c0=place(0,false);
+        commit(fillSim(covLen(c0,0,1), P));
+      }
       return plan;
     }
     const Rn=corners.length;
-    const runs=corners.map((c,k)=>{ let a=path.cum[c], b=path.cum[corners[(k+1)%Rn]]; if(b<=a) b+=P; return {a,b,L:b-a}; });
-
-    // 1) NAROŻNIKI — każdy stawiany DOKŁADNIE RAZ (bez duplikatu „na szwie" pętli).
-    //    Ostry róg (kąt wewn. ≤ 0.95·FOV) → JEDNA kamera na dwusiecznej łapie oba ogrodzenia;
-    //    szerszy róg → dwie kamery, każda w swój bok. Wspólne dla wszystkich trybów.
+    // 1) KOTWICE — narożniki z kamerami BEZWARUNKOWYMI, każda stawiana DOKŁADNIE RAZ:
+    //    WKLĘSŁY (wcięcie) → dwie kamery „od siebie" (kąt wewn. ≥180°, dwusieczna go nie
+    //    obejmie); wypukły CIASNY (kąt wewn. ≤0.95·FOV) → jedna na dwusiecznej łapie oba
+    //    ogrodzenia. Wypukły SZEROKI kamer z góry NIE dostaje — rozstrzyga go marsz frontu
+    //    (pkt 2). Brak jakiejkolwiek kotwicy (np. prostokąt przy szerokim FOV) → wymuszamy
+    //    parę narożną na rogu 0, żeby marsz miał punkt zaczepienia i domknięcia pętli.
+    const kinds=corners.map(v=>{
+      if(Math.sign(turns[v])!==orient) return 'reflex';                       // narożnik wklęsły (wcięcie)
+      return angDiff((brngE[(v-1+n)%n]+180)%360,brngE[v])<=fov*0.95?'tight':'wide';
+    });
+    const anchorCams=new Array(Rn).fill(null);
     for(let i=0;i<Rn;i++){
       const v=corners[i];
-      const dPrev=(brngE[(v-1+n)%n]+180)%360, dNext=brngE[v];                 // dwa boki wychodzące z wierzchołka
-      const theta=angDiff(dPrev,dNext);                                       // kąt wewnętrzny w rogu
-      if(theta<=fov*0.95){                                                    // jedna kamera obejmie oba boki
+      if(kinds[i]==='reflex') anchorCams[i]=[place(path.cum[v],true),place(path.cum[v],false)];
+      else if(kinds[i]==='tight'){
+        const dPrev=(brngE[(v-1+n)%n]+180)%360, dNext=brngE[v];               // dwa boki wychodzące z wierzchołka
         const mx=Math.atan2(Math.sin(toR(dPrev))+Math.sin(toR(dNext)), Math.cos(toR(dPrev))+Math.cos(toR(dNext)));
         let bis=((toD(mx)%360)+360)%360;                                      // dwusieczna
-        const toC=bearing({lat:pts[v][0],lng:pts[v][1]},{lat:cen[0],lng:cen[1]});
-        if(angDiff(bis,toC)>90) bis=(bis+180)%360;                            // skieruj do wnętrza
-        plan.push({lat:pts[v][0],lng:pts[v][1],az:Math.round(bis)%360});
-      } else {
-        place(path.cum[v],true);                                             // kamera „w tył" (poprzedni bok)
-        place(path.cum[v],false);                                            // kamera „w przód" (kolejny bok)
+        // normalna wewnętrzna rogu = uśredniony (atan2) kierunek normalnych obu boków ku wnętrzu
+        const n1=toR(brngE[(v-1+n)%n]+orient*90), n2=toR(brngE[v]+orient*90);
+        const ni=((toD(Math.atan2(Math.sin(n1)+Math.sin(n2), Math.cos(n1)+Math.cos(n2)))%360)+360)%360;
+        if(angDiff(bis,ni)>90) bis=(bis+180)%360;                             // skieruj do wnętrza
+        const c={lat:pts[v][0],lng:pts[v][1],az:Math.round(bis)%360}; plan.push(c); anchorCams[i]=[c];
       }
     }
-    // 2) ŚRODKI PRZEBIEGÓW — końce ma pokryte kamerami narożnymi (±zasięg); wypełnij [zasięg, L−zasięg].
-    runs.forEach(run=>{
-      const M=run.L-2*range;                                                 // środek nieobjęty przez rogi
-      if(M<=1e-6) return;
+    let s0=kinds.findIndex(k=>k!=='wide');
+    if(s0<0){ s0=0; anchorCams[0]=[place(path.cum[corners[0]],true),place(path.cum[corners[0]],false)]; }
+    // 2) MARSZ FRONTU POKRYCIA wokół pętli od kotwicy s0 (łuki rozwinięte monotonicznie):
+    //    kotwica → fill do vb−covB (pokrycie „w tył" jej kamer MIERZYMY covLen-em, potem
+    //    front = vb+covF); SZEROKI róg wypukły → wybór wariantu symulacją w wideCorner (niżej):
+    //    'overlap' porównuje SKIP/K0/K1/K2, 'fewer' — SKIP/K0/KT.
+    const a0=path.cum[corners[s0]];
+    const arcAt=off=>off>=Rn?a0+P:a0+((path.cum[corners[(s0+off)%Rn]]-a0+P)%P);
+    const covInto=(cams,s,dir)=>{let m=0;for(const c of cams)m=Math.max(m,covLen(c,s,dir));return m;};
+    // SZEROKI róg: front u dochodzi z lewej do wierzchołka vb; WARIANTY wyrównane symulacją
+    // do wspólnego celu cap i porównane kosztem (overlap: kamery → słupy → dalszy front;
+    // fewer: słupy → kamery → front):
+    //  K0 „klasyczna para narożna": dwie kamery na wierzchołku z kredytem pokrycia RAW (bez
+    //     claim) — nośnik dawnego zachowania; przy ov>0 zwykle wygrywa, bo dodatni zakład
+    //     zagęszcza ŁAŃCUCHY, a nie rogi (kredyt rogów pozostaje pełny);
+    //  K1 „łańcuch do rogu" (overlap): fillSim(u,vb) — łańcuch widzi przez wypukły róg, więc
+    //     często sam przestrzeliwuje wierzchołek (róg BEZ kamer); inaczej róg dostaje TYLKO
+    //     kamerę „w przód" (bez „w tył" — łańcuch domknął płot do wierzchołka);
+    //  K2 „domknięcie zza rogu" (overlap): łańcuch krótszy + słup DWUKIERUNKOWY q∈[vb,cap]:
+    //     kamera „w tył" kryje wstecz PRZEZ róg (domyka styk przy froncie), „w przód" ciągnie
+    //     dalej; q>vb zastępuje parę narożną + pierwszy słup łańcucha (−1 słup);
+    //  KT „przezroczysty" (fewer): dwukierunkowe słupy fillSim maszerują przez róg do cap.
+    // Przy ov<0 luka ≤ g przy wierzchołku jest legalna jak na każdym styku (fillSim/domknięcie liczą g).
+    const wideCorner=(u,vb,cap)=>{
+      if(u>=cap) return u;                               // front już za horyzontem porównania — nic do roboty
+      const cand=[];
+      if(u>=vb-0.2) cand.push({cams:[],F:u});            // SKIP: róg pokryty „na wskroś" (0,2 m = luz próbkowania)
+      const r0=(()=>{ const T0=vb-covLen(mkCam(vb,true),vb,-1);         // K0 (0,2 m luzu jak dotąd)
+        return u<T0-0.2?fillSim(u,T0):{cams:[]}; })();
+      cand.push({cams:[...r0.cams,{s:vb,back:true},{s:vb,back:false}], F:Math.max(u,vb+covLen(mkCam(vb,false),vb,1))});
       if(mode==='fewer'){
-        // MNIEJ SŁUPÓW: słupy DWUKIERUNKOWE — 2 kamery na jednym słupie patrzące KU OBU ROGOM
-        // (rozstaw ≈ 2·zasięg zamiast osobnych słupów co zasięg).
-        const nP=Math.max(1, Math.ceil(M/Math.max(1,2*spacing)));
-        for(let k=0;k<nP;k++){ const s=run.a+range+(k+0.5)*(M/nP); place(s,false); place(s,true); }
+        const rt=fillSim(u,cap);                                        // KT
+        cand.push({cams:rt.cams,F:rt.u});
       } else {
-        // RÓWNOMIERNIE: N kamer z JEDNAKOWYM zakładem na całym przebiegu. Końce pokrywają kamery
-        // narożne (start 0 i L−zasięg), a środkowe rozkładamy równo ⇒ każdy styk ma ten sam zakład.
-        const N=Math.max(2, Math.ceil((run.L-range)/spacing)+1);             // łącznie kamer na przebiegu (2 rogi + środki)
-        const shift=(run.L-range)/(N-1);                                     // równy odstęp startów ⇒ równy zakład = zasięg−shift
-        for(let i=1;i<=N-2;i++) place(run.a+i*shift,false);                  // tylko środkowe (rogi już postawione)
+        const r1=fillSim(u,vb), c1=r1.cams.slice(); let F1=r1.u;        // K1
+        if(F1<=vb+0.3){ c1.push({s:vb,back:false}); F1=Math.max(F1,vb+covLen(mkCam(vb,false),vb,1)); }
+        cand.push({cams:c1,F:F1});
+        const c2=[]; let u2=u, F2=null, guard=Math.ceil((vb-u)/0.5)+8;  // K2
+        while(guard-->0 && u2<vb-0.01){
+          const okq=q=>q-claim(covLen(mkCam(q,true),q,-1))<=u2+g+0.3;
+          if(okq(vb)){                                   // słup za rogiem domyka styk — bisekcją najdalszy
+            let lo=vb, hi=cap;
+            if(okq(hi)) lo=hi; else for(let it=0;it<6;it++){const m=(lo+hi)/2; if(okq(m))lo=m; else hi=m;}
+            c2.push({s:lo,back:true},{s:lo,back:false});
+            F2=lo+covLen(mkCam(lo,false),lo,1); break;
+          }
+          const s=u2+g; c2.push({s,back:false});
+          u2=Math.max(u2+0.6,s+claim(covLen(mkCam(s,false),s,1)));
+        }
+        if(F2!=null) cand.push({cams:c2,F:F2});          // F2=null: łańcuch K2 sam przestrzelił róg = K1
       }
-    });
+      const poles=cs=>new Set(cs.map(c=>c.s.toFixed(2))).size;
+      const score=x=>{ const e=x.F>=cap?null:fillSim(x.F,cap);          // dopełnij do cap dla uczciwego porównania
+        const cs=e?x.cams.concat(e.cams):x.cams;
+        return {c:cs.length,p:poles(cs),F:e?e.u:x.F,x}; };
+      let best=null;
+      for(const sc of cand.map(score)){
+        const [a,b]=mode==='fewer'?[sc.p,sc.c]:[sc.c,sc.p], [ba,bb]=best?(mode==='fewer'?[best.p,best.c]:[best.c,best.p]):[1/0,1/0];
+        if(!best||a<ba||(a===ba&&(b<bb||(b===bb&&sc.F>best.F+0.01)))) best=sc;
+      }
+      return commit({cams:best.x.cams,u:best.x.F});
+    };
+    let u=a0+covInto(anchorCams[s0],a0,1);
+    for(let off=1;off<=Rn;off++){
+      const i=(s0+off)%Rn, vb=arcAt(off), A=anchorCams[i];
+      if(A){
+        const T=vb-covInto(A,vb,-1);
+        if(u<T-0.2) u=commit(fillSim(u,T));              // 0,2 m = luz próbkowania (jak dotąd)
+        u=Math.max(u,vb+covInto(A,vb,1));
+      } else u=wideCorner(u,vb,Math.min(vb+range,arcAt(off+1)));   // horyzont RAW (nie ·kf): K0 musi móc pokazać pełny kredyt rogu
+    }
     return plan;
   }
-  // usuń dotychczasowe kamery perymetru danego obszaru (żeby ponowne ułożenie nie dublowało)
-  function removePerimCams(zoneId){
+  // usuń dotychczasowe kamery perymetru danego obszaru (żeby ponowne ułożenie nie dublowało);
+  // przypisanie do GLOBALA — korzysta z niej także usuwanie obszaru (deleteZone)
+  removePerimCams=function(zoneId){
     cameras.filter(c=>c.perimeterZone===zoneId).forEach(c=>{
       if(c.marker)map.removeLayer(c.marker);
       if(c.cover)map.removeLayer(c.cover);
+      if(c.coverVis)map.removeLayer(c.coverVis);
       if(selected===c){selected=null;clearHandles();
         document.getElementById('camEmpty').style.display='block';
         document.getElementById('camEdit').style.display='none';}
     });
     cameras=cameras.filter(c=>c.perimeterZone!==zoneId);
-  }
+  };
   function selectedPerimZone(){return zones.find(x=>x.id===el('perimZone').value);}
   function updatePerimInfo(z,count){
     const info=el('perimInfo'); if(!info)return;
@@ -2182,17 +3154,20 @@ el('btnDelObjPin').onclick=()=>{ if(objPin&&confirm('Usunąć zapisaną pinezkę
     });
   }
   // ——— trwałość wyboru na zakładce Perymetr (szablon / obszar / zakład-luka / tryb) ———
-  let perimSel={tpl:'',zone:'',overlap:'0',mode:'overlap'};
+  // perimSel jest GLOBALNY (patrz sekcja STAN) — serialize() czyta z niego, nie z DOM
   if(savedPerim) perimSel={...perimSel,...savedPerim};   // zasiane z projektu (loadState mógł już ustawić savedPerim)
+  // wpisana z ręki wartość omija atrybuty min/max inputa — zawsze przycinaj do [-90,80]
+  const clampOv=v=>Math.max(-90,Math.min(80,+v||0));
   function readPerimSel(){                                 // zapamiętaj bieżący wybór z DOM
     perimSel={tpl:el('perimTpl').value,zone:el('perimZone').value,overlap:el('perimOverlap').value,mode:getPerimMode()};
   }
   applyPerimSel=function(){                                // odtwórz zapamiętany wybór do DOM (po przebudowie list / wejściu na zakładkę)
     if(savedPerim){perimSel={tpl:'',zone:'',overlap:'0',mode:'overlap',...savedPerim};savedPerim=null;}
+    if(perimSel.mode!=='overlap'&&perimSel.mode!=='fewer') perimSel.mode='overlap';   // nieznany/stary tryb (np. 'uniform') → domyślny, żeby zawsze jeden przycisk był aktywny
     // ustawiaj tylko gdy pozycja istnieje; NIE kasuj zapamiętanego id, gdy listy jeszcze się nie wczytały (odtworzy się przy kolejnym wywołaniu)
     if(perimSel.tpl && templates.some(t=>String(t.id)===perimSel.tpl)) el('perimTpl').value=perimSel.tpl;
     if(perimSel.zone && zones.some(z=>z.id===perimSel.zone)) el('perimZone').value=perimSel.zone;
-    if(perimSel.overlap!=null) el('perimOverlap').value=perimSel.overlap;
+    if(perimSel.overlap!=null) el('perimOverlap').value=clampOv(perimSel.overlap);
     document.querySelectorAll('#perimMode .pseg-btn').forEach(b=>b.classList.toggle('active',b.dataset.mode===perimSel.mode));
   };
   function refreshPerimZones(){
@@ -2206,28 +3181,36 @@ el('btnDelObjPin').onclick=()=>{ if(objPin&&confirm('Usunąć zapisaną pinezkę
     if(prev && zones.some(z=>z.id===prev)) sel.value=prev;
     else if(selectedZone) sel.value=selectedZone.id;
     applyPerimSel();                                 // odtwórz zapamiętany szablon/obszar/zakład/tryb przy wejściu na zakładkę
+    if(!zones.some(z=>z.id===perimSel.zone)) perimSel.zone=sel.value;   // auto-wybór z listy (brak/nieaktualny zapis) → utrwal, żeby zapis zgadzał się z widokiem
     updatePerimInfo(selectedPerimZone(),null);
     updatePerimModeCounts();                     // odśwież liczby kamer/słupów na przyciskach trybów
   }
   // aktywny tryb z przełącznika segmentowego
-  function getPerimMode(){ const b=document.querySelector('#perimMode .pseg-btn.active'); return b?b.dataset.mode:'uniform'; }
+  function getPerimMode(){ const b=document.querySelector('#perimMode .pseg-btn.active'); return b?b.dataset.mode:'overlap'; }
   function layPerimeter(auto){                 // auto=true → ciche przeliczenie (przy przeklikiwaniu trybu/suwaka), bez alertów/skoku mapy
     const z=selectedPerimZone();
     if(!z){ if(!auto)alert('Wybierz obszar.'); return; }
     if(!z.pts||z.pts.length<3){ if(!auto)alert('Obszar musi mieć co najmniej 3 wierzchołki.'); return; }
     const t=templates.find(x=>String(x.id)===el('perimTpl').value);
     if(!t){ if(!auto)alert('Wybierz szablon kamery.'); return; }
-    const ov=+el('perimOverlap').value||0, mode=getPerimMode();
+    const ov=clampOv(el('perimOverlap').value), mode=getPerimMode();
     const plan=planPerimeter(z,t,ov,mode);
     if(!plan.length){ if(!auto)alert('Nie udało się wyznaczyć pozycji — obszar jest zbyt mały.'); return; }
     if(!auto && plan.length>60 && !confirm('Powstanie '+plan.length+' kamer. Kontynuować?'))return;
+    // BEZPIECZNIK cichych przeliczeń (auto omija powyższy confirm): >300 kamer to niemal na pewno
+    // pomyłka w parametrach — nie zasypuj projektu, pokaż tylko liczbę i zostaw decyzję przyciskowi
+    if(auto && plan.length>300){
+      const info=el('perimInfo');
+      if(info) info.innerHTML='Obwód: <b>'+fmtLen(zonePerimeter(z.pts))+'</b> · plan: <b>'+plan.length+'</b> kamer — za dużo na automatyczne ułożenie. Sprawdź zasięg/zakład i użyj „▦ Ułóż perymetr”.';
+      return;
+    }
     removePerimCams(z.id);
     plan.forEach(pl=>{
       camSeq++;
       const num=nextCamNum();
       const cam={id:'c'+Date.now()+camSeq,num,name:'K'+num,type:'bullet',
         lat:pl.lat,lng:pl.lng,az:pl.az,fov:90,range:20,height:3,model:'',notes:'',
-        color:CAM_COLOR,perimeterZone:z.id};
+        ...CAM_DEFAULTS,color:CAM_COLOR,perimeterZone:z.id};
       applyTemplate(cam,t);
       if(!isPano(cam)) cam.az=pl.az;         // kierunek wzdłuż boku (pano: bez kierunku)
       cameras.push(cam); drawCam(cam);
@@ -2242,7 +3225,7 @@ el('btnDelObjPin').onclick=()=>{ if(objPin&&confirm('Usunąć zapisaną pinezkę
   function autoLay(){ const z=selectedPerimZone(), t=templates.find(x=>String(x.id)===el('perimTpl').value); if(z && z.pts && z.pts.length>=3 && t) layPerimeter(true); }
   // policz kamery/słupy dla KAŻDEGO trybu i pokaż na przyciskach — żeby było wiadomo PRZED kliknięciem
   function updatePerimModeCounts(){
-    const z=selectedPerimZone(), t=templates.find(x=>String(x.id)===el('perimTpl').value), ov=+el('perimOverlap').value||0;
+    const z=selectedPerimZone(), t=templates.find(x=>String(x.id)===el('perimTpl').value), ov=clampOv(el('perimOverlap').value);
     document.querySelectorAll('#perimMode .pseg-btn').forEach(b=>{
       const camEl=b.querySelector('.pseg-cam'), poleEl=b.querySelector('.pseg-pole');
       if(!z||!t||!z.pts||z.pts.length<3){ camEl.textContent='–'; poleEl.textContent='–'; return; }
@@ -2257,13 +3240,13 @@ el('btnDelObjPin').onclick=()=>{ if(objPin&&confirm('Usunąć zapisaną pinezkę
     const cnt=cameras.filter(c=>c.perimeterZone===z.id).length;
     if(!cnt){alert('Brak kamer perymetru dla tego obszaru.');return;}
     if(!confirm('Usunąć '+cnt+' kamer perymetru dla obszaru „'+z.name+'”?'))return;
-    removePerimCams(z.id); refreshList(); save(); updatePerimInfo(z,0);
+    removePerimCams(z.id); refreshList(); restackCameras(); save(); updatePerimInfo(z,0);   // restack jak po ułożeniu — kamera ręczna schowana w kulce klastra musi odzyskać marker
   }
   el('btnLayPerimeter').onclick=()=>layPerimeter(false);
   el('btnClearPerimeter').onclick=clearPerimeter;
   el('perimZone').onchange=()=>{ readPerimSel(); save(); updatePerimInfo(selectedPerimZone(),null); updatePerimModeCounts(); autoRelay(); };
   el('perimTpl').onchange=()=>{ readPerimSel(); save(); updatePerimModeCounts(); autoLay(); };        // wybór szablonu → od razu układa (obszar wybrany)
-  el('perimOverlap').onchange=()=>{ readPerimSel(); save(); updatePerimModeCounts(); autoLay(); };    // zmiana zakładu/luki → od razu układa
+  el('perimOverlap').onchange=()=>{ el('perimOverlap').value=clampOv(el('perimOverlap').value); readPerimSel(); save(); updatePerimModeCounts(); autoLay(); };    // zmiana zakładu/luki → przytnij do zakresu i od razu układa
   // suwak zakładu/luki działa w obu trybach — zawsze widoczny
   function syncPerimMode(){ el('perimOverlapField').style.display='block'; }
   // przełącznik segmentowy trybu: klik = ustaw aktywny + od razu układa (obszar+szablon wybrane)
