@@ -12,12 +12,25 @@ const app = new Hono();
 // Directory with the built frontend (produced by `vite build`, copied in Docker)
 const FRONTEND_DIR = "./frontend/dist";
 
+// Allowed CORS origins. Same-origin requests (frontend served by this app)
+// don't need CORS, but extra origins can be added via CORS_ORIGINS
+// (comma-separated) without a rebuild — e.g. a separate prod domain.
+const corsOrigins = [
+  "http://localhost:4000",
+  "http://localhost:5173",
+  "https://ts150.korat-egret.ts.net:4000",
+  ...(process.env.CORS_ORIGINS || "")
+    .split(",")
+    .map((o) => o.trim())
+    .filter(Boolean),
+];
+
 // Middleware
 app.use("*", logger());
 app.use(
   "*",
   cors({
-    origin: ["http://localhost:4000", "http://localhost:5173", "https://ts150.korat-egret.ts.net:4000"],
+    origin: corsOrigins,
     allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allowHeaders: ["Content-Type", "Authorization"],
   })

@@ -38,5 +38,8 @@ ENV PORT=4001
 ENV HOST=0.0.0.0
 EXPOSE 4001
 
-# Apply pending migrations, then start the server.
-CMD ["sh", "-c", "npm run db:migrate && npm run start"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||4001)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+
+# Apply migrations, ensure master admin exists, then start the server.
+CMD ["sh", "-c", "npm run db:migrate && npm run bootstrap:admin && npm run start"]
