@@ -4,8 +4,20 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { readFileSync } from "fs";
-import api from "./routes/index.js";
-import { startMailPoller } from "./services/cma-mail.js";
+import { runMigrations } from "./db/migrate.js";
+
+// Apply DB migrations BEFORE importing anything that opens the shared db
+// connection or queries tables. Makes the app self-sufficient regardless of
+// how the process is started (Dockerfile CMD, `npm start`, Nixpacks, ...).
+runMigrations();
+
+// Now safe to load modules that touch the db.
+const { default: api } = await import("./routes/index.js");
+const { startMailPoller } = await import("./services/cma-mail.js");
+const { ensureMasterAdmin } = await import("../scripts/bootstrap-admin.js");
+
+// Ensure the master admin exists (no-op without ADMIN_PASSWORD).
+ensureMasterAdmin();
 
 const app = new Hono();
 

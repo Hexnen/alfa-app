@@ -41,5 +41,5 @@ EXPOSE 4001
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||4001)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-# Apply migrations, ensure master admin exists, then start the server.
-CMD ["sh", "-c", "npm run db:migrate && npm run bootstrap:admin && npm run start"]
+# The server self-migrates and bootstraps the admin on startup (see src/index.ts).
+CMD ["npm", "run", "start"]
