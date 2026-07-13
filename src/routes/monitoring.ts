@@ -332,6 +332,124 @@ app.delete("/overlays/:overlayId", async (c) => {
   return c.json({ success: true, data: null });
 });
 
+// --- Nazwane wersje (snapshoty) stanu projektu ---
+
+const MAX_SNAPSHOTS_PER_PROJECT = 30;
+
+// Lekka lista — bez pola data (pełny stan bywa duży)
+app.get("/:id/snapshots", async (c) => {
+  const id = parseInt(c.req.param("id"));
+  const snapshots = await db
+    .select({
+      id: schema.monitoringSnapshots.id,
+      name: schema.monitoringSnapshots.name,
+      createdAt: schema.monitoringSnapshots.createdAt,
+    })
+    .from(schema.monitoringSnapshots)
+    .where(eq(schema.monitoringSnapshots.projectId, id))
+    .orderBy(
+      desc(schema.monitoringSnapshots.createdAt),
+      desc(schema.monitoringSnapshots.id)
+    );
+  return c.json({ success: true, data: snapshots });
+});
+
+// Pełny rekord z data — do przywrócenia stanu w designerze
+app.get("/snapshots/:snapshotId", async (c) => {
+  const snapshotId = parseInt(c.req.param("snapshotId"));
+  const [snapshot] = await db
+    .select()
+    .from(schema.monitoringSnapshots)
+    .where(eq(schema.monitoringSnapshots.id, snapshotId));
+  if (!snapshot) {
+    return c.json({ success: false, error: "Wersja nie istnieje" }, 404);
+  }
+  return c.json({ success: true, data: snapshot });
+});
+
+app.post("/:id/snapshots", async (c) => {
+  const id = parseInt(c.req.param("id"));
+  const [project] = await db
+    .select({ id: schema.monitoringProjects.id })
+    .from(schema.monitoringProjects)
+    .where(eq(schema.monitoringProjects.id, id));
+  if (!project) {
+    return c.json({ success: false, error: "Projekt nie istnieje" }, 404);
+  }
+  const body = await c.req.json();
+  const name = typeof body.name === "string" ? body.name.trim() : "";
+  if (!name) {
+    return c.json({ success: false, error: "Nazwa wersji jest wymagana" }, 400);
+  }
+  // data: JSON stanu projektu — jako string albo obiekt (jak PUT /:id/data)
+  let data = "";
+  if (typeof body.data === "string" && body.data) {
+    data = body.data;
+  } else if (typeof body.data === "object" && body.data !== null) {
+    data = JSON.stringify(body.data);
+  }
+  if (!data) {
+    return c.json({ success: false, error: "Brak stanu projektu (data)" }, 400);
+  }
+  const [{ count }] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(schema.monitoringSnapshots)
+    .where(eq(schema.monitoringSnapshots.projectId, id));
+  if (count >= MAX_SNAPSHOTS_PER_PROJECT) {
+    return c.json(
+      {
+        success: false,
+        error: `Osiągnięto limit ${MAX_SNAPSHOTS_PER_PROJECT} wersji dla projektu — usuń starsze wersje, aby zapisać nową`,
+      },
+      400
+    );
+  }
+  const [snapshot] = await db
+    .insert(schema.monitoringSnapshots)
+    .values({ projectId: id, name, data })
+    .returning({
+      id: schema.monitoringSnapshots.id,
+      name: schema.monitoringSnapshots.name,
+      createdAt: schema.monitoringSnapshots.createdAt,
+    });
+  return c.json({ success: true, data: snapshot }, 201);
+});
+
+// Zmiana nazwy wersji
+app.put("/snapshots/:snapshotId", async (c) => {
+  const snapshotId = parseInt(c.req.param("snapshotId"));
+  const body = await c.req.json();
+  const name = typeof body.name === "string" ? body.name.trim() : "";
+  if (!name) {
+    return c.json({ success: false, error: "Nazwa wersji jest wymagana" }, 400);
+  }
+  const [snapshot] = await db
+    .update(schema.monitoringSnapshots)
+    .set({ name })
+    .where(eq(schema.monitoringSnapshots.id, snapshotId))
+    .returning({
+      id: schema.monitoringSnapshots.id,
+      name: schema.monitoringSnapshots.name,
+      createdAt: schema.monitoringSnapshots.createdAt,
+    });
+  if (!snapshot) {
+    return c.json({ success: false, error: "Wersja nie istnieje" }, 404);
+  }
+  return c.json({ success: true, data: snapshot });
+});
+
+app.delete("/snapshots/:snapshotId", async (c) => {
+  const snapshotId = parseInt(c.req.param("snapshotId"));
+  const [snapshot] = await db
+    .delete(schema.monitoringSnapshots)
+    .where(eq(schema.monitoringSnapshots.id, snapshotId))
+    .returning({ id: schema.monitoringSnapshots.id });
+  if (!snapshot) {
+    return c.json({ success: false, error: "Wersja nie istnieje" }, 404);
+  }
+  return c.json({ success: true, data: null });
+});
+
 app.delete("/:id", async (c) => {
   const id = parseInt(c.req.param("id"));
   const [project] = await db

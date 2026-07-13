@@ -688,6 +688,24 @@ export const monitoringOverlays = sqliteTable("monitoring_overlays", {
 export type MonitoringOverlay = typeof monitoringOverlays.$inferSelect;
 export type NewMonitoringOverlay = typeof monitoringOverlays.$inferInsert;
 
+// Nazwane wersje (snapshoty) projektu monitoringu — ręcznie zapisywane
+// migawki pełnego stanu designera (JSON jak monitoring_projects.data),
+// do których można wrócić niezależnie od autozapisu.
+export const monitoringSnapshots = sqliteTable("monitoring_snapshots", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  projectId: integer("project_id")
+    .notNull()
+    .references(() => monitoringProjects.id, { onDelete: "cascade" }),
+  name: text("name").notNull(), // np. "Wariant 8 kamer, 3 słupy"
+  data: text("data").notNull(), // JSON pełnego stanu projektu z designera
+  createdAt: text("created_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+});
+
+export type MonitoringSnapshot = typeof monitoringSnapshots.$inferSelect;
+export type NewMonitoringSnapshot = typeof monitoringSnapshots.$inferInsert;
+
 // ============================================================
 // MODUŁ KADRY — odwzorowanie skoroszytu "MASTER" (godziny → wynagrodzenia)
 // Przepływ: użytkownik wpisuje godziny za miesiąc → aplikacja liczy

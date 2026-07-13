@@ -43,3 +43,6 @@ plan_zlecenie_auto_create.md
 # Stray data artifacts
 images.jpg
 *.xls
+
+# Local designer test snapshots
+data/snapshots/
