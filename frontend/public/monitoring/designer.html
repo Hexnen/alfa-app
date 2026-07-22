@@ -374,6 +374,9 @@
   .icon-btn.lock-on{color:var(--accent2)}
   /* tryb samodzielny (bez podkładu kafelkowego): neutralne jasne tło zamiast szarości Leafleta */
   #map.base-standalone{background:#f3f4f6}
+  /* spinner overlaya postępu importu planu */
+  .prog-spin{display:inline-block;width:22px;height:22px;border-radius:50%;border:2.5px solid var(--line);border-top-color:var(--accent);animation:progspin .8s linear infinite}
+  @keyframes progspin{to{transform:rotate(360deg)}}
   .modal-actions{display:flex;gap:.5rem;justify-content:flex-end;margin-top:1rem}
   /* === /FUNDAMENT === */
 
@@ -935,6 +938,7 @@ select.dd-native{position:absolute!important;width:1px!important;height:1px!impo
         <span class="lf-txt">Legenda</span>
       </button>
       </div>
+
     </div>
 
     <div id="side">
@@ -2800,21 +2804,53 @@ if(window.pdfjsLib){
 }
 const isPlanFile=f=>!!f&&(/^image\//.test(f.type)||f.type==='application/pdf'||/\.pdf$/i.test(f.name));
 const planName=f=>(f.name||'Plan').replace(/\.[^.]+$/,'')||'Plan';
-/* Drabinka kompresji: WebP q 0.8 → 0.65 → 0.5; gdy nadal za duże — downscale canvasa ×0.85 i ponów.
+/* ——— OVERLAY POSTĘPU importu planu: pokazywany NATYCHMIAST, etapy na bieżąco, Anuluj przerywa pipeline ——— */
+let planProg=null;
+function planProgShow(title,token){
+  planProgHide();
+  const ov=document.createElement('div'); ov.className='modal-overlay plan-progress';
+  const card=document.createElement('div'); card.className='modal-card';
+  card.innerHTML='<div class="modal-hero"><span class="modal-ico" data-kind="info"><span class="prog-spin"></span></span>'
+    +'<div class="modal-htext"><h4></h4><div class="modal-msg prog-stage">Przygotowanie…</div></div></div>'
+    +'<div class="modal-actions"></div>';
+  card.querySelector('h4').textContent=title||'Import planu';
+  const btn=document.createElement('button'); btn.className='btn'; btn.textContent='Anuluj';
+  btn.onclick=()=>{token.cancelled=true; if(token.renderTask){try{token.renderTask.cancel();}catch(e){}} planProgStage('Anulowanie…'); btn.disabled=true;};
+  card.querySelector('.modal-actions').appendChild(btn);
+  ov.appendChild(card); document.body.appendChild(ov);
+  planProg={el:ov,textEl:card.querySelector('.prog-stage')};
+}
+function planProgStage(t){if(planProg)planProg.textEl.textContent=t;}
+function planProgHide(){if(planProg){planProg.el.remove();planProg=null;}}
+/* oddaj klatkę przeglądarce — tekst etapu faktycznie się odmalowuje między ciężkimi krokami */
+const uiFrame=()=>new Promise(r=>requestAnimationFrame(()=>setTimeout(r,0)));
+function ckCancel(token){if(token&&token.cancelled){const e=new Error('anulowano');e.cancelled=true;throw e;}}
+
+/* Drabinka kompresji (ASYNC, bez blokowania UI): WebP q 0.8 → 0.65 → 0.5; gdy nadal za duże —
+   downscale canvasa ×0.85 i ponów. Decyzje po blob.size (toBlob), dataURL liczony DOKŁADNIE z bajtów
+   (23 znaki nagłówka + base64) i konwertowany tylko RAZ, dla zaakceptowanego wyniku.
    Cel < ~3 MB dataURL (4 M znaków), twardy limit 7.4 M znaków (backend odrzuca > 8 M). */
-function compressCanvas(cv){
+const cvToBlob=(cv,q)=>new Promise(res=>cv.toBlob(b=>res(b),'image/webp',q));
+const blobToDataURL=b=>new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result);r.onerror=()=>rej(new Error('konwersja obrazu nie powiodła się'));r.readAsDataURL(b);});
+const dataURLLen=bytes=>23+Math.ceil(bytes/3)*4;   // 'data:image/webp;base64,' + długość base64
+async function compressCanvasAsync(cv,token,onStep){
   const TARGET=4_000_000, HARD=7_400_000, QS=[0.8,0.65,0.5];
-  let canvas=cv;
+  let canvas=cv, attempt=0;
   for(let i=0;i<8;i++){
     let smallest=null;
     for(const q of QS){
-      const u=canvas.toDataURL('image/webp',q);
-      if(u.length<=TARGET) return {url:u,w:canvas.width,h:canvas.height};
-      if(!smallest||u.length<smallest.url.length) smallest={url:u,w:canvas.width,h:canvas.height};
+      ckCancel(token); await uiFrame();
+      attempt++;
+      const blob=await cvToBlob(canvas,q);
+      if(!blob)continue;
+      if(onStep)onStep(attempt,blob.size);
+      if(dataURLLen(blob.size)<=TARGET) return {url:await blobToDataURL(blob),w:canvas.width,h:canvas.height};
+      if(!smallest||blob.size<smallest.blob.size) smallest={blob,w:canvas.width,h:canvas.height};
     }
     // nie schodź poniżej czytelności rysunku — jeśli mieści się w twardym limicie, przyjmij co jest
     if(canvas.width<900||canvas.height<900||i===7)
-      return smallest&&smallest.url.length<=HARD?smallest:null;
+      return smallest&&dataURLLen(smallest.blob.size)<=HARD?{url:await blobToDataURL(smallest.blob),w:smallest.w,h:smallest.h}:null;
+    ckCancel(token); await uiFrame();
     const nc=document.createElement('canvas');
     nc.width=Math.max(64,Math.round(canvas.width*0.85)); nc.height=Math.max(64,Math.round(canvas.height*0.85));
     const cx=nc.getContext('2d'); cx.fillStyle='#fff'; cx.fillRect(0,0,nc.width,nc.height);
@@ -2823,30 +2859,31 @@ function compressCanvas(cv){
   }
   return null;
 }
-/* każdy plan zapisujemy do WebP (mniejszy niż JPEG/PNG); meta — tylko import z PDF */
-function planFromCanvas(name,cv,atLL,meta){
-  const res=compressCanvas(cv);
-  if(!res){uiAlert('Plan jest zbyt duży nawet po kompresji. Zmniejsz rozdzielczość i spróbuj ponownie.');return;}
-  // kompresja mogła zmniejszyć piksele → metry/piksel liczone od FINALNYCH pikseli obrazu
-  if(meta&&meta.mppImage&&res.w!==cv.width) meta.mppImage=meta.mppImage*cv.width/res.w;
-  addOverlayFromImage(name,res.url,res.w,res.h,atLL,meta);
-}
-/* obraz (JPG/PNG/…): skalowanie na canvasie do 1800 px dłuższego boku, potem WebP */
-function loadImagePlan(f,atLL){
-  const r=new FileReader();
-  r.onload=()=>{
+const compressStage=(n,bytes)=>planProgStage('Kompresja… (próba '+n+', '+(bytes/1048576).toFixed(1)+' MB)');
+/* obraz (JPG/PNG/…): skalowanie na canvasie do 1800 px dłuższego boku, potem WebP (async + postęp) */
+async function loadImagePlan(f,atLL){
+  const token={cancelled:false};
+  planProgShow('Import obrazu',token);
+  try{
+    planProgStage('Wczytywanie obrazu…'); await uiFrame();
+    const dataURL=await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result);r.onerror=()=>rej(new Error('nie udało się odczytać pliku'));r.readAsDataURL(f);});
     const img=new Image();
-    img.onload=()=>{
-      const max=1800; let w=img.naturalWidth,h=img.naturalHeight;
-      const sc=Math.min(1,max/Math.max(w,h)); w=Math.round(w*sc); h=Math.round(h*sc);
-      const cv=document.createElement('canvas'); cv.width=w; cv.height=h;
-      cv.getContext('2d').drawImage(img,0,0,w,h);
-      planFromCanvas(planName(f),cv,atLL);
-    };
-    img.onerror=()=>uiAlert('Nie udało się wczytać obrazu.');
-    img.src=r.result;
-  };
-  r.readAsDataURL(f);
+    await new Promise((res,rej)=>{img.onload=res;img.onerror=()=>rej(new Error('nieobsługiwany lub uszkodzony obraz'));img.src=dataURL;});
+    ckCancel(token);
+    const max=1800; let w=img.naturalWidth,h=img.naturalHeight;
+    const sc=Math.min(1,max/Math.max(w,h)); w=Math.round(w*sc); h=Math.round(h*sc);
+    const cv=document.createElement('canvas'); cv.width=w; cv.height=h;
+    cv.getContext('2d').drawImage(img,0,0,w,h);
+    planProgStage('Kompresja…'); await uiFrame();
+    const res=await compressCanvasAsync(cv,token,compressStage);
+    planProgHide();
+    if(!res){uiAlert('Plan jest zbyt duży nawet po kompresji. Zmniejsz rozdzielczość i spróbuj ponownie.');return;}
+    addOverlayFromImage(planName(f),res.url,res.w,res.h,atLL);
+  }catch(err){
+    planProgHide();
+    if(err&&err.cancelled)return;
+    uiAlert('Nie udało się wczytać obrazu: '+(err&&err.message||err));
+  }finally{planProgHide();}
 }
 /* ——— PDF (np. budowlane PZT 1:500): adaptacyjna rozdzielczość + auto-wykrycie skali z warstwy tekstowej ——— */
 /* dialog wyboru strony dla PDF wielostronicowego (select w stylu systemu; null = anuluj import) */
@@ -2950,45 +2987,73 @@ async function detectPdfScale(page){
     return cands[0].d;
   }catch(e){return null;}
 }
-/* render strony PDF w adaptacyjnej rozdzielczości: bazowo 150 DPI, obniżane tak, by ≤ ~16 Mpx i dłuższy bok ≤ ~7000 px */
-function loadPdfPlan(f,atLL){
+/* render strony PDF w adaptacyjnej rozdzielczości: bazowo 150 DPI, obniżane tak, by ≤ ~16 Mpx i dłuższy bok ≤ ~7000 px.
+   Cały pipeline asynchroniczny z overlayem postępu (etapy: wczytywanie → render → skala → kompresja) i Anuluj. */
+async function loadPdfPlan(f,atLL){
   if(!window.pdfjsLib){uiAlert('Obsługa PDF nie została załadowana. Odśwież stronę i spróbuj ponownie.');return;}
-  const r=new FileReader();
-  r.onload=async()=>{
-    try{
-      const pdf=await pdfjsLib.getDocument({data:new Uint8Array(r.result)}).promise;
-      let pageNo=1;
-      if(pdf.numPages>1){pageNo=await uiPdfPageDialog(pdf.numPages); if(pageNo==null)return;}
-      const page=await pdf.getPage(pageNo);
-      const base=page.getViewport({scale:1});            // pt; uwzględnia /Rotate strony
-      const wMM=base.width*25.4/72, hMM=base.height*25.4/72;
-      let dpi=150;
-      dpi=Math.min(dpi, 7000/(Math.max(base.width,base.height)/72));                 // limit dłuższego boku canvas
-      dpi=Math.min(dpi, Math.sqrt(16e6/((base.width/72)*(base.height/72))));         // limit ~16 Mpx łącznie
-      dpi=Math.max(40,dpi);
-      const vp=page.getViewport({scale:dpi/72});
-      const cv=document.createElement('canvas'); cv.width=Math.round(vp.width); cv.height=Math.round(vp.height);
-      const ctx=cv.getContext('2d'); ctx.fillStyle='#fff'; ctx.fillRect(0,0,cv.width,cv.height); // białe tło pod przezroczystością
-      await page.render({canvasContext:ctx,viewport:vp}).promise;
-      const detected=await detectPdfScale(page);
-      const ans=await uiPdfScaleDialog(detected,[wMM,hMM]);
-      if(!ans)return;   // Anuluj / Esc / klik w tło — przerwij import bez śladów (żadnego overlaya ani zapisu)
-      const meta={sheetMM:[Math.round(wMM),Math.round(hMM)],scaleDenom:detected||null,applyScale:false,mppImage:null};
-      if(ans.apply){
-        meta.applyScale=true; meta.scaleDenom=ans.denom;
-        meta.mppImage=(25.4/dpi)*ans.denom/1000;   // metry/piksel renderu; ewentualny downscale kompresji koryguje planFromCanvas
-      }
-      if(ans.standalone)setBase(BASE_NONE);   // przed dodaniem planu — save() z addOverlayFromImage utrwali też nowy base
-      planFromCanvas(planName(f),cv,atLL,meta);
-    }catch(err){uiAlert('Nie udało się wczytać PDF: '+(err&&err.message||err));}
-  };
-  r.readAsArrayBuffer(f);
+  const token={cancelled:false,renderTask:null};
+  planProgShow('Import planu z PDF',token);
+  try{
+    planProgStage('Wczytywanie PDF…'); await uiFrame();
+    const buf=await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result);r.onerror=()=>rej(new Error('nie udało się odczytać pliku'));r.readAsArrayBuffer(f);});
+    ckCancel(token);
+    const task=pdfjsLib.getDocument({data:new Uint8Array(buf)});
+    task.onProgress=p=>{if(p&&p.total)planProgStage('Wczytywanie PDF… '+Math.min(100,Math.round(p.loaded/p.total*100))+'%');};
+    const pdf=await task.promise;
+    ckCancel(token);
+    let pageNo=1;
+    if(pdf.numPages>1){
+      planProgHide();                                   // dialog wyboru strony nie może ginąć pod overlayem postępu
+      pageNo=await uiPdfPageDialog(pdf.numPages);
+      if(pageNo==null)return;
+      planProgShow('Import planu z PDF',token);
+    }
+    const page=await pdf.getPage(pageNo);
+    const base=page.getViewport({scale:1});             // pt; uwzględnia /Rotate strony
+    const wMM=base.width*25.4/72, hMM=base.height*25.4/72;
+    let dpi=150;
+    dpi=Math.min(dpi, 7000/(Math.max(base.width,base.height)/72));                 // limit dłuższego boku canvas
+    dpi=Math.min(dpi, Math.sqrt(16e6/((base.width/72)*(base.height/72))));         // limit ~16 Mpx łącznie
+    dpi=Math.max(40,dpi);
+    const vp=page.getViewport({scale:dpi/72});
+    const cv=document.createElement('canvas'); cv.width=Math.round(vp.width); cv.height=Math.round(vp.height);
+    const ctx=cv.getContext('2d'); ctx.fillStyle='#fff'; ctx.fillRect(0,0,cv.width,cv.height);   // białe tło pod przezroczystością
+    planProgStage('Renderowanie arkusza ('+cv.width+'×'+cv.height+' px, '+Math.round(dpi)+' DPI)…'); await uiFrame();
+    const rt=page.render({canvasContext:ctx,viewport:vp}); token.renderTask=rt;
+    await rt.promise; token.renderTask=null;
+    ckCancel(token);
+    planProgStage('Wykrywanie skali…'); await uiFrame();
+    const detected=await detectPdfScale(page);
+    ckCancel(token);
+    planProgStage('Kompresja…'); await uiFrame();
+    const res=await compressCanvasAsync(cv,token,compressStage);
+    planProgHide();                                     // zamknij postęp PRZED dialogiem skali / komunikatem błędu
+    if(!res){uiAlert('Plan jest zbyt duży nawet po kompresji. Zmniejsz rozdzielczość i spróbuj ponownie.');return;}
+    const ans=await uiPdfScaleDialog(detected,[wMM,hMM]);
+    if(!ans)return;   // Anuluj / Esc / klik w tło — przerwij import bez śladów (żadnego overlaya ani zapisu)
+    const meta={sheetMM:[Math.round(wMM),Math.round(hMM)],scaleDenom:detected||null,applyScale:false,mppImage:null};
+    if(ans.apply){
+      meta.applyScale=true; meta.scaleDenom=ans.denom;
+      meta.mppImage=(25.4/dpi)*ans.denom/1000*(cv.width/res.w);   // metry/piksel od FINALNYCH pikseli (po ewentualnym downscale kompresji)
+    }
+    if(ans.standalone)setBase(BASE_NONE);   // przed dodaniem planu — save() z addOverlayFromImage utrwali też nowy base
+    addOverlayFromImage(planName(f),res.url,res.w,res.h,atLL,meta);
+  }catch(err){
+    planProgHide();
+    if(err&&(err.cancelled||err.name==='RenderingCancelledException'))return;   // Anuluj — cicho
+    uiAlert('Nie udało się wczytać PDF: '+(err&&err.message||err));
+  }finally{planProgHide();}
 }
+let planBusy=false;   // trwa przetwarzanie planu — ignoruj kolejne pliki (drop/input), aż pipeline skończy
 function loadPlanFile(f,atLL){
   if(!f)return;
-  if(/^image\//.test(f.type)) loadImagePlan(f,atLL);
-  else if(f.type==='application/pdf'||/\.pdf$/i.test(f.name)) loadPdfPlan(f,atLL);
-  else uiAlert('Wybierz obraz (JPG/PNG) lub plik PDF.');
+  if(planBusy){showToast('Trwa przetwarzanie planu — poczekaj na zakończenie poprzedniego importu.');return;}
+  let p=null;
+  if(/^image\//.test(f.type)) p=loadImagePlan(f,atLL);
+  else if(f.type==='application/pdf'||/\.pdf$/i.test(f.name)) p=loadPdfPlan(f,atLL);
+  else{uiAlert('Wybierz obraz (JPG/PNG) lub plik PDF.');return;}
+  planBusy=true;
+  Promise.resolve(p).catch(()=>{}).then(()=>{planBusy=false;});
 }
 
 /* ====== KALIBRACJA DWUPUNKTOWA skali planu: 2 kliknięcia na podkładzie + rzeczywista odległość [m] ====== */
