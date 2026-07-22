@@ -288,7 +288,12 @@ app.post("/:id/overlays", async (c) => {
       neLng,
       rotation: typeof body.rotation === "number" ? body.rotation : 0,
       opacity: typeof body.opacity === "number" ? body.opacity : 0.7,
+      meta:
+        typeof body.meta === "string" && body.meta.length <= 2000
+          ? body.meta
+          : null,
       visible: true,
+      locked: body.locked === true,
       sortOrder: sql<number>`(SELECT COALESCE(max(sort_order), 0) + 1 FROM monitoring_overlays WHERE project_id = ${id})`,
     })
     .returning();
@@ -308,7 +313,11 @@ app.put("/overlays/:overlayId", async (c) => {
   if (typeof body.opacity === "number")
     updates.opacity = Math.min(1, Math.max(0, body.opacity));
   if (typeof body.visible === "boolean") updates.visible = body.visible;
+  if (typeof body.locked === "boolean") updates.locked = body.locked;
   if (typeof body.sortOrder === "number") updates.sortOrder = body.sortOrder;
+  if (body.meta === null) updates.meta = null;
+  else if (typeof body.meta === "string" && body.meta.length <= 2000)
+    updates.meta = body.meta;
   const [overlay] = await db
     .update(schema.monitoringOverlays)
     .set(updates)

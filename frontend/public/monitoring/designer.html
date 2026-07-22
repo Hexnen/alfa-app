@@ -75,7 +75,7 @@
   #map{flex:1;min-width:0;position:relative;z-index:0}   /* zamknij warstwy Leafleta we własnym kontekście stackingu */
   /* podświetlenie mapy przy przeciąganiu pliku planu (drag&drop) */
   #map.plan-dropzone{outline:3px dashed var(--accent);outline-offset:-8px}
-  #map.plan-dropzone::after{content:"Upuść plan tutaj — JPG / PNG / jednostronicowy PDF";position:absolute;inset:0;z-index:700;display:flex;align-items:center;justify-content:center;background:rgba(15,23,42,.5);color:var(--accent);font-size:16px;font-weight:600;pointer-events:none;text-align:center;padding:1rem}
+  #map.plan-dropzone::after{content:"Upuść plan tutaj — JPG / PNG / PDF";position:absolute;inset:0;z-index:700;display:flex;align-items:center;justify-content:center;background:rgba(15,23,42,.5);color:var(--accent);font-size:16px;font-weight:600;pointer-events:none;text-align:center;padding:1rem}
   #side{width:336px;border-left:1px solid var(--line);display:flex;flex-direction:row;overflow:visible;position:relative;z-index:2;
     background:
       radial-gradient(120% 55% at 50% -8%, var(--glow-top), transparent 60%),
@@ -368,6 +368,10 @@
   .modal-msg{font-size:13px;color:var(--txt);line-height:1.5}
   .modal-card input.modal-input{width:100%;margin-top:.7rem;background:var(--panel2);border:1px solid var(--line);border-radius:var(--r-sm);color:var(--txt);padding:.5rem .6rem;font-size:13px;transition:border-color var(--t),box-shadow var(--t)}
   .modal-card input.modal-input:focus{outline:none;border-color:var(--brand);box-shadow:var(--ring)}
+  .ui-toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);z-index:6000;max-width:min(560px,90vw);background:var(--panel);border:1px solid var(--line);border-radius:var(--r-sm);padding:.55rem .9rem;font-size:12.5px;color:var(--txt);box-shadow:var(--sh-2);opacity:0;pointer-events:none;transition:opacity .25s;text-align:center}
+  /* zablokowany plan: kliknięcia przechodzą na mapę, brak przeciągania po obrazie */
+  .plan-overlay.plan-locked{pointer-events:none !important}
+  .icon-btn.lock-on{color:var(--accent2)}
   .modal-actions{display:flex;gap:.5rem;justify-content:flex-end;margin-top:1rem}
   /* === /FUNDAMENT === */
 
@@ -1226,7 +1230,7 @@ select.dd-native{position:absolute!important;width:1px!important;height:1px!impo
         <!-- PLANY (nakładki rastrowe) -->
         <div class="tabpane" id="tab-plans">
           <div class="pane-head"><h3>Plany</h3><button class="btn primary" id="btnAddPlan"><span class="ico" data-anim="plus"><svg viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M12 5v14"/></svg></span> Dodaj plan</button></div>
-          <div id="planEmpty" class="empty"><span class="empty-ico"><span class="ico ic-drawable" style="--dl:80"><svg viewBox="0 0 24 24"><path d="M13 13.74a2 2 0 0 1-2 0L2.5 8.87a1 1 0 0 1 0-1.74L11 2.26a2 2 0 0 1 2 0l8.5 4.87a1 1 0 0 1 0 1.74z"/><path d="m20 14.285 1.5.845a1 1 0 0 1 0 1.74L13 21.74a2 2 0 0 1-2 0l-8.5-4.87a1 1 0 0 1 0-1.74l1.5-.845"/></svg></span></span><span class="empty-title">Brak planów</span><span class="empty-cta">Przeciągnij plik na mapę lub użyj <b><span class="ico"><svg viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M12 5v14"/></svg></span> Dodaj plan</b> (JPG/PNG).</span></div>
+          <div id="planEmpty" class="empty"><span class="empty-ico"><span class="ico ic-drawable" style="--dl:80"><svg viewBox="0 0 24 24"><path d="M13 13.74a2 2 0 0 1-2 0L2.5 8.87a1 1 0 0 1 0-1.74L11 2.26a2 2 0 0 1 2 0l8.5 4.87a1 1 0 0 1 0 1.74z"/><path d="m20 14.285 1.5.845a1 1 0 0 1 0 1.74L13 21.74a2 2 0 0 1-2 0l-8.5-4.87a1 1 0 0 1 0-1.74l1.5-.845"/></svg></span></span><span class="empty-title">Brak planów</span><span class="empty-cta">Przeciągnij plik na mapę lub użyj <b><span class="ico"><svg viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M12 5v14"/></svg></span> Dodaj plan</b> (JPG/PNG/PDF).</span></div>
           <div id="planList"></div>
           <p class="hint" style="margin-top:.8rem">Ustaw położenie i rozmiar planu bezpośrednio na mapie (uchwyty na wybranym planie); suwakami reguluj przezroczystość, skalę i obrót. Plany leżą pod kamerami i punktami.</p>
         </div>
@@ -1529,7 +1533,9 @@ const ICON={
  cctv:'<svg viewBox="0 0 24 24"><path d="M16.75 12h3.632a1 1 0 0 1 .894 1.447l-2.034 4.069a1 1 0 0 1-1.708.134l-2.124-2.97"/><path d="M17.106 9.053a1 1 0 0 1 .447 1.341l-3.106 6.211a1 1 0 0 1-1.342.447L3.61 12.3a2.92 2.92 0 0 1-1.3-3.91L3.69 5.6a2.92 2.92 0 0 1 3.92-1.3z"/><path d="M2 19h3.76a2 2 0 0 0 1.8-1.1L9 15"/><path d="M2 21v-4"/><path d="M7 9h.01"/></svg>',
  alertTri:'<svg viewBox="0 0 24 24"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>',
  search:'<svg viewBox="0 0 24 24"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>',
- grip:'<svg viewBox="0 0 24 24"><circle cx="9" cy="6" r="1.4" fill="currentColor" stroke="none"/><circle cx="15" cy="6" r="1.4" fill="currentColor" stroke="none"/><circle cx="9" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="15" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="9" cy="18" r="1.4" fill="currentColor" stroke="none"/><circle cx="15" cy="18" r="1.4" fill="currentColor" stroke="none"/></svg>'
+ grip:'<svg viewBox="0 0 24 24"><circle cx="9" cy="6" r="1.4" fill="currentColor" stroke="none"/><circle cx="15" cy="6" r="1.4" fill="currentColor" stroke="none"/><circle cx="9" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="15" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="9" cy="18" r="1.4" fill="currentColor" stroke="none"/><circle cx="15" cy="18" r="1.4" fill="currentColor" stroke="none"/></svg>',
+ lock:'<svg viewBox="0 0 24 24"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>',
+ lockOpen:'<svg viewBox="0 0 24 24"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>'
 };
 function ico(k,cls){return '<span class="ico '+(cls||'')+'">'+(ICON[k]||'')+'</span>';}
 const TYPE_META={bullet:{label:'Tubowa',icon:'bullet'},dome:{label:'Kopułka',icon:'dome'},ptz:{label:'PTZ',icon:'ptz'},pano:{label:'360°',icon:'pano'}};
@@ -2512,13 +2518,35 @@ function renderZonesGroupedForPrint(){
 }
 
 /* ============ PLANY (nakładki rastrowe) ============ */
-/* Każdy plan: {dbId,name,data,sw:[lat,lng],ne:[lat,lng],rotation,opacity,visible,layer,baseHalfLat,baseHalfLng,sizePct}.
+/* Każdy plan: {dbId,name,data,sw:[lat,lng],ne:[lat,lng],rotation,opacity,visible,layer,baseHalfLat,baseHalfLng,sizePct,meta}.
+   meta (opcjonalne, persystowane jako JSON): {imgW,imgH:px obrazu, mppImage:metry/piksel NA MAPIE (aktualizowane
+   przy każdym skalowaniu), scaleDenom:wykryty/zadany mianownik skali arkusza, sheetMM:[szer,wys] arkusza PDF w mm,
+   calibrated:true po kalibracji dwupunktowej}.
    Obrót realizowany przez doklejenie rotate() do transformu <img>, który Leaflet nadpisuje przy każdym resecie —
    dlatego applyRot() reaplikowany po zoomend/moveend/viewreset oraz po setBounds/utworzeniu. */
 let overlays=[], selectedOverlay=null, planHandles=null;
 
 function planCenter(ov){return [(ov.sw[0]+ov.ne[0])/2,(ov.sw[1]+ov.ne[1])/2];}
 function initBaseSize(ov){ov.baseHalfLat=(ov.ne[0]-ov.sw[0])/2;ov.baseHalfLng=(ov.ne[1]-ov.sw[1])/2;ov.sizePct=100;}
+/* metry/piksel obrazu wg BIEŻĄCEGO rozmiaru na mapie — przeliczane po każdym skalowaniu (uchwyt, suwak, kalibracja) */
+function updateOvMpp(ov){
+  if(!ov.meta||!ov.meta.imgW)return;
+  const cLat=(ov.sw[0]+ov.ne[0])/2;
+  ov.meta.mppImage=map.distance([cLat,ov.sw[1]],[cLat,ov.ne[1]])/ov.meta.imgW;
+}
+/* efektywna skala 1:X z bieżącego rozmiaru na mapie (tylko plany z PDF — znamy wymiary arkusza w mm) */
+function ovEffectiveDenom(ov){
+  if(!ov.meta||!ov.meta.imgW||!ov.meta.sheetMM||!ov.meta.mppImage)return null;
+  return ov.meta.mppImage*ov.meta.imgW*1000/ov.meta.sheetMM[0];
+}
+const parseOvMeta=s=>{try{const m=typeof s==='string'?JSON.parse(s):s;return m&&typeof m==='object'?m:null;}catch(e){return null;}};
+/* lekki toast (komunikaty nieblokujące — np. wynik kalibracji) */
+let _toastEl=null,_toastTimer=null;
+function showToast(msg,ms){
+  if(!_toastEl){_toastEl=document.createElement('div');_toastEl.className='ui-toast';document.body.appendChild(_toastEl);}
+  _toastEl.textContent=msg;_toastEl.style.opacity='1';
+  clearTimeout(_toastTimer);_toastTimer=setTimeout(()=>{_toastEl.style.opacity='0';},ms||4500);
+}
 function applyRot(ov){
   const el=ov.layer&&ov.layer.getElement(); if(!el)return;
   el.style.transformOrigin='50% 50%';
@@ -2531,9 +2559,21 @@ function drawOverlay(ov){
   if(ov.layer)map.removeLayer(ov.layer);
   ov.layer=L.imageOverlay(ov.data,[ov.sw,ov.ne],{opacity:ov.opacity,interactive:true,className:'plan-overlay',pane:'overlayPane'});
   ov.layer.on('click',()=>{if(mode)return;selectOverlay(ov);});
-  ov.layer.on('add',()=>bindPlanDrag(ov));   // przeciąganie planu bezpośrednio po jego obrazie
+  ov.layer.on('add',()=>{bindPlanDrag(ov);applyLock(ov);});   // przeciąganie planu bezpośrednio po jego obrazie
   if(ov.visible)ov.layer.addTo(map);
   applyRot(ov);
+}
+/* LOCK planu: pointer-events przez klasę CSS — kliknięcia i drag przechodzą na mapę */
+function applyLock(ov){
+  const el=ov.layer&&ov.layer.getElement(); if(!el)return;
+  el.classList.toggle('plan-locked',!!ov.locked);
+}
+function toggleOverlayLock(ov){
+  ov.locked=!ov.locked;
+  applyLock(ov);
+  if(ov.locked&&selectedOverlay===ov)clearPlanHandles();
+  else if(selectedOverlay===ov)positionPlanHandles(ov);
+  renderPlans(); persistOverlay(ov,{locked:1});
 }
 // czy jesteśmy w zakładce „Plany" — tylko wtedy plan przechwytuje przeciąganie (poza nią mapa panuje normalnie)
 const plansTabActive=()=>document.getElementById('tab-plans').classList.contains('active');
@@ -2544,6 +2584,7 @@ function bindPlanDrag(ov){
 }
 // bezpośrednie przeciąganie planu: przesuwamy jego granice zamiast panować mapą
 function startPlanDrag(ov,ev){
+  if(ov.locked)return;                 // zablokowany plan — nie przechwytuj (mapa panuje normalnie)
   if(mode||!plansTabActive())return;   // podczas stawiania kamer/punktów lub poza zakładką Plany — nie przechwytuj
   L.DomEvent.stop(ev);                  // zatrzymaj mousedown na obrazie: mapa nie zaczyna panningu, brak natywnego „ghost drag" <img>
   selectOverlay(ov);
@@ -2596,9 +2637,10 @@ function scaleOverlayTo(ov,d1){
   const d0=Math.hypot((nePt.x-swPt.x)/2,(nePt.y-swPt.y)/2)||1, s=d1/d0;
   const hLat=(ov.ne[0]-c[0])*s, hLng=(ov.ne[1]-c[1])*s;
   ov.sw=[c[0]-hLat,c[1]-hLng]; ov.ne=[c[0]+hLat,c[1]+hLng];
-  updateOverlayBounds(ov);
+  updateOverlayBounds(ov); updateOvMpp(ov);
 }
 function positionPlanHandles(ov){
+  if(ov.locked){clearPlanHandles();return;}   // zablokowany plan — bez uchwytów skalowania/obrotu
   if(!planHandles){
     const corners=[0,1,2,3].map(()=>mkPlanHandle('p-size','Skaluj — złap róg'));
     corners.forEach(h=>{
@@ -2636,7 +2678,7 @@ function setOverlayRotation(ov,d){ov.rotation=d;applyRot(ov);}
 function setPlanSize(ov,pct){
   const c=planCenter(ov), f=pct/100, hLat=ov.baseHalfLat*f, hLng=ov.baseHalfLng*f;
   ov.sw=[c[0]-hLat,c[1]-hLng]; ov.ne=[c[0]+hLat,c[1]+hLng]; ov.sizePct=pct;
-  updateOverlayBounds(ov);
+  updateOverlayBounds(ov); updateOvMpp(ov);
   if(selectedOverlay===ov)positionPlanHandles(ov);
 }
 function toggleOverlayVisible(ov){
@@ -2678,31 +2720,63 @@ function renderPlans(){
     const head=document.createElement('div'); head.className='pr-head';
     const nm=document.createElement('input'); nm.className='mini'; nm.value=ov.name; nm.title='Nazwa planu';
     nm.oninput=()=>{ov.name=nm.value;}; nm.onchange=()=>persistOverlay(ov,{name:1});
+    const lck=document.createElement('button'); lck.className='icon-btn'+(ov.locked?' lock-on':''); lck.innerHTML=ov.locked?ICON.lock:ICON.lockOpen;
+    lck.title=ov.locked?'Odblokuj plan':'Zablokuj plan (bez przesuwania/skalowania/obrotu)';
+    lck.onclick=()=>toggleOverlayLock(ov);
     const vis=document.createElement('button'); vis.className='icon-btn'; vis.innerHTML=ov.visible?ICON.eye:ICON.eyeOff; vis.title='Pokaż / ukryj plan';
     vis.onclick=()=>toggleOverlayVisible(ov);
     const del=document.createElement('button'); del.className='icon-btn del-x'; del.innerHTML=ICON.close; del.title='Usuń plan';
     del.onclick=()=>{uiConfirm('Usunąć plan: '+ov.name+'?',{danger:true}).then(ok=>{if(ok)deleteOverlay(ov);});};
-    head.appendChild(nm); head.appendChild(vis); head.appendChild(del); row.appendChild(head);
+    head.appendChild(nm); head.appendChild(lck); head.appendChild(vis); head.appendChild(del); row.appendChild(head);
     row.appendChild(planSliderField('Przezroczystość',Math.round(ov.opacity*100),0,100,' %',v=>setOverlayOpacity(ov,v/100),()=>persistOverlay(ov,{opacity:1}),true));
-    row.appendChild(planSliderField('Rozmiar',Math.round(ov.sizePct||100),20,400,' %',v=>setPlanSize(ov,v),()=>persistOverlay(ov,{geom:1}),true));
-    row.appendChild(planSliderField('Obrót',Math.round(ov.rotation||0),0,359,'°',v=>setOverlayRotation(ov,v),()=>persistOverlay(ov,{rotation:1}),true));
-    const cbtn=document.createElement('button'); cbtn.className='btn'; cbtn.style.width='100%'; cbtn.innerHTML=ico('target')+' Wyśrodkuj na mapie';
+    const fSize=planSliderField('Rozmiar',Math.round(ov.sizePct||100),20,400,' %',v=>setPlanSize(ov,v),()=>persistOverlay(ov,{geom:1}),true);
+    const fRot=planSliderField('Obrót',Math.round(ov.rotation||0),0,359,'°',v=>setOverlayRotation(ov,v),()=>persistOverlay(ov,{rotation:1}),true);
+    if(ov.locked){[fSize,fRot].forEach(f=>{f.querySelectorAll('input,button').forEach(i=>i.disabled=true);f.style.opacity='.55';f.title='Plan zablokowany — odblokuj kłódką, aby zmieniać';});}
+    row.appendChild(fSize); row.appendChild(fRot);
+    if(ov.meta&&ov.meta.mppImage){
+      const den=ovEffectiveDenom(ov);
+      const inf=document.createElement('div');
+      inf.style.cssText='font-family:var(--font-mono);font-size:10.5px;color:var(--muted);margin:-.15rem 0 .4rem';
+      inf.textContent=(den?'≈1:'+Math.round(den)+' · ':'')+ov.meta.mppImage.toFixed(3)+' m/px'+(ov.meta.calibrated?' · skalibrowany':'');
+      inf.title='Efektywna skala planu wg bieżącego rozmiaru na mapie';
+      row.appendChild(inf);
+    }
+    const btns=document.createElement('div'); btns.style.cssText='display:flex;gap:.4rem';
+    const kbtn=document.createElement('button'); kbtn.className='btn'; kbtn.style.flex='1'; kbtn.innerHTML=ico('ruler')+' Kalibruj skalę';
+    kbtn.title=ov.locked?'Odblokuj plan, aby kalibrować':'Kliknij 2 punkty na planie (np. końce koty wymiarowej) i podaj rzeczywistą odległość w metrach';
+    kbtn.disabled=!!ov.locked;
+    kbtn.onclick=()=>startCalibration(ov);
+    const cbtn=document.createElement('button'); cbtn.className='btn'; cbtn.style.flex='1'; cbtn.innerHTML=ico('target')+' Wyśrodkuj';
+    cbtn.title='Wyśrodkuj plan na mapie';
     cbtn.onclick=()=>map.fitBounds(L.latLngBounds(ov.sw,ov.ne).pad(.1));
-    row.appendChild(cbtn);
+    btns.appendChild(kbtn); btns.appendChild(cbtn);
+    row.appendChild(btns);
     list.appendChild(row);
   });
 }
 
-/* dodanie planu z gotowego data-URL: początkowo ~55% szerokości mapy;
-   wyśrodkowany na bieżącym widoku lub — przy upuszczeniu pliku — w miejscu kursora (atLL) */
-function addOverlayFromImage(name,dataURL,imgW,imgH,atLL){
-  const size=map.getSize(), wPx=size.x*0.55, hPx=wPx*(imgH/imgW);
-  const c=map.latLngToContainerPoint(atLL||map.getCenter());
-  const swLL=map.containerPointToLatLng(L.point(c.x-wPx/2,c.y+hPx/2)); // dolny-lewy = min lat, min lng
-  const neLL=map.containerPointToLatLng(L.point(c.x+wPx/2,c.y-hPx/2)); // górny-prawy = max lat, max lng
-  const ov={dbId:null,name,data:dataURL,sw:[swLL.lat,swLL.lng],ne:[neLL.lat,neLL.lng],rotation:0,opacity:0.7,visible:true,layer:null};
-  initBaseSize(ov); overlays.push(ov); drawOverlay(ov); createOverlayRecord(ov);
+/* dodanie planu z gotowego data-URL. Bez meta.applyScale: początkowo ~55% szerokości mapy,
+   wyśrodkowany na bieżącym widoku lub — przy upuszczeniu pliku — w miejscu kursora (atLL).
+   Z meta.applyScale (PDF ze znaną skalą): rozmiar RZECZYWISTY w metrach wokół punktu upuszczenia/środka mapy. */
+function addOverlayFromImage(name,dataURL,imgW,imgH,atLL,meta){
+  let swLL,neLL;
+  const realScale=!!(meta&&meta.applyScale&&meta.mppImage>0);
+  if(realScale){
+    const c=atLL||map.getCenter(), hw=imgW*meta.mppImage/2, hh=imgH*meta.mppImage/2;   // pół-szerokość/wysokość [m]
+    swLL=L.latLng(destination(c.lat,c.lng,180,hh)[0], destination(c.lat,c.lng,270,hw)[1]);
+    neLL=L.latLng(destination(c.lat,c.lng,0,hh)[0],   destination(c.lat,c.lng,90,hw)[1]);
+  }else{
+    const size=map.getSize(), wPx=size.x*0.55, hPx=wPx*(imgH/imgW);
+    const c=map.latLngToContainerPoint(atLL||map.getCenter());
+    swLL=map.containerPointToLatLng(L.point(c.x-wPx/2,c.y+hPx/2)); // dolny-lewy = min lat, min lng
+    neLL=map.containerPointToLatLng(L.point(c.x+wPx/2,c.y-hPx/2)); // górny-prawy = max lat, max lng
+  }
+  const ov={dbId:null,name,data:dataURL,sw:[swLL.lat,swLL.lng],ne:[neLL.lat,neLL.lng],rotation:0,opacity:0.7,visible:true,locked:false,layer:null,
+    meta:{imgW,imgH,mppImage:null,scaleDenom:meta&&meta.scaleDenom||null,sheetMM:meta&&meta.sheetMM||null,calibrated:false}};
+  initBaseSize(ov); updateOvMpp(ov);
+  overlays.push(ov); drawOverlay(ov); createOverlayRecord(ov);
   selectOverlay(ov); save();
+  if(realScale) map.fitBounds(L.latLngBounds(ov.sw,ov.ne).pad(.15));
 }
 /* pdf.js: worker z tego samego origin (blob) — unika blokady cross-origin Worker; fallback: fake worker */
 if(window.pdfjsLib){
@@ -2713,12 +2787,36 @@ if(window.pdfjsLib){
 }
 const isPlanFile=f=>!!f&&(/^image\//.test(f.type)||f.type==='application/pdf'||/\.pdf$/i.test(f.name));
 const planName=f=>(f.name||'Plan').replace(/\.[^.]+$/,'')||'Plan';
-/* każdy plan zapisujemy do WebP (mniejszy niż JPEG/PNG); przy dużym pliku obniżamy jakość */
-function planFromCanvas(name,cv,atLL){
-  let url=cv.toDataURL('image/webp',0.85);
-  if(url.length>7500000) url=cv.toDataURL('image/webp',0.7);
-  if(url.length>7500000){uiAlert('Plan jest zbyt duży nawet po kompresji. Zmniejsz rozdzielczość i spróbuj ponownie.');return;}
-  addOverlayFromImage(name,url,cv.width,cv.height,atLL);
+/* Drabinka kompresji: WebP q 0.8 → 0.65 → 0.5; gdy nadal za duże — downscale canvasa ×0.85 i ponów.
+   Cel < ~3 MB dataURL (4 M znaków), twardy limit 7.4 M znaków (backend odrzuca > 8 M). */
+function compressCanvas(cv){
+  const TARGET=4_000_000, HARD=7_400_000, QS=[0.8,0.65,0.5];
+  let canvas=cv;
+  for(let i=0;i<8;i++){
+    let smallest=null;
+    for(const q of QS){
+      const u=canvas.toDataURL('image/webp',q);
+      if(u.length<=TARGET) return {url:u,w:canvas.width,h:canvas.height};
+      if(!smallest||u.length<smallest.url.length) smallest={url:u,w:canvas.width,h:canvas.height};
+    }
+    // nie schodź poniżej czytelności rysunku — jeśli mieści się w twardym limicie, przyjmij co jest
+    if(canvas.width<900||canvas.height<900||i===7)
+      return smallest&&smallest.url.length<=HARD?smallest:null;
+    const nc=document.createElement('canvas');
+    nc.width=Math.max(64,Math.round(canvas.width*0.85)); nc.height=Math.max(64,Math.round(canvas.height*0.85));
+    const cx=nc.getContext('2d'); cx.fillStyle='#fff'; cx.fillRect(0,0,nc.width,nc.height);
+    cx.drawImage(canvas,0,0,nc.width,nc.height);
+    canvas=nc;
+  }
+  return null;
+}
+/* każdy plan zapisujemy do WebP (mniejszy niż JPEG/PNG); meta — tylko import z PDF */
+function planFromCanvas(name,cv,atLL,meta){
+  const res=compressCanvas(cv);
+  if(!res){uiAlert('Plan jest zbyt duży nawet po kompresji. Zmniejsz rozdzielczość i spróbuj ponownie.');return;}
+  // kompresja mogła zmniejszyć piksele → metry/piksel liczone od FINALNYCH pikseli obrazu
+  if(meta&&meta.mppImage&&res.w!==cv.width) meta.mppImage=meta.mppImage*cv.width/res.w;
+  addOverlayFromImage(name,res.url,res.w,res.h,atLL,meta);
 }
 /* obraz (JPG/PNG/…): skalowanie na canvasie do 1800 px dłuższego boku, potem WebP */
 function loadImagePlan(f,atLL){
@@ -2737,22 +2835,129 @@ function loadImagePlan(f,atLL){
   };
   r.readAsDataURL(f);
 }
-/* PDF: przyjmujemy tylko JEDNOSTRONICOWY; renderujemy stronę 1 do ~1800 px i zapisujemy jako WebP */
+/* ——— PDF (np. budowlane PZT 1:500): adaptacyjna rozdzielczość + auto-wykrycie skali z warstwy tekstowej ——— */
+/* dialog wyboru strony dla PDF wielostronicowego (select w stylu systemu; null = anuluj import) */
+function uiPdfPageDialog(numPages){
+  return new Promise(resolve=>{
+    const overlay=document.createElement('div'); overlay.className='modal-overlay';
+    const card=document.createElement('div'); card.className='modal-card';
+    card.innerHTML='<div class="modal-hero"><span class="modal-ico" data-kind="info">'+ico('doc')+'</span>'
+      +'<div class="modal-htext"><h4>PDF wielostronicowy</h4>'
+      +'<div class="modal-msg">Plik ma '+numPages+' stron — wybierz stronę, która zostanie wczytana jako plan.</div></div></div>'
+      +'<div style="margin-top:.7rem"></div><div class="modal-actions"></div>';
+    const selWrap=card.children[1];
+    const sel=document.createElement('select');
+    for(let i=1;i<=numPages;i++){const o=document.createElement('option');o.value=i;o.textContent='Strona '+i;sel.appendChild(o);}
+    selWrap.appendChild(sel);
+    const actions=card.querySelector('.modal-actions');
+    let done=false;
+    const close=v=>{if(done)return;done=true;document.removeEventListener('keydown',onKey,true);overlay.remove();resolve(v);};
+    const cancel=document.createElement('button'); cancel.className='btn'; cancel.textContent='Anuluj'; cancel.onclick=()=>close(null);
+    const ok=document.createElement('button'); ok.className='btn primary'; ok.textContent='Wczytaj'; ok.onclick=()=>close(+sel.value||1);
+    actions.appendChild(cancel); actions.appendChild(ok);
+    const onKey=e=>{
+      if(e.key==='Escape'){e.preventDefault();e.stopPropagation();close(null);}
+      else if(e.key==='Enter'){
+        const a=document.activeElement;
+        if(a&&a.closest&&a.closest('.dd-wrap'))return;   // Enter na rozwiniętej liście stron obsługuje dropdown
+        e.preventDefault();close(+sel.value||1);
+      }
+    };
+    document.addEventListener('keydown',onKey,true);
+    overlay.addEventListener('mousedown',e=>{if(e.target===overlay)close(null);});
+    overlay.appendChild(card); document.body.appendChild(overlay);
+    if(window.enhanceSelect)window.enhanceSelect(sel);
+    requestAnimationFrame(()=>ok.focus());
+  });
+}
+/* dialog skali po imporcie PDF: edytowalny mianownik + Zastosuj / Umieść bez skali */
+function uiPdfScaleDialog(detected,sheetMM){
+  return new Promise(resolve=>{
+    const overlay=document.createElement('div'); overlay.className='modal-overlay';
+    const card=document.createElement('div'); card.className='modal-card';
+    const mm=Math.round(sheetMM[0])+'×'+Math.round(sheetMM[1])+' mm';
+    card.innerHTML='<div class="modal-hero"><span class="modal-ico" data-kind="info">'+ico('ruler')+'</span>'
+      +'<div class="modal-htext"><h4>Skala planu</h4>'
+      +'<div class="modal-msg">'+(detected?'Wykryto skalę <b>1:'+detected+'</b>':'Nie wykryto skali w treści PDF')
+      +' (arkusz ~'+mm+'). Umieścić plan na mapie w skali rzeczywistej?</div></div></div>'
+      +'<label style="display:block;margin-top:.7rem;font-size:11px;color:var(--muted)">Mianownik skali (1 : …)</label>'
+      +'<input class="modal-input" type="number" min="1" max="20000" step="1" style="margin-top:.25rem">'
+      +'<div style="margin-top:.55rem;font-size:11px;color:var(--muted);line-height:1.45">Uwaga: wydruki „dopasuj do strony” potrafią przekłamać skalę arkusza — po umieszczeniu możesz ją doprecyzować przyciskiem „Kalibruj skalę” (2 punkty + rzeczywista odległość).</div>'
+      +'<div class="modal-actions"></div>';
+    const input=card.querySelector('.modal-input'); input.value=detected||500;
+    const actions=card.querySelector('.modal-actions');
+    let done=false;
+    const close=v=>{if(done)return;done=true;document.removeEventListener('keydown',onKey,true);overlay.remove();resolve(v);};
+    const noScale=document.createElement('button'); noScale.className='btn'; noScale.textContent='Umieść bez skali'; noScale.onclick=()=>close({apply:false});
+    const ok=document.createElement('button'); ok.className='btn primary'; ok.textContent='Zastosuj skalę';
+    ok.onclick=()=>{const d=parseInt(input.value,10); if(!(d>0)){input.focus();return;} close({apply:true,denom:d});};
+    actions.appendChild(noScale); actions.appendChild(ok);
+    const onKey=e=>{
+      if(e.key==='Escape'){e.preventDefault();e.stopPropagation();close({apply:false});}
+      else if(e.key==='Enter'){e.preventDefault();ok.click();}
+    };
+    document.addEventListener('keydown',onKey,true);
+    overlay.addEventListener('mousedown',e=>{if(e.target===overlay)close({apply:false});});
+    overlay.appendChild(card); document.body.appendChild(overlay);
+    requestAnimationFrame(()=>{input.focus();input.select();});
+  });
+}
+/* wykrycie mianownika skali w warstwie tekstowej strony (wzorzec „1:500”); preferuj dopasowanie przy tokenie SKALA */
+async function detectPdfScale(page){
+  try{
+    const tc=await page.getTextContent();
+    const items=(tc.items||[]).map(it=>({s:String(it.str||''),x:it.transform?it.transform[4]:null,y:it.transform?it.transform[5]:null}));
+    const RE=/1\s*[:∶]\s*(\d{3,5})/g, OK=d=>d>=100&&d<=5000;
+    const cands=[], skala=[];
+    items.forEach(it=>{
+      if(/SKALA/i.test(it.s))skala.push(it);
+      let m; RE.lastIndex=0;
+      while((m=RE.exec(it.s))){const d=+m[1]; if(OK(d))cands.push({d,x:it.x,y:it.y,near:/SKALA/i.test(it.s)});}
+    });
+    if(!cands.length){ // „1 : 500” bywa rozbite na osobne itemy — fallback: cały tekst sklejony
+      const all=items.map(i=>i.s).join(' ');
+      let m; RE.lastIndex=0;
+      while((m=RE.exec(all))){const d=+m[1]; if(OK(d))cands.push({d});}
+    }
+    if(!cands.length)return null;
+    const inSkala=cands.find(c=>c.near); if(inSkala)return inSkala.d;
+    if(skala.length){ // najbliższy geometrycznie tokenowi SKALA
+      let best=null,bd=Infinity;
+      cands.forEach(c=>{if(c.x==null)return;skala.forEach(sp=>{if(sp.x==null)return;const dd=Math.hypot(c.x-sp.x,c.y-sp.y);if(dd<bd){bd=dd;best=c;}});});
+      if(best)return best.d;
+    }
+    return cands[0].d;
+  }catch(e){return null;}
+}
+/* render strony PDF w adaptacyjnej rozdzielczości: bazowo 150 DPI, obniżane tak, by ≤ ~16 Mpx i dłuższy bok ≤ ~7000 px */
 function loadPdfPlan(f,atLL){
   if(!window.pdfjsLib){uiAlert('Obsługa PDF nie została załadowana. Odśwież stronę i spróbuj ponownie.');return;}
   const r=new FileReader();
-  r.onload=()=>{
-    pdfjsLib.getDocument({data:new Uint8Array(r.result)}).promise.then(pdf=>{
-      if(pdf.numPages!==1){uiAlert('PDF ma '+pdf.numPages+' stron — wgraj plik z jedną stroną (lub obraz).');return;}
-      return pdf.getPage(1).then(page=>{
-        const base=page.getViewport({scale:1});
-        const scale=Math.min(3,1800/Math.max(base.width,base.height)); // celuj w ~1800 px dłuższy bok
-        const vp=page.getViewport({scale:Math.max(scale,0.2)});
-        const cv=document.createElement('canvas'); cv.width=Math.round(vp.width); cv.height=Math.round(vp.height);
-        const ctx=cv.getContext('2d'); ctx.fillStyle='#fff'; ctx.fillRect(0,0,cv.width,cv.height); // białe tło pod przezroczystością
-        return page.render({canvasContext:ctx,viewport:vp}).promise.then(()=>planFromCanvas(planName(f),cv,atLL));
-      });
-    }).catch(err=>uiAlert('Nie udało się wczytać PDF: '+(err&&err.message||err)));
+  r.onload=async()=>{
+    try{
+      const pdf=await pdfjsLib.getDocument({data:new Uint8Array(r.result)}).promise;
+      let pageNo=1;
+      if(pdf.numPages>1){pageNo=await uiPdfPageDialog(pdf.numPages); if(pageNo==null)return;}
+      const page=await pdf.getPage(pageNo);
+      const base=page.getViewport({scale:1});            // pt; uwzględnia /Rotate strony
+      const wMM=base.width*25.4/72, hMM=base.height*25.4/72;
+      let dpi=150;
+      dpi=Math.min(dpi, 7000/(Math.max(base.width,base.height)/72));                 // limit dłuższego boku canvas
+      dpi=Math.min(dpi, Math.sqrt(16e6/((base.width/72)*(base.height/72))));         // limit ~16 Mpx łącznie
+      dpi=Math.max(40,dpi);
+      const vp=page.getViewport({scale:dpi/72});
+      const cv=document.createElement('canvas'); cv.width=Math.round(vp.width); cv.height=Math.round(vp.height);
+      const ctx=cv.getContext('2d'); ctx.fillStyle='#fff'; ctx.fillRect(0,0,cv.width,cv.height); // białe tło pod przezroczystością
+      await page.render({canvasContext:ctx,viewport:vp}).promise;
+      const detected=await detectPdfScale(page);
+      const ans=await uiPdfScaleDialog(detected,[wMM,hMM]);
+      const meta={sheetMM:[Math.round(wMM),Math.round(hMM)],scaleDenom:detected||null,applyScale:false,mppImage:null};
+      if(ans&&ans.apply){
+        meta.applyScale=true; meta.scaleDenom=ans.denom;
+        meta.mppImage=(25.4/dpi)*ans.denom/1000;   // metry/piksel renderu; ewentualny downscale kompresji koryguje planFromCanvas
+      }
+      planFromCanvas(planName(f),cv,atLL,meta);
+    }catch(err){uiAlert('Nie udało się wczytać PDF: '+(err&&err.message||err));}
   };
   r.readAsArrayBuffer(f);
 }
@@ -2760,7 +2965,48 @@ function loadPlanFile(f,atLL){
   if(!f)return;
   if(/^image\//.test(f.type)) loadImagePlan(f,atLL);
   else if(f.type==='application/pdf'||/\.pdf$/i.test(f.name)) loadPdfPlan(f,atLL);
-  else uiAlert('Wybierz obraz (JPG/PNG) lub jednostronicowy PDF.');
+  else uiAlert('Wybierz obraz (JPG/PNG) lub plik PDF.');
+}
+
+/* ====== KALIBRACJA DWUPUNKTOWA skali planu: 2 kliknięcia na podkładzie + rzeczywista odległość [m] ====== */
+let calib=null;   // {ov, pts:[latlng], line} — aktywna kalibracja (mode==='calib')
+function startCalibration(ov){
+  if(ov.locked){showToast('Plan jest zablokowany — odblokuj go kłódką, aby kalibrować skalę.');return;}
+  selectOverlay(ov);
+  if(!ov.visible){uiAlert('Plan jest ukryty — włącz jego widoczność przed kalibracją.');return;}
+  setMode('calib');
+  calib={ov,pts:[],line:null};
+  showToast('Kalibracja skali: kliknij 2 punkty na planie o znanej odległości (np. końce koty wymiarowej). Esc — anuluj.',7000);
+}
+function endCalib(){if(!calib)return;if(calib.line)map.removeLayer(calib.line);calib=null;}
+function calibMove(latlng){
+  if(!calib||!calib.pts.length)return;   // linia podglądu od 1. punktu do kursora (jak w trybie pomiaru)
+  if(!calib.line)calib.line=L.polyline([calib.pts[0],latlng],{color:'#22d3ee',weight:2,dashArray:'4,4',interactive:false}).addTo(map);
+  else calib.line.setLatLngs([calib.pts[0],latlng]);
+}
+function calibClick(latlng){
+  if(!calib)return;
+  calib.pts.push(latlng);
+  if(calib.pts.length<2){calibMove(latlng);return;}
+  const ov=calib.ov, mapM=map.distance(calib.pts[0],calib.pts[1]);
+  endCalib(); setMode(null);
+  if(!(mapM>0.01)){uiAlert('Punkty kalibracji są zbyt blisko siebie — spróbuj ponownie.');return;}
+  uiPrompt('Rzeczywista odległość między punktami [m]:','',{title:'Kalibracja skali',okText:'Przelicz',placeholder:'np. 25'}).then(v=>{
+    if(v==null)return;
+    const realM=parseFloat(String(v).replace(',','.'));
+    if(!(realM>0)){uiAlert('Podaj dodatnią odległość w metrach.');return;}
+    const f=realM/mapM, c=planCenter(ov);
+    const hLat=(ov.ne[0]-c[0])*f, hLng=(ov.ne[1]-c[1])*f;     // skalowanie bounds wokół środka (jak scaleOverlayTo)
+    ov.sw=[c[0]-hLat,c[1]-hLng]; ov.ne=[c[0]+hLat,c[1]+hLng];
+    initBaseSize(ov);                                          // 100% na suwaku = rozmiar po kalibracji
+    updateOverlayBounds(ov); updateOvMpp(ov);
+    if(ov.meta)ov.meta.calibrated=true;
+    if(selectedOverlay===ov)positionPlanHandles(ov);
+    renderPlans(); persistOverlay(ov,{geom:1});
+    const den=ovEffectiveDenom(ov);
+    showToast('Skala skalibrowana'+(den?' — efektywnie ≈1:'+Math.round(den):'')
+      +(ov.meta&&ov.meta.mppImage?' ('+ov.meta.mppImage.toFixed(3)+' m/px obrazu)':''),6000);
+  });
 }
 el('btnAddPlan').onclick=()=>el('planInput').click();
 el('planInput').onchange=e=>{const f=e.target.files[0]; e.target.value=''; loadPlanFile(f);};
@@ -2778,7 +3024,7 @@ el('planInput').onchange=e=>{const f=e.target.files[0]; e.target.value=''; loadP
     if(!hasFiles(e))return; stop(e); depth=0; mapEl.classList.remove('plan-dropzone');
     const atLL=map.mouseEventToLatLng(e);
     const files=Array.from(e.dataTransfer.files||[]).filter(isPlanFile);
-    if(!files.length){uiAlert('Upuść obraz (JPG/PNG) lub jednostronicowy PDF, aby dodać plan.');return;}
+    if(!files.length){uiAlert('Upuść obraz (JPG/PNG) lub PDF, aby dodać plan.');return;}
     activateTab('plans');
     files.forEach((f,i)=>loadPlanFile(f, i===0?atLL:null)); // kolejne pliki: wyśrodkowane, by się nie nakładały 1:1
   });
@@ -2802,18 +3048,20 @@ function persistOverlay(ov,fields){
     if(fields.opacity)b.opacity=ov.opacity;
     if(fields.rotation)b.rotation=ov.rotation;
     if(fields.visible)b.visible=ov.visible;
+    if(fields.locked)b.locked=!!ov.locked;
     if(fields.geom){b.swLat=ov.sw[0];b.swLng=ov.sw[1];b.neLat=ov.ne[0];b.neLng=ov.ne[1];}
+    if(fields.geom||fields.meta)b.meta=ov.meta?JSON.stringify(ov.meta):null;   // mppImage zmienia się z geometrią
     debouncePut(ov,b);
   }else save();
 }
 function createOverlayRecord(ov){
   if(!SERVER){save();return;}
   fetch('/api/monitoring/'+PROJECT_ID+'/overlays',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({name:ov.name,data:ov.data,swLat:ov.sw[0],swLng:ov.sw[1],neLat:ov.ne[0],neLng:ov.ne[1],rotation:ov.rotation,opacity:ov.opacity})})
+    body:JSON.stringify({name:ov.name,data:ov.data,swLat:ov.sw[0],swLng:ov.sw[1],neLat:ov.ne[0],neLng:ov.ne[1],rotation:ov.rotation,opacity:ov.opacity,meta:ov.meta?JSON.stringify(ov.meta):null})})
     .then(r=>r.ok?r.json():Promise.reject()).then(j=>{
       ov.dbId=j.data.id; markStatus(true);
       // dosynchronizuj ewentualne zmiany sprzed powrotu POST
-      persistOverlay(ov,{name:1,opacity:1,rotation:1,visible:1,geom:1});
+      persistOverlay(ov,{name:1,opacity:1,rotation:1,visible:1,locked:1,geom:1});
     }).catch(()=>markStatus(false));
 }
 function loadOverlays(){
@@ -2821,7 +3069,7 @@ function loadOverlays(){
   fetch('/api/monitoring/'+PROJECT_ID+'/overlays',{cache:'no-store'}).then(r=>r.ok?r.json():Promise.reject())
     .then(j=>{(j.data||[]).forEach(o=>{
       const ov={dbId:o.id,name:o.name,data:o.data,sw:[o.swLat,o.swLng],ne:[o.neLat,o.neLng],
-        rotation:o.rotation||0,opacity:o.opacity==null?0.7:o.opacity,visible:o.visible!==false,layer:null};
+        rotation:o.rotation||0,opacity:o.opacity==null?0.7:o.opacity,visible:o.visible!==false,locked:o.locked===true,layer:null,meta:parseOvMeta(o.meta)};
       initBaseSize(ov); overlays.push(ov); drawOverlay(ov);
     }); renderPlans();}).catch(()=>{});
 }
@@ -2839,6 +3087,7 @@ function setMode(m){
   map.getContainer().style.cursor=m?'crosshair':'';
   const _rot=(m==='rotate'); document.body.classList.toggle('rotating',_rot); map.boxZoom[_rot?'disable':'enable'](); map.dragging[_rot?'disable':'enable']();
   if(m!=='addcam'){ aiming=null; hideGhost(); }   // sprzątnij podgląd łezki i przerwane celowanie po wyjściu z trybu kamery
+  if(m!=='calib') endCalib();                     // porzucona kalibracja skali planu — usuń linię podglądu
   if(m!=='rotate' && rotating){ const {cam,az0}=rotating; rotating=null; cam.az=az0; updateCam(cam); if(selected===cam)positionHandles(cam); syncForm(cam); reorientPetal(cam); refreshList(); }   // wyjście z obrotu bez zatwierdzenia => przywróć poprzedni kierunek
   // porzuć niedokończony pomiar/obrys przy każdej zmianie trybu (naprawia „wiszące" linie)
   startMeasure(); startArea();
@@ -2860,12 +3109,14 @@ map.on('click',e=>{
   else if(mode&&mode.indexOf('pt:')===0){addPoint(mode.slice(3),e.latlng);setMode(null);}
   else if(mode==='measure'){measureClick(e.latlng);}
   else if(mode==='area'){areaClick(e.latlng);}
+  else if(mode==='calib'){calibClick(e.latlng);}
   else if(mode==='rotate'){confirmRotate();}
 });
 // Stawianie kamery = dwa kliknięcia: 1. pozycja, 2. kierunek. Podgląd łezki + stożka podąża za kursorem.
 map.on('mousemove',e=>{
   if(mode==='addcam'){ if(aiming) showGhost(aiming.latlng, bearing(aiming.latlng,e.latlng), true); else showGhost(e.latlng, 0, false); }
   else if(mode==='rotate') rotateTo(e.latlng);
+  else if(mode==='calib') calibMove(e.latlng);
 });
 map.getContainer().addEventListener('mouseleave',()=>{ if(!aiming)hideGhost(); });
 map.on('mousedown',e=>{ if(mode==='rotate') L.DomEvent.preventDefault(e); });
@@ -3043,7 +3294,7 @@ function serialize(){
     perim:{...(savedPerim?{tpl:'',zone:'',overlap:'0',mode:'overlap',...savedPerim}:perimSel)}
   };
   // W trybie SERVER plany trzyma osobna tabela (REST) — nie pakujemy obrazów do auto-zapisu stanu.
-  if(!SERVER) o.overlays=overlays.map(v=>({name:v.name,data:v.data,sw:v.sw,ne:v.ne,rotation:v.rotation,opacity:v.opacity,visible:v.visible}));
+  if(!SERVER) o.overlays=overlays.map(v=>({name:v.name,data:v.data,sw:v.sw,ne:v.ne,rotation:v.rotation,opacity:v.opacity,visible:v.visible,locked:!!v.locked,meta:v.meta||null}));
   return o;
 }
 /* tryb aplikacji: otwarty z alfa-app (?id=N) => auto-zapis do bazy przez API */
@@ -3101,7 +3352,7 @@ function loadState(d){
   });
   (d.zones||[]).forEach(z=>{const zn={...z};if(zn.kind!=='main')zn.kind='side';if(zn.area==null)zn.area=polygonArea(zn.pts);zones.push(zn);drawZone(zn);});
   (d.overlays||[]).forEach(o=>{ // plany z zapisu lokalnego (w trybie SERVER wczytuje je loadOverlays())
-    const ov={dbId:null,name:o.name,data:o.data,sw:o.sw,ne:o.ne,rotation:o.rotation||0,opacity:o.opacity==null?0.7:o.opacity,visible:o.visible!==false,layer:null};
+    const ov={dbId:null,name:o.name,data:o.data,sw:o.sw,ne:o.ne,rotation:o.rotation||0,opacity:o.opacity==null?0.7:o.opacity,visible:o.visible!==false,locked:o.locked===true,layer:null,meta:parseOvMeta(o.meta)};
     initBaseSize(ov); overlays.push(ov); drawOverlay(ov);
   });
   refreshList(); refreshPoints(); refreshCable(); refreshZones(); renderPlans(); restackCameras(); applyLayerToggles();

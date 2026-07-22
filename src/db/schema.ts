@@ -679,7 +679,12 @@ export const monitoringOverlays = sqliteTable("monitoring_overlays", {
   rotation: real("rotation").default(0).notNull(), // stopnie
   opacity: real("opacity").default(0.7).notNull(), // 0..1
   visible: integer("visible", { mode: "boolean" }).default(true).notNull(),
+  // blokada planu — zablokowany nie daje się przesuwać/skalować/obracać w designerze
+  locked: integer("locked", { mode: "boolean" }).default(false).notNull(),
   sortOrder: integer("sort_order").default(0).notNull(),
+  // JSON z metadanymi skali planu (import PDF / kalibracja):
+  // {imgW,imgH, mppImage (m/px obrazu), scaleDenom (1:X), sheetMM:[w,h], calibrated}
+  meta: text("meta"),
   createdAt: text("created_at")
     .default(sql`(datetime('now'))`)
     .notNull(),
