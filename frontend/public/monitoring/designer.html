@@ -2935,30 +2935,70 @@ const uiFrame=()=>new Promise(r=>requestAnimationFrame(()=>setTimeout(r,0)));
 function ckCancel(token){if(token&&token.cancelled){const e=new Error('anulowano');e.cancelled=true;throw e;}}
 
 /* Drabinka kompresji (ASYNC, bez blokowania UI): WebP q 0.8 → 0.65 → 0.5; gdy nadal za duże —
-   downscale canvasa ×0.85 i ponów. Decyzje po blob.size (toBlob), dataURL liczony DOKŁADNIE z bajtów
+   downscale canvasa ×0.85 i ponów. Decyzje po blob.size, dataURL liczony DOKŁADNIE z bajtów
    (23 znaki nagłówka + base64) i konwertowany tylko RAZ, dla zaakceptowanego wyniku.
-   Cel < ~3 MB dataURL (4 M znaków), twardy limit 7.4 M znaków (backend odrzuca > 8 M). */
+   Cel < ~3 MB dataURL (4 M znaków), twardy limit 7.4 M znaków (backend odrzuca > 8 M).
+   PERF: wszystkie szczeble jakości enkodują się RÓWNOLEGLE w puli 3 workerów
+   (createImageBitmap → OffscreenCanvas.convertToBlob) — ściana = najwolniejsze pojedyncze
+   enkodowanie zamiast sumy prób; wybór wyniku identyczny jak w drabince sekwencyjnej
+   (najwyższe q mieszczące się w celu). Fallback: sekwencyjny toBlob na main. */
 const cvToBlob=(cv,q)=>new Promise(res=>cv.toBlob(b=>res(b),'image/webp',q));
 const blobToDataURL=b=>new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result);r.onerror=()=>rej(new Error('konwersja obrazu nie powiodła się'));r.readAsDataURL(b);});
 const dataURLLen=bytes=>23+Math.ceil(bytes/3)*4;   // 'data:image/webp;base64,' + długość base64
+const ENC_QS=[0.8,0.65,0.5];
+const ENC_PARALLEL=typeof OffscreenCanvas!=='undefined'&&typeof createImageBitmap==='function'&&!!OffscreenCanvas.prototype.convertToBlob&&typeof Worker!=='undefined';
+let _encPool=null;
+function encPool(){
+  if(!_encPool){
+    const src="onmessage=async e=>{const{bmp,q}=e.data;try{const oc=new OffscreenCanvas(bmp.width,bmp.height);oc.getContext('2d').drawImage(bmp,0,0);if(bmp.close)bmp.close();const blob=await oc.convertToBlob({type:'image/webp',quality:q});postMessage({ok:1,blob});}catch(err){postMessage({ok:0});}};";
+    const url=URL.createObjectURL(new Blob([src],{type:'application/javascript'}));
+    _encPool=ENC_QS.map(()=>new Worker(url));
+  }
+  return _encPool;
+}
+const encInWorker=(w,bmp,q)=>new Promise(res=>{w.onmessage=e=>res(e.data.ok?e.data.blob:null);w.postMessage({bmp,q},[bmp]);});
+/* enkoduje szczeble drabinki dla danego canvasu; zwraca [{q,blob|null}] w kolejności malejącego q */
+async function encodeLadder(canvas,token,onStep){
+  if(ENC_PARALLEL){
+    try{
+      const bmps=await Promise.all(ENC_QS.map(()=>createImageBitmap(canvas)));
+      ckCancel(token);
+      const pool=encPool();
+      const blobs=await Promise.all(ENC_QS.map((q,k)=>encInWorker(pool[k],bmps[k],q)));
+      const out=ENC_QS.map((q,k)=>({q,blob:blobs[k]}));
+      if(out.some(r=>r.blob)){
+        let n=0; out.forEach(r=>{if(r.blob&&onStep)onStep(++n,r.blob.size);});
+        return out;
+      }
+    }catch(e){ if(e&&e.cancelled)throw e; /* inaczej: fallback sekwencyjny niżej */ }
+  }
+  const out=[]; let n=0;
+  for(const q of ENC_QS){
+    ckCancel(token); await uiFrame();
+    const blob=await cvToBlob(canvas,q);
+    if(blob&&onStep)onStep(++n,blob.size);
+    out.push({q,blob});
+    if(blob&&dataURLLen(blob.size)<=4_000_000)break;   // sekwencyjnie: nie schodź niżej, gdy już się mieści
+  }
+  return out;
+}
 async function compressCanvasAsync(cv,token,onStep){
-  const TARGET=4_000_000, HARD=7_400_000, QS=[0.8,0.65,0.5];
-  let canvas=cv, attempt=0;
+  const TARGET=4_000_000, HARD=7_400_000;
+  let canvas=cv;
   for(let i=0;i<8;i++){
+    ckCancel(token); await uiFrame();
+    const tries=await encodeLadder(canvas,token,onStep);
+    ckCancel(token);
     let smallest=null;
-    for(const q of QS){
-      ckCancel(token); await uiFrame();
-      attempt++;
-      const blob=await cvToBlob(canvas,q);
-      if(!blob)continue;
-      if(onStep)onStep(attempt,blob.size);
-      if(dataURLLen(blob.size)<=TARGET) return {url:await blobToDataURL(blob),w:canvas.width,h:canvas.height};
-      if(!smallest||blob.size<smallest.blob.size) smallest={blob,w:canvas.width,h:canvas.height};
+    for(const r of tries){
+      if(!r.blob)continue;
+      if(dataURLLen(r.blob.size)<=TARGET)   // ENC_QS malejąco → pierwszy pasujący = najwyższa jakość
+        return {url:await blobToDataURL(r.blob),w:canvas.width,h:canvas.height};
+      if(!smallest||r.blob.size<smallest.blob.size) smallest={blob:r.blob,w:canvas.width,h:canvas.height};
     }
     // nie schodź poniżej czytelności rysunku — jeśli mieści się w twardym limicie, przyjmij co jest
     if(canvas.width<900||canvas.height<900||i===7)
       return smallest&&dataURLLen(smallest.blob.size)<=HARD?{url:await blobToDataURL(smallest.blob),w:smallest.w,h:smallest.h}:null;
-    ckCancel(token); await uiFrame();
     const nc=document.createElement('canvas');
     nc.width=Math.max(64,Math.round(canvas.width*0.85)); nc.height=Math.max(64,Math.round(canvas.height*0.85));
     const cx=nc.getContext('2d'); cx.fillStyle='#fff'; cx.fillRect(0,0,nc.width,nc.height);
@@ -3125,13 +3165,15 @@ async function loadPdfPlan(f,atLL){
     dpi=Math.max(40,dpi);
     const vp=page.getViewport({scale:dpi/72});
     const cv=document.createElement('canvas'); cv.width=Math.round(vp.width); cv.height=Math.round(vp.height);
-    const ctx=cv.getContext('2d'); ctx.fillStyle='#fff'; ctx.fillRect(0,0,cv.width,cv.height);   // białe tło pod przezroczystością
+    // alpha:false → nieprzezroczysty canvas (szybszy encoder WebP); białe tło maluje pdf.js opcją background
+    const ctx=cv.getContext('2d',{alpha:false});
     planProgStage('Renderowanie arkusza ('+cv.width+'×'+cv.height+' px, '+Math.round(dpi)+' DPI)…'); await uiFrame();
-    const rt=page.render({canvasContext:ctx,viewport:vp}); token.renderTask=rt;
+    const detectP=detectPdfScale(page);   // getTextContent RÓWNOLEGLE z renderem — detekcja nie zależy od canvasu
+    const rt=page.render({canvasContext:ctx,viewport:vp,background:'#ffffff'}); token.renderTask=rt;
     await rt.promise; token.renderTask=null;
     ckCancel(token);
     planProgStage('Wykrywanie skali…'); await uiFrame();
-    const detected=await detectPdfScale(page);
+    const detected=await detectP;         // zwykle już rozstrzygnięte — etap tylko mignie
     ckCancel(token);
     planProgStage('Kompresja…'); await uiFrame();
     const res=await compressCanvasAsync(cv,token,compressStage);
