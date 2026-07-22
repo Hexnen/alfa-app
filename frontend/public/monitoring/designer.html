@@ -372,6 +372,8 @@
   /* zablokowany plan: kliknięcia przechodzą na mapę, brak przeciągania po obrazie */
   .plan-overlay.plan-locked{pointer-events:none !important}
   .icon-btn.lock-on{color:var(--accent2)}
+  /* tryb samodzielny (bez podkładu kafelkowego): neutralne jasne tło zamiast szarości Leafleta */
+  #map.base-standalone{background:#f3f4f6}
   .modal-actions{display:flex;gap:.5rem;justify-content:flex-end;margin-top:1rem}
   /* === /FUNDAMENT === */
 
@@ -1424,10 +1426,21 @@ const bases = {
   "Google Hybryda (sat + nazwy)": L.tileLayer('https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}',{maxZoom:22,maxNativeZoom:21,subdomains:['mt0','mt1','mt2','mt3'],attribution:'Google'}),
   "Mapa OSM": L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'})
 };
+/* Tryb SAMODZIELNY (bez podkładu): plan (np. PZT) jest mapą — zero kafelków, neutralne tło.
+   Zostajemy na EPSG:3857, więc cała geometria metrowa (destination, map.distance, stożki, kable) działa bez zmian. */
+const BASE_NONE='__none__';
 const baseSel = document.getElementById('baseSel');
 Object.keys(bases).forEach((k,i)=>{const o=document.createElement('option');o.value=k;o.textContent=k;baseSel.appendChild(o);});
+{const o=document.createElement('option');o.value=BASE_NONE;o.textContent='Samodzielny (bez mapy)';baseSel.appendChild(o);}
 let currentBase = bases[Object.keys(bases)[0]].addTo(map);
-baseSel.onchange = ()=>{map.removeLayer(currentBase);currentBase=bases[baseSel.value].addTo(map);};
+function setBase(key){
+  if(!bases[key]&&key!==BASE_NONE)return;
+  if(currentBase){map.removeLayer(currentBase);currentBase=null;}
+  if(key!==BASE_NONE)currentBase=bases[key].addTo(map);
+  map.getContainer().classList.toggle('base-standalone',key===BASE_NONE);
+  if(baseSel.value!==key)baseSel.value=key;
+}
+baseSel.onchange = ()=>{setBase(baseSel.value);save();};   // utrwal wybór podkładu od razu (nie czekając na autosave)
 
 L.control.scale({metric:true,imperial:false,position:'bottomleft'}).addTo(map);
 
@@ -2883,21 +2896,29 @@ function uiPdfScaleDialog(detected,sheetMM){
       +'<label style="display:block;margin-top:.7rem;font-size:11px;color:var(--muted)">Mianownik skali (1 : …)</label>'
       +'<input class="modal-input" type="number" min="1" max="20000" step="1" style="margin-top:.25rem">'
       +'<div style="margin-top:.55rem;font-size:11px;color:var(--muted);line-height:1.45">Uwaga: wydruki „dopasuj do strony” potrafią przekłamać skalę arkusza — po umieszczeniu możesz ją doprecyzować przyciskiem „Kalibruj skalę” (2 punkty + rzeczywista odległość).</div>'
-      +'<div class="modal-actions"></div>';
+      +'<div class="modal-actions" style="flex-wrap:wrap"></div>';
     const input=card.querySelector('.modal-input'); input.value=detected||500;
     const actions=card.querySelector('.modal-actions');
     let done=false;
     const close=v=>{if(done)return;done=true;document.removeEventListener('keydown',onKey,true);overlay.remove();resolve(v);};
+    const readDenom=()=>{const d=parseInt(input.value,10); if(!(d>0)){input.focus();return null;} return d;};
+    // „Użyj jako mapy”: umieszczenie w skali + przełączenie na tryb samodzielny (plan JEST mapą, bez kafelków)
+    const asMap=document.createElement('button'); asMap.className='btn'; asMap.style.cssText='width:100%;margin-top:.6rem';
+    asMap.innerHTML=ico('map')+' Użyj jako mapy (tryb samodzielny)';
+    asMap.title='Umieść plan w skali rzeczywistej i wyłącz podkład satelitarny — pracujesz na samym planie';
+    asMap.onclick=()=>{const d=readDenom(); if(d!=null)close({apply:true,denom:d,standalone:true});};
+    actions.parentNode.insertBefore(asMap,actions);
+    const cancel=document.createElement('button'); cancel.className='btn'; cancel.textContent='Anuluj'; cancel.onclick=()=>close(null);
     const noScale=document.createElement('button'); noScale.className='btn'; noScale.textContent='Umieść bez skali'; noScale.onclick=()=>close({apply:false});
     const ok=document.createElement('button'); ok.className='btn primary'; ok.textContent='Zastosuj skalę';
-    ok.onclick=()=>{const d=parseInt(input.value,10); if(!(d>0)){input.focus();return;} close({apply:true,denom:d});};
-    actions.appendChild(noScale); actions.appendChild(ok);
+    ok.onclick=()=>{const d=readDenom(); if(d!=null)close({apply:true,denom:d});};
+    actions.appendChild(cancel); actions.appendChild(noScale); actions.appendChild(ok);
     const onKey=e=>{
-      if(e.key==='Escape'){e.preventDefault();e.stopPropagation();close({apply:false});}
+      if(e.key==='Escape'){e.preventDefault();e.stopPropagation();close(null);}   // Esc = Anuluj (bez importu)
       else if(e.key==='Enter'){e.preventDefault();ok.click();}
     };
     document.addEventListener('keydown',onKey,true);
-    overlay.addEventListener('mousedown',e=>{if(e.target===overlay)close({apply:false});});
+    overlay.addEventListener('mousedown',e=>{if(e.target===overlay)close(null);});
     overlay.appendChild(card); document.body.appendChild(overlay);
     requestAnimationFrame(()=>{input.focus();input.select();});
   });
@@ -2951,11 +2972,13 @@ function loadPdfPlan(f,atLL){
       await page.render({canvasContext:ctx,viewport:vp}).promise;
       const detected=await detectPdfScale(page);
       const ans=await uiPdfScaleDialog(detected,[wMM,hMM]);
+      if(!ans)return;   // Anuluj / Esc / klik w tło — przerwij import bez śladów (żadnego overlaya ani zapisu)
       const meta={sheetMM:[Math.round(wMM),Math.round(hMM)],scaleDenom:detected||null,applyScale:false,mppImage:null};
-      if(ans&&ans.apply){
+      if(ans.apply){
         meta.applyScale=true; meta.scaleDenom=ans.denom;
         meta.mppImage=(25.4/dpi)*ans.denom/1000;   // metry/piksel renderu; ewentualny downscale kompresji koryguje planFromCanvas
       }
+      if(ans.standalone)setBase(BASE_NONE);   // przed dodaniem planu — save() z addOverlayFromImage utrwali też nowy base
       planFromCanvas(planName(f),cv,atLL,meta);
     }catch(err){uiAlert('Nie udało się wczytać PDF: '+(err&&err.message||err));}
   };
@@ -3333,7 +3356,7 @@ function loadState(d){
   zones.forEach(z=>{if(z.poly)map.removeLayer(z.poly);});
   overlays.forEach(o=>{if(o.layer)map.removeLayer(o.layer);});
   cameras=[];points=[];cables=[];zones=[];overlays=[];clearHandles();clearPlanHandles();clearZoneHandles();selected=null;selectedOverlay=null;selectedZone=null;startArea();
-  if(d.base&&bases[d.base]){map.removeLayer(currentBase);currentBase=bases[d.base].addTo(map);baseSel.value=d.base;}
+  if(d.base&&(bases[d.base]||d.base===BASE_NONE))setBase(d.base);
   if(d.center)map.setView(d.center,d.zoom||DEFAULT_ZOOM);
   camSeq=d.seq?.cam||0; ptSeq=d.seq?.pt||{}; zoneSeq=d.seq?.zone||0;
   el('objInfo').value=d.info||DEFAULT_INFO;
@@ -3674,12 +3697,15 @@ async function captureMaps(){
   const shots=[];
   const mapEl=document.getElementById('map');
   const savedStyle=mapEl.style.cssText;   // przywrócimy layout panelu po zrzutach
+  // tryb samodzielny (bez podkładu) — nie ma czego podmieniać ani na co czekać; zrzut idzie na białym tle
+  const standalone=!currentBase;
   // podmień podkład na wersję z crossOrigin='anonymous', by kafle dało się wczytać cross-origin
-  const corsBase=L.tileLayer(currentBase._url,{...currentBase.options,crossOrigin:true});
+  const corsBase=standalone?null:L.tileLayer(currentBase._url,{...currentBase.options,crossOrigin:true});
   let tileErrors=0, tileWarned=false;
-  corsBase.on('tileerror',()=>tileErrors++);
+  if(corsBase)corsBase.on('tileerror',()=>tileErrors++);
   // kafle nie osiadły (timeout / błędy pobierania) → jednorazowo spytaj, czy drukować z dziurami w podkładzie
   const ensureTiles=async ms=>{
+    if(standalone)return;
     const ok=await waitBaseLoad(corsBase,ms);
     if((!ok||tileErrors)&&!tileWarned){
       tileWarned=true;
@@ -3687,10 +3713,11 @@ async function captureMaps(){
       if(!go){const e=new Error('anulowano');e.cancelled=true;throw e;}   // finally niżej przywróci stan mapy
     }
   };
-  map.removeLayer(currentBase); corsBase.addTo(map);
+  if(!standalone){map.removeLayer(currentBase); corsBase.addTo(map);}
   try{
     // powiększ mapę do kwadratowego pola zrzutu (sterujemy proporcją / rozdzielczością)
-    mapEl.style.cssText='position:fixed;left:0;top:0;z-index:2000;width:'+CAP+'px;height:'+CAP+'px';   // < .modal-overlay(5000) — uiConfirm o kaflach musi być klikalny nad mapą
+    mapEl.style.cssText='position:fixed;left:0;top:0;z-index:2000;width:'+CAP+'px;height:'+CAP+'px'
+      +(standalone?';background:#fff':'');   // < .modal-overlay(5000) — uiConfirm o kaflach musi być klikalny nad mapą; samodzielny → biały papier
     map.invalidateSize();
     await ensureTiles(15000);
     for(const t of targets){
@@ -3749,8 +3776,8 @@ async function captureMaps(){
     }
   }finally{
     mapEl.style.cssText=savedStyle;
-    map.removeLayer(corsBase);
-    currentBase=bases[prevBaseKey].addTo(map);
+    if(corsBase)map.removeLayer(corsBase);
+    if(!standalone)currentBase=bases[prevBaseKey].addTo(map);
     map.invalidateSize();
     map.setView(prevCenter,prevZoom,{animate:false});
   }
