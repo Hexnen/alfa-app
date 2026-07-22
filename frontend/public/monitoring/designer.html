@@ -374,9 +374,13 @@
   .icon-btn.lock-on{color:var(--accent2)}
   /* tryb samodzielny (bez podkładu kafelkowego): neutralne jasne tło zamiast szarości Leafleta */
   #map.base-standalone{background:#f3f4f6}
-  /* spinner overlaya postępu importu planu */
+  /* spinner + determinowany pasek postępu overlaya importu planu */
   .prog-spin{display:inline-block;width:22px;height:22px;border-radius:50%;border:2.5px solid var(--line);border-top-color:var(--accent);animation:progspin .8s linear infinite}
   @keyframes progspin{to{transform:rotate(360deg)}}
+  .prog-row{display:flex;align-items:center;gap:.55rem;margin-top:.7rem}
+  .prog-bar{flex:1;height:6px;border-radius:999px;background:var(--panel2);border:1px solid var(--line);overflow:hidden}
+  .prog-fill{height:100%;width:0%;border-radius:999px;background:linear-gradient(90deg,var(--brand-2),var(--brand));transition:width .15s linear}
+  .prog-pct{font-family:var(--font-mono);font-size:11px;color:var(--muted);min-width:36px;text-align:right;font-variant-numeric:tabular-nums}
   .modal-actions{display:flex;gap:.5rem;justify-content:flex-end;margin-top:1rem}
   /* === /FUNDAMENT === */
 
@@ -2912,24 +2916,66 @@ if(window.pdfjsLib){
 }
 const isPlanFile=f=>!!f&&(/^image\//.test(f.type)||f.type==='application/pdf'||/\.pdf$/i.test(f.name));
 const planName=f=>(f.name||'Plan').replace(/\.[^.]+$/,'')||'Plan';
-/* ——— OVERLAY POSTĘPU importu planu: pokazywany NATYCHMIAST, etapy na bieżąco, Anuluj przerywa pipeline ——— */
+/* ——— OVERLAY POSTĘPU importu planu: pokazywany NATYCHMIAST, etapy na bieżąco, Anuluj przerywa pipeline.
+   Determinowany pasek 0–100% na ważonych etapach (PDF: wczytywanie 0–15, render+skala 15–35, kompresja 35–100).
+   Etapy bez telemetrii (render, równoległe convertToBlob) animowane asymptotycznie do ~95% górnej granicy
+   przedziału wg estymaty czasu z Mpx; koniec etapu domyka skokowo do granicy. Pasek nigdy się nie cofa. ——— */
 let planProg=null;
-function planProgShow(title,token){
+function planProgShow(title,token,initPct){
   planProgHide();
   const ov=document.createElement('div'); ov.className='modal-overlay plan-progress';
   const card=document.createElement('div'); card.className='modal-card';
   card.innerHTML='<div class="modal-hero"><span class="modal-ico" data-kind="info"><span class="prog-spin"></span></span>'
     +'<div class="modal-htext"><h4></h4><div class="modal-msg prog-stage">Przygotowanie…</div></div></div>'
+    +'<div class="prog-row"><div class="prog-bar"><div class="prog-fill"></div></div><span class="prog-pct">0%</span></div>'
     +'<div class="modal-actions"></div>';
   card.querySelector('h4').textContent=title||'Import planu';
   const btn=document.createElement('button'); btn.className='btn'; btn.textContent='Anuluj';
   btn.onclick=()=>{token.cancelled=true; if(token.renderTask){try{token.renderTask.cancel();}catch(e){}} planProgStage('Anulowanie…'); btn.disabled=true;};
   card.querySelector('.modal-actions').appendChild(btn);
   ov.appendChild(card); document.body.appendChild(ov);
-  planProg={el:ov,textEl:card.querySelector('.prog-stage')};
+  planProg={el:ov,textEl:card.querySelector('.prog-stage'),fill:card.querySelector('.prog-fill'),
+    pctEl:card.querySelector('.prog-pct'),cur:0,range:[0,100],anim:null};
+  if(initPct)planProgSet(initPct);
 }
 function planProgStage(t){if(planProg)planProg.textEl.textContent=t;}
-function planProgHide(){if(planProg){planProg.el.remove();planProg=null;}}
+/* pozycja bezwzględna 0–100, monotoniczna (nigdy w dół) */
+function planProgSet(p){
+  if(!planProg)return;
+  p=Math.min(100,Math.max(planProg.cur,p));
+  planProg.cur=p;
+  planProg.fill.style.width=p+'%';
+  planProg.pctEl.textContent=Math.round(p)+'%';
+}
+function planProgStopAnim(){if(planProg&&planProg.anim){cancelAnimationFrame(planProg.anim);planProg.anim=null;}}
+/* nowy etap: przedział [a,b] paska */
+function planProgRange(a,b){if(!planProg)return;planProgStopAnim();planProg.range=[a,b];planProgSet(a);}
+/* postęp mierzalny (np. onProgress z getDocument): ułamek 0–1 wewnątrz bieżącego przedziału */
+function planProgFrac(f){if(!planProg)return;const[a,b]=planProg.range;planProgSet(a+(b-a)*Math.max(0,Math.min(1,f)));}
+/* etap bez telemetrii: asymptotyczna animacja do ~95% górnej granicy przedziału w tempie z estymaty czasu */
+function planProgDrift(expectedMs){
+  if(!planProg)return;
+  planProgStopAnim();
+  const[a,b]=planProg.range, cap=a+(b-a)*0.95, start=planProg.cur, t0=performance.now();
+  const tau=Math.max(200,expectedMs*0.7);
+  const tick=()=>{
+    if(!planProg)return;
+    const p=start+(cap-start)*(1-Math.exp(-(performance.now()-t0)/tau));
+    planProgSet(p);
+    if(p<cap-0.1&&planProg.anim!==null)planProg.anim=requestAnimationFrame(tick);
+  };
+  planProg.anim=requestAnimationFrame(tick);
+}
+/* koniec etapu: skokowe domknięcie do górnej granicy przedziału */
+function planProgDone(){if(!planProg)return;planProgStopAnim();planProgSet(planProg.range[1]);}
+/* kolejna iteracja downscale kompresji: podprzedział = połowa pozostałego dystansu (bez cofania) */
+function planProgSplit(expectedMs){
+  if(!planProg)return;
+  const end=planProg.range[1], a=planProg.cur;
+  planProgStopAnim(); planProg.range=[a,a+(end-a)/2];
+  planProgDrift(expectedMs);
+}
+function planProgHide(){if(planProg){planProgStopAnim();planProg.el.remove();planProg=null;}}
 /* oddaj klatkę przeglądarce — tekst etapu faktycznie się odmalowuje między ciężkimi krokami */
 const uiFrame=()=>new Promise(r=>requestAnimationFrame(()=>setTimeout(r,0)));
 function ckCancel(token){if(token&&token.cancelled){const e=new Error('anulowano');e.cancelled=true;throw e;}}
@@ -2982,11 +3028,16 @@ async function encodeLadder(canvas,token,onStep){
   }
   return out;
 }
+/* estymata czasu enkodowania drabinki [ms] wg megapikseli (zmierzone: ~185 ms/Mpx równolegle) */
+const encEstMs=(w,h)=>Math.max(400,(w*h/1e6)*(ENC_PARALLEL?185:520));
 async function compressCanvasAsync(cv,token,onStep){
   const TARGET=4_000_000, HARD=7_400_000;
   let canvas=cv;
   for(let i=0;i<8;i++){
     ckCancel(token); await uiFrame();
+    // pasek: 1. podejście płynie po całym przedziale etapu; kolejne downscale dostają połowę pozostałego dystansu
+    if(i===0)planProgDrift(encEstMs(canvas.width,canvas.height));
+    else planProgSplit(encEstMs(canvas.width,canvas.height));
     const tries=await encodeLadder(canvas,token,onStep);
     ckCancel(token);
     let smallest=null;
@@ -3013,7 +3064,7 @@ async function loadImagePlan(f,atLL){
   const token={cancelled:false};
   planProgShow('Import obrazu',token);
   try{
-    planProgStage('Wczytywanie obrazu…'); await uiFrame();
+    planProgStage('Wczytywanie obrazu…'); planProgRange(0,25); planProgDrift(400); await uiFrame();
     const dataURL=await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result);r.onerror=()=>rej(new Error('nie udało się odczytać pliku'));r.readAsDataURL(f);});
     const img=new Image();
     await new Promise((res,rej)=>{img.onload=res;img.onerror=()=>rej(new Error('nieobsługiwany lub uszkodzony obraz'));img.src=dataURL;});
@@ -3022,8 +3073,10 @@ async function loadImagePlan(f,atLL){
     const sc=Math.min(1,max/Math.max(w,h)); w=Math.round(w*sc); h=Math.round(h*sc);
     const cv=document.createElement('canvas'); cv.width=w; cv.height=h;
     cv.getContext('2d').drawImage(img,0,0,w,h);
-    planProgStage('Kompresja…'); await uiFrame();
+    planProgDone();   // wczytany i przeskalowany → 25%
+    planProgStage('Kompresja…'); planProgRange(25,100); await uiFrame();
     const res=await compressCanvasAsync(cv,token,compressStage);
+    planProgDone(); await new Promise(r=>setTimeout(r,180));   // chwila na 100%, żeby domknięcie było widoczne
     planProgHide();
     if(!res){uiAlert('Plan jest zbyt duży nawet po kompresji. Zmniejsz rozdzielczość i spróbuj ponownie.');return;}
     addOverlayFromImage(planName(f),res.url,res.w,res.h,atLL);
@@ -3142,19 +3195,20 @@ async function loadPdfPlan(f,atLL){
   const token={cancelled:false,renderTask:null};
   planProgShow('Import planu z PDF',token);
   try{
-    planProgStage('Wczytywanie PDF…'); await uiFrame();
+    planProgStage('Wczytywanie PDF…'); planProgRange(0,15); planProgDrift(500); await uiFrame();
     const buf=await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result);r.onerror=()=>rej(new Error('nie udało się odczytać pliku'));r.readAsArrayBuffer(f);});
     ckCancel(token);
     const task=pdfjsLib.getDocument({data:new Uint8Array(buf)});
-    task.onProgress=p=>{if(p&&p.total)planProgStage('Wczytywanie PDF… '+Math.min(100,Math.round(p.loaded/p.total*100))+'%');};
+    task.onProgress=p=>{if(p&&p.total){planProgStage('Wczytywanie PDF… '+Math.min(100,Math.round(p.loaded/p.total*100))+'%');planProgFrac(p.loaded/p.total);}};
     const pdf=await task.promise;
     ckCancel(token);
+    planProgDone();   // wczytany → 15%
     let pageNo=1;
     if(pdf.numPages>1){
       planProgHide();                                   // dialog wyboru strony nie może ginąć pod overlayem postępu
       pageNo=await uiPdfPageDialog(pdf.numPages);
       if(pageNo==null)return;
-      planProgShow('Import planu z PDF',token);
+      planProgShow('Import planu z PDF',token,15);      // wróć z zachowanym postępem
     }
     const page=await pdf.getPage(pageNo);
     const base=page.getViewport({scale:1});             // pt; uwzględnia /Rotate strony
@@ -3167,7 +3221,8 @@ async function loadPdfPlan(f,atLL){
     const cv=document.createElement('canvas'); cv.width=Math.round(vp.width); cv.height=Math.round(vp.height);
     // alpha:false → nieprzezroczysty canvas (szybszy encoder WebP); białe tło maluje pdf.js opcją background
     const ctx=cv.getContext('2d',{alpha:false});
-    planProgStage('Renderowanie arkusza ('+cv.width+'×'+cv.height+' px, '+Math.round(dpi)+' DPI)…'); await uiFrame();
+    planProgStage('Renderowanie arkusza ('+cv.width+'×'+cv.height+' px, '+Math.round(dpi)+' DPI)…');
+    planProgRange(15,35); planProgDrift(Math.max(400,cv.width*cv.height/1e6*60)); await uiFrame();
     const detectP=detectPdfScale(page);   // getTextContent RÓWNOLEGLE z renderem — detekcja nie zależy od canvasu
     const rt=page.render({canvasContext:ctx,viewport:vp,background:'#ffffff'}); token.renderTask=rt;
     await rt.promise; token.renderTask=null;
@@ -3175,8 +3230,10 @@ async function loadPdfPlan(f,atLL){
     planProgStage('Wykrywanie skali…'); await uiFrame();
     const detected=await detectP;         // zwykle już rozstrzygnięte — etap tylko mignie
     ckCancel(token);
-    planProgStage('Kompresja…'); await uiFrame();
+    planProgDone();   // render + skala → 35%
+    planProgStage('Kompresja…'); planProgRange(35,100); await uiFrame();
     const res=await compressCanvasAsync(cv,token,compressStage);
+    planProgDone(); await new Promise(r=>setTimeout(r,180));   // chwila na 100% — domknięcie ma być widoczne
     planProgHide();                                     // zamknij postęp PRZED dialogiem skali / komunikatem błędu
     if(!res){uiAlert('Plan jest zbyt duży nawet po kompresji. Zmniejsz rozdzielczość i spróbuj ponownie.');return;}
     const ans=await uiPdfScaleDialog(detected,[wMM,hMM]);
