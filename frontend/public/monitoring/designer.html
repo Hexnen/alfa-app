@@ -4139,6 +4139,15 @@ async function captureMaps(){
           const sp=cam.marker._icon&&cam.marker._icon.querySelector('.cam-flower span');
           if(sp){restore.push([sp,sp.style.transform]); sp.style.transform=(sp.style.transform+' rotate('+angleDeg+'deg)').trim();}
         });
+        // kontr-obrót poziomych etykiet (długości boków, pomiary, nazwy punktów) — ta sama zasada co numery kamer:
+        // etykieta dostaje +angle, ctx.rotate(-angle) ją prostuje. Leaflet daje tooltipom transform-origin:0 0
+        // (leaflet-zoom-animated) — obrót musi iść wokół środka etykiety, inaczej odjeżdża z miejsca zakotwiczenia.
+        mapEl.querySelectorAll('.leaflet-tooltip').forEach(tt=>{
+          if(tt.classList.contains('zone-label'))return;   // podpis obszaru i tak odfiltrowany w rasterMap
+          restore.push([tt,tt.style.transform,tt.style.transformOrigin]);
+          tt.style.transformOrigin='50% 50%';
+          tt.style.transform=(tt.style.transform+' rotate('+angleDeg+'deg)').trim();
+        });
       }
       try{
         const img=await rasterMap(mapEl,!!t.overview);
@@ -4175,7 +4184,7 @@ async function captureMaps(){
         }
         ctx.drawImage(img,0,0);
         shots.push({name:t.name||(t.z?(t.z.name||'Obszar'):'Plan sytuacyjny'),area:(t.overview?'':(t.z?fmtArea(t.z.area):'')),url:out.toDataURL('image/jpeg',0.9)});
-      }finally{ restore.forEach(([sp,v])=>sp.style.transform=v); }   // przywróć oryginalne transformy numerów
+      }finally{ restore.forEach(([n,tr,to])=>{n.style.transform=tr; if(to!==undefined)n.style.transformOrigin=to;}); }   // przywróć oryginalne transformy numerów i etykiet
     }
   }finally{
     mapEl.style.cssText=savedStyle;
