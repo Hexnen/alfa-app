@@ -75,7 +75,7 @@
   #map{flex:1;min-width:0;position:relative;z-index:0}   /* zamknij warstwy Leafleta we własnym kontekście stackingu */
   /* podświetlenie mapy przy przeciąganiu pliku planu (drag&drop) */
   #map.plan-dropzone{outline:3px dashed var(--accent);outline-offset:-8px}
-  #map.plan-dropzone::after{content:"Upuść plan tutaj — JPG / PNG / PDF";position:absolute;inset:0;z-index:700;display:flex;align-items:center;justify-content:center;background:rgba(15,23,42,.5);color:var(--accent);font-size:16px;font-weight:600;pointer-events:none;text-align:center;padding:1rem}
+  #map.plan-dropzone::after{content:"Upuść plan tutaj — JPG / PNG / PDF / DWG";position:absolute;inset:0;z-index:700;display:flex;align-items:center;justify-content:center;background:rgba(15,23,42,.5);color:var(--accent);font-size:16px;font-weight:600;pointer-events:none;text-align:center;padding:1rem}
   #side{width:336px;border-left:1px solid var(--line);display:flex;flex-direction:row;overflow:visible;position:relative;z-index:2;
     background:
       radial-gradient(120% 55% at 50% -8%, var(--glow-top), transparent 60%),
@@ -1266,7 +1266,7 @@ select.dd-native{position:absolute!important;width:1px!important;height:1px!impo
         <!-- PLANY (nakładki rastrowe) -->
         <div class="tabpane" id="tab-plans">
           <div class="pane-head"><h3>Plany</h3><button class="btn primary" id="btnAddPlan"><span class="ico" data-anim="plus"><svg viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M12 5v14"/></svg></span> Dodaj plan</button></div>
-          <div id="planEmpty" class="empty"><span class="empty-ico"><span class="ico ic-drawable" style="--dl:80"><svg viewBox="0 0 24 24"><path d="M13 13.74a2 2 0 0 1-2 0L2.5 8.87a1 1 0 0 1 0-1.74L11 2.26a2 2 0 0 1 2 0l8.5 4.87a1 1 0 0 1 0 1.74z"/><path d="m20 14.285 1.5.845a1 1 0 0 1 0 1.74L13 21.74a2 2 0 0 1-2 0l-8.5-4.87a1 1 0 0 1 0-1.74l1.5-.845"/></svg></span></span><span class="empty-title">Brak planów</span><span class="empty-cta">Przeciągnij plik na mapę lub użyj <b><span class="ico"><svg viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M12 5v14"/></svg></span> Dodaj plan</b> (JPG/PNG/PDF).</span></div>
+          <div id="planEmpty" class="empty"><span class="empty-ico"><span class="ico ic-drawable" style="--dl:80"><svg viewBox="0 0 24 24"><path d="M13 13.74a2 2 0 0 1-2 0L2.5 8.87a1 1 0 0 1 0-1.74L11 2.26a2 2 0 0 1 2 0l8.5 4.87a1 1 0 0 1 0 1.74z"/><path d="m20 14.285 1.5.845a1 1 0 0 1 0 1.74L13 21.74a2 2 0 0 1-2 0l-8.5-4.87a1 1 0 0 1 0-1.74l1.5-.845"/></svg></span></span><span class="empty-title">Brak planów</span><span class="empty-cta">Przeciągnij plik na mapę lub użyj <b><span class="ico"><svg viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M12 5v14"/></svg></span> Dodaj plan</b> (JPG/PNG/PDF/DWG).</span></div>
           <div id="planList"></div>
           <p class="hint" style="margin-top:.8rem">Ustaw położenie i rozmiar planu bezpośrednio na mapie (uchwyty na wybranym planie); suwakami reguluj przezroczystość, skalę i obrót. Plany leżą pod kamerami i punktami.</p>
         </div>
@@ -1422,7 +1422,7 @@ select.dd-native{position:absolute!important;width:1px!important;height:1px!impo
 </div>
 
 <input type="file" id="fileInput" accept="application/json" style="display:none">
-<input type="file" id="planInput" accept="image/*,application/pdf" style="display:none">
+<input type="file" id="planInput" accept="image/*,application/pdf,.dwg" style="display:none">
 
 <script>
 /* ============ DANE STARTOWE ============ */
@@ -2902,6 +2902,7 @@ function addOverlayFromImage(name,dataURL,imgW,imgH,atLL,meta){
   }
   const ov={dbId:null,name,data:dataURL,sw:[swLL.lat,swLL.lng],ne:[neLL.lat,neLL.lng],rotation:0,opacity:0.7,visible:true,locked:false,layer:null,
     meta:{imgW,imgH,mppImage:null,scaleDenom:meta&&meta.scaleDenom||null,sheetMM:meta&&meta.sheetMM||null,calibrated:false}};
+  if(meta&&meta.extra)Object.assign(ov.meta,meta.extra);   // np. DWG: {source,unit,confidence,widthM,heightM}
   initBaseSize(ov); updateOvMpp(ov);
   overlays.push(ov); drawOverlay(ov); createOverlayRecord(ov);
   selectOverlay(ov); save();
@@ -2914,7 +2915,7 @@ if(window.pdfjsLib){
     .then(t=>{pdfjsLib.GlobalWorkerOptions.workerSrc=URL.createObjectURL(new Blob([t],{type:'application/javascript'}));})
     .catch(()=>{pdfjsLib.GlobalWorkerOptions.workerSrc='https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js';});
 }
-const isPlanFile=f=>!!f&&(/^image\//.test(f.type)||f.type==='application/pdf'||/\.pdf$/i.test(f.name));
+const isPlanFile=f=>!!f&&(/^image\//.test(f.type)||f.type==='application/pdf'||/\.(pdf|dwg)$/i.test(f.name));
 const planName=f=>(f.name||'Plan').replace(/\.[^.]+$/,'')||'Plan';
 /* ——— OVERLAY POSTĘPU importu planu: pokazywany NATYCHMIAST, etapy na bieżąco, Anuluj przerywa pipeline.
    Determinowany pasek 0–100% na ważonych etapach (PDF: wczytywanie 0–15, render+skala 15–35, kompresja 35–100).
@@ -3251,14 +3252,144 @@ async function loadPdfPlan(f,atLL){
     uiAlert('Nie udało się wczytać PDF: '+(err&&err.message||err));
   }finally{planProgHide();}
 }
+/* ====== IMPORT DWG: konwersja po stronie serwera (LibreDWG + ezdxf + resvg), job asynchroniczny ====== */
+/* Jednostkę rysunku serwer WNIOSKUJE z geometrii (ramka arkusza ISO×skala, wymiary, klaster encji) —
+   metadane DWG bywają fałszywe. Wynik: PNG arkusza + {unit, confidence, widthM, heightM, scaleDenom}. */
+function dwgUpload(f,token){
+  return new Promise((res,rej)=>{
+    const xhr=new XMLHttpRequest(); token.xhr=xhr;
+    xhr.open('POST','/api/monitoring/'+PROJECT_ID+'/dwg-import');
+    xhr.upload.onprogress=e=>{
+      if(token.cancelled){try{xhr.abort();}catch(_e){}return;}
+      if(e.lengthComputable){planProgFrac(e.loaded/e.total);planProgStage('Wysyłanie pliku… '+Math.round(e.loaded/e.total*100)+'%');}
+    };
+    xhr.onload=()=>{token.xhr=null;
+      try{const j=JSON.parse(xhr.responseText);
+        if(xhr.status<300&&j.success)res(j.data.jobId); else rej(new Error(j.error||('HTTP '+xhr.status)));
+      }catch(e){rej(new Error('HTTP '+xhr.status));}};
+    xhr.onerror=()=>{token.xhr=null;rej(new Error('błąd sieci przy wysyłaniu pliku'));};
+    xhr.onabort=()=>{token.xhr=null;const e=new Error('anulowano');e.cancelled=true;rej(e);};
+    const fd=new FormData(); fd.append('file',f,f.name); xhr.send(fd);
+  });
+}
+function dwgAbort(token){
+  if(token.xhr){try{token.xhr.abort();}catch(e){}}
+  if(token.jobId){fetch('/api/monitoring/dwg-import/'+token.jobId,{method:'DELETE'}).catch(()=>{});token.jobId=null;}
+}
+/* dialog wymiarów po analizie DWG — źródłem prawdy są METRY z geometrii (nie mianownik skali) */
+function uiDwgScaleDialog(m){
+  return new Promise(resolve=>{
+    const overlay=document.createElement('div'); overlay.className='modal-overlay';
+    const card=document.createElement('div'); card.className='modal-card';
+    const CONF={high:'wysoka',medium:'średnia',low:'NISKA'}[m.confidence]||m.confidence;
+    let desc='Wykryto: jednostka rysunku <b>'+m.unit+'</b> (pewność '+CONF+'), teren ~<b>'
+      +m.widthM+' × '+m.heightM+' m</b>'
+      +(m.frame?', arkusz '+m.frame.format+' w skali <b>1:'+m.frame.scale+'</b>':(m.scaleDenom?', tekst skali 1:'+m.scaleDenom:''))
+      +'. Umieścić plan na mapie w skali rzeczywistej?';
+    card.innerHTML='<div class="modal-hero"><span class="modal-ico" data-kind="info">'+ico('ruler')+'</span>'
+      +'<div class="modal-htext"><h4>Wymiary planu (DWG)</h4>'
+      +'<div class="modal-msg">'+desc+'</div></div></div>'
+      +'<label style="display:block;margin-top:.7rem;font-size:11px;color:var(--muted)">Szerokość obrazu planu [m]</label>'
+      +'<input class="modal-input" type="number" min="1" max="100000" step="0.1" style="margin-top:.25rem">'
+      +'<div style="margin-top:.55rem;font-size:11px;color:var(--muted);line-height:1.45">'
+      +(m.confidence==='low'
+        ?'<b style="color:#f59e0b">Pewność wykrycia jest niska</b> — zweryfikuj szerokość albo po umieszczeniu doprecyzuj przyciskiem „Kalibruj skalę” (2 punkty + rzeczywista odległość).'
+        :'W razie wątpliwości skalę można potem doprecyzować przyciskiem „Kalibruj skalę” (2 punkty + rzeczywista odległość).')
+      +'</div><div class="modal-actions" style="flex-wrap:wrap"></div>';
+    const input=card.querySelector('.modal-input'); input.value=m.widthM||100;
+    const actions=card.querySelector('.modal-actions');
+    let done=false;
+    const close=v=>{if(done)return;done=true;document.removeEventListener('keydown',onKey,true);overlay.remove();resolve(v);};
+    const readW=()=>{const w=parseFloat(String(input.value).replace(',','.')); if(!(w>0)){input.focus();return null;} return w;};
+    const asMap=document.createElement('button'); asMap.className='btn'; asMap.style.cssText='width:100%;margin-top:.6rem';
+    asMap.innerHTML=ico('map')+' Użyj jako mapy (tryb samodzielny)';
+    asMap.title='Umieść plan w skali rzeczywistej i wyłącz podkład satelitarny — pracujesz na samym planie';
+    asMap.onclick=()=>{const w=readW(); if(w!=null)close({apply:true,widthM:w,standalone:true});};
+    actions.parentNode.insertBefore(asMap,actions);
+    const cancel=document.createElement('button'); cancel.className='btn'; cancel.textContent='Anuluj'; cancel.onclick=()=>close(null);
+    const noScale=document.createElement('button'); noScale.className='btn'; noScale.textContent='Umieść bez skali'; noScale.onclick=()=>close({apply:false});
+    const ok=document.createElement('button'); ok.className='btn primary'; ok.textContent='Zastosuj wymiary';
+    ok.onclick=()=>{const w=readW(); if(w!=null)close({apply:true,widthM:w});};
+    actions.appendChild(cancel); actions.appendChild(noScale); actions.appendChild(ok);
+    const onKey=e=>{
+      if(e.key==='Escape'){e.preventDefault();e.stopPropagation();close(null);}
+      else if(e.key==='Enter'){e.preventDefault();ok.click();}
+    };
+    document.addEventListener('keydown',onKey,true);
+    overlay.addEventListener('mousedown',e=>{if(e.target===overlay)close(null);});
+    overlay.appendChild(card); document.body.appendChild(overlay);
+    requestAnimationFrame(()=>{input.focus();input.select();});
+  });
+}
+async function loadDwgPlan(f,atLL){
+  if(!SERVER){uiAlert('Import DWG działa tylko w trybie projektu alfa-app (konwersja odbywa się na serwerze). Otwórz designer z listy projektów.');return;}
+  const token={cancelled:false,xhr:null,jobId:null};
+  planProgShow('Import planu z DWG',token);
+  try{
+    if(f.size>30*1024*1024)throw new Error('plik przekracza limit 30 MB');
+    planProgStage('Wysyłanie pliku…'); planProgRange(0,18); await uiFrame();
+    token.jobId=await dwgUpload(f,token);
+    ckCancel(token);
+    planProgRange(18,88);
+    let result=null;
+    while(true){
+      if(token.cancelled){const e=new Error('anulowano');e.cancelled=true;throw e;}
+      const r=await fetch('/api/monitoring/dwg-import/'+token.jobId,{cache:'no-store'});
+      if(!r.ok)throw new Error('utracono zadanie konwersji (restart serwera?)');
+      const d=(await r.json()).data;
+      if(d.stage==='error')throw new Error(d.error||'konwersja nie powiodła się');
+      if(d.stage==='cancelled'){const e=new Error('anulowano');e.cancelled=true;throw e;}
+      planProgStage(d.stageLabel||'Konwersja…'); planProgFrac(d.progress||0);
+      if(d.stage==='done'){result=d.result;break;}
+      await new Promise(r2=>setTimeout(r2,1000));
+    }
+    ckCancel(token);
+    planProgRange(88,92); planProgStage('Pobieranie obrazu…'); planProgDrift(900); await uiFrame();
+    const ir=await fetch('/api/monitoring/dwg-import/'+token.jobId+'/image');
+    if(!ir.ok)throw new Error('nie udało się pobrać obrazu');
+    const blob=await ir.blob();
+    ckCancel(token);
+    const url=URL.createObjectURL(blob), img=new Image();
+    try{ await new Promise((res,rej)=>{img.onload=res;img.onerror=()=>rej(new Error('błędny obraz z konwersji'));img.src=url;}); }
+    finally{ setTimeout(()=>URL.revokeObjectURL(url),0); }
+    const cv=document.createElement('canvas'); cv.width=img.naturalWidth; cv.height=img.naturalHeight;
+    cv.getContext('2d',{alpha:false}).drawImage(img,0,0);
+    planProgDone();
+    planProgStage('Kompresja…'); planProgRange(92,100); await uiFrame();
+    const res=await compressCanvasAsync(cv,token,compressStage);
+    planProgDone(); await new Promise(r2=>setTimeout(r2,180));
+    planProgHide();
+    fetch('/api/monitoring/dwg-import/'+token.jobId,{method:'DELETE'}).catch(()=>{}); token.jobId=null;   // sprzątnij job po odbiorze
+    if(!res){uiAlert('Plan jest zbyt duży nawet po kompresji. Zmniejsz rozdzielczość i spróbuj ponownie.');return;}
+    const m=result.meta||{};
+    const ans=await uiDwgScaleDialog(m);
+    if(!ans)return;   // Anuluj — bez śladów
+    const meta={sheetMM:null,scaleDenom:m.scaleDenom||null,applyScale:false,mppImage:null,
+      extra:{source:'dwg',unit:m.unit,confidence:m.confidence,widthM:m.widthM,heightM:m.heightM}};
+    if(ans.apply){
+      meta.applyScale=true;
+      meta.mppImage=ans.widthM/res.w;   // metry/piksel od FINALNYCH pikseli obrazu
+      meta.extra.widthM=ans.widthM; meta.extra.heightM=+(ans.widthM*res.h/res.w).toFixed(2);
+    }
+    if(ans.standalone)setBase(BASE_NONE);
+    addOverlayFromImage(planName(f),res.url,res.w,res.h,atLL,meta);
+  }catch(err){
+    planProgHide();
+    dwgAbort(token);
+    if(err&&err.cancelled)return;
+    uiAlert('Nie udało się zaimportować DWG: '+(err&&err.message||err));
+  }finally{planProgHide();}
+}
+
 let planBusy=false;   // trwa przetwarzanie planu — ignoruj kolejne pliki (drop/input), aż pipeline skończy
 function loadPlanFile(f,atLL){
   if(!f)return;
   if(planBusy){showToast('Trwa przetwarzanie planu — poczekaj na zakończenie poprzedniego importu.');return;}
   let p=null;
-  if(/^image\//.test(f.type)) p=loadImagePlan(f,atLL);
+  if(/\.dwg$/i.test(f.name)) p=loadDwgPlan(f,atLL);
+  else if(/^image\//.test(f.type)) p=loadImagePlan(f,atLL);
   else if(f.type==='application/pdf'||/\.pdf$/i.test(f.name)) p=loadPdfPlan(f,atLL);
-  else{uiAlert('Wybierz obraz (JPG/PNG) lub plik PDF.');return;}
+  else{uiAlert('Wybierz obraz (JPG/PNG), plik PDF lub DWG.');return;}
   planBusy=true;
   Promise.resolve(p).catch(()=>{}).then(()=>{planBusy=false;});
 }
