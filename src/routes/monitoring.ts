@@ -8,6 +8,12 @@ import type {
   NewMonitoringOverlay,
 } from "../db/schema.js";
 import { renderOffer } from "../lib/monitoring-offer.js";
+import {
+  cancelDwgJob,
+  createDwgJob,
+  getDwgJob,
+} from "../services/dwg-import.js";
+import { readFile } from "node:fs/promises";
 
 const app = new Hono();
 
@@ -327,6 +333,77 @@ app.put("/overlays/:overlayId", async (c) => {
     return c.json({ success: false, error: "Plan nie istnieje" }, 404);
   }
   return c.json({ success: true, data: overlay });
+});
+
+// --- Import DWG: asynchroniczny job konwersji (LibreDWG + ezdxf + resvg) ---
+
+const DWG_MAX_BYTES = 30 * 1024 * 1024;
+
+app.post("/:id/dwg-import", async (c) => {
+  const id = parseInt(c.req.param("id"));
+  const [project] = await db
+    .select({ id: schema.monitoringProjects.id })
+    .from(schema.monitoringProjects)
+    .where(eq(schema.monitoringProjects.id, id));
+  if (!project) {
+    return c.json({ success: false, error: "Projekt nie istnieje" }, 404);
+  }
+  const len = parseInt(c.req.header("content-length") || "0");
+  if (len > DWG_MAX_BYTES + 64 * 1024) {
+    return c.json({ success: false, error: "Plik za duży (max 30 MB)" }, 413);
+  }
+  const body = await c.req.parseBody();
+  const file = body.file;
+  if (!(file instanceof File) || !/\.dwg$/i.test(file.name)) {
+    return c.json({ success: false, error: "Prześlij plik .dwg (pole 'file')" }, 400);
+  }
+  if (file.size > DWG_MAX_BYTES) {
+    return c.json({ success: false, error: "Plik za duży (max 30 MB)" }, 413);
+  }
+  const buf = Buffer.from(await file.arrayBuffer());
+  // sygnatura DWG: "AC10xx"
+  if (!buf.subarray(0, 2).equals(Buffer.from("AC"))) {
+    return c.json({ success: false, error: "To nie wygląda na plik DWG" }, 400);
+  }
+  const job = createDwgJob(id, file.name, buf);
+  return c.json({ success: true, data: { jobId: job.id } }, 201);
+});
+
+app.get("/dwg-import/:jobId", (c) => {
+  const job = getDwgJob(c.req.param("jobId"));
+  if (!job) return c.json({ success: false, error: "Zadanie nie istnieje" }, 404);
+  return c.json({
+    success: true,
+    data: {
+      stage: job.stage,
+      stageLabel: job.stageLabel,
+      progress: job.progress,
+      error: job.error ?? null,
+      result: job.result
+        ? { meta: job.result.meta, pngBytes: job.result.pngBytes }
+        : null,
+    },
+  });
+});
+
+app.get("/dwg-import/:jobId/image", async (c) => {
+  const job = getDwgJob(c.req.param("jobId"));
+  if (!job || !job.result) {
+    return c.json({ success: false, error: "Obraz nie jest gotowy" }, 404);
+  }
+  try {
+    const png = await readFile(job.result.pngPath);
+    c.header("Content-Type", "image/png");
+    c.header("Cache-Control", "no-store");
+    return c.body(new Uint8Array(png)); // PNG ~1-4 MB — bufor zamiast streamu (prostota)
+  } catch {
+    return c.json({ success: false, error: "Obraz wygasł" }, 410);
+  }
+});
+
+app.delete("/dwg-import/:jobId", (c) => {
+  cancelDwgJob(c.req.param("jobId"));
+  return c.json({ success: true, data: null });
 });
 
 app.delete("/overlays/:overlayId", async (c) => {
