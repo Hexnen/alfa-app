@@ -6,10 +6,11 @@
 // Metadane DWG bywają fałszywe ($INSUNITS, $EXTMIN) — jednostkę WNIOSKUJE
 // skrypt Pythona (ramka arkusza ISO×skala, mediana DIMENSION, rozmiar
 // klastra encji); szczegóły w scripts/dwg/dwg_analyze_render.py.
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { accessSync, constants } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 
 export interface DwgJobResult {
@@ -38,11 +39,92 @@ const JOB_TTL_MS = 15 * 60_000; // po tym czasie job + pliki tymczasowe znikają
 const jobs = new Map<string, DwgJob>();
 let queue: Promise<void> = Promise.resolve(); // serializacja: jeden job na raz
 
-const BIN_DIR = process.env.LIBREDWG_BIN_DIR || "";
-const PYTHON = process.env.DWG_PYTHON || "python3";
 const SCRIPT = path.resolve(process.cwd(), "scripts/dwg/dwg_analyze_render.py");
 
-const bin = (name: string) => (BIN_DIR ? path.join(BIN_DIR, name) : name);
+// ── resolucja binarek LibreDWG i Pythona z ezdxf ──
+// Kolejność: env (LIBREDWG_BIN_DIR / DWG_PYTHON) → PATH → znane fallbacki
+// (dev: ~/.local/opt/libredwg, prod/Docker: /usr/local/bin). Wynik cache'ujemy
+// per proces, żeby nie sprawdzać systemu plików przy każdym jobie.
+const FALLBACK_BIN_DIRS = [
+  path.join(homedir(), ".local", "opt", "libredwg", "bin"),
+  "/usr/local/bin",
+];
+const FALLBACK_PYTHONS = [
+  path.join(homedir(), ".local", "opt", "libredwg", "venv", "bin", "python3"),
+  "/usr/local/bin/python3",
+  "/usr/bin/python3",
+];
+
+function isExecutable(p: string): boolean {
+  try {
+    accessSync(p, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function pathDirs(): string[] {
+  return (process.env.PATH || "").split(path.delimiter).filter(Boolean);
+}
+
+const binCache = new Map<string, string | null>();
+
+/** Pierwsza istniejąca i wykonywalna lokalizacja binarki LibreDWG (albo null). */
+function resolveBin(name: string): string | null {
+  const cached = binCache.get(name);
+  if (cached !== undefined) return cached;
+  const candidates: string[] = [];
+  if (process.env.LIBREDWG_BIN_DIR) candidates.push(path.join(process.env.LIBREDWG_BIN_DIR, name));
+  for (const dir of pathDirs()) candidates.push(path.join(dir, name));
+  for (const dir of FALLBACK_BIN_DIRS) candidates.push(path.join(dir, name));
+  const found = candidates.find(isExecutable) ?? null;
+  binCache.set(name, found);
+  return found;
+}
+
+function requireBin(name: string): string {
+  const p = resolveBin(name);
+  if (!p) {
+    throw new Error(
+      `Konwerter DWG (LibreDWG) niedostępny na serwerze — skonfiguruj LIBREDWG_BIN_DIR lub zainstaluj ${name}`
+    );
+  }
+  return p;
+}
+
+/** Czy interpreter ma bibliotekę ezdxf (potrzebna do analizy/renderu DXF). */
+function hasEzdxf(python: string): boolean {
+  try {
+    const r = spawnSync(python, ["-c", "import ezdxf"], { stdio: "ignore", timeout: 15_000 });
+    return r.status === 0;
+  } catch {
+    return false;
+  }
+}
+
+let pythonCache: string | null | undefined;
+
+/** Pierwszy interpreter Pythona z ezdxf: DWG_PYTHON → python3 z PATH → fallbacki. */
+function resolvePython(): string | null {
+  if (pythonCache !== undefined) return pythonCache;
+  const candidates: string[] = [];
+  if (process.env.DWG_PYTHON) candidates.push(process.env.DWG_PYTHON);
+  for (const dir of pathDirs()) candidates.push(path.join(dir, "python3"));
+  candidates.push(...FALLBACK_PYTHONS);
+  pythonCache = candidates.find((p) => isExecutable(p) && hasEzdxf(p)) ?? null;
+  return pythonCache;
+}
+
+function requirePython(): string {
+  const p = resolvePython();
+  if (!p) {
+    throw new Error(
+      "Analiza DXF niedostępna na serwerze — brak Pythona z biblioteką ezdxf (zainstaluj: pip install \"ezdxf>=1.3\" lub wskaż interpreter w DWG_PYTHON)"
+    );
+  }
+  return p;
+}
 
 // sprzątanie przeterminowanych jobów
 setInterval(() => {
@@ -139,11 +221,15 @@ async function runJob(job: DwgJob, dwgBuffer: Buffer): Promise<void> {
   }, JOB_TIMEOUT_MS);
 
   try {
+    // najpierw sprawdź cały toolchain — czytelny błąd zamiast ENOENT w połowie
+    const dwg2dxf = requireBin("dwg2dxf");
+    const python = requirePython();
+
     await writeFile(dwgPath, dwgBuffer);
 
     // ── convert: DWG → DXF (LibreDWG) + naprawa MTEXT ──
     setStage(job, "convert", "Konwersja DWG → DXF", 0.02);
-    const conv = await runChild(job, bin("dwg2dxf"), ["-y", "-o", dxfPath, dwgPath]);
+    const conv = await runChild(job, dwg2dxf, ["-y", "-o", dxfPath, dwgPath]);
     if (job.cancelled) return;
     // dwg2dxf potrafi zwrócić kod !=0 mimo poprawnego wyjścia — decyduje istnienie pliku
     let dxfRaw: Buffer;
@@ -162,7 +248,7 @@ async function runJob(job: DwgJob, dwgBuffer: Buffer): Promise<void> {
     // ── analyze + render SVG (python/ezdxf; postęp z linii "PROG f etap") ──
     setStage(job, "analyze", "Analiza rysunku", 0.15);
     let metaLine = "";
-    const py = await runChild(job, PYTHON, [SCRIPT, fixedPath, svgPath, metaPath], (line) => {
+    const py = await runChild(job, python, [SCRIPT, fixedPath, svgPath, metaPath], (line) => {
       if (line.startsWith("PROG ")) {
         const sp = line.indexOf(" ", 5);
         const frac = parseFloat(line.slice(5, sp < 0 ? undefined : sp));
