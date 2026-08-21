@@ -2012,19 +2012,25 @@ export interface WarehouseDocumentItemInput {
   unitPrice?: number | null;
 }
 
+/**
+ * Body dokumentu (POST i PUT). PUT szkicu = pełna podmiana nagłówka jak POST:
+ * brak/null pola opcjonalnego czyści wartość — dlatego pola tekstowe wysyłamy
+ * jawnie (`wartość || null`), nigdy przez pominięcie.
+ */
 export interface WarehouseDocumentInput {
   docType: WarehouseDocType;
   warehouseFromId?: number | null;
   warehouseToId?: number | null;
-  contractorName?: string;
-  invoiceNumber?: string;
-  /** null (przy PUT) = usuń istniejący załącznik; undefined = bez zmian */
+  contractorName?: string | null;
+  invoiceNumber?: string | null;
+  /** Wyjątek od pełnej podmiany: undefined = zachowaj załącznik (bez zmian),
+   *  null = usuń istniejący, string = podmień. */
   invoiceFileName?: string | null;
   invoiceFileData?: string | null;
   issuedAt?: string;
-  notes?: string;
+  notes?: string | null;
   items: WarehouseDocumentItemInput[];
-  /** true = utwórz i od razu zatwierdź (nadaje numer, księguje ruchy) */
+  /** true = zapisz i od razu zatwierdź atomowo (nadaje numer, księguje ruchy) */
   confirm?: boolean;
 }
 
@@ -2058,7 +2064,8 @@ export const warehouseApi = {
     });
   },
 
-  async updateItem(id: number, data: Partial<WarehouseItemInput>) {
+  /** PUT = pełna podmiana kartoteki (backend waliduje komplet pól). */
+  async updateItem(id: number, data: WarehouseItemInput) {
     return request<ApiResponse<WarehouseItem>>(`/warehouse/items/${id}`, {
       method: "PUT",
       body: JSON.stringify(data),
@@ -2084,7 +2091,8 @@ export const warehouseApi = {
     });
   },
 
-  async updateWarehouse(id: number, data: Partial<WarehouseDefInput>) {
+  /** PUT = pełna podmiana definicji magazynu (backend waliduje komplet pól). */
+  async updateWarehouse(id: number, data: WarehouseDefInput) {
     return request<ApiResponse<WarehouseDef>>(`/warehouse/warehouses/${id}`, {
       method: "PUT",
       body: JSON.stringify(data),
@@ -2104,10 +2112,16 @@ export const warehouseApi = {
   },
 
   // Dokumenty
-  async getDocuments(params?: { type?: string; status?: string }) {
+  async getDocuments(params?: {
+    type?: string;
+    status?: string;
+    /** Maks. liczba dokumentów (backend domyślnie 500). */
+    limit?: number;
+  }) {
     const searchParams = new URLSearchParams();
     if (params?.type) searchParams.set("type", params.type);
     if (params?.status) searchParams.set("status", params.status);
+    if (params?.limit) searchParams.set("limit", String(params.limit));
     const query = searchParams.toString();
     return request<ApiResponse<WarehouseDocument[]>>(
       `/warehouse/documents${query ? `?${query}` : ""}`
@@ -2131,7 +2145,11 @@ export const warehouseApi = {
     });
   },
 
-  async updateDocument(id: number, data: Partial<WarehouseDocumentInput>) {
+  /**
+   * PUT szkicu = pełna podmiana nagłówka i pozycji; `confirm: true` = zapisz
+   * i zatwierdź atomowo w jednej transakcji (błąd stanu → nic nie zapisane).
+   */
+  async updateDocument(id: number, data: WarehouseDocumentInput) {
     return request<ApiResponse<WarehouseDocument>>(
       `/warehouse/documents/${id}`,
       { method: "PUT", body: JSON.stringify(data) }

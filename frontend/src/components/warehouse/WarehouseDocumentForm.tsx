@@ -339,7 +339,9 @@ export function WarehouseDocumentForm({
       }
       for (const [itemId, qty] of perItem) {
         const available = stockFor(freshStock, itemId, sourceId);
-        if (qty > available) {
+        // Epsilon jak w backendzie — wydanie dokładnej resztki ułamkowej
+        // (np. 0.1999999…) nie może być odrzucone przez błąd zaokrągleń.
+        if (qty > available + 1e-9) {
           const it = itemById(itemId);
           window.alert(
             `Za mało towaru "${it?.name ?? "?"}" w magazynie źródłowym — ` +
@@ -350,18 +352,20 @@ export function WarehouseDocumentForm({
       }
     }
 
+    // PUT szkicu = pełna podmiana nagłówka jak POST (brak/null = wyczyść),
+    // więc pola tekstowe wysyłamy JAWNIE: wartość albo null — nigdy undefined,
+    // bo pominięte pole nie zachowuje starej wartości, tylko by ją skasowało
+    // w sposób nieoczywisty. Null przy nieaktywnym polu (np. contractorName po
+    // przełączeniu WZ→RW) czyści pozostałość po poprzednim rodzaju dokumentu.
     const payload: WarehouseDocumentInput = {
       docType,
-      warehouseFromId: needsSource ? Number(warehouseFromId) : undefined,
-      warehouseToId:
-        isPz || docType === "MM" ? Number(warehouseToId) : undefined,
+      warehouseFromId: needsSource ? Number(warehouseFromId) : null,
+      warehouseToId: isPz || docType === "MM" ? Number(warehouseToId) : null,
       contractorName:
-        (isPz || docType === "WZ") && contractorName.trim()
-          ? contractorName.trim()
-          : undefined,
-      invoiceNumber: isPz && invoiceNumber.trim() ? invoiceNumber.trim() : undefined,
-      // Załącznik: nowy plik → wyślij; istniejący zachowany → pomiń (bez
-      // zmian); usunięty w trybie edycji → null (jawne skasowanie na PUT).
+        isPz || docType === "WZ" ? contractorName.trim() || null : null,
+      invoiceNumber: isPz ? invoiceNumber.trim() || null : null,
+      // Wyjątek (załącznik): nowy plik → wyślij; istniejący zachowany → pomiń
+      // (bez zmian); usunięty w trybie edycji → null (jawne skasowanie na PUT).
       invoiceFileName:
         isPz && invoiceFile
           ? invoiceFile.name
@@ -375,7 +379,7 @@ export function WarehouseDocumentForm({
             ? null
             : undefined,
       issuedAt: issuedAt || undefined,
-      notes: notes.trim() || undefined,
+      notes: notes.trim() || null,
       items: rows.map((r) => ({
         itemId: r.itemId,
         quantity: Number(r.quantity),

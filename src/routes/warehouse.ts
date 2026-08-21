@@ -30,13 +30,22 @@ const DOC_TYPES = ["PZ", "WZ", "RW", "MM"] as const;
 type DocType = (typeof DOC_TYPES)[number];
 const WAREHOUSE_TYPES = ["main", "vehicle", "employee", "site", "other"] as const;
 const MAX_INVOICE_DATA = 10 * 1024 * 1024; // 10 MB (ZDEKODOWANE bajty załącznika)
-const MAX_PHOTO_DATA = 1024 * 1024; // 1 MB (długość stringa data-URL; front skaluje do ≤800px)
+const MAX_PHOTO_DATA = 1024 * 1024; // 1 MB (ZDEKODOWANE bajty; front skaluje do ≤800px)
 const IMAGE_DATA_URL_RE = /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/;
+// Dozwolone typy MIME załącznika faktury — prefiks sprawdzany osobno od
+// payloadu, żeby nie puszczać regexu po całym (wielomegabajtowym) stringu.
+const INVOICE_DATA_URL_PREFIX_RE =
+  /^data:(?:application\/pdf|image\/jpeg|image\/png|image\/webp);base64,/;
+const B64_SAMPLE_RE = /^[A-Za-z0-9+/=]+$/;
+const INVOICE_FORMAT_ERROR =
+  "Nieprawidłowy format załącznika (dozwolone PDF/JPG/PNG/WebP)";
 
 /**
  * Przybliżony rozmiar zdekodowanych bajtów załącznika data-URL/base64
  * (część po przecinku × 3/4; padding pomijalny). Klient porównuje file.size
  * (bajty pliku) — serwer musi liczyć to samo, nie długość stringa base64.
+ * UWAGA: rzetelny wynik tylko dla zwalidowanego data-URL (payload bez
+ * przecinków) — walidacja formatu musi iść przed limitem rozmiaru.
  */
 function dataUrlDecodedBytes(s: string): number {
   const comma = s.indexOf(",");
@@ -44,8 +53,57 @@ function dataUrlDecodedBytes(s: string): number {
   return Math.floor((b64len * 3) / 4);
 }
 
+/**
+ * Walidacja załącznika faktury (data-URL): dozwolone PDF/JPG/PNG/WebP,
+ * payload base64, zdekodowany rozmiar ≤ 10 MB. Świadomie bez jednego wielkiego
+ * regexu na całym stringu: prefiks MIME sprawdzany na krótkim wycinku, payload
+ * próbkowany (początek + koniec) i sprawdzany na brak kolejnego przecinka —
+ * inaczej "<śmieci>,x" oszukiwałby licznik bajtów liczony od przecinka.
+ * Zwraca błąd z kodem HTTP albo null, gdy załącznik jest poprawny.
+ */
+function validateInvoiceFileData(
+  s: string
+): { error: string; status: 400 | 413 } | null {
+  const prefix = INVOICE_DATA_URL_PREFIX_RE.exec(s.slice(0, 64));
+  if (!prefix) return { error: INVOICE_FORMAT_ERROR, status: 400 };
+  const payloadStart = prefix[0].length;
+  const payloadLen = s.length - payloadStart;
+  if (payloadLen <= 0) return { error: INVOICE_FORMAT_ERROR, status: 400 };
+  if (s.indexOf(",", payloadStart) !== -1) {
+    return { error: INVOICE_FORMAT_ERROR, status: 400 };
+  }
+  const head = s.slice(payloadStart, payloadStart + 4096);
+  const tail = payloadLen > 4096 ? s.slice(-4096) : "";
+  if (!B64_SAMPLE_RE.test(head) || (tail && !B64_SAMPLE_RE.test(tail))) {
+    return { error: INVOICE_FORMAT_ERROR, status: 400 };
+  }
+  if (Math.floor((payloadLen * 3) / 4) > MAX_INVOICE_DATA) {
+    return { error: "Załącznik faktury jest za duży (limit 10 MB)", status: 413 };
+  }
+  return null;
+}
+
+/**
+ * Dzisiejsza data wg LOKALNEGO zegara serwera. toISOString() dawałoby UTC —
+ * na przełomie doby/roku wczorajszą datę i numer dokumentu ze starego roku.
+ */
 function todayISO(): string {
-  return new Date().toISOString().slice(0, 10);
+  const d = new Date();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${d.getFullYear()}-${mm}-${dd}`;
+}
+
+/** Czy RRRR-MM-DD to realna data kalendarzowa w sensownym zakresie (2000–2100). */
+function isValidCalendarDate(iso: string): boolean {
+  const [y, m, d] = iso.split("-").map(Number);
+  if (y < 2000 || y > 2100) return false;
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return (
+    dt.getUTCFullYear() === y &&
+    dt.getUTCMonth() === m - 1 &&
+    dt.getUTCDate() === d
+  );
 }
 
 function nowISO(): string {
@@ -85,13 +143,14 @@ function parseItemBody(body: Record<string, unknown>): {
 
   let photoData: string | null = null;
   if (typeof body.photoData === "string" && body.photoData) {
-    if (body.photoData.length > MAX_PHOTO_DATA) {
-      return { error: "Zdjęcie towaru jest za duże (limit 1 MB po kompresji)" };
-    }
+    // Format przed rozmiarem — licznik bajtów zakłada payload po przecinku.
     if (!IMAGE_DATA_URL_RE.test(body.photoData)) {
       return {
         error: "Nieprawidłowe zdjęcie towaru (wymagany obraz JPEG/PNG/WebP)",
       };
+    }
+    if (dataUrlDecodedBytes(body.photoData) > MAX_PHOTO_DATA) {
+      return { error: "Zdjęcie towaru jest za duże (maks. 1 MB po kompresji)" };
     }
     photoData = body.photoData;
   }
@@ -120,6 +179,69 @@ function parseItemBody(body: Record<string, unknown>): {
   };
 }
 
+/**
+ * Konflikt SKU z innym towarem: komunikat 400 albo null, gdy SKU wolne.
+ * Używane jako pre-check (ładny komunikat) i ponownie w catchu po złapaniu
+ * wyścigu (UNIQUE constraint) — wtedy re-query pokazuje kolidujący wiersz.
+ */
+async function skuConflict(sku: string, selfId?: number): Promise<string | null> {
+  const dup = await db
+    .select({
+      name: schema.warehouseItems.name,
+      isArchived: schema.warehouseItems.isArchived,
+    })
+    .from(schema.warehouseItems)
+    .where(
+      selfId === undefined
+        ? eq(schema.warehouseItems.sku, sku)
+        : and(
+            eq(schema.warehouseItems.sku, sku),
+            ne(schema.warehouseItems.id, selfId)
+          )
+    )
+    .limit(1);
+  if (dup.length === 0) return null;
+  return dup[0].isArchived
+    ? `Zarchiwizowany towar "${dup[0].name}" ma ten SKU — przywróć go zamiast tworzyć nowy`
+    : "Towar o tym SKU już istnieje";
+}
+
+/** Czy błąd z SQLite to naruszenie UNIQUE na warehouse_items.sku (wyścig z pre-checkiem). */
+function isSkuUniqueViolation(err: unknown): boolean {
+  return (
+    err instanceof Error &&
+    err.message.includes("UNIQUE constraint failed: warehouse_items.sku")
+  );
+}
+
+/**
+ * Blokada archiwizacji towaru z niezerowym stanem (wywoływać W transakcji
+ * razem z update — bez okna wyścigu z równoległym confirmem dokumentu).
+ */
+function assertItemStockZeroSync(tx: Tx, itemId: number, unit: string) {
+  const rows = tx
+    .select({
+      warehouseId: schema.warehouseStock.warehouseId,
+      quantity: schema.warehouseStock.quantity,
+    })
+    .from(schema.warehouseStock)
+    .where(eq(schema.warehouseStock.itemId, itemId))
+    .all();
+  const nonZero = rows.filter((r) => Math.abs(r.quantity) > EPS);
+  if (nonZero.length > 0) {
+    const details = nonZero
+      .map(
+        (r) =>
+          `${fmtQty(r.quantity)} ${unit} w ${warehouseNameSync(tx, r.warehouseId)}`
+      )
+      .join("; ");
+    throw new ApiError(
+      400,
+      `Nie można zarchiwizować towaru z niezerowym stanem (${details})`
+    );
+  }
+}
+
 // Lista towarów (domyślnie bez zarchiwizowanych)
 app.get("/items", async (c) => {
   const includeArchived = c.req.query("includeArchived") === "1";
@@ -140,32 +262,28 @@ app.post("/items", async (c) => {
   if (error || !data) return jsonError(c, 400, error ?? "Błędne dane");
 
   if (data.sku) {
-    const dup = await db
-      .select({
-        id: schema.warehouseItems.id,
-        name: schema.warehouseItems.name,
-        isArchived: schema.warehouseItems.isArchived,
-      })
-      .from(schema.warehouseItems)
-      .where(eq(schema.warehouseItems.sku, data.sku))
-      .limit(1);
-    if (dup.length > 0) {
+    const conflict = await skuConflict(data.sku);
+    if (conflict) return jsonError(c, 400, conflict);
+  }
+
+  try {
+    const result = await db
+      .insert(schema.warehouseItems)
+      .values(data as NewWarehouseItem)
+      .returning();
+    return c.json({ success: true, data: result[0], message: "Towar dodany" }, 201);
+  } catch (err) {
+    // Wyścig z równoległym zapisem tego samego SKU — pre-check przeszedł,
+    // INSERT dostał UNIQUE; mapujemy na ten sam 400 co pre-check.
+    if (data.sku && isSkuUniqueViolation(err)) {
       return jsonError(
         c,
         400,
-        dup[0].isArchived
-          ? `Zarchiwizowany towar "${dup[0].name}" ma ten SKU — przywróć go zamiast tworzyć nowy`
-          : "Towar o tym SKU już istnieje"
+        (await skuConflict(data.sku)) ?? "Towar o tym SKU już istnieje"
       );
     }
+    throw err;
   }
-
-  const result = await db
-    .insert(schema.warehouseItems)
-    .values(data as NewWarehouseItem)
-    .returning();
-
-  return c.json({ success: true, data: result[0], message: "Towar dodany" }, 201);
 });
 
 // Edycja towaru
@@ -183,29 +301,8 @@ app.put("/items/:id", async (c) => {
   if (error || !data) return jsonError(c, 400, error ?? "Błędne dane");
 
   if (data.sku) {
-    const dup = await db
-      .select({
-        id: schema.warehouseItems.id,
-        name: schema.warehouseItems.name,
-        isArchived: schema.warehouseItems.isArchived,
-      })
-      .from(schema.warehouseItems)
-      .where(
-        and(
-          eq(schema.warehouseItems.sku, data.sku),
-          ne(schema.warehouseItems.id, id)
-        )
-      )
-      .limit(1);
-    if (dup.length > 0) {
-      return jsonError(
-        c,
-        400,
-        dup[0].isArchived
-          ? `Zarchiwizowany towar "${dup[0].name}" ma ten SKU — przywróć go zamiast tworzyć nowy`
-          : "Towar o tym SKU już istnieje"
-      );
-    }
+    const conflict = await skuConflict(data.sku, id);
+    if (conflict) return jsonError(c, 400, conflict);
   }
 
   const isArchived =
@@ -213,32 +310,65 @@ app.put("/items/:id", async (c) => {
       ? existing[0].isArchived
       : Boolean(body.isArchived);
 
-  const result = await db
-    .update(schema.warehouseItems)
-    .set({ ...data, isArchived, updatedAt: nowISO() })
-    .where(eq(schema.warehouseItems.id, id))
-    .returning();
-
-  return c.json({ success: true, data: result[0], message: "Towar zaktualizowany" });
+  try {
+    const result = db.transaction((tx) => {
+      const cur = tx
+        .select()
+        .from(schema.warehouseItems)
+        .where(eq(schema.warehouseItems.id, id))
+        .get();
+      if (!cur) throw new ApiError(404, "Nie znaleziono towaru");
+      // Archiwizacja (przejście false→true) tylko przy zerowym stanie —
+      // check+update w JEDNEJ transakcji (bez okna wyścigu z confirmem).
+      if (isArchived && !cur.isArchived) {
+        assertItemStockZeroSync(tx, id, data.unit ?? cur.unit);
+      }
+      return tx
+        .update(schema.warehouseItems)
+        .set({ ...data, isArchived, updatedAt: nowISO() })
+        .where(eq(schema.warehouseItems.id, id))
+        .returning()
+        .get();
+    });
+    return c.json({ success: true, data: result, message: "Towar zaktualizowany" });
+  } catch (err) {
+    if (err instanceof ApiError) return jsonError(c, err.status, err.message);
+    if (data.sku && isSkuUniqueViolation(err)) {
+      return jsonError(
+        c,
+        400,
+        (await skuConflict(data.sku, id)) ?? "Towar o tym SKU już istnieje"
+      );
+    }
+    throw err;
+  }
 });
 
-// "Usunięcie" towaru = archiwizacja (fizyczny delete nigdy — historia ruchów)
+// "Usunięcie" towaru = archiwizacja (fizyczny delete nigdy — historia ruchów);
+// zablokowane przy niezerowym stanie (ilości znikałyby ze wszystkich widoków)
 app.delete("/items/:id", async (c) => {
   const id = parseInt(c.req.param("id"));
-  const existing = await db
-    .select()
-    .from(schema.warehouseItems)
-    .where(eq(schema.warehouseItems.id, id))
-    .limit(1);
-  if (existing.length === 0) return jsonError(c, 404, "Nie znaleziono towaru");
-
-  const result = await db
-    .update(schema.warehouseItems)
-    .set({ isArchived: true, updatedAt: nowISO() })
-    .where(eq(schema.warehouseItems.id, id))
-    .returning();
-
-  return c.json({ success: true, data: result[0], message: "Towar zarchiwizowany" });
+  try {
+    const result = db.transaction((tx) => {
+      const cur = tx
+        .select()
+        .from(schema.warehouseItems)
+        .where(eq(schema.warehouseItems.id, id))
+        .get();
+      if (!cur) throw new ApiError(404, "Nie znaleziono towaru");
+      if (!cur.isArchived) assertItemStockZeroSync(tx, id, cur.unit);
+      return tx
+        .update(schema.warehouseItems)
+        .set({ isArchived: true, updatedAt: nowISO() })
+        .where(eq(schema.warehouseItems.id, id))
+        .returning()
+        .get();
+    });
+    return c.json({ success: true, data: result, message: "Towar zarchiwizowany" });
+  } catch (err) {
+    if (err instanceof ApiError) return jsonError(c, err.status, err.message);
+    throw err;
+  }
 });
 
 // ============================================================
@@ -284,7 +414,11 @@ function parseWarehouseBody(body: Record<string, unknown>): {
   };
 }
 
-/** Walidacja parentId: istnieje i sam nie ma parenta (max 1 poziom). */
+/**
+ * Walidacja parentId: istnieje, nie jest zarchiwizowany i sam nie ma parenta
+ * (max 1 poziom). Odrzucenie zarchiwizowanego rodzica blokuje też przywrócenie
+ * podmagazynu, którego rodzic wciąż jest w archiwum.
+ */
 async function validateParent(
   parentId: number | null,
   selfId?: number
@@ -298,9 +432,44 @@ async function validateParent(
     .where(eq(schema.warehouses.id, parentId))
     .limit(1);
   if (parent.length === 0) return "Nie znaleziono magazynu nadrzędnego";
+  if (parent[0].isArchived)
+    return `Magazyn nadrzędny "${parent[0].name}" jest zarchiwizowany — przywróć go najpierw`;
   if (parent[0].parentId !== null)
     return "Magazyn nadrzędny nie może sam mieć magazynu nadrzędnego (maksymalnie jeden poziom zagnieżdżenia)";
   return null;
+}
+
+/**
+ * Blokada archiwizacji magazynu (wywoływać W transakcji razem z update —
+ * bez okna wyścigu z równoległym confirmem dokumentu): niezerowy stan
+ * lub aktywne podmagazyny → 400.
+ */
+function assertWarehouseArchivableSync(tx: Tx, warehouseId: number) {
+  const stock = tx
+    .select({ quantity: schema.warehouseStock.quantity })
+    .from(schema.warehouseStock)
+    .where(eq(schema.warehouseStock.warehouseId, warehouseId))
+    .all();
+  if (stock.some((s) => Math.abs(s.quantity) > EPS)) {
+    throw new ApiError(400, "Nie można zarchiwizować magazynu z niezerowym stanem");
+  }
+  const activeChild = tx
+    .select({ id: schema.warehouses.id })
+    .from(schema.warehouses)
+    .where(
+      and(
+        eq(schema.warehouses.parentId, warehouseId),
+        eq(schema.warehouses.isArchived, false)
+      )
+    )
+    .limit(1)
+    .get();
+  if (activeChild) {
+    throw new ApiError(
+      400,
+      "Magazyn ma aktywne podmagazyny — zarchiwizuj je najpierw"
+    );
+  }
 }
 
 // Lista magazynów (magazyn główny seedowany przy starcie aplikacji — src/index.ts)
@@ -367,48 +536,63 @@ app.put("/warehouses/:id", async (c) => {
       ? existing[0].isArchived
       : Boolean(body.isArchived);
 
-  const result = await db
-    .update(schema.warehouses)
-    .set({ ...data, isArchived })
-    .where(eq(schema.warehouses.id, id))
-    .returning();
-
-  return c.json({ success: true, data: result[0], message: "Magazyn zaktualizowany" });
+  try {
+    const result = db.transaction((tx) => {
+      const cur = tx
+        .select()
+        .from(schema.warehouses)
+        .where(eq(schema.warehouses.id, id))
+        .get();
+      if (!cur) throw new ApiError(404, "Nie znaleziono magazynu");
+      // Archiwizacja przez PUT podlega tym samym regułom co DELETE (zerowy
+      // stan, brak aktywnych podmagazynów) — check+update w JEDNEJ transakcji.
+      if (isArchived && !cur.isArchived) {
+        assertWarehouseArchivableSync(tx, id);
+      }
+      return tx
+        .update(schema.warehouses)
+        .set({ ...data, isArchived })
+        .where(eq(schema.warehouses.id, id))
+        .returning()
+        .get();
+    });
+    return c.json({ success: true, data: result, message: "Magazyn zaktualizowany" });
+  } catch (err) {
+    if (err instanceof ApiError) return jsonError(c, err.status, err.message);
+    throw err;
+  }
 });
 
 // "Usunięcie" magazynu = archiwizacja; zablokowane przy niezerowym stanie
+// lub aktywnych podmagazynach (check+update w jednej transakcji — bez okna
+// wyścigu z równoległym zatwierdzeniem dokumentu)
 app.delete("/warehouses/:id", async (c) => {
   const id = parseInt(c.req.param("id"));
-  const existing = await db
-    .select()
-    .from(schema.warehouses)
-    .where(eq(schema.warehouses.id, id))
-    .limit(1);
-  if (existing.length === 0) return jsonError(c, 404, "Nie znaleziono magazynu");
-
-  const stock = await db
-    .select()
-    .from(schema.warehouseStock)
-    .where(eq(schema.warehouseStock.warehouseId, id));
-  if (stock.some((s) => Math.abs(s.quantity) > EPS)) {
-    return jsonError(
-      c,
-      400,
-      "Nie można zarchiwizować magazynu z niezerowym stanem"
-    );
+  try {
+    const result = db.transaction((tx) => {
+      const cur = tx
+        .select()
+        .from(schema.warehouses)
+        .where(eq(schema.warehouses.id, id))
+        .get();
+      if (!cur) throw new ApiError(404, "Nie znaleziono magazynu");
+      if (!cur.isArchived) assertWarehouseArchivableSync(tx, id);
+      return tx
+        .update(schema.warehouses)
+        .set({ isArchived: true })
+        .where(eq(schema.warehouses.id, id))
+        .returning()
+        .get();
+    });
+    return c.json({
+      success: true,
+      data: result,
+      message: "Magazyn zarchiwizowany",
+    });
+  } catch (err) {
+    if (err instanceof ApiError) return jsonError(c, err.status, err.message);
+    throw err;
   }
-
-  const result = await db
-    .update(schema.warehouses)
-    .set({ isArchived: true })
-    .where(eq(schema.warehouses.id, id))
-    .returning();
-
-  return c.json({
-    success: true,
-    data: result[0],
-    message: "Magazyn zarchiwizowany",
-  });
 });
 
 // ============================================================
@@ -531,14 +715,18 @@ function parseDocHead(body: Record<string, unknown>): {
     typeof body.invoiceFileData === "string" && body.invoiceFileData
       ? body.invoiceFileData
       : null;
-  if (invoiceFileData && dataUrlDecodedBytes(invoiceFileData) > MAX_INVOICE_DATA) {
-    return { error: "Załącznik faktury jest za duży (limit 10 MB)", status: 413 };
+  if (invoiceFileData) {
+    const invErr = validateInvoiceFileData(invoiceFileData);
+    if (invErr) return invErr;
   }
 
   let issuedAt = typeof body.issuedAt === "string" ? body.issuedAt.trim() : "";
   if (!issuedAt) issuedAt = todayISO();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(issuedAt)) {
     return { error: "Data dokumentu musi mieć format RRRR-MM-DD", status: 400 };
+  }
+  if (!isValidCalendarDate(issuedAt)) {
+    return { error: "Nieprawidłowa data dokumentu", status: 400 };
   }
 
   return {
@@ -779,12 +967,23 @@ function nextDocNumberSync(tx: Tx, docType: DocType, issuedAt: string): string {
 
 /**
  * Weryfikacja (w tx), że magazyny i towary dokumentu nie są zarchiwizowane —
- * zatwierdzenie nie może wprowadzać stanów do niewidocznych magazynów/kartotek.
+ * zatwierdzenie ani storno nie mogą księgować stanów do niewidocznych
+ * magazynów/kartotek. Domyślne komunikaty dotyczą zatwierdzania; cancel
+ * podaje własne przez `messages`.
  */
 function assertNotArchivedSync(
   tx: Tx,
   doc: Pick<WarehouseDocument, "warehouseFromId" | "warehouseToId">,
-  items: { itemId: number }[]
+  items: { itemId: number }[],
+  messages: {
+    warehouse: (name: string) => string;
+    item: (name: string) => string;
+  } = {
+    warehouse: (n) =>
+      `Magazyn "${n}" jest zarchiwizowany — przywróć go przed zatwierdzeniem`,
+    item: (n) =>
+      `Towar "${n}" jest zarchiwizowany — przywróć go przed zatwierdzeniem`,
+  }
 ) {
   for (const whId of [doc.warehouseFromId, doc.warehouseToId]) {
     if (whId === null) continue;
@@ -798,10 +997,7 @@ function assertNotArchivedSync(
       .get();
     if (!wh) throw new ApiError(400, `Nie znaleziono magazynu o ID ${whId}`);
     if (wh.isArchived) {
-      throw new ApiError(
-        400,
-        `Magazyn "${wh.name}" jest zarchiwizowany — przywróć go przed zatwierdzeniem`
-      );
+      throw new ApiError(400, messages.warehouse(wh.name));
     }
   }
   const seen = new Set<number>();
@@ -819,10 +1015,7 @@ function assertNotArchivedSync(
     if (!item)
       throw new ApiError(400, `Nie znaleziono towaru o ID ${it.itemId}`);
     if (item.isArchived) {
-      throw new ApiError(
-        400,
-        `Towar "${item.name}" jest zarchiwizowany — przywróć go przed zatwierdzeniem`
-      );
+      throw new ApiError(400, messages.item(item.name));
     }
   }
 }
@@ -937,11 +1130,22 @@ app.get("/documents", async (c) => {
     );
   }
 
+  let limit = 500;
+  const limitRaw = c.req.query("limit");
+  if (limitRaw) {
+    const v = parseInt(limitRaw);
+    if (!Number.isInteger(v) || v <= 0) {
+      return jsonError(c, 400, "Nieprawidłowy parametr limit");
+    }
+    limit = Math.min(v, 2000);
+  }
+
   const docs = await db
     .select(docColumns)
     .from(schema.warehouseDocuments)
     .where(conditions.length > 0 ? and(...conditions) : undefined)
-    .orderBy(desc(schema.warehouseDocuments.id));
+    .orderBy(desc(schema.warehouseDocuments.id))
+    .limit(limit);
 
   const counts = await db
     .select({
@@ -1105,16 +1309,8 @@ app.post("/documents", async (c) => {
   }
 });
 
-// Pola metadanych edytowalne również po zatwierdzeniu (nie wpływają na stany)
-const META_FIELDS = [
-  "contractorName",
-  "invoiceNumber",
-  "invoiceFileName",
-  "invoiceFileData",
-  "notes",
-] as const;
-
-// Edycja dokumentu: draft — wszystko (pozycje podmieniane w całości);
+// Edycja dokumentu: draft — wszystko (pozycje podmieniane w całości;
+// confirm=true dodatkowo zatwierdza w tej samej transakcji);
 // confirmed — tylko metadane; cancelled — nic.
 app.put("/documents/:id", async (c) => {
   const id = parseInt(c.req.param("id"));
@@ -1169,18 +1365,30 @@ app.put("/documents/:id", async (c) => {
       return jsonError(c, 400, "Zatwierdzony dokument można tylko anulować");
     }
 
+    // Metadane (nie wpływają na stany) — ta sama koercja/trim co parseDocHead,
+    // żeby kontrakt draft/confirmed był spójny.
+    const trimmedOrNull = (v: unknown) =>
+      typeof v === "string" && v.trim() ? v.trim() : null;
     const patch: Record<string, unknown> = {};
-    for (const f of META_FIELDS) {
-      if (body[f] !== undefined) {
-        const v = body[f];
-        patch[f] = typeof v === "string" && v !== "" ? v : null;
+    if (body.contractorName !== undefined)
+      patch.contractorName = trimmedOrNull(body.contractorName);
+    if (body.invoiceNumber !== undefined)
+      patch.invoiceNumber = trimmedOrNull(body.invoiceNumber);
+    if (body.invoiceFileName !== undefined)
+      patch.invoiceFileName = trimmedOrNull(body.invoiceFileName);
+    if (body.notes !== undefined)
+      patch.notes =
+        typeof body.notes === "string" && body.notes.trim() ? body.notes : null;
+    if (body.invoiceFileData !== undefined) {
+      const v =
+        typeof body.invoiceFileData === "string" && body.invoiceFileData
+          ? body.invoiceFileData
+          : null;
+      if (v) {
+        const invErr = validateInvoiceFileData(v);
+        if (invErr) return jsonError(c, invErr.status, invErr.error);
       }
-    }
-    if (
-      typeof patch.invoiceFileData === "string" &&
-      dataUrlDecodedBytes(patch.invoiceFileData) > MAX_INVOICE_DATA
-    ) {
-      return jsonError(c, 413, "Załącznik faktury jest za duży (limit 10 MB)");
+      patch.invoiceFileData = v;
     }
 
     // Update strzeżony statusem — dokument mógł zostać równolegle anulowany.
@@ -1205,23 +1413,17 @@ app.put("/documents/:id", async (c) => {
     return c.json({ success: true, data: rest, message: "Dokument zaktualizowany" });
   }
 
-  // DRAFT — pełna edycja; brakujące pola nagłówka uzupełniamy z istniejącego
+  // DRAFT — pełna PODMIANA nagłówka (kontrakt jak POST: pole pominięte/null
+  // = wyczyść; issuedAt pusty = dzisiejsza data; magazyny wg typu dokumentu).
+  // WYJĄTEK: załącznik faktury zachowuje semantykę patcha — pominięte pole
+  // (undefined) = zachowaj istniejący, jawny null = usuń, string = podmień.
   const merged: Record<string, unknown> = {
+    ...body,
     docType: body.docType ?? doc.docType,
-    warehouseFromId:
-      body.warehouseFromId !== undefined ? body.warehouseFromId : doc.warehouseFromId,
-    warehouseToId:
-      body.warehouseToId !== undefined ? body.warehouseToId : doc.warehouseToId,
-    contractorName:
-      body.contractorName !== undefined ? body.contractorName : doc.contractorName,
-    invoiceNumber:
-      body.invoiceNumber !== undefined ? body.invoiceNumber : doc.invoiceNumber,
     invoiceFileName:
       body.invoiceFileName !== undefined ? body.invoiceFileName : doc.invoiceFileName,
     invoiceFileData:
       body.invoiceFileData !== undefined ? body.invoiceFileData : doc.invoiceFileData,
-    issuedAt: body.issuedAt !== undefined ? body.issuedAt : doc.issuedAt,
-    notes: body.notes !== undefined ? body.notes : doc.notes,
   };
   const head = parseDocHead(merged);
   if (head.error || !head.data) {
@@ -1236,6 +1438,12 @@ app.put("/documents/:id", async (c) => {
     }
     newItems = parsed.items;
   }
+
+  // confirm=true → edycja + zatwierdzenie ATOMOWO (jedna transakcja):
+  // nieudany confirm (np. brak stanu) wycofuje również zmiany edycji.
+  const confirm = body.confirm === true;
+  const user = getUser(c);
+  const createdBy = user?.email ?? null;
 
   try {
     const updated = db.transaction((tx) => {
@@ -1273,15 +1481,27 @@ app.put("/documents/:id", async (c) => {
         });
       }
 
-      return tx
+      const updatedDoc = tx
         .update(schema.warehouseDocuments)
         .set({ ...head.data!, updatedAt: nowISO() })
         .where(eq(schema.warehouseDocuments.id, id))
         .returning()
         .get();
+
+      if (confirm) {
+        return confirmDocumentSync(tx, updatedDoc, createdBy);
+      }
+      return updatedDoc;
     });
     const { invoiceFileData: _omit, ...rest } = updated;
-    return c.json({ success: true, data: rest, message: "Dokument zaktualizowany" });
+    return c.json({
+      success: true,
+      data: rest,
+      message:
+        updated.status === "confirmed"
+          ? `Dokument ${updated.docNumber} zatwierdzony`
+          : "Dokument zaktualizowany",
+    });
   } catch (err) {
     if (err instanceof ApiError) return jsonError(c, err.status, err.message);
     throw err;
@@ -1370,6 +1590,15 @@ app.post("/documents/:id/cancel", async (c) => {
         .where(eq(schema.warehouseDocumentItems.documentId, id))
         .orderBy(asc(schema.warehouseDocumentItems.positionNo))
         .all();
+
+      // Storno księguje ruchy tak samo jak confirm — nie może trafiać do
+      // zarchiwizowanego magazynu/towaru (stany zniknęłyby z widoków).
+      assertNotArchivedSync(tx, doc, items, {
+        warehouse: (n) =>
+          `Nie można anulować: magazyn "${n}" jest zarchiwizowany — przywróć go przed anulowaniem`,
+        item: (n) =>
+          `Nie można anulować: towar "${n}" jest zarchiwizowany — przywróć go przed anulowaniem`,
+      });
 
       // Storno = delty z odwróconym znakiem; najpierw walidacja że nie zejdziemy
       // poniżej zera (np. anulowanie PZ, gdy towar już wydano dalej).

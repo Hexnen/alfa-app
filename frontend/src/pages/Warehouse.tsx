@@ -190,9 +190,9 @@ export function Warehouse() {
     if (!editable) return;
     try {
       if (editingDoc) {
-        const { confirm, ...rest } = data;
-        await warehouseApi.updateDocument(editingDoc.id, rest);
-        if (confirm) await warehouseApi.confirmDocument(editingDoc.id);
+        // Jeden PUT z `confirm: true` = atomowe zapisz-i-zatwierdź (błąd
+        // stanu → backend nie zapisuje nic, szkic zostaje nietknięty).
+        await warehouseApi.updateDocument(editingDoc.id, data);
       } else {
         await warehouseApi.createDocument(data);
       }
@@ -320,7 +320,9 @@ export function Warehouse() {
     if (!editable) return;
     try {
       // PUT wymaga pełnego body (walidacja parseWarehouseBody) — odsyłamy
-      // bieżące pola magazynu, zmieniając wyłącznie flagę archiwum.
+      // bieżące pola magazynu (w tym niezmieniony parentId), zmieniając
+      // wyłącznie flagę archiwum. Backend odrzuca restore pod zarchiwizowanym
+      // rodzicem — komunikat po polsku trafia do alertu poniżej.
       await warehouseApi.updateWarehouse(wh.id, {
         name: wh.name,
         code: wh.code ?? undefined,
@@ -328,9 +330,10 @@ export function Warehouse() {
         parentId: wh.parentId,
         isArchived: false,
       });
-      await loadCore();
     } catch (err) {
       alertError(err, "Błąd przywracania magazynu");
+    } finally {
+      await loadCore();
     }
   };
 
