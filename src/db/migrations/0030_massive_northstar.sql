@@ -1,0 +1,1 @@
+ALTER TABLE `hr_hours` ADD `object_uncertain` integer DEFAULT false NOT NULL;

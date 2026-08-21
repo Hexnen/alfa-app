@@ -310,6 +310,9 @@ function parseHours(body: Record<string, unknown>): {
       deductions: toNum(body.deductions),
       bonuses: toNum(body.bonuses),
       notes: typeof body.notes === "string" ? body.notes : "",
+      // Flaga "obiekt do potwierdzenia" (carry-over). Formularz jej nie wysyła,
+      // więc każdy zapis wpisu przez użytkownika zdejmuje pytajnik.
+      objectUncertain: body.objectUncertain === true,
     },
   };
 }
@@ -388,6 +391,81 @@ app.put("/hours/:id", async (c) => {
     );
   }
   return c.json({ success: true, data: result[0], message: "Godziny zapisane" });
+});
+
+// Przeniesienie aktywnych pracowników z poprzedniego miesiąca: dla każdego
+// wpisu godzin z miesiąca poprzedzającego (year, month) — o ile pracownik jest
+// aktywny, a para (pracownik, obiekt) nie istnieje jeszcze w miesiącu docelowym
+// — tworzy pusty wpis z flagą objectUncertain (obiekt do potwierdzenia).
+// Idempotentny: ponowne wywołanie niczego nie dubluje. Uprawnienie edycji
+// egzekwuje tabPermissionGuard (zapis na /hr/* wymaga poziomu "edit"),
+// tak samo jak dla POST /hours.
+app.post("/hours/carry-over", async (c) => {
+  const body = await c.req.json<Record<string, unknown>>();
+  const year = toNum(body.year);
+  const month = toNum(body.month);
+  if (!year || year < 2000 || year > 2100 || !month || month < 1 || month > 12) {
+    return c.json<ApiResponse<null>>(
+      { success: false, error: "Nieprawidłowy rok/miesiąc" },
+      400,
+    );
+  }
+  const prevYear = month === 1 ? year - 1 : year;
+  const prevMonth = month === 1 ? 12 : month - 1;
+
+  // Wpisy poprzedniego miesiąca — tylko aktywni pracownicy
+  const prevRows = await db
+    .select({ hours: schema.hrHours })
+    .from(schema.hrHours)
+    .innerJoin(
+      schema.hrEmployees,
+      eq(schema.hrHours.employeeId, schema.hrEmployees.id),
+    )
+    .where(
+      and(
+        eq(schema.hrHours.year, prevYear),
+        eq(schema.hrHours.month, prevMonth),
+        eq(schema.hrEmployees.active, true),
+      ),
+    );
+
+  // Dedup: pary (pracownik, obiekt) już obecne w miesiącu docelowym
+  const existing = await db
+    .select({
+      employeeId: schema.hrHours.employeeId,
+      objectId: schema.hrHours.objectId,
+    })
+    .from(schema.hrHours)
+    .where(and(eq(schema.hrHours.year, year), eq(schema.hrHours.month, month)));
+  const seen = new Set(
+    existing.map((r) => `${r.employeeId}:${r.objectId ?? "null"}`),
+  );
+
+  const toInsert: NewHrHours[] = [];
+  for (const { hours: prev } of prevRows) {
+    const key = `${prev.employeeId}:${prev.objectId ?? "null"}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    toInsert.push({
+      employeeId: prev.employeeId,
+      objectId: prev.objectId,
+      objectUncertain: true,
+      year,
+      month,
+      nightHours: null,
+      workedHours: null,
+      uwHours: null,
+      l4Hours: null,
+      maxHours: null,
+      deductions: null,
+      bonuses: null,
+      notes: "",
+    });
+  }
+  if (toInsert.length > 0) {
+    await db.insert(schema.hrHours).values(toInsert);
+  }
+  return c.json({ success: true, data: { inserted: toInsert.length } });
 });
 
 app.delete("/hours/:id", async (c) => {

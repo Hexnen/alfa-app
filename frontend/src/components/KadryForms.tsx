@@ -290,6 +290,11 @@ export function HrHoursForm({
                   </option>
                 ))}
               </select>
+              {entry?.objectUncertain && (
+                <p className="text-xs text-amber-600">
+                  Obiekt przeniesiony z poprzedniego miesiąca — potwierdź
+                </p>
+              )}
             </div>
           </div>
 

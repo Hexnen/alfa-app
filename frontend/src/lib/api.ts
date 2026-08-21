@@ -1627,6 +1627,7 @@ export interface HrHoursEntry {
   id: number;
   employeeId: number;
   objectId: number | null;
+  objectUncertain: boolean;
   year: number;
   month: number;
   nightHours: number | null;
@@ -1864,6 +1865,13 @@ export const updateHrHours = (id: number, data: HrHoursInput) =>
   });
 export const deleteHrHours = (id: number) =>
   request<ApiResponse<null>>(`/hr/hours/${id}`, { method: "DELETE" });
+// Przeniesienie aktywnych pracowników z poprzedniego miesiąca (puste wpisy
+// z flagą objectUncertain); idempotentne — zwraca liczbę dodanych wierszy
+export const carryOverHrHours = (year: number, month: number) =>
+  request<ApiResponse<{ inserted: number }>>("/hr/hours/carry-over", {
+    method: "POST",
+    body: JSON.stringify({ year, month }),
+  });
 
 export const getHrContracts = (onlyActive = false) =>
   request<ApiResponse<HrContract[]>>(

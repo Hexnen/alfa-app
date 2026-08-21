@@ -790,6 +790,11 @@ export const hrHours = sqliteTable("hr_hours", {
   objectId: integer("object_id").references(() => hrObjects.id, {
     onDelete: "set null",
   }),
+  // Wpis przeniesiony z poprzedniego miesiąca — obiekt do potwierdzenia
+  // (zapis wpisu przez użytkownika zdejmuje flagę)
+  objectUncertain: integer("object_uncertain", { mode: "boolean" })
+    .default(false)
+    .notNull(),
   year: integer("year").notNull(),
   month: integer("month").notNull(), // 1-12
   nightHours: real("night_hours"), // godziny nocne — informacyjne, nie wchodzą do płac

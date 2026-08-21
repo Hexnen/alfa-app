@@ -1,7 +1,7 @@
 // Moduł Kadry — odwzorowanie skoroszytu "MASTER": godziny → zestawienie dla
 // księgowości → kwoty od księgowości → wynagrodzenia (przelew/gotówka).
 // Każdy nagłówek kolumny ma tooltip (hover) z opisem, z czego się kalkuluje.
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Navigate, useParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -35,6 +35,7 @@ import {
   createHrHours,
   updateHrHours,
   deleteHrHours,
+  carryOverHrHours,
   getHrEmployees,
   createHrEmployee,
   updateHrEmployee,
@@ -137,6 +138,7 @@ export function Kadry() {
   const { tab } = useParams<{ tab: string }>();
   const { canEdit } = usePerms();
   const editable = canEdit(`kadry/${tab}`);
+  const hoursEditable = canEdit("kadry/godziny");
   const now = new Date();
   const [year, setYear] = useState(now.getFullYear());
   const [month, setMonth] = useState(now.getMonth() + 1);
@@ -168,23 +170,55 @@ export function Kadry() {
     Record<number, { workNorm: string; contractNorm: string }>
   >({});
 
+  // Carry-over: jedna próba na parę (year, month) w tej sesji + ochrona przed
+  // zapisem stanu po szybkiej zmianie miesiąca (klucz ostatniego żądania)
+  const carryTriedRef = useRef<Set<string>>(new Set());
+  const monthKeyRef = useRef("");
+
   const loadMonth = useCallback(async () => {
+    const key = `${year}-${month}`;
+    monthKeyRef.current = key;
     setLoading(true);
     try {
-      const [s, p, h, o] = await Promise.all([
-        getHrSummary(year, month),
-        getHrPayroll(year, month),
-        getHrHours(year, month),
-        getHrOffice(year, month),
-      ]);
+      const fetchAll = () =>
+        Promise.all([
+          getHrSummary(year, month),
+          getHrPayroll(year, month),
+          getHrHours(year, month),
+          getHrOffice(year, month),
+        ]);
+      let [s, p, h, o] = await fetchAll();
+      // Auto-przeniesienie aktywnych pracowników z poprzedniego miesiąca:
+      // tylko gdy miesiąc pusty, użytkownik ma edycję godzin, miesiąc nie jest
+      // dalej niż 1 w przód (przewijanie w przyszłość nie tworzy kaskady
+      // pustych miesięcy) i nie próbowano jeszcze w tej sesji.
+      const nowIdx =
+        new Date().getFullYear() * 12 + new Date().getMonth() + 1;
+      if (
+        (h.data ?? []).length === 0 &&
+        hoursEditable &&
+        year * 12 + month - nowIdx <= 1 &&
+        !carryTriedRef.current.has(key)
+      ) {
+        carryTriedRef.current.add(key);
+        try {
+          const res = await carryOverHrHours(year, month);
+          if ((res.data?.inserted ?? 0) > 0) {
+            [s, p, h, o] = await fetchAll();
+          }
+        } catch {
+          // Błąd carry-over (np. sieć) nie blokuje widoku pustego miesiąca
+        }
+      }
+      if (monthKeyRef.current !== key) return; // zmieniono miesiąc w trakcie
       setSummary(s.data ?? null);
       setPayroll(p.data ?? []);
       setHours(h.data ?? []);
       setOffice(o.data ?? []);
     } finally {
-      setLoading(false);
+      if (monthKeyRef.current === key) setLoading(false);
     }
-  }, [year, month]);
+  }, [year, month, hoursEditable]);
 
   const loadDictionaries = useCallback(async () => {
     const [e, o, c] = await Promise.all([
@@ -865,7 +899,17 @@ export function Kadry() {
                         <td className="whitespace-nowrap px-3 py-2 font-medium">
                           {r.employeeName}
                         </td>
-                        <td className="px-3 py-2">{r.objectName || "—"}</td>
+                        <td className="px-3 py-2">
+                          {r.objectName || "—"}
+                          {r.objectUncertain && (
+                            <span
+                              title="Przeniesione z poprzedniego miesiąca — potwierdź obiekt zapisując wpis"
+                              className="ml-1.5 cursor-help font-semibold text-amber-600"
+                            >
+                              ?
+                            </span>
+                          )}
+                        </td>
                         <td className="px-3 py-2 text-right">
                           {r.nightHours != null ? hrs(r.nightHours) : ""}
                         </td>
