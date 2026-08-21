@@ -1910,6 +1910,274 @@ export const deleteHrOffice = (id: number) =>
 export const getHrSummary = (year: number, month: number) =>
   request<ApiResponse<HrSummary>>(`/hr/summary?year=${year}&month=${month}`);
 
+// ---------------------------------------------------------------------------
+// Magazyn (Techniczny -> Magazyn) — towary, magazyny, dokumenty, ruchy
+// ---------------------------------------------------------------------------
+
+export interface WarehouseItem {
+  id: number;
+  sku: string | null;
+  name: string;
+  category: string | null;
+  unit: string;
+  description: string | null;
+  photoData: string | null;
+  minStock: number | null;
+  isAsset: boolean;
+  barcode: string | null;
+  isArchived: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WarehouseItemInput {
+  name: string;
+  unit: string;
+  sku?: string;
+  category?: string;
+  description?: string;
+  minStock?: number | null;
+  isAsset?: boolean;
+  barcode?: string;
+  photoData?: string | null;
+  /** false = przywrócenie towaru z archiwum */
+  isArchived?: boolean;
+}
+
+export type WarehouseType = "main" | "vehicle" | "employee" | "site" | "other";
+
+export interface WarehouseDef {
+  id: number;
+  name: string;
+  code: string | null;
+  type: WarehouseType;
+  parentId: number | null;
+  isArchived: boolean;
+  createdAt: string;
+}
+
+export interface WarehouseDefInput {
+  name: string;
+  code?: string;
+  type: WarehouseType;
+  parentId?: number | null;
+  /** false = przywrócenie magazynu z archiwum */
+  isArchived?: boolean;
+}
+
+export interface StockEntry {
+  itemId: number;
+  warehouseId: number;
+  quantity: number;
+}
+
+export type WarehouseDocType = "PZ" | "WZ" | "RW" | "MM";
+export type WarehouseDocStatus = "draft" | "confirmed" | "cancelled";
+
+export interface WarehouseDocumentItem {
+  id: number;
+  documentId: number;
+  itemId: number;
+  itemName?: string;
+  itemUnit?: string;
+  quantity: number;
+  unitPrice: number | null;
+  positionNo: number;
+}
+
+export interface WarehouseDocument {
+  id: number;
+  docType: WarehouseDocType;
+  docNumber: string | null;
+  status: WarehouseDocStatus;
+  warehouseFromId: number | null;
+  warehouseToId: number | null;
+  contractorName: string | null;
+  invoiceNumber: string | null;
+  invoiceFileName: string | null;
+  hasInvoiceFile?: boolean;
+  issuedAt: string;
+  confirmedAt: string | null;
+  notes: string | null;
+  createdBy: string | null;
+  itemCount?: number;
+  warehouseFromName?: string | null;
+  warehouseToName?: string | null;
+  items?: WarehouseDocumentItem[];
+}
+
+export interface WarehouseDocumentItemInput {
+  itemId: number;
+  quantity: number;
+  unitPrice?: number | null;
+}
+
+export interface WarehouseDocumentInput {
+  docType: WarehouseDocType;
+  warehouseFromId?: number | null;
+  warehouseToId?: number | null;
+  contractorName?: string;
+  invoiceNumber?: string;
+  /** null (przy PUT) = usuń istniejący załącznik; undefined = bez zmian */
+  invoiceFileName?: string | null;
+  invoiceFileData?: string | null;
+  issuedAt?: string;
+  notes?: string;
+  items: WarehouseDocumentItemInput[];
+  /** true = utwórz i od razu zatwierdź (nadaje numer, księguje ruchy) */
+  confirm?: boolean;
+}
+
+export interface WarehouseMovement {
+  id: number;
+  itemId: number;
+  itemName: string;
+  itemUnit: string;
+  warehouseId: number;
+  warehouseName: string;
+  quantityDelta: number;
+  documentId: number;
+  docNumber: string | null;
+  docType: WarehouseDocType | null;
+  createdAt: string;
+  createdBy: string | null;
+}
+
+export const warehouseApi = {
+  // Towary (kartoteka)
+  async getItems(includeArchived = false) {
+    return request<ApiResponse<WarehouseItem[]>>(
+      `/warehouse/items${includeArchived ? "?includeArchived=1" : ""}`
+    );
+  },
+
+  async createItem(data: WarehouseItemInput) {
+    return request<ApiResponse<WarehouseItem>>("/warehouse/items", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  },
+
+  async updateItem(id: number, data: Partial<WarehouseItemInput>) {
+    return request<ApiResponse<WarehouseItem>>(`/warehouse/items/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    });
+  },
+
+  /** DELETE = archiwizacja towaru (nie usuwa historii) */
+  async archiveItem(id: number) {
+    return request<ApiResponse<null>>(`/warehouse/items/${id}`, {
+      method: "DELETE",
+    });
+  },
+
+  // Magazyny
+  async getWarehouses() {
+    return request<ApiResponse<WarehouseDef[]>>("/warehouse/warehouses");
+  },
+
+  async createWarehouse(data: WarehouseDefInput) {
+    return request<ApiResponse<WarehouseDef>>("/warehouse/warehouses", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  },
+
+  async updateWarehouse(id: number, data: Partial<WarehouseDefInput>) {
+    return request<ApiResponse<WarehouseDef>>(`/warehouse/warehouses/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    });
+  },
+
+  /** DELETE = archiwizacja magazynu (400 przy niezerowym stanie) */
+  async archiveWarehouse(id: number) {
+    return request<ApiResponse<null>>(`/warehouse/warehouses/${id}`, {
+      method: "DELETE",
+    });
+  },
+
+  // Stany (tylko niezerowe wpisy)
+  async getStock() {
+    return request<ApiResponse<StockEntry[]>>("/warehouse/stock");
+  },
+
+  // Dokumenty
+  async getDocuments(params?: { type?: string; status?: string }) {
+    const searchParams = new URLSearchParams();
+    if (params?.type) searchParams.set("type", params.type);
+    if (params?.status) searchParams.set("status", params.status);
+    const query = searchParams.toString();
+    return request<ApiResponse<WarehouseDocument[]>>(
+      `/warehouse/documents${query ? `?${query}` : ""}`
+    );
+  },
+
+  async getDocument(id: number) {
+    return request<ApiResponse<WarehouseDocument>>(`/warehouse/documents/${id}`);
+  },
+
+  async getDocumentInvoice(id: number) {
+    return request<ApiResponse<{ fileName: string; data: string }>>(
+      `/warehouse/documents/${id}/invoice`
+    );
+  },
+
+  async createDocument(data: WarehouseDocumentInput) {
+    return request<ApiResponse<WarehouseDocument>>("/warehouse/documents", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  },
+
+  async updateDocument(id: number, data: Partial<WarehouseDocumentInput>) {
+    return request<ApiResponse<WarehouseDocument>>(
+      `/warehouse/documents/${id}`,
+      { method: "PUT", body: JSON.stringify(data) }
+    );
+  },
+
+  async confirmDocument(id: number) {
+    return request<ApiResponse<WarehouseDocument>>(
+      `/warehouse/documents/${id}/confirm`,
+      { method: "POST" }
+    );
+  },
+
+  /** Storno zatwierdzonego dokumentu */
+  async cancelDocument(id: number) {
+    return request<ApiResponse<WarehouseDocument>>(
+      `/warehouse/documents/${id}/cancel`,
+      { method: "POST" }
+    );
+  },
+
+  /** Usuwanie tylko szkiców */
+  async deleteDocument(id: number) {
+    return request<ApiResponse<null>>(`/warehouse/documents/${id}`, {
+      method: "DELETE",
+    });
+  },
+
+  // Ruchy magazynowe
+  async getMovements(params?: {
+    itemId?: number;
+    warehouseId?: number;
+    limit?: number;
+  }) {
+    const searchParams = new URLSearchParams();
+    if (params?.itemId) searchParams.set("itemId", String(params.itemId));
+    if (params?.warehouseId)
+      searchParams.set("warehouseId", String(params.warehouseId));
+    if (params?.limit) searchParams.set("limit", String(params.limit));
+    const query = searchParams.toString();
+    return request<ApiResponse<WarehouseMovement[]>>(
+      `/warehouse/movements${query ? `?${query}` : ""}`
+    );
+  },
+};
+
 // --- ADMIN: zarządzanie użytkownikami ---
 export interface AdminUser {
   id: number;

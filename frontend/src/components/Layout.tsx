@@ -103,6 +103,7 @@ const sections: NavItem[] = [
       { name: "Cennik", href: "/technical/cennik" },
       { name: "Technicy", href: "/technical/technicy" },
       { name: "Obiekty", href: "/technical/obiekty" },
+      { name: "Magazyn", href: "/technical/magazyn" },
       { name: "Projekty", href: "/technical/projekty" },
       { name: "Szablony", href: "/technical/szablony" },
     ],

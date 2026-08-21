@@ -66,6 +66,7 @@ const API_TAB_MAP: { prefix: string; tabs: string[] }[] = [
   { prefix: "/monitored-objects", tabs: ["technical/obiekty"] },
   { prefix: "/monitoring", tabs: ["technical/projekty"] },
   { prefix: "/camera-models", tabs: ["technical/szablony"] },
+  { prefix: "/warehouse", tabs: ["technical/magazyn"] },
 ];
 
 const READ_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);

@@ -1,4 +1,12 @@
-import { sqliteTable, text, integer, real } from "drizzle-orm/sqlite-core";
+import {
+  sqliteTable,
+  text,
+  integer,
+  real,
+  primaryKey,
+  index,
+  type AnySQLiteColumn,
+} from "drizzle-orm/sqlite-core";
 import { sql } from "drizzle-orm";
 
 // Contractors table
@@ -902,3 +910,189 @@ export const hrOfficePayroll = sqliteTable("hr_office_payroll", {
 
 export type HrOfficePayroll = typeof hrOfficePayroll.$inferSelect;
 export type NewHrOfficePayroll = typeof hrOfficePayroll.$inferInsert;
+
+// ============================================================
+// MODUŁ MAGAZYN — kartoteka towarów, magazyny, dokumenty (PZ/WZ/RW/MM),
+// ledger ruchów (źródło prawdy) + cache stanów. Stany zmieniają się
+// WYŁĄCZNIE przez zatwierdzenie/anulowanie dokumentu — w jednej transakcji
+// zapisywany jest ruch do warehouse_movements i aktualizowany warehouse_stock.
+// ============================================================
+
+// Kartoteka towarów / sprzętu (isAsset = sprzęt zwrotny vs materiał zużywalny).
+// Nigdy nie usuwana fizycznie — tylko archiwizacja (historia ruchów musi się spinać).
+export const warehouseItems = sqliteTable("warehouse_items", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  sku: text("sku").unique(),
+  name: text("name").notNull(),
+  category: text("category"),
+  unit: text("unit").default("szt").notNull(),
+  description: text("description"),
+  photoData: text("photo_data"), // base64 data-URL (wzorzec jak monitoringPhotos)
+  minStock: real("min_stock"), // próg alertu niskiego stanu
+  isAsset: integer("is_asset", { mode: "boolean" }).default(false).notNull(),
+  barcode: text("barcode"),
+  isArchived: integer("is_archived", { mode: "boolean" })
+    .default(false)
+    .notNull(),
+  createdAt: text("created_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+  updatedAt: text("updated_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+});
+
+export type WarehouseItem = typeof warehouseItems.$inferSelect;
+export type NewWarehouseItem = typeof warehouseItems.$inferInsert;
+
+// Magazyny — główny, pojazdy, pracownicy, budowy. Hierarchia max 1 poziom
+// (parent nie może sam mieć parenta — pilnowane w API).
+export const warehouses = sqliteTable("warehouses", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(),
+  code: text("code"),
+  type: text("type", { enum: ["main", "vehicle", "employee", "site", "other"] })
+    .default("main")
+    .notNull(),
+  parentId: integer("parent_id").references(
+    (): AnySQLiteColumn => warehouses.id
+  ),
+  isArchived: integer("is_archived", { mode: "boolean" })
+    .default(false)
+    .notNull(),
+  createdAt: text("created_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+});
+
+export type Warehouse = typeof warehouses.$inferSelect;
+export type NewWarehouse = typeof warehouses.$inferInsert;
+
+// Dokumenty magazynowe: PZ (przyjęcie), WZ (wydanie), RW (rozchód wewnętrzny),
+// MM (przesunięcie międzymagazynowe). docNumber nadawany przy zatwierdzeniu.
+export const warehouseDocuments = sqliteTable("warehouse_documents", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  docType: text("doc_type", { enum: ["PZ", "WZ", "RW", "MM"] }).notNull(),
+  docNumber: text("doc_number").unique(), // np. PZ/2026/001 — nadawany przy zatwierdzeniu
+  status: text("status", { enum: ["draft", "confirmed", "cancelled"] })
+    .default("draft")
+    .notNull(),
+  warehouseFromId: integer("warehouse_from_id").references(() => warehouses.id),
+  warehouseToId: integer("warehouse_to_id").references(() => warehouses.id),
+  contractorName: text("contractor_name"),
+  invoiceNumber: text("invoice_number"),
+  invoiceFileName: text("invoice_file_name"),
+  invoiceFileData: text("invoice_file_data"), // base64 data-URL
+  issuedAt: text("issued_at").notNull(), // data dokumentu YYYY-MM-DD
+  confirmedAt: text("confirmed_at"),
+  notes: text("notes"),
+  createdBy: text("created_by"), // login (email) użytkownika
+  createdAt: text("created_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+  updatedAt: text("updated_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+});
+
+export type WarehouseDocument = typeof warehouseDocuments.$inferSelect;
+export type NewWarehouseDocument = typeof warehouseDocuments.$inferInsert;
+
+// Pozycje dokumentu magazynowego
+export const warehouseDocumentItems = sqliteTable(
+  "warehouse_document_items",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    documentId: integer("document_id")
+      .notNull()
+      .references(() => warehouseDocuments.id, { onDelete: "cascade" }),
+    itemId: integer("item_id")
+      .notNull()
+      .references(() => warehouseItems.id),
+    quantity: real("quantity").notNull(),
+    unitPrice: real("unit_price"),
+    positionNo: integer("position_no").notNull(),
+  },
+  (t) => ({
+    documentIdIdx: index("warehouse_document_items_document_id_idx").on(
+      t.documentId
+    ),
+  })
+);
+
+export type WarehouseDocumentItem = typeof warehouseDocumentItems.$inferSelect;
+export type NewWarehouseDocumentItem =
+  typeof warehouseDocumentItems.$inferInsert;
+
+// LEDGER ruchów magazynowych — append-only, źródło prawdy o stanach.
+// Anulowanie dokumentu dopisuje ruchy odwrotne (storno), niczego nie kasuje.
+export const warehouseMovements = sqliteTable(
+  "warehouse_movements",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    itemId: integer("item_id")
+      .notNull()
+      .references(() => warehouseItems.id),
+    warehouseId: integer("warehouse_id")
+      .notNull()
+      .references(() => warehouses.id),
+    quantityDelta: real("quantity_delta").notNull(), // +przyjęcie / -wydanie
+    documentId: integer("document_id").references(() => warehouseDocuments.id),
+    documentItemId: integer("document_item_id").references(
+      () => warehouseDocumentItems.id
+    ),
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+    createdBy: text("created_by"),
+  },
+  (t) => ({
+    itemIdIdx: index("warehouse_movements_item_id_idx").on(t.itemId),
+    warehouseIdIdx: index("warehouse_movements_warehouse_id_idx").on(
+      t.warehouseId
+    ),
+    documentIdIdx: index("warehouse_movements_document_id_idx").on(
+      t.documentId
+    ),
+  })
+);
+
+export type WarehouseMovement = typeof warehouseMovements.$inferSelect;
+export type NewWarehouseMovement = typeof warehouseMovements.$inferInsert;
+
+// Cache aktualnych stanów (itemId × warehouseId) — aktualizowany w tej samej
+// transakcji co insert do ledgera; zawsze = SUM(quantity_delta) z ledgera.
+export const warehouseStock = sqliteTable(
+  "warehouse_stock",
+  {
+    itemId: integer("item_id")
+      .notNull()
+      .references(() => warehouseItems.id),
+    warehouseId: integer("warehouse_id")
+      .notNull()
+      .references(() => warehouses.id),
+    quantity: real("quantity").default(0).notNull(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.itemId, t.warehouseId] }),
+  })
+);
+
+export type WarehouseStock = typeof warehouseStock.$inferSelect;
+export type NewWarehouseStock = typeof warehouseStock.$inferInsert;
+
+// Sekwencje numeracji dokumentów per typ i rok (PZ/2026/001, ...)
+export const warehouseDocSequences = sqliteTable(
+  "warehouse_doc_sequences",
+  {
+    docType: text("doc_type").notNull(),
+    year: integer("year").notNull(),
+    lastNumber: integer("last_number").default(0).notNull(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.docType, t.year] }),
+  })
+);
+
+export type WarehouseDocSequence = typeof warehouseDocSequences.$inferSelect;
+export type NewWarehouseDocSequence = typeof warehouseDocSequences.$inferInsert;

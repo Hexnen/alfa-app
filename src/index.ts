@@ -19,6 +19,23 @@ const { ensureMasterAdmin } = await import("../scripts/bootstrap-admin.js");
 // Ensure the master admin exists (no-op without ADMIN_PASSWORD).
 ensureMasterAdmin();
 
+// Seed magazynu: pusta tabela warehouses → utwórz "Magazyn główny".
+// Robione przy starcie (nie w GET /warehouses) — odczyt nie może robić zapisów
+// i nie ma wyścigu współbieżnych requestów tworzącego duplikaty.
+{
+  const { sql } = await import("drizzle-orm");
+  const { db, schema } = await import("./db/index.js");
+  const [{ count }] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(schema.warehouses);
+  if (count === 0) {
+    await db
+      .insert(schema.warehouses)
+      .values({ name: "Magazyn główny", code: "MAG", type: "main" });
+    console.log("Seed: utworzono domyślny magazyn główny");
+  }
+}
+
 const app = new Hono();
 
 // Directory with the built frontend (produced by `vite build`, copied in Docker)

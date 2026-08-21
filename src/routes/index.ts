@@ -15,6 +15,7 @@ import monitoringRoutes from "./monitoring.js";
 import monitoredObjectsRoutes from "./monitored-objects.js";
 import cmaMailRoutes from "./cma-mail.js";
 import hrRoutes from "./hr.js";
+import warehouseRoutes from "./warehouse.js";
 import authRoutes from "./auth.js";
 import publicRoutes from "./public.js";
 import adminRoutes from "./admin.js";
@@ -155,5 +156,6 @@ api.route("/cma", cmaRoutes);
 api.route("/monitoring", monitoringRoutes);
 api.route("/monitored-objects", monitoredObjectsRoutes);
 api.route("/hr", hrRoutes);
+api.route("/warehouse", warehouseRoutes);
 
 export default api;
