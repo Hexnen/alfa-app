@@ -2264,3 +2264,307 @@ export const setAdminUserPassword = (id: number, password: string) =>
 
 export const deleteAdminUser = (id: number) =>
   request<ApiResponse<null>>(`/admin/users/${id}`, { method: "DELETE" });
+
+// ---------------------------------------------------------------------------
+// Kalendarz (dział techniczny) + globalny activity_log
+// ---------------------------------------------------------------------------
+
+export type CalendarEventType =
+  | "serwis"
+  | "montaz"
+  | "wizja"
+  | "demontaz"
+  | "biuro"
+  | "przygotowanie"
+  | "konserwacja"
+  | "urlop";
+
+export type CalendarEventStatus = "planned" | "confirmed" | "done" | "cancelled";
+
+export type CalendarSeriesFreq =
+  | "weekly"
+  | "monthly"
+  | "quarterly"
+  | "semiannual"
+  | "yearly";
+
+export interface CalendarSeries {
+  id: number;
+  freq: CalendarSeriesFreq;
+  interval: number;
+  until: string | null;
+  count: number | null;
+}
+
+export interface CalendarRecurrenceInput {
+  freq: CalendarSeriesFreq;
+  interval?: number;
+  until?: string | null;
+  count?: number | null;
+}
+
+export interface CalendarEventTechnician {
+  id: number;
+  firstName: string;
+  lastName: string;
+}
+
+export interface CalendarEvent {
+  id: number;
+  type: CalendarEventType;
+  title: string;
+  description: string | null;
+  location: string | null;
+  /** ISO lokalny bez strefy: "YYYY-MM-DDTHH:MM" (all-day: "YYYY-MM-DD"). */
+  startAt: string;
+  /** Dla all-day koniec jest EXCLUSIVE (jak w FullCalendar). */
+  endAt: string;
+  allDay: boolean;
+  status: CalendarEventStatus;
+  department: string;
+  objectId: number | null;
+  objectName: string | null;
+  orderId: number | null;
+  realizationId: number | null;
+  technicians: CalendarEventTechnician[];
+  createdBy: number | null;
+  createdByLabel: string | null;
+  updatedBy: number | null;
+  updatedByLabel: string | null;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt: string | null;
+  seriesId: number | null;
+  series?: CalendarSeries | null;
+  /** Opcjonalnie od backendu: pozycja wystąpienia w serii (badge "5/8"). */
+  seriesIndex?: number;
+  seriesTotal?: number;
+  /** Tylko w odpowiedzi POST z recurrence. */
+  occurrencesCount?: number;
+}
+
+export interface CalendarEventWithHistory extends CalendarEvent {
+  history: ActivityEntry[];
+}
+
+export interface CalendarEventInput {
+  type: CalendarEventType;
+  title: string;
+  description?: string | null;
+  location?: string | null;
+  startAt: string;
+  endAt: string;
+  allDay: boolean;
+  status?: CalendarEventStatus;
+  objectId?: number | null;
+  orderId?: number | null;
+  realizationId?: number | null;
+  technicianIds: number[];
+  recurrence?: CalendarRecurrenceInput | null;
+}
+
+export interface CalendarMoveInput {
+  startAt: string;
+  endAt: string;
+  allDay: boolean;
+}
+
+/** Zakres operacji na wystąpieniu serii. */
+export type CalendarSeriesScope = "this" | "future" | "all";
+
+export type ActivityAction =
+  | "created"
+  | "updated"
+  | "deleted"
+  | "restored"
+  | "moved"
+  | "assigned"
+  | "unassigned"
+  | "status_changed";
+
+export interface ActivityEventRef {
+  id: number;
+  title: string;
+  type: CalendarEventType;
+  startAt: string;
+  endAt: string;
+  allDay: boolean;
+  status: CalendarEventStatus;
+  deletedAt: string | null;
+}
+
+export interface ActivityEntry {
+  id: number;
+  entityType: string;
+  entityId: number;
+  objectId: number | null;
+  userId: number | null;
+  userLabel: string | null;
+  action: ActivityAction | string;
+  field: string | null;
+  oldValue: string | null;
+  newValue: string | null;
+  summary: string | null;
+  createdAt: string;
+  event?: ActivityEventRef | null;
+}
+
+export interface CalendarEventsQuery {
+  from: string;
+  to: string;
+  type?: CalendarEventType[];
+  /** Jeden technik albo lista (backend przyjmuje "1,2,3"). */
+  technicianId?: number | number[];
+  objectId?: number;
+  status?: CalendarEventStatus | CalendarEventStatus[];
+  includeDeleted?: boolean;
+}
+
+export interface CalendarConflictsQuery {
+  technicianIds: number[];
+  startAt: string;
+  endAt: string;
+  excludeId?: number;
+}
+
+/** Kolizja z GET /calendar/conflicts — `conflictKind: "urlop"` = technik na urlopie. */
+export interface CalendarConflict extends CalendarEvent {
+  conflictKind: "urlop" | "event";
+}
+
+/** Urlopy technika w zakresie (GET /calendar/availability). */
+export interface TechnicianLeave {
+  eventId: number;
+  title: string;
+  startAt: string;
+  endAt: string;
+  allDay: boolean;
+  status: CalendarEventStatus;
+}
+
+export interface TechnicianAvailability {
+  technicianId: number;
+  firstName: string;
+  lastName: string;
+  leaves: TechnicianLeave[];
+}
+
+const scopeQuery = (scope?: CalendarSeriesScope) =>
+  scope && scope !== "this" ? `?scope=${scope}` : "";
+
+export const calendarApi = {
+  async getEvents(params: CalendarEventsQuery) {
+    const sp = new URLSearchParams();
+    sp.set("from", params.from);
+    sp.set("to", params.to);
+    if (params.type?.length) sp.set("type", params.type.join(","));
+    const techs = Array.isArray(params.technicianId) ? params.technicianId : params.technicianId ? [params.technicianId] : [];
+    if (techs.length) sp.set("technicianId", techs.join(","));
+    if (params.objectId) sp.set("objectId", String(params.objectId));
+    const statuses = Array.isArray(params.status) ? params.status : params.status ? [params.status] : [];
+    if (statuses.length) sp.set("status", statuses.join(","));
+    if (params.includeDeleted) sp.set("includeDeleted", "1");
+    return request<ApiResponse<CalendarEvent[]>>(
+      `/calendar/events?${sp.toString()}`
+    );
+  },
+
+  async getEvent(id: number) {
+    return request<ApiResponse<CalendarEventWithHistory>>(
+      `/calendar/events/${id}`
+    );
+  },
+
+  async create(data: CalendarEventInput) {
+    return request<ApiResponse<CalendarEvent>>("/calendar/events", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  },
+
+  /** PUT = pełna aktualizacja; `scope` tylko dla wystąpień serii. */
+  async update(id: number, data: CalendarEventInput, scope?: CalendarSeriesScope) {
+    return request<ApiResponse<CalendarEvent>>(
+      `/calendar/events/${id}${scopeQuery(scope)}`,
+      { method: "PUT", body: JSON.stringify(data) }
+    );
+  },
+
+  /** Drag&drop / resize w kalendarzu. */
+  async move(id: number, data: CalendarMoveInput) {
+    return request<ApiResponse<CalendarEvent>>(`/calendar/events/${id}/move`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    });
+  },
+
+  /** Soft delete; `scope` tylko dla wystąpień serii. */
+  async remove(id: number, scope?: CalendarSeriesScope) {
+    return request<ApiResponse<null>>(
+      `/calendar/events/${id}${scopeQuery(scope)}`,
+      { method: "DELETE" }
+    );
+  },
+
+  async restore(id: number) {
+    return request<ApiResponse<CalendarEvent>>(
+      `/calendar/events/${id}/restore`,
+      { method: "POST" }
+    );
+  },
+
+  /** Kolizje terminów techników (ostrzeżenie, nie blokada). */
+  async conflicts(params: CalendarConflictsQuery) {
+    const sp = new URLSearchParams();
+    sp.set("technicianIds", params.technicianIds.join(","));
+    sp.set("startAt", params.startAt);
+    sp.set("endAt", params.endAt);
+    if (params.excludeId) sp.set("excludeId", String(params.excludeId));
+    return request<ApiResponse<CalendarConflict[]>>(
+      `/calendar/conflicts?${sp.toString()}`
+    );
+  },
+
+  /** Urlopy techników nachodzące na zakres [from, to) — do oznaczania w dialogu. */
+  async availability(from: string, to: string) {
+    const sp = new URLSearchParams({ from, to });
+    return request<ApiResponse<TechnicianAvailability[]>>(
+      `/calendar/availability?${sp.toString()}`
+    );
+  },
+
+  async objectEvents(objectId: number) {
+    return request<ApiResponse<CalendarEvent[]>>(
+      `/calendar/objects/${objectId}/events`
+    );
+  },
+
+  /** Bieżący token ICS (null, jeśli jeszcze nie wygenerowano) — bez rotacji. */
+  async getFeedToken() {
+    return request<ApiResponse<{ token: string; url: string } | null>>(
+      "/calendar/feed-token"
+    );
+  },
+
+  /** Generuje / rotuje token subskrypcji ICS dla zalogowanego użytkownika. */
+  async feedToken() {
+    return request<ApiResponse<{ token: string; url: string }>>(
+      "/calendar/feed-token",
+      { method: "POST" }
+    );
+  },
+};
+
+export const activityApi = {
+  async object(objectId: number, limit = 100) {
+    return request<ApiResponse<ActivityEntry[]>>(
+      `/activity/object/${objectId}?limit=${limit}`
+    );
+  },
+
+  async recent(limit = 50) {
+    return request<ApiResponse<ActivityEntry[]>>(
+      `/activity/recent?limit=${limit}`
+    );
+  },
+};

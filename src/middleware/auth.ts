@@ -62,11 +62,12 @@ const API_TAB_MAP: { prefix: string; tabs: string[] }[] = [
   { prefix: "/protocols", tabs: ["technical/protokoly"] },
   { prefix: "/quotes", tabs: ["technical/wyceny"] },
   { prefix: "/pricelist", tabs: ["technical/cennik"] },
-  { prefix: "/technicians", tabs: ["technical/technicy"] },
+  { prefix: "/technicians", tabs: ["technical/technicy", "technical/kalendarz"] },
   { prefix: "/monitored-objects", tabs: ["technical/obiekty"] },
   { prefix: "/monitoring", tabs: ["technical/projekty"] },
   { prefix: "/camera-models", tabs: ["technical/szablony"] },
   { prefix: "/warehouse", tabs: ["technical/magazyn"] },
+  { prefix: "/calendar", tabs: ["technical/kalendarz"] },
 ];
 
 const READ_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);

@@ -419,6 +419,9 @@ export const users = sqliteTable("users", {
   // odczytaną wartość jako expectedVersion; niezgodność => 409 (dwóch adminów
   // edytujących tego samego usera nie nadpisze się po cichu — lost update).
   version: integer("version").default(1).notNull(),
+  // Token subskrypcji kalendarza ICS (GET /calendar/feed.ics?token=...).
+  // NULL = użytkownik nie wygenerował feedu. Rotowany przez POST /calendar/feed-token.
+  calendarToken: text("calendar_token").unique(),
   createdAt: text("created_at")
     .default(sql`(datetime('now'))`)
     .notNull(),
@@ -1101,3 +1104,186 @@ export const warehouseDocSequences = sqliteTable(
 
 export type WarehouseDocSequence = typeof warehouseDocSequences.$inferSelect;
 export type NewWarehouseDocSequence = typeof warehouseDocSequences.$inferInsert;
+
+// ============================================================================
+// KALENDARZ (dział techniczny) — wydarzenia, serie cykliczne, przypisani technicy
+// ============================================================================
+
+export const CALENDAR_EVENT_TYPES = [
+  "serwis",
+  "montaz",
+  "wizja",
+  "demontaz",
+  "biuro",
+  "przygotowanie",
+  "konserwacja",
+  "urlop",
+] as const;
+export type CalendarEventType = (typeof CALENDAR_EVENT_TYPES)[number];
+
+export const CALENDAR_EVENT_STATUSES = [
+  "planned",
+  "confirmed",
+  "done",
+  "cancelled",
+] as const;
+export type CalendarEventStatus = (typeof CALENDAR_EVENT_STATUSES)[number];
+
+export const CALENDAR_SERIES_FREQS = [
+  "weekly",
+  "monthly",
+  "quarterly",
+  "semiannual",
+  "yearly",
+] as const;
+export type CalendarSeriesFreq = (typeof CALENDAR_SERIES_FREQS)[number];
+
+// Seria cykliczna (np. konserwacja co kwartał). Wystąpienia są
+// MATERIALIZOWANE jako zwykłe wiersze calendar_events (każde ma własny
+// status/historię/techników) — seria to tylko reguła + spinacz.
+// Reguła: until albo count; oba NULL → 24 miesiące do przodu (max 200 wystąpień).
+export const calendarSeries = sqliteTable("calendar_series", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  freq: text("freq", { enum: CALENDAR_SERIES_FREQS }).notNull(),
+  interval: integer("interval").default(1).notNull(), // co ile jednostek freq
+  until: text("until"), // YYYY-MM-DD (włącznie)
+  count: integer("count"), // liczba wystąpień
+  createdBy: integer("created_by").references(() => users.id, {
+    onDelete: "set null",
+  }),
+  createdAt: text("created_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+  updatedAt: text("updated_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+});
+
+export type CalendarSeries = typeof calendarSeries.$inferSelect;
+export type NewCalendarSeries = typeof calendarSeries.$inferInsert;
+
+// Wydarzenie kalendarza. Daty: ISO lokalny bez strefy "YYYY-MM-DDTHH:MM";
+// dla all_day "YYYY-MM-DD", a end_at jest EXCLUSIVE (jak FullCalendar:
+// 1-dniowy event = start "2026-09-12", end "2026-09-13").
+export const calendarEvents = sqliteTable(
+  "calendar_events",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    type: text("type", { enum: CALENDAR_EVENT_TYPES }).notNull(),
+    title: text("title").notNull(),
+    description: text("description"),
+    location: text("location"),
+    startAt: text("start_at").notNull(),
+    endAt: text("end_at").notNull(),
+    allDay: integer("all_day", { mode: "boolean" }).default(false).notNull(),
+    status: text("status", { enum: CALENDAR_EVENT_STATUSES })
+      .default("planned")
+      .notNull(),
+    department: text("department").default("technical").notNull(),
+    objectId: integer("object_id").references(() => objects.id, {
+      onDelete: "set null",
+    }),
+    orderId: integer("order_id").references(() => orders.id, {
+      onDelete: "set null",
+    }),
+    realizationId: integer("realization_id").references(
+      () => realizations.id,
+      { onDelete: "set null" }
+    ),
+    seriesId: integer("series_id").references(() => calendarSeries.id, {
+      onDelete: "set null",
+    }),
+    createdBy: integer("created_by").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    updatedBy: integer("updated_by").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+    updatedAt: text("updated_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+    deletedAt: text("deleted_at"), // soft delete
+  },
+  (t) => ({
+    startAtIdx: index("calendar_events_start_at_idx").on(t.startAt),
+    objectIdIdx: index("calendar_events_object_id_idx").on(t.objectId),
+    deletedAtIdx: index("calendar_events_deleted_at_idx").on(t.deletedAt),
+    seriesIdIdx: index("calendar_events_series_id_idx").on(t.seriesId),
+  })
+);
+
+export type CalendarEvent = typeof calendarEvents.$inferSelect;
+export type NewCalendarEvent = typeof calendarEvents.$inferInsert;
+
+// Przypisanie techników do wydarzenia (N:M).
+export const calendarEventAssignees = sqliteTable(
+  "calendar_event_assignees",
+  {
+    eventId: integer("event_id")
+      .notNull()
+      .references(() => calendarEvents.id, { onDelete: "cascade" }),
+    technicianId: integer("technician_id")
+      .notNull()
+      .references(() => technicians.id, { onDelete: "cascade" }),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.eventId, t.technicianId] }),
+  })
+);
+
+export type CalendarEventAssignee = typeof calendarEventAssignees.$inferSelect;
+export type NewCalendarEventAssignee = typeof calendarEventAssignees.$inferInsert;
+
+// ============================================================================
+// ACTIVITY LOG — generyczny dziennik zmian dla całej aplikacji
+// (kalendarz jest pierwszym konsumentem; w przyszłości magazyn itd.)
+// ============================================================================
+
+export const ACTIVITY_ACTIONS = [
+  "created",
+  "updated",
+  "deleted",
+  "restored",
+  "moved",
+  "assigned",
+  "unassigned",
+  "status_changed",
+] as const;
+export type ActivityAction = (typeof ACTIVITY_ACTIONS)[number];
+
+export const activityLog = sqliteTable(
+  "activity_log",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    entityType: text("entity_type").notNull(), // "calendar_event", ...
+    entityId: integer("entity_id").notNull(),
+    // Denormalizacja: historia obiektu jednym zapytaniem.
+    objectId: integer("object_id").references(() => objects.id, {
+      onDelete: "set null",
+    }),
+    userId: integer("user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    // Snapshot nazwy/emaila użytkownika — odporny na usunięcie konta.
+    userLabel: text("user_label"),
+    action: text("action", { enum: ACTIVITY_ACTIONS }).notNull(),
+    field: text("field"),
+    oldValue: text("old_value"),
+    newValue: text("new_value"),
+    summary: text("summary"), // czytelny opis PL
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+  },
+  (t) => ({
+    entityIdx: index("activity_log_entity_idx").on(t.entityType, t.entityId),
+    objectIdIdx: index("activity_log_object_id_idx").on(t.objectId),
+    createdAtIdx: index("activity_log_created_at_idx").on(t.createdAt),
+  })
+);
+
+export type ActivityLogEntry = typeof activityLog.$inferSelect;
+export type NewActivityLogEntry = typeof activityLog.$inferInsert;

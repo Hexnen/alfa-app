@@ -97,6 +97,7 @@ const sections: NavItem[] = [
     href: "/technical",
     icon: Wrench,
     children: [
+      { name: "Kalendarz", href: "/technical/kalendarz" },
       { name: "Realizacje", href: "/technical/realizacje" },
       { name: "Protokoły", href: "/technical/protokoly" },
       { name: "Wyceny", href: "/technical/wyceny" },

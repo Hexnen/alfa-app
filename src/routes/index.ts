@@ -19,6 +19,8 @@ import warehouseRoutes from "./warehouse.js";
 import authRoutes from "./auth.js";
 import publicRoutes from "./public.js";
 import adminRoutes from "./admin.js";
+import calendarRoutes, { calendarPublicRoutes } from "./calendar.js";
+import activityRoutes from "./activity.js";
 import { requireAuth, tabPermissionGuard } from "../middleware/auth.js";
 import { db, schema } from "../db/index.js";
 import { sql, eq } from "drizzle-orm";
@@ -34,6 +36,10 @@ api.route("/auth", authRoutes);
 // Musi być zamontowane PRZED api.use("*", requireAuth), tak samo jak /auth.
 api.route("/public", publicRoutes);
 
+// --- KALENDARZ: publiczny feed ICS (auth po tokenie użytkownika w query) ---
+// GET /calendar/feed.ics?token=... — montowane PRZED requireAuth, jak /public.
+api.route("/calendar", calendarPublicRoutes);
+
 // --- Wszystkie pozostałe trasy API — chronione sesją ---
 api.use("*", requireAuth);
 
@@ -43,6 +49,11 @@ api.route("/admin", adminRoutes);
 
 // --- Strażnik uprawnień do zakładek (view/edit) dla tras modułowych ---
 api.use("*", tabPermissionGuard);
+
+// --- KALENDARZ (technical/kalendarz) + globalny dziennik aktywności ---
+// /activity nie jest w API_TAB_MAP — historia obiektu czytelna dla każdego zalogowanego.
+api.route("/calendar", calendarRoutes);
+api.route("/activity", activityRoutes);
 
 // Dashboard statistics
 api.get("/stats", async (c) => {

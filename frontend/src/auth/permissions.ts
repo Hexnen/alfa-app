@@ -34,6 +34,7 @@ export const TABS: TabDef[] = [
   { key: "technical/technicy", label: "Technicy", group: "Techniczny" },
   { key: "technical/obiekty", label: "Obiekty", group: "Techniczny" },
   { key: "technical/magazyn", label: "Magazyn", group: "Techniczny" },
+  { key: "technical/kalendarz", label: "Kalendarz", group: "Techniczny" },
   { key: "technical/projekty", label: "Projekty", group: "Techniczny" },
   { key: "technical/szablony", label: "Szablony", group: "Techniczny" },
   { key: "ofi", label: "OFI", group: "OFI" },

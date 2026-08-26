@@ -18,6 +18,7 @@ import { Kadry } from "./pages/Kadry";
 import { Monitoring } from "./pages/Monitoring";
 import { Templates } from "./pages/Templates";
 import { Warehouse } from "./pages/Warehouse";
+import { Calendar } from "./pages/Calendar";
 import { OrderDetails } from "./pages/OrderDetails";
 import { CmaReports } from "./pages/CmaReports";
 import { CmaReportDetails } from "./pages/CmaReportDetails";
@@ -75,6 +76,7 @@ function AuthedApp() {
           />
           <Route path="/technical/projekty" element={<Monitoring />} />
           <Route path="/technical/szablony" element={<Templates />} />
+          <Route path="/technical/kalendarz" element={<Calendar />} />
           <Route path="/technical/magazyn" element={<Warehouse />} />
           <Route path="/technical/:tab" element={<Technical />} />
           {/* Legacy paths → new locations under Techniczny */}
