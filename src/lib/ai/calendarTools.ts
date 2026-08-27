@@ -29,6 +29,7 @@ import {
   zEventInput,
   zId,
   zIds,
+  zPatch,
   type Change,
   type ResolvedChange,
 } from "./calendarChanges.js";
@@ -106,17 +107,51 @@ export function formatInputErrors(toolName: string, error: z.ZodError, input: un
 }
 
 /**
+ * Odchudza JSON Schema dla modelu: zod emituje `pattern`, `maxLength`, `maximum: 2^53` przy KAŻDYM polu
+ * (kilkaset tokenów na krok), a walidacja i tak jest zod-em w `execute`. Zostają: type, enum, required,
+ * description, granice liczbowe „znaczące” (np. durationHours ≤ 12) i min/max elementów tablic.
+ */
+function slimSchema(node: unknown): unknown {
+  if (Array.isArray(node)) return node.map(slimSchema);
+  if (!node || typeof node !== "object") return node;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
+    if (k === "$schema" || k === "pattern" || k === "maxLength" || k === "minLength" || k === "additionalProperties") continue;
+    if (k === "maximum" && v === Number.MAX_SAFE_INTEGER) continue;
+    if (k === "exclusiveMinimum" && v === 0) continue;
+    // `x.nullable()` → anyOf [{type:X},{type:"null"}] → krócej: type: [X, "null"].
+    const vv = k === "anyOf" && Array.isArray(v) ? (v.map(slimSchema) as unknown[]) : null;
+    if (vv && vv.length === 2 && vv.every((x) => x && typeof x === "object" && Object.keys(x).length === 1 && typeof (x as { type?: unknown }).type === "string") && vv.some((x) => (x as { type: string }).type === "null")) {
+      out.type = vv.map((x) => (x as { type: string }).type);
+      continue;
+    }
+    out[k] = slimSchema(v);
+  }
+  return out;
+}
+
+/**
  * Narzędzie z „miękką” walidacją: model dostaje pełny JSON Schema (z zod), ale SDK nie odrzuca wywołania
  * z błędnymi parametrami (AI_InvalidToolInputError przerywał turę / pokazywał stack). Zamiast tego
  * `execute` waliduje zod-em i zwraca `{ error: "durationHours: maks. 12 …" }` — model poprawia się w kolejnym kroku.
  */
-function lenientTool<S extends z.ZodType, R>(name: string, def: { description: string; inputSchema: S; execute: (input: z.output<S>) => Promise<R> }) {
+function lenientTool<S extends z.ZodType, R>(
+  name: string,
+  def: {
+    description: string;
+    inputSchema: S;
+    /** Schemat pokazywany modelowi (lżejszy niż walidacyjny, np. bez inline całego Change) — walidacja zawsze `inputSchema`. */
+    modelSchema?: z.ZodType;
+    execute: (input: z.output<S>) => Promise<R>;
+  }
+) {
   const schema = def.inputSchema;
+  const shown = def.modelSchema ?? schema;
   type In = z.output<S>;
   type Out = R | { error: string };
   const t = tool<In, unknown, Record<string, unknown>>({
     description: def.description,
-    inputSchema: jsonSchema<In>(() => z.toJSONSchema(schema, { target: "draft-7", io: "input", reused: "inline" }) as unknown as JSONSchema7, {
+    inputSchema: jsonSchema<In>(() => slimSchema(z.toJSONSchema(shown, { target: "draft-7", io: "input", reused: "inline" })) as unknown as JSONSchema7, {
       validate: (value) => ({ success: true, value: value as In }),
     }),
     execute: async (raw): Promise<Out> => {
@@ -190,15 +225,41 @@ function missingTechnicians(ids: number[]): string | null {
  * Akcja dołączona do opcji ask_choice: klik opcji wystawia kartę zmiany / propozycji OD RAZU
  * (POST /assistant/chats/:id/choose), bez drugiej tury modelu.
  */
-export const zChoiceAction = z
-  .discriminatedUnion("kind", [
-    z.object({ kind: z.literal("change"), change: zChange.describe("Gotowa pozycja jak w propose_changes (np. update {eventId, patch:{startAt,endAt}})") }),
-    z.object({ kind: z.literal("event"), event: zEventInput.describe("Komplet danych nowego wydarzenia jak w propose_event (bez recurrence)") }),
-  ])
-  .describe(
-    "Gotowy wynik wyboru tej opcji — UI wystawi kartę zmiany/propozycji od razu po kliknięciu, bez kolejnej tury. Dołącz TYLKO gdy po wyborze nie trzeba już nic sprawdzać ani dopytywać (np. wybór terminu dla znanego wydarzenia, slot dla nowego wydarzenia ze znanym obiektem i technikami). Opcje „Inny…/Inne…” bez action."
-  );
+export const zChoiceAction = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("change"), change: zChange }),
+  z.object({ kind: z.literal("event"), event: zEventInput }),
+]);
 export type ChoiceAction = z.infer<typeof zChoiceAction>;
+
+/**
+ * Płaski kształt pozycji propose_changes dla modelu (walidacja: `zChange`). Pola per kind opisane w prompcie (M4).
+ * Zwykły `z.object` (nie loose) — `patch`/`event` zostają zdefiniowane, żeby model znał ich pola.
+ */
+const zChangeForModel = z.object({
+  kind: z.enum(["update", "status", "cancel", "note", "delete", "restore", "create"]),
+  eventId: zId.optional().describe("wszystkie kind poza create"),
+  patch: zPatch.optional().describe("kind update: tylko zmieniane pola"),
+  status: z.enum(["confirmed", "done", "cancelled"]).optional().describe("kind status"),
+  actualStartAt: z.string().optional().describe("status done: data z godziną albo HH:MM"),
+  actualEndAt: z.string().optional().describe("status done: data z godziną albo HH:MM"),
+  note: z.string().optional().describe("status done: przebieg → notatka"),
+  text: z.string().optional().describe("kind note: treść notatki"),
+  reason: z.string().optional(),
+  event: zEventInput.optional().describe("kind create"),
+});
+
+/**
+ * Wersja `zChoiceAction` dla schematu pokazywanego modelowi: bez inline całego Change/EventInput
+ * (to ~1,5k tokenów w każdym kroku) — kształty są w schematach propose_changes/propose_event i w prompcie (reguła 20).
+ * Walidacja wywołania nadal pełnym `zChoiceAction`.
+ */
+const zChoiceActionForModel = z
+  .object({
+    kind: z.enum(["change", "event"]).describe("WYMAGANE: \"change\" (pole change) albo \"event\" (pole event)"),
+    change: z.looseObject({ kind: z.enum(["update", "status", "cancel", "note", "delete", "restore"]), eventId: zId }).optional().describe("pozycja jak w propose_changes, np. {kind:\"update\", eventId, patch:{startAt, endAt}}"),
+    event: z.looseObject({ type: z.enum(CALENDAR_EVENT_TYPES), title: z.string(), startAt: zDateOrDt }).optional().describe("dane jak w propose_event (bez recurrence)"),
+  })
+  .describe("karta od razu po kliknięciu; tylko gdy nic już nie trzeba sprawdzać; nie dla „Inny…/Inne…”");
 
 /** Jedna opcja ask_choice po walidacji (kształt dla frontu: ChoiceCard). */
 export interface ChoiceOption {
@@ -236,17 +297,42 @@ export type EventProposalResult = { proposal: EventProposal; needsConfirmation: 
 
 /** Wejście propose_event: dane wydarzenia + allowPast + opcjonalna seria. */
 export const zProposeEventInput = zEventInput.extend({
-  allowPast: z.boolean().optional().describe("true TYLKO gdy użytkownik jawnie potwierdził termin w przeszłości"),
+  allowPast: z.boolean().optional().describe("tylko gdy użytkownik potwierdził termin w przeszłości"),
   recurrence: z
     .object({
       freq: z.enum(CALENDAR_SERIES_FREQS),
       interval: z.number().int().min(1).max(52).default(1),
-      until: zDate.optional().describe("YYYY-MM-DD (włącznie)"),
+      until: zDate.optional().describe("YYYY-MM-DD włącznie"),
       count: z.number().int().min(1).max(200).optional(),
     })
     .optional(),
 });
 export type ProposeEventInput = z.output<typeof zProposeEventInput>;
+
+/** Wejście ask_choice — parametryzowane schematem `action` (pełny do walidacji, skrócony dla modelu). */
+function zAskChoiceInput<A extends z.ZodType>(action: A) {
+  return z.object({
+    question: z.string().trim().min(1).max(300),
+    options: z
+      .array(
+        z.object({
+          label: z.string().trim().min(1).max(120).describe("bez id z bazy"),
+          value: z.string().trim().max(200).optional().describe("wysyłane jako odpowiedź (domyślnie label); termin z rokiem"),
+          hint: z.string().trim().max(160).optional(),
+          objectId: zId.optional(),
+          technicianId: zId.optional(),
+          startAt: zDateOrDt.optional().describe("gdy opcja = termin"),
+          endAt: zDateOrDt.optional().describe("exclusive"),
+          eventId: zId.optional().describe("gdy opcja = istniejące wydarzenie"),
+          action: action.optional(),
+        })
+      )
+      .min(2)
+      .max(8),
+    allowCustom: z.boolean().optional().describe("przycisk „Inne…”"),
+    multi: z.boolean().optional(),
+  });
+}
 
 /** Opcja otwarta („Inny termin / Inne… / Żadne z nich”) — zawsze wolna odpowiedź, nigdy action. */
 export const OTHER_OPTION_RE = /^inn[aey]\b|^inne\b|^żadn/i;
@@ -364,9 +450,9 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
   const disabled = new Set(cfg.disabledTools);
   const all = {
     find_object: lenientTool("find_object", {
-      description: "Szuka obiektu klienta po fragmencie nazwy/adresu/miasta. Zwraca trafienia (id do propose_event/ask_choice), `count` i `ambiguous`.",
+      description: "Obiekt klienta po fragmencie nazwy/adresu/miasta → trafienia (id), `count`, `ambiguous`.",
       inputSchema: z.object({
-        query: z.string().trim().min(1).max(200).describe("Fragment nazwy/adresu/miasta"),
+        query: z.string().trim().min(1).max(200),
       }),
       execute: async ({ query }) => {
         const q = likePattern(query);
@@ -399,9 +485,9 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
     }),
 
     find_technician: lenientTool("find_technician", {
-      description: "Szuka technika po fragmencie imienia/nazwiska (lista techników jest też w prompcie). Zwraca id, nazwę, active.",
+      description: "Technik po fragmencie imienia/nazwiska (także nieaktywni) → id, name, active.",
       inputSchema: z.object({
-        query: z.string().trim().min(1).max(200).describe("Fragment imienia/nazwiska"),
+        query: z.string().trim().min(1).max(200),
       }),
       execute: async ({ query }) => {
         const q = likePattern(query);
@@ -430,10 +516,10 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
     }),
 
     list_events: lenientTool("list_events", {
-      description: "Wydarzenia w zakresie [from, to) z opcjonalnym filtrem technika/obiektu (grafik). Do wolnych terminów użyj find_free_slots.",
+      description: "Grafik: wydarzenia w [from, to) z filtrem technika/obiektu.",
       inputSchema: z.object({
-        from: zDateOrDt.describe(`Początek zakresu, ${DATE_OR_DATETIME}`),
-        to: zDateOrDt.describe(`Koniec zakresu (exclusive), ${DATE_OR_DATETIME}`),
+        from: zDateOrDt.describe(DATE_OR_DATETIME),
+        to: zDateOrDt.describe("exclusive"),
         technicianId: zId.optional(),
         objectId: zId.optional(),
       }),
@@ -478,17 +564,16 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
     }),
 
     search_events: lenientTool("search_events", {
-      description:
-        "Szuka KONKRETNEGO wydarzenia (np. „urlop Dominika”, „serwis w Magazynie”) po fragmencie tytułu/obiektu/lokalizacji, techniku (id lub imię), typie, statusie. Bez from/to: dziś −90…+180 dni. Wyniki od najbliższych dzisiejszej dacie, maks. 20.",
+      description: `Konkretne wydarzenie po fragmencie tytułu/obiektu/lokalizacji, techniku, typie, statusie. Domyślnie dziś −${SEARCH_PAST_DAYS}…+${SEARCH_FUTURE_DAYS} dni, najbliższe dziś pierwsze, maks. ${SEARCH_EVENTS_LIMIT}.`,
       inputSchema: z.object({
-        query: z.string().trim().max(200).optional().describe("Fragment tytułu / nazwy obiektu / lokalizacji (bez imienia technika — do tego technicianName)"),
-        technicianId: zId.optional().describe("Id technika z listy w prompcie"),
-        technicianName: z.string().trim().max(100).optional().describe("Fragment imienia/nazwiska technika, gdy nie znasz id"),
-        type: z.enum(CALENDAR_EVENT_TYPES).optional().describe("Typ wydarzenia, np. urlop, serwis"),
+        query: z.string().trim().max(200).optional().describe("tytuł/obiekt/lokalizacja (bez imienia technika)"),
+        technicianId: zId.optional(),
+        technicianName: z.string().trim().max(100).optional(),
+        type: z.enum(CALENDAR_EVENT_TYPES).optional(),
         status: z.enum(CALENDAR_EVENT_STATUSES).optional(),
-        from: zDateOrDt.optional().describe(`Początek zakresu, ${DATE_OR_DATETIME} (domyślnie dziś − ${SEARCH_PAST_DAYS} dni)`),
-        to: zDateOrDt.optional().describe(`Koniec zakresu (exclusive), ${DATE_OR_DATETIME} (domyślnie dziś + ${SEARCH_FUTURE_DAYS} dni)`),
-        includeCancelled: z.boolean().optional().describe("Uwzględnij anulowane (domyślnie false)"),
+        from: zDateOrDt.optional().describe(DATE_OR_DATETIME),
+        to: zDateOrDt.optional().describe("exclusive"),
+        includeCancelled: z.boolean().optional(),
       }),
       execute: async (input) => {
         const today = localNow().slice(0, 10);
@@ -561,8 +646,8 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
     }),
 
     get_event: lenientTool("get_event", {
-      description: "Pełne dane jednego wydarzenia po id (opis, technicy, seria, czy usunięte) + notatki (dziennik: co się działo, ustalenia; ostatnie 10) — do pytań o przebieg i przed propose_changes.",
-      inputSchema: z.object({ eventId: zId.describe("Id z list_events") }),
+      description: `Pełne dane wydarzenia (opis, technicy, seria, usunięte) + ostatnie ${GET_EVENT_NOTES} notatek z dziennika.`,
+      inputSchema: z.object({ eventId: zId }),
       execute: async ({ eventId }) => {
         const e = loadEvent(db, eventId);
         if (!e) return { error: `Wydarzenie #${eventId} nie istnieje — użyj list_events` };
@@ -584,18 +669,17 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
     }),
 
     show_events: lenientTool("show_events", {
-      description:
-        "Pokazuje użytkownikowi interaktywną listę wydarzeń (karta z otwieraniem, podglądem w kalendarzu i szybkimi akcjami). Używaj ZAWSZE, gdy odpowiedź zawiera listę wydarzeń — zamiast wypisywać je tekstem. suggestActions=true dla zaległych/do rozliczenia.",
+      description: "Interaktywna karta z listą wydarzeń (zamiast listy tekstem). suggestActions dla zaległych/do rozliczenia.",
       inputSchema: z.object({
         eventIds: z
           .array(zId)
           .min(1)
           .max(SHOW_EVENTS_MAX)
           .refine((ids) => new Set(ids).size === ids.length, { message: "id wydarzeń muszą być unikalne" })
-          .describe("Id wydarzeń z list_events/search_events (1–30, unikalne)"),
-        title: z.string().trim().max(80).optional().describe("Nagłówek karty, np. „Zaległe wydarzenia”, „Wtorek 01.09”"),
-        note: z.string().trim().max(300).optional().describe("Krótka uwaga pod nagłówkiem"),
-        suggestActions: z.boolean().optional().describe("true → karta podpowiada szybkie akcje (wykonane/anuluj) — dla zaległych/do rozliczenia"),
+          .describe(`1–${SHOW_EVENTS_MAX}, unikalne`),
+        title: z.string().trim().max(80).optional().describe("nagłówek karty"),
+        note: z.string().trim().max(300).optional(),
+        suggestActions: z.boolean().optional(),
       }),
       execute: async ({ eventIds, title, note, suggestActions }) => {
         // loadEvents zwraca też usunięte (soft-delete) — pokazujemy je z deleted:true.
@@ -617,12 +701,12 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
     }),
 
     check_conflicts: lenientTool("check_conflicts", {
-      description: "Kolizje wskazanych techników z innymi wydarzeniami i urlopami w [startAt, endAt).",
+      description: "Kolizje techników z wydarzeniami i urlopami w [startAt, endAt).",
       inputSchema: z.object({
         startAt: zDateOrDt.describe(DATE_OR_DATETIME),
-        endAt: zDateOrDt.describe(`${DATE_OR_DATETIME} (exclusive)`),
+        endAt: zDateOrDt.describe("exclusive"),
         technicianIds: zIds.min(1),
-        excludeEventId: zId.optional().describe("Pomiń to wydarzenie (przy przesuwaniu istniejącego)"),
+        excludeEventId: zId.optional().describe("pomiń przesuwane wydarzenie"),
       }),
       execute: async ({ startAt, endAt, technicianIds, excludeEventId }) => {
         if (endAt <= startAt) return { error: "endAt musi być późniejszy niż startAt" };
@@ -646,17 +730,16 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
     }),
 
     find_free_slots: lenientTool("find_free_slots", {
-      description:
-        "Najbliższe wolne okna (godziny pracy, pon–pt, bez kolizji i urlopów). technicianIds = [] → wszyscy aktywni, każdy slot ma listę wolnych. Wynik przedstaw przez ask_choice.",
+      description: "Najbliższe wolne okna (godziny pracy, pon–pt, bez kolizji i urlopów). technicianIds [] = wszyscy aktywni (slot ma listę wolnych).",
       inputSchema: z.object({
-        technicianIds: zIds.describe("Id techników; pusta lista = wszyscy aktywni (dowolny technik / kto jest wolny)"),
-        durationHours: z.number().min(0.25).max(12).describe("Czas trwania w godzinach, np. 2"),
-        from: zDate.optional().describe("YYYY-MM-DD, domyślnie dziś (przy kolizji: dzień kolizji)"),
-        horizonDays: z.number().int().min(1).max(90).optional().describe("Ile dni do przodu (domyślnie z reguł, maks. 90)"),
-        earliest: z.string().regex(HHMM_RE).optional().describe("HH:MM — najwcześniejszy początek (domyślnie początek dnia pracy)"),
-        latest: z.string().regex(HHMM_RE).optional().describe("HH:MM — najpóźniejszy koniec (domyślnie koniec dnia pracy)"),
-        workdaysOnly: z.boolean().optional().describe("Tylko pon–pt (domyślnie true)"),
-        limit: z.number().int().min(1).max(8).optional().describe("Ile slotów (domyślnie 3)"),
+        technicianIds: zIds,
+        durationHours: z.number().min(0.25).max(12),
+        from: zDate.optional().describe("YYYY-MM-DD, domyślnie dziś"),
+        horizonDays: z.number().int().min(1).max(90).optional(),
+        earliest: z.string().regex(HHMM_RE).optional().describe("HH:MM"),
+        latest: z.string().regex(HHMM_RE).optional().describe("HH:MM"),
+        workdaysOnly: z.boolean().optional().describe("domyślnie true"),
+        limit: z.number().int().min(1).max(8).optional().describe("domyślnie 3"),
       }),
       execute: async (input) => {
         const now = localNow();
@@ -700,29 +783,9 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
     }),
 
     ask_choice: lenientTool("ask_choice", {
-      description:
-        "JEDNO pytanie z 2–8 opcjami do kliknięcia (obiekt, technik, termin, typ, wydarzenie). UI pokaże przyciski; odpowiedź przyjdzie jako wiadomość użytkownika. Opcja z `action` wystawia kartę zmiany/propozycji od razu po kliknięciu. Kończy turę.",
-      inputSchema: z.object({
-        question: z.string().trim().min(1).max(300).describe("Krótkie pytanie, np. 'Który obiekt wybierasz?'"),
-        options: z
-          .array(
-            z.object({
-              label: z.string().trim().min(1).max(120).describe("Tekst przycisku (bez id z bazy)"),
-              value: z.string().trim().max(200).optional().describe("Tekst wysyłany jako odpowiedź (domyślnie label); dla terminów pełna data z rokiem"),
-              hint: z.string().trim().max(160).optional().describe("Drobny opis pod etykietą, np. adres i miasto obiektu, wolni technicy"),
-              objectId: zId.optional().describe("Id obiektu z find_object — UI pokaże podgląd obiektu"),
-              technicianId: zId.optional().describe("Id technika, gdy opcja = technik"),
-              startAt: zDateOrDt.optional().describe("Początek slotu, gdy opcja = termin — UI podświetli na siatce"),
-              endAt: zDateOrDt.optional().describe("Koniec slotu (exclusive), gdy opcja = termin"),
-              eventId: zId.optional().describe("Id wydarzenia z list_events, gdy opcja = istniejące wydarzenie (doprecyzowanie zmian)"),
-              action: zChoiceAction.optional(),
-            })
-          )
-          .min(2)
-          .max(8),
-        allowCustom: z.boolean().optional().describe("Pozwól wpisać inną odpowiedź (przycisk „Inne…”)"),
-        multi: z.boolean().optional().describe("Wielokrotny wybór (np. kilku techników)"),
-      }),
+      description: "JEDNO pytanie z 2–8 opcjami-przyciskami; odpowiedź przyjdzie jako wiadomość użytkownika. Kończy turę.",
+      inputSchema: zAskChoiceInput(zChoiceAction),
+      modelSchema: zAskChoiceInput(zChoiceActionForModel),
       execute: async ({ question, options, allowCustom, multi }) => {
         // Referencje muszą istnieć (model mógł zmyślić id).
         const objectIds = [...new Set(options.map((o) => o.objectId).filter((x): x is number => x != null))];
@@ -776,19 +839,22 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
     }),
 
     propose_event: lenientTool("propose_event", {
-      description:
-        "Karta propozycji NOWEGO wydarzenia do ZATWIERDZENIA przez użytkownika. NIE zapisuje. Jedno wywołanie = jedna karta; kilka wydarzeń = kilka wywołań w tym samym kroku. Przy {error} popraw i wywołaj ponownie.",
+      description: "Karta propozycji NOWEGO wydarzenia do zatwierdzenia (nie zapisuje). Jedno wywołanie = jedna karta. Przy {error} popraw i wywołaj ponownie.",
       inputSchema: zProposeEventInput,
       // Logika w buildCalendarActions.buildEventProposal (wspólna z ask_choice.action i POST /choose).
       execute: async (input) => actions.buildEventProposal(input),
     }),
 
     propose_changes: lenientTool("propose_changes", {
-      description:
-        "Paczka zmian ISTNIEJĄCYCH wydarzeń (update/status/cancel/delete/restore) i nieplanowanych, które się odbyły (create) — karty do ZATWIERDZENIA, NIE zapisuje. Jedno wywołanie = jedna paczka (1–20 pozycji). Pozycja z błędem nie blokuje pozostałych.",
+      description: `Paczka zmian ISTNIEJĄCYCH wydarzeń (update/status/cancel/note/delete/restore) i nieplanowanych, które się odbyły (create) — karty do zatwierdzenia, nie zapisuje. 1–${CHANGES_MAX} pozycji; pozycja z błędem nie blokuje reszty.`,
       inputSchema: z.object({
         changes: z.array(zChange).min(1).max(CHANGES_MAX),
-        note: z.string().trim().max(300).optional().describe("Krótki kontekst paczki (np. „Podsumowanie dnia 27.08”)"),
+        note: z.string().trim().max(300).optional().describe("kontekst paczki"),
+      }),
+      // Modelowi pokazujemy jeden płaski kształt pozycji (zamiast 7-wariantowej unii inline — ~2× mniej tokenów w każdym kroku).
+      modelSchema: z.object({
+        changes: z.array(zChangeForModel).min(1).max(CHANGES_MAX),
+        note: z.string().optional().describe("kontekst paczki"),
       }),
       // Logika w buildCalendarActions.resolveChangesPreview (wspólna z ask_choice.action i POST /choose).
       execute: async ({ changes, note }) => actions.resolveChangesPreview(changes, note),

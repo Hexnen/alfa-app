@@ -398,14 +398,30 @@ function ChatSession({
           const id = await ensureChat();
           return { api: assistantApi.messageUrl(id), body: { message: messages[messages.length - 1] } };
         },
+        // Resume po F5 w trakcie tury: serwer trzyma bufor streamu (turnRunner) — GET /stream odtwarza go
+        // od zera i dołącza live ogon; 204 gdy nic nie leci (SDK: null → status ready).
+        prepareReconnectToStreamRequest: () => ({ api: assistantApi.messageUrl(chatIdRef.current ?? 0).replace(/\/message$/, "/stream") }),
       }),
     [ensureChat]
   );
 
+  /** Tura wznowiona po F5 (resume) — po jej końcu dociągamy historię z bazy (kanoniczne id wiersza). */
+  const resumedRef = useRef(false);
   const { messages, sendMessage, status, stop, setMessages, error, clearError } = useChat({
     id: `assistant-${mountChatId ?? "draft"}`,
     transport,
-    onFinish: () => onTitleMaybeChanged(),
+    // Po odświeżeniu w trakcie tury podłącz się do trwającej generacji (GET /stream). Draft nie ma czatu.
+    resume: mountChatId != null,
+    onFinish: () => {
+      onTitleMaybeChanged();
+      if (resumedRef.current && chatIdRef.current != null) {
+        resumedRef.current = false;
+        const id = chatIdRef.current;
+        void assistantApi.messages(id).then((ms) => {
+          if (chatIdRef.current === id) setMessages(ms as UIMessage[]);
+        });
+      }
+    },
   });
 
   // Historia z DB (z parts, więc karty propozycji przeżywają reload). Draft → pusta.
@@ -417,7 +433,16 @@ function ChatSession({
     assistantApi
       .messages(mountChatId)
       .then((ms) => {
-        if (alive) setMessages(ms as UIMessage[]);
+        if (!alive) return;
+        // Resume mógł już dopisać streamowaną odpowiedź asystenta (id z SDK, nie z bazy) — zachowaj ją
+        // za historią, chyba że baza ma już gotową odpowiedź (tura skończyła się przed wczytaniem).
+        setMessages((cur) => {
+          const history = ms as UIMessage[];
+          const live = cur.filter((m) => m.role === "assistant" && !history.some((h) => h.id === m.id));
+          if (live.length === 0) return history;
+          resumedRef.current = true;
+          return history[history.length - 1]?.role === "assistant" ? history : [...history, ...live];
+        });
       })
       .catch((e: unknown) => {
         if (alive) setLoadError(e instanceof Error ? e.message : "Nie udało się wczytać historii.");

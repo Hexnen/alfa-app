@@ -10,6 +10,9 @@
  *    przez istniejący POST /calendar/events, po czym woła POST /chats/:id/system {kind,eventId};
  *  - POST /chats/:id/message streamuje UI Message Stream (SSE) z SDK — nie {success,data};
  *  - jedna tura na czat naraz (reserveTurn → 409 busy), twardy timeout 180 s, POST /chats/:id/stop;
+ *  - tura żyje po stronie serwera (src/lib/ai/turnRunner.ts): rozłączenie klienta (F5, zamknięta karta)
+ *    NIE przerywa generacji — chunki są buforowane w RAM, GET /chats/:id/stream odtwarza bufor i dołącza
+ *    live (useChat resume; 204 gdy nic nie leci). Abort tylko przez POST /stop, DELETE czatu albo timeout;
  *  - przerwana tura zostaje w bazie jako wiadomość asystenta z partem `data-aborted`
  *    (a jej usage z sumy kroków jako finishReason "aborted");
  *  - montowane w src/routes/index.ts po requireAuth; dostęp wg assistant.access (requireAssistantAccess),
@@ -64,6 +67,7 @@ import { applyChange, CHANGES_MAX, zChange, type Change } from "../lib/ai/calend
 import { localNow } from "../lib/ai/freeSlots.js";
 import { canEdit } from "../lib/auth/permissions.js";
 import { getUser as getCtxUser, hasAssistantAccess } from "../middleware/auth.js";
+import { releaseTurn, reserveTurn, runTurn, stopTurn, subscribeTurn, TURN_TIMEOUT_MS } from "../lib/ai/turnRunner.js";
 
 const app = new Hono();
 
@@ -75,8 +79,6 @@ const BUSY_MESSAGE = "Asystent jeszcze odpowiada w tym czacie — poczekaj na ko
 /** Limity wejścia: body JSON (SSE-owe UIMessage z frontu ma kilkaset bajtów) i tekst jednej wiadomości. */
 const BODY_LIMIT_BYTES = 64 * 1024;
 const MESSAGE_MAX_CHARS = 4000;
-/** Twardy limit czasu jednej tury (8 kroków × wolny dostawca to realnie ~60–120 s). */
-const TURN_TIMEOUT_MS = 180_000;
 
 app.use(
   "*",
@@ -86,46 +88,7 @@ app.use(
   })
 );
 
-// ---------------------------------------------------------------------------
-// Rezerwacja tury per czat (wzór: roleplay turnRunner.reserveTurn)
-// ---------------------------------------------------------------------------
-
-type Inflight = {
-  abort: AbortController;
-  timeout: NodeJS.Timeout;
-  startedAt: number;
-  /** Kto przerwał: Stop z frontu / twardy timeout; null = nikt (tura żyje albo skończyła się sama). */
-  stoppedBy: "user" | "timeout" | null;
-};
-const inflight = new Map<number, Inflight>();
-
-/**
- * Rezerwuje slot tury (synchronicznie na event loopie) ZANIM handler utrwali wiadomość usera:
- * przegrany wyścigu dwóch POST-ów dostaje null (→ 409 busy) bez żadnego zapisu. Timeout
- * przerywa generację i jest też samonaprawą slotu, gdyby handler rzucił przed startem streamu.
- */
-function reserveTurn(chatId: number): Inflight | null {
-  if (inflight.has(chatId)) return null;
-  const turn: Inflight = {
-    abort: new AbortController(),
-    startedAt: Date.now(),
-    stoppedBy: null,
-    timeout: setTimeout(() => {
-      turn.stoppedBy = "timeout";
-      turn.abort.abort(new Error("timeout"));
-      // Slot zostaje zwolniony przez finally handlera; gdyby handler padł przed streamem — sprzątamy tu.
-      setTimeout(() => releaseTurn(chatId, turn), 5_000).unref?.();
-    }, TURN_TIMEOUT_MS),
-  };
-  inflight.set(chatId, turn);
-  return turn;
-}
-
-function releaseTurn(chatId: number, turn: Inflight) {
-  if (inflight.get(chatId) !== turn) return;
-  clearTimeout(turn.timeout);
-  inflight.delete(chatId);
-}
+// Rezerwacja tury per czat: src/lib/ai/turnRunner.ts (reserveTurn/releaseTurn/runTurn/subscribeTurn/stopTurn).
 
 // ---------------------------------------------------------------------------
 // Helpery: wiadomości UI ↔ wiersze bazy
@@ -445,11 +408,7 @@ app.post("/chats", async (c) => {
 app.delete("/chats/:id", (c) => {
   const chat = getOwnedChat(Number(c.req.param("id")), getCtxUser(c));
   if (!chat) return c.json({ success: false, error: "Nie znaleziono czatu" }, 404);
-  const turn = inflight.get(chat.id);
-  if (turn) {
-    turn.stoppedBy = "user";
-    turn.abort.abort(new Error("chat deleted"));
-  }
+  stopTurn(chat.id, "chat deleted");
   db.delete(schema.assistantChats).where(eq(schema.assistantChats.id, chat.id)).run();
   return c.json({ success: true, data: { id: chat.id } });
 });
@@ -460,15 +419,26 @@ app.get("/chats/:id/messages", (c) => {
   return c.json({ success: true, data: loadMessages(chat.id).map(uiMessageOf) });
 });
 
-/** Zatrzymanie bieżącej tury (Stop w UI). Idempotentne: brak tury → stopped:false. */
+/**
+ * Zatrzymanie bieżącej tury (Stop w UI). Od wprowadzenia runnera rozłączenie klienta nie przerywa
+ * generacji — Stop MUSI wołać ten endpoint. Idempotentne: brak tury → stopped:false.
+ */
 app.post("/chats/:id/stop", (c) => {
   const chat = getOwnedChat(Number(c.req.param("id")), getCtxUser(c));
   if (!chat) return c.json({ success: false, error: "Nie znaleziono czatu" }, 404);
-  const turn = inflight.get(chat.id);
-  if (!turn) return c.json({ success: true, data: { stopped: false } });
-  turn.stoppedBy = "user";
-  turn.abort.abort(new Error("stopped by user"));
-  return c.json({ success: true, data: { stopped: true } });
+  return c.json({ success: true, data: { stopped: stopTurn(chat.id) } });
+});
+
+/**
+ * Resume streamu tury (useChat resume / prepareReconnectToStreamRequest): replay bufora trwającej
+ * generacji od zera + live ogon — po F5 w trakcie tury albo z drugiej karty. Nic nie leci → 204.
+ */
+app.get("/chats/:id/stream", (c) => {
+  const chat = getOwnedChat(Number(c.req.param("id")), getCtxUser(c));
+  if (!chat) return c.json({ success: false, error: "Nie znaleziono czatu" }, 404);
+  const stream = subscribeTurn(chat.id);
+  if (!stream) return c.body(null, 204);
+  return createUIMessageStreamResponse({ stream });
 });
 
 /**
@@ -975,26 +945,15 @@ app.post("/chats/:id/message", async (c) => {
     };
 
     /**
-     * Strumień do klienta + niezależny konsument w tle: gdyby klient się rozłączył, stream i tak
-     * jest czytany do końca, więc onEnd (zapis odpowiedzi / data-aborted) wykona się ZAWSZE
-     * (wzór: roleplay turnRunner.runTurn). Slot tury zwalnia się dopiero po pełnym przeczytaniu.
+     * Runner konsumuje stream niezależnie od widzów (onEnd → persist wykona się ZAWSZE, także gdy
+     * klient się rozłączył) i zwalnia slot po końcu; odpowiedź to subskrypcja bufora — ta sama,
+     * którą po F5 dostaje GET /chats/:id/stream (resume).
      */
     const respond = (stream: ReadableStream<UIMessageChunk>) => {
-      const [toClient, toDrain] = stream.tee();
-      void (async () => {
-        try {
-          const reader = toDrain.getReader();
-          for (;;) {
-            const { done } = await reader.read();
-            if (done) break;
-          }
-        } catch {
-          /* błąd strumienia — treść poszła już jako data-error */
-        } finally {
-          releaseTurn(chat.id, turn);
-        }
-      })();
-      return createUIMessageStreamResponse({ stream: toClient });
+      runTurn(chat.id, turn, stream);
+      const live = subscribeTurn(chat.id);
+      if (!live) return c.json({ success: false, error: "Tura zakończyła się przed podpięciem streamu." }, 500);
+      return createUIMessageStreamResponse({ stream: live });
     };
 
     const { key: apiKey } = resolveApiKey();
@@ -1046,7 +1005,9 @@ app.post("/chats/:id/message", async (c) => {
     const client = makeChatClient(apiKey, conf.baseUrl);
     const tools = buildCalendarTools(user, conf);
     const startedAt = turn.startedAt;
-    const signal = AbortSignal.any([c.req.raw.signal, turn.abort.signal]);
+    // Tura żyje po stronie serwera (turnRunner) — rozłączenie klienta niczego nie przerywa;
+    // abort tylko przez POST /stop, DELETE czatu albo timeout runnera.
+    const signal = turn.abort.signal;
     let turnError: TurnErrorInfo | null = null;
     let usage: TurnUsage = ZERO_USAGE;
     let lastFinish: string | null = null;
@@ -1155,7 +1116,7 @@ app.post("/chats/:id/message", async (c) => {
             });
           }
         } catch (e) {
-          // Przerwanie (Stop / rozłączenie / timeout) albo błąd generacji — treść niesie data-error.
+          // Przerwanie (Stop / usunięcie czatu / timeout) albo błąd generacji — treść niesie data-error.
           const err = (turnError as TurnErrorInfo | null) ?? (signal.aborted ? null : classifyError(e));
           if (turn.stoppedBy === "timeout") {
             writer.write({ type: "data-error", data: { code: "timeout", message: `Tura przekroczyła limit ${TURN_TIMEOUT_MS / 1000} s i została przerwana — spróbuj ponownie albo uprość polecenie.` } });
@@ -1174,7 +1135,8 @@ app.post("/chats/:id/message", async (c) => {
 
     return respond(stream);
   } catch (e) {
-    releaseTurn(chat.id, turn);
+    // Błąd PRZED startem runnera (np. w assembleSystemPrompt) — slot zwalniamy sami; po runTurn sprząta runner.
+    if (!turn.started) releaseTurn(chat.id, turn);
     throw e;
   }
 });

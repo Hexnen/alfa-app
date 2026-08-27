@@ -56,33 +56,33 @@ export const NOTE_TEXT_MAX = 2000;
 /** Dane nowego wydarzenia (wspólne: propose_event i propose_changes/create). */
 export const zEventInput = z.object({
   type: z.enum(CALENDAR_EVENT_TYPES),
-  title: z.string().trim().max(PROPOSAL_TITLE_MAX).describe(`Krótki tytuł (maks. ${PROPOSAL_TITLE_MAX} znaków), np. 'Serwis — Magazyn Centralny'; urlop: może być pusty`),
+  title: z.string().trim().max(PROPOSAL_TITLE_MAX).describe(`maks. ${PROPOSAL_TITLE_MAX} znaków; urlop: może być pusty`),
   startAt: zDateOrDt.describe(DATE_OR_DATETIME),
-  endAt: zDateOrDt.optional().describe(`${DATE_OR_DATETIME}; all-day: EXCLUSIVE (dzień po ostatnim). Brak → domyślny czas trwania z reguł.`),
-  allDay: z.boolean().optional().describe("Brak → wg reguł typów całodniowych"),
-  objectId: zId.optional().describe("Id z find_object"),
-  objectName: z.string().trim().max(200).optional().describe("Nazwa obiektu (do karty; gdy brak objectId)"),
-  location: z.string().trim().max(200).optional().describe("Lokalizacja tekstowa, gdy nie ma obiektu w bazie"),
+  endAt: zDateOrDt.optional().describe("exclusive; brak → domyślny czas trwania"),
+  allDay: z.boolean().optional(),
+  objectId: zId.optional(),
+  objectName: z.string().trim().max(200).optional().describe("gdy brak objectId"),
+  location: z.string().trim().max(200).optional().describe("tekst, gdy obiekt spoza bazy"),
   description: z.string().trim().max(2000).optional(),
   technicianIds: zIds.default([]),
   status: z.enum(CALENDAR_EVENT_STATUSES).optional(),
 });
 export type EventInput = z.infer<typeof zEventInput>;
 
-const zPatch = z
+export const zPatch = z
   .object({
     title: z.string().trim().min(1).max(PROPOSAL_TITLE_MAX).optional(),
     type: z.enum(CALENDAR_EVENT_TYPES).optional(),
-    startAt: zDateOrDt.optional().describe("Nowy początek; sam startAt bez endAt = przesunięcie z zachowaniem długości"),
+    startAt: zDateOrDt.optional().describe("sam startAt = przesunięcie z zachowaniem długości"),
     endAt: zDateOrDt.optional(),
     allDay: z.boolean().optional(),
-    objectId: zId.nullable().optional().describe("Id z find_object; null = bez obiektu"),
+    objectId: zId.nullable().optional().describe("null = bez obiektu"),
     location: z.string().trim().max(200).nullable().optional(),
-    description: z.string().trim().max(2000).nullable().optional().describe("ZASTĘPUJE stały opis (do dopisania informacji o przebiegu/ustaleniach użyj kind: note)"),
-    technicianIds: zIds.optional().describe("PEŁNA nowa lista techników"),
+    description: z.string().trim().max(2000).nullable().optional().describe("zastępuje opis (przebieg → kind note)"),
+    technicianIds: zIds.optional().describe("pełna nowa lista"),
     status: z.enum(CALENDAR_EVENT_STATUSES).optional(),
   })
-  .describe("Tylko zmieniane pola");
+  .describe("tylko zmieniane pola");
 
 export const zChange = z.discriminatedUnion("kind", [
   z.object({
@@ -95,22 +95,22 @@ export const zChange = z.discriminatedUnion("kind", [
     kind: z.literal("status"),
     eventId: zId,
     status: z.enum(["confirmed", "done", "cancelled"]),
-    actualStartAt: zActualTime.optional().describe("Faktyczny początek (done): data z godziną albo HH:MM tego dnia"),
-    actualEndAt: zActualTime.optional().describe("Faktyczny koniec (done): data z godziną albo HH:MM tego dnia"),
-    note: z.string().trim().max(1000).optional().describe("Przebieg — zapisywany jako notatka wydarzenia (nie zmienia opisu)"),
+    actualStartAt: zActualTime.optional().describe("done: data z godziną albo HH:MM"),
+    actualEndAt: zActualTime.optional().describe("done: data z godziną albo HH:MM"),
+    note: z.string().trim().max(1000).optional().describe("przebieg → notatka wydarzenia"),
     reason: z.string().trim().max(300).optional(),
   }),
   z.object({ kind: z.literal("cancel"), eventId: zId, reason: z.string().trim().max(300).optional() }),
   z.object({
     kind: z.literal("note"),
     eventId: zId,
-    text: z.string().trim().min(1).max(NOTE_TEXT_MAX).describe("Treść notatki (dziennik wydarzenia: przebieg, ustalenia, prośby klienta)"),
+    text: z.string().trim().min(1).max(NOTE_TEXT_MAX),
   }),
   z.object({ kind: z.literal("delete"), eventId: zId, reason: z.string().trim().max(300).optional() }),
   z.object({ kind: z.literal("restore"), eventId: zId }),
   z.object({
     kind: z.literal("create"),
-    event: zEventInput.describe("Nieplanowane wydarzenie, które się odbyło (w przeszłości → status wg reguły podsumowania dnia)"),
+    event: zEventInput.describe("nieplanowane, które się odbyło"),
     reason: z.string().trim().max(300).optional(),
   }),
 ]);

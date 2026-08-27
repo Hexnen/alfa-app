@@ -97,7 +97,7 @@ try {
   const promptOn = assembleSystemPrompt({ today: TODAY, weekday: "czwartek", user: { displayName: "T" }, technicians: techs, rules: cfg });
   const promptOff = assembleSystemPrompt({ today: TODAY, weekday: "czwartek", user: { displayName: "T" }, technicians: techs, rules: { ...cfg, allowModifications: false } });
   ok("prompt: sekcja Modyfikacje przy allowModifications", /## Modyfikacje/.test(promptOn) && /PODSUMOWANIE DNIA/.test(promptOn) && /propose_changes/.test(promptOn));
-  ok("prompt: bez sekcji przy allowModifications=false", !/## Modyfikacje/.test(promptOff) && !/propose_changes/.test(promptOff));
+  ok("prompt: bez sekcji przy allowModifications=false", /## Modyfikacje istniejących wydarzeń \(wyłączone\)/.test(promptOff) && !/podsumowanie dnia/i.test(promptOff) && !/propose_changes/.test(promptOff));
 
   // get_event
   const g = (await exec(tools.get_event, { eventId: evServ })) as { event?: { id: number; description: string; technicianIds: number[] }; error?: string };
