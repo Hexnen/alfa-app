@@ -69,7 +69,7 @@ const BUSY_MESSAGE = "Asystent jeszcze odpowiada w tym czacie — poczekaj na ko
 /** Limity wejścia: body JSON (SSE-owe UIMessage z frontu ma kilkaset bajtów) i tekst jednej wiadomości. */
 const BODY_LIMIT_BYTES = 64 * 1024;
 const MESSAGE_MAX_CHARS = 4000;
-/** Twardy limit czasu jednej tury (6 kroków × wolny dostawca to realnie ~60–90 s). */
+/** Twardy limit czasu jednej tury (8 kroków × wolny dostawca to realnie ~60–120 s). */
 const TURN_TIMEOUT_MS = 180_000;
 
 app.use(
@@ -611,15 +611,23 @@ function isTerminalResult(toolName: string, output: unknown): boolean {
   return false;
 }
 
+/** Tekst kroku kończy się pytaniem do użytkownika (po zdjęciu markdownu/białych znaków). */
+export function endsWithQuestion(text: string): boolean {
+  return /\?[\s*_`)\]]*$/.test(text.trim());
+}
+
 /**
  * Krok terminalny: model odpowiedział bez narzędzi ALBO wśród wyników jest karta propozycji /
- * pytanie z przyciskami. Wspólny dla stopWhen i wykrywania „fałszywego” limitu kroków.
+ * pytanie z przyciskami ALBO tekst kroku kończy się pytaniem do użytkownika (pytanie KOŃCZY turę —
+ * dalsze kroki „nad” pytaniem produkowały bezsensowne wywołania i zjadały limit kroków).
+ * Wspólny dla stopWhen i wykrywania „fałszywego” limitu kroków.
  * Uwaga: propose_event z {error} (np. kolizja) NIE jest terminalny — model ma poprawić dane.
  */
 function isTerminalStep(step: StepResult<ToolSet> | undefined): boolean {
   if (!step) return false;
   if (step.toolCalls.length === 0) return true;
-  return step.toolResults.some((r) => isTerminalResult(r.toolName, r.output));
+  if (step.toolResults.some((r) => isTerminalResult(r.toolName, r.output))) return true;
+  return endsWithQuestion(step.text);
 }
 
 type TurnUsage = { promptTokens: number; completionTokens: number; reasoningTokens: number; steps: number; toolCalls: number };

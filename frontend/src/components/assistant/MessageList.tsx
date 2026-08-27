@@ -34,7 +34,7 @@ export interface MessageListProps extends Omit<MessageBubbleProps, "message" | "
   configured: boolean;
   /** Osobowość z GET /assistant/status (nazwa, powitanie, chipy sugestii). */
   persona?: AssistantPersona | null;
-  /** Limit kroków narzędzi w turze (GET /assistant/status.maxSteps; brak → 6). */
+  /** Limit kroków narzędzi w turze (GET /assistant/status.maxSteps; brak → 8). */
   maxSteps: number;
 }
 

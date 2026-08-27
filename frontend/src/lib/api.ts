@@ -2585,7 +2585,7 @@ export interface AssistantStatus {
   reason?: string;
   persona?: { name: string; greeting: string; suggestions: string[] };
   access?: "admins" | "calendar_editors";
-  /** Limit kroków narzędzi w jednej turze (do wiersza „Krok n/max”); brak → front zakłada 6. */
+  /** Limit kroków narzędzi w jednej turze (do wiersza „Krok n/max”); brak → front zakłada 8. */
   maxSteps?: number;
   /** Maksymalna długość wiadomości użytkownika (znaki); brak → 4000. */
   messageMaxChars?: number;

@@ -68,6 +68,9 @@ const plural = (n: number, one: string, few: string, many: string) => {
   return `${n} ${cat === "one" ? one : cat === "few" ? few : many}`;
 };
 
+/** Surowy błąd walidacji wejścia narzędzia z SDK (historia sprzed „miękkiej” walidacji) — nie pokazujemy stacka. */
+const INVALID_INPUT_RE = /AI_InvalidToolInputError|Type validation failed|Invalid input for tool/i;
+
 const TOOL_LABELS: Record<string, ToolLabel> = {
   find_object: {
     icon: MapPin,
@@ -96,6 +99,15 @@ const TOOL_LABELS: Record<string, ToolLabel> = {
     done: (o) => {
       const n = arrLen(o.events);
       if (n === 0) return "Brak wydarzeń w tym zakresie";
+      return `Znaleziono ${plural(n, "wydarzenie", "wydarzenia", "wydarzeń")}${o.truncated ? " (lista skrócona)" : ""}`;
+    },
+  },
+  search_events: {
+    icon: CalendarSearch,
+    running: (i) => `Szukam wydarzenia${str(i.query) ? ` „${str(i.query)}”` : ""}…`,
+    done: (o) => {
+      const n = arrLen(o.events);
+      if (n === 0) return "Nie znaleziono wydarzenia";
       return `Znaleziono ${plural(n, "wydarzenie", "wydarzenia", "wydarzeń")}${o.truncated ? " (lista skrócona)" : ""}`;
     },
   },
@@ -214,10 +226,19 @@ function ToolRow({ part, live }: { part: ToolPart; live: boolean }) {
   const interrupted = unfinished && !live;
   const failed = interrupted || part.state === "output-error" || (part.state === "output-available" && typeof output.error === "string");
 
+  // Błąd walidacji parametrów (stary strumień: AI_InvalidToolInputError ze stackiem; nowy: {error:"Nieprawidłowe parametry…"})
+  // → krótka etykieta, szczegóły w title. Model dostaje błąd jako wynik i poprawia wywołanie w kolejnym kroku.
+  const invalidInput =
+    (part.state === "output-error" && INVALID_INPUT_RE.test(part.errorText || "")) ||
+    (typeof output.error === "string" && /^Nieprawidłowe parametry/.test(output.error));
   let label: string;
+  let title: string | undefined;
   if (running) label = meta ? meta.running(input) : `Wywołuję ${name}…`;
   else if (interrupted) label = `${meta ? meta.running(input).replace(/…$/, "") : name} — przerwane`;
-  else if (part.state === "output-error") label = part.errorText || `Błąd narzędzia ${name}`;
+  else if (invalidInput) {
+    label = "Nieprawidłowe parametry — asystent poprawia";
+    title = (part.state === "output-error" ? part.errorText : (output.error as string)) || undefined;
+  } else if (part.state === "output-error") label = part.errorText || `Błąd narzędzia ${name}`;
   else if (typeof output.error === "string") label = output.error;
   else label = meta ? meta.done(output, input) : `Zakończono ${name}`;
 
@@ -242,7 +263,9 @@ function ToolRow({ part, live }: { part: ToolPart; live: boolean }) {
         <Check className="h-3.5 w-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden />
       )}
       <Icon className="h-3.5 w-3.5 shrink-0 opacity-70" aria-hidden />
-      <span className="min-w-0 truncate">{label}</span>
+      <span className="min-w-0 truncate" title={title}>
+        {label}
+      </span>
       {details && (open ? <ChevronDown className="h-3 w-3 shrink-0" aria-hidden /> : <ChevronRight className="h-3 w-3 shrink-0" aria-hidden />)}
     </div>
   );

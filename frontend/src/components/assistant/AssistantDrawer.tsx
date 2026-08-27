@@ -52,7 +52,7 @@ export interface AssistantDrawerProps {
 }
 
 const STORAGE_KEY = "alfa.assistant.chatId";
-const DEFAULT_MAX_STEPS = 6;
+const DEFAULT_MAX_STEPS = 8;
 const DEFAULT_MAX_CHARS = 4000;
 const readStoredChat = (): number | null => {
   try {

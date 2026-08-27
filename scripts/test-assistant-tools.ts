@@ -7,7 +7,7 @@
  * Sprząta po sobie (także przy błędzie).
  */
 import { db, schema } from "../src/db/index.js";
-import { like } from "drizzle-orm";
+import { eq, like } from "drizzle-orm";
 import { buildCalendarTools, escapeLike, PROPOSAL_TITLE_MAX } from "../src/lib/ai/calendarTools.js";
 import { PROPOSAL_INTENT_RE } from "../src/lib/ai/calendarPrompt.js";
 import { listActiveTechnicians } from "../src/lib/calendar-queries.js";
@@ -19,7 +19,10 @@ function ok(label: string, cond: boolean, extra?: unknown) {
   if (!cond) failures++;
 }
 const PREFIX = "__ASST_TEST__";
-const cleanup = () => db.delete(schema.objects).where(like(schema.objects.name, `${PREFIX}%`)).run();
+const cleanup = () => {
+  db.delete(schema.calendarEvents).where(like(schema.calendarEvents.title, `${PREFIX}%`)).run();
+  db.delete(schema.objects).where(like(schema.objects.name, `${PREFIX}%`)).run();
+};
 cleanup();
 
 const opts = { toolCallId: "t", messages: [] as never[] };
@@ -51,7 +54,7 @@ try {
   ok("find_object: id grupy = najniższy id", !!g && g.id === Math.min(a1, a2), r1);
   ok("find_object: inny adres = osobne trafienie", r1.objects.some((o) => o.id === b1), r1);
 
-  const r2 = (await exec(tools.find_object, { query: `${PREFIX} Magazyn` + " ul. Inna" })) as { count: number };
+  const r2 = (await exec(tools.find_object, { query: `${PREFIX} Nieistniejący Obiekt Qqq` })) as { count: number };
   ok("find_object: brak trafienia → count 0, ambiguous false", r2.count === 0, r2);
 
   // escape LIKE
@@ -121,6 +124,73 @@ try {
   ok("list_events: to <= from → error", typeof l1.error === "string", l1);
   const l2 = (await exec(tools.list_events, { from: "2026-09-01", to: "2026-09-08" })) as { events: unknown[]; count: number; truncated: boolean };
   ok("list_events: count + truncated", Array.isArray(l2.events) && typeof l2.truncated === "boolean" && l2.count === l2.events.length, l2);
+
+  // list_events: zakres ponad limit → przycięcie zamiast błędu
+  const l3 = (await exec(tools.list_events, { from: "2026-01-01", to: "2027-01-01" })) as { error?: string; truncatedRange?: boolean; to?: string; note?: string };
+  ok("list_events: 365 dni → truncatedRange, to = from + 90, bez error", !l3.error && l3.truncatedRange === true && l3.to === "2026-04-01" && !!l3.note, l3);
+  const l4 = (await exec(tools.list_events, { from: "2026-09-01", to: "2026-09-08" })) as { truncatedRange?: boolean };
+  ok("list_events: zakres w limicie → bez truncatedRange", l4.truncatedRange === undefined, l4);
+
+  // miękka walidacja wejścia: błędne parametry → { error } (nie AI_InvalidToolInputError)
+  const v1 = (await exec(tools.find_free_slots, { technicianIds: [], durationHours: 88 })) as { error?: string };
+  ok("walidacja: durationHours 88 → error „durationHours: maks. 12 (podano 88)”", typeof v1.error === "string" && /durationHours: maks\. 12 \(podano 88\)/.test(v1.error), v1);
+  const v2 = (await exec(tools.list_events, { from: "2026-09-01" })) as { error?: string };
+  ok("walidacja: brak wymaganego pola → error z nazwą pola", typeof v2.error === "string" && /\bto\b/.test(v2.error), v2);
+  const v3 = (await exec(tools.search_events, { type: "wakacje" })) as { error?: string };
+  ok("walidacja: zły enum → error z dozwolonymi wartościami", typeof v3.error === "string" && /type: dozwolone/.test(v3.error), v3);
+
+  // search_events (tymczasowe wydarzenia: urlop technika + serwis z obiektem)
+  const today = new Date().toISOString().slice(0, 10);
+  const shift = (d: number) => new Date(Date.parse(`${today}T00:00Z`) + d * 86_400_000).toISOString().slice(0, 10);
+  const evUrlop = db
+    .insert(schema.calendarEvents)
+    .values({ type: "urlop", title: `${PREFIX} Urlop — technik`, startAt: shift(-14), endAt: shift(-13), allDay: true, status: "planned" })
+    .returning({ id: schema.calendarEvents.id })
+    .get().id;
+  const evServ = db
+    .insert(schema.calendarEvents)
+    .values({ type: "serwis", title: `${PREFIX} Serwis`, startAt: `${shift(3)}T08:00`, endAt: `${shift(3)}T10:00`, allDay: false, status: "planned", objectId: a1 })
+    .returning({ id: schema.calendarEvents.id })
+    .get().id;
+  const evOld = db
+    .insert(schema.calendarEvents)
+    .values({ type: "serwis", title: `${PREFIX} Stary serwis`, startAt: `${shift(-120)}T08:00`, endAt: `${shift(-120)}T10:00`, allDay: false, status: "planned" })
+    .returning({ id: schema.calendarEvents.id })
+    .get().id;
+  const evCanc = db
+    .insert(schema.calendarEvents)
+    .values({ type: "serwis", title: `${PREFIX} Anulowany`, startAt: `${shift(5)}T08:00`, endAt: `${shift(5)}T10:00`, allDay: false, status: "cancelled" })
+    .returning({ id: schema.calendarEvents.id })
+    .get().id;
+  if (tid != null) db.insert(schema.calendarEventAssignees).values({ eventId: evUrlop, technicianId: tid }).run();
+  try {
+    const s1 = (await exec(tools.search_events, { query: PREFIX })) as { events: { id: number }[]; count: number; from: string; to: string };
+    const ids1 = s1.events.map((e) => e.id);
+    ok("search_events: domyślny zakres −90…+180 (stary poza, anulowany pominięty)", ids1.includes(evUrlop) && ids1.includes(evServ) && !ids1.includes(evOld) && !ids1.includes(evCanc), s1);
+    ok("search_events: sort po odległości od dziś (serwis +3 przed urlopem −14)", ids1.indexOf(evServ) < ids1.indexOf(evUrlop), ids1);
+    ok("search_events: zwraca from/to", s1.from === shift(-90) && s1.to === shift(180), s1);
+    const s2 = (await exec(tools.search_events, { query: PREFIX, includeCancelled: true })) as { events: { id: number }[] };
+    ok("search_events: includeCancelled → anulowany wraca", s2.events.some((e) => e.id === evCanc), s2);
+    const s3 = (await exec(tools.search_events, { query: PREFIX, type: "urlop" })) as { events: { id: number }[] };
+    ok("search_events: filtr type=urlop", s3.events.length === 1 && s3.events[0].id === evUrlop, s3);
+    // odmiana: „Magazynie” → rdzeń „Magaz” trafia w nazwę obiektu przez join
+    const s4 = (await exec(tools.search_events, { query: `${PREFIX} Magazynie` })) as { events: { id: number }[] };
+    ok("search_events: odmiana („Magazynie”) trafia po nazwie obiektu", s4.events.some((e) => e.id === evServ), s4);
+    if (tid != null) {
+      const tname = techs[0].name.split(" ")[0];
+      const s5 = (await exec(tools.search_events, { technicianName: tname, type: "urlop", from: shift(-20), to: shift(-10) })) as { events: { id: number }[] };
+      ok(`search_events: technik po imieniu („${tname}”) + type`, s5.events.some((e) => e.id === evUrlop), s5);
+      const s6 = (await exec(tools.search_events, { technicianId: tid, from: shift(-20), to: shift(-10) })) as { events: { id: number }[] };
+      ok("search_events: technicianId", s6.events.some((e) => e.id === evUrlop), s6);
+    }
+    const s7 = (await exec(tools.search_events, { from: shift(-20), to: shift(-10) })) as { error?: string };
+    ok("search_events: bez filtra → error (użyj list_events)", typeof s7.error === "string", s7);
+    const s8 = (await exec(tools.search_events, { query: "100%_x" })) as { events: unknown[]; count: number };
+    ok("search_events: escape LIKE (bez wildcard)", s8.count === 0, s8);
+  } finally {
+    db.delete(schema.calendarEventAssignees).where(eq(schema.calendarEventAssignees.eventId, evUrlop)).run();
+    db.delete(schema.calendarEvents).where(like(schema.calendarEvents.title, `${PREFIX}%`)).run();
+  }
 
   // check_conflicts
   const k1 = (await exec(tools.check_conflicts, { startAt: "2026-09-01T10:00", endAt: "2026-09-01T08:00", technicianIds: [tid] })) as { error?: string };

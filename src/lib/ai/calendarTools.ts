@@ -7,11 +7,11 @@
  * Pola tekstowe z bazy są przycinane (`clip`) — wynik narzędzia to dane, nie instrukcje.
  * Schematy zmian (Change) i ich rozwiązywanie: src/lib/ai/calendarChanges.ts (wspólne z apply-changes).
  */
-import { tool } from "ai";
+import { jsonSchema, tool, type JSONSchema7, type Tool, type ToolExecutionOptions } from "ai";
 import { z } from "zod";
-import { and, asc, gt, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import { and, asc, gt, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
 import { db, schema } from "../../db/index.js";
-import { CALENDAR_SERIES_FREQS, type User } from "../../db/schema.js";
+import { CALENDAR_EVENT_STATUSES, CALENDAR_EVENT_TYPES, CALENDAR_SERIES_FREQS, type User } from "../../db/schema.js";
 import { ApiError } from "../calendar-labels.js";
 import { parseInput, type ParsedInput } from "../calendar-mutations.js";
 import { conflictEventIds, listActiveTechnicians, loadEvent, loadEvents, techName } from "../calendar-queries.js";
@@ -55,7 +55,73 @@ const DAY_MS = 86_400_000;
 const CLIP = 120;
 /** Limit wyników list_events (+ flaga truncated). */
 const LIST_EVENTS_LIMIT = 40;
+/** Limit wyników search_events (+ flaga truncated). */
+const SEARCH_EVENTS_LIMIT = 20;
+/** Domyślny zakres search_events względem dziś: [dziś − 90, dziś + 180). */
+const SEARCH_PAST_DAYS = 90;
+const SEARCH_FUTURE_DAYS = 180;
 const HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+/** Etykiety pól zod → czytelny komunikat dla modelu (PL, krótko, bez stacka). */
+function formatIssue(issue: z.core.$ZodIssue): string {
+  const path = issue.path.length ? issue.path.map(String).join(".") : "wejście";
+  switch (issue.code) {
+    case "too_big":
+      return `${path}: maks. ${issue.maximum}${issue.origin === "array" ? " elementów" : issue.origin === "string" ? " znaków" : ""}`;
+    case "too_small":
+      return `${path}: min. ${issue.minimum}${issue.origin === "array" ? " elementów" : issue.origin === "string" ? " znaków" : ""}`;
+    case "invalid_type":
+      return `${path}: oczekiwano ${issue.expected}`;
+    case "invalid_value":
+      return `${path}: dozwolone ${issue.values.map((v) => JSON.stringify(v)).join(", ")}`;
+    case "unrecognized_keys":
+      return `nieznane pola: ${issue.keys.join(", ")}`;
+    default:
+      return `${path}: ${issue.message}`;
+  }
+}
+
+/** `{ error }` z listy błędów walidacji (podane wartości w nawiasie, gdy proste). */
+export function formatInputErrors(toolName: string, error: z.ZodError, input: unknown): string {
+  const obj = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
+  const seen = new Set<string>();
+  const parts: string[] = [];
+  for (const issue of error.issues) {
+    let msg = formatIssue(issue);
+    const key = issue.path.length === 1 ? String(issue.path[0]) : null;
+    const given = key != null ? obj[key] : undefined;
+    if (key != null && (typeof given === "number" || typeof given === "string")) msg += ` (podano ${JSON.stringify(given)})`;
+    if (!seen.has(msg)) {
+      seen.add(msg);
+      parts.push(msg);
+    }
+  }
+  return `Nieprawidłowe parametry ${toolName}: ${parts.slice(0, 6).join("; ")} — popraw wartości i wywołaj ponownie`;
+}
+
+/**
+ * Narzędzie z „miękką” walidacją: model dostaje pełny JSON Schema (z zod), ale SDK nie odrzuca wywołania
+ * z błędnymi parametrami (AI_InvalidToolInputError przerywał turę / pokazywał stack). Zamiast tego
+ * `execute` waliduje zod-em i zwraca `{ error: "durationHours: maks. 12 …" }` — model poprawia się w kolejnym kroku.
+ */
+function lenientTool<S extends z.ZodType, R>(name: string, def: { description: string; inputSchema: S; execute: (input: z.output<S>) => Promise<R> }) {
+  const schema = def.inputSchema;
+  type In = z.output<S>;
+  type Out = R | { error: string };
+  const t = tool<In, unknown, Record<string, unknown>>({
+    description: def.description,
+    inputSchema: jsonSchema<In>(() => z.toJSONSchema(schema, { target: "draft-7", io: "input", reused: "inline" }) as unknown as JSONSchema7, {
+      validate: (value) => ({ success: true, value: value as In }),
+    }),
+    execute: async (raw): Promise<Out> => {
+      const r = schema.safeParse(raw);
+      if (!r.success) return { error: formatInputErrors(name, r.error, raw) };
+      return def.execute(r.data);
+    },
+  });
+  // Typ wyjścia zawężony do R | { error } (generyczny R nie przechodzi przez NeverOptional w sygnaturze tool()).
+  return t as unknown as Tool<In, Out> & { execute: (input: In, options: ToolExecutionOptions<Record<string, unknown>>) => Promise<Out> };
+}
 
 /** Przycina tekst z bazy do CLIP znaków (dane, nie instrukcje; oszczędność kontekstu). */
 function clip(s: string | null | undefined, max = CLIP): string | null {
@@ -139,7 +205,7 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
   const cfg: ToolsConfig = { ...ASSISTANT_DEFAULTS, ...config };
   const disabled = new Set(cfg.disabledTools);
   const all = {
-    find_object: tool({
+    find_object: lenientTool("find_object", {
       description: "Szuka obiektu klienta po fragmencie nazwy/adresu/miasta. Zwraca trafienia (id do propose_event/ask_choice), `count` i `ambiguous`.",
       inputSchema: z.object({
         query: z.string().trim().min(1).max(200).describe("Fragment nazwy/adresu/miasta"),
@@ -174,7 +240,7 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
       },
     }),
 
-    find_technician: tool({
+    find_technician: lenientTool("find_technician", {
       description: "Szuka technika po fragmencie imienia/nazwiska (lista techników jest też w prompcie). Zwraca id, nazwę, active.",
       inputSchema: z.object({
         query: z.string().trim().min(1).max(200).describe("Fragment imienia/nazwiska"),
@@ -205,7 +271,7 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
       },
     }),
 
-    list_events: tool({
+    list_events: lenientTool("list_events", {
       description: "Wydarzenia w zakresie [from, to) z opcjonalnym filtrem technika/obiektu (grafik). Do wolnych terminów użyj find_free_slots.",
       inputSchema: z.object({
         from: zDateOrDt.describe(`Początek zakresu, ${DATE_OR_DATETIME}`),
@@ -213,12 +279,12 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
         technicianId: zId.optional(),
         objectId: zId.optional(),
       }),
-      execute: async ({ from, to, technicianId, objectId }) => {
-        const span = spanDays(from, to);
-        if (span <= 0 || to <= from) return { error: "Parametr to musi być późniejszy niż from" };
-        if (span > cfg.maxHorizonDays) {
-          return { error: `Zakres ${span} dni przekracza limit ${cfg.maxHorizonDays} dni — zawęź zapytanie` };
-        }
+      execute: async ({ from, to: toIn, technicianId, objectId }) => {
+        const span = spanDays(from, toIn);
+        if (span <= 0 || toIn <= from) return { error: "Parametr to musi być późniejszy niż from" };
+        // Zakres ponad limit: przycinamy zamiast odrzucać (błąd kosztował 2–3 kroki na próby „365 → 91 → 90”).
+        const truncatedRange = span > cfg.maxHorizonDays;
+        const to = truncatedRange ? addDays(from.slice(0, 10), cfg.maxHorizonDays) : toIn;
         const conds = [
           isNull(schema.calendarEvents.deletedAt),
           gt(schema.calendarEvents.endAt, from),
@@ -240,11 +306,84 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
           .map((r) => r.id);
         const truncated = ids.length > LIST_EVENTS_LIMIT;
         const events = loadEvents(db, ids.slice(0, LIST_EVENTS_LIMIT)).map(briefEvent);
-        return { events, count: events.length, truncated };
+        return {
+          events,
+          count: events.length,
+          truncated,
+          from,
+          to,
+          ...(truncatedRange
+            ? { truncatedRange: true as const, note: `Zakres ${span} dni przycięto do limitu ${cfg.maxHorizonDays} dni (do ${to}). Do szukania konkretnego wydarzenia użyj search_events.` }
+            : {}),
+        };
       },
     }),
 
-    get_event: tool({
+    search_events: lenientTool("search_events", {
+      description:
+        "Szuka KONKRETNEGO wydarzenia (np. „urlop Dominika”, „serwis w Magazynie”) po fragmencie tytułu/obiektu/lokalizacji, techniku (id lub imię), typie, statusie. Bez from/to: dziś −90…+180 dni. Wyniki od najbliższych dzisiejszej dacie, maks. 20.",
+      inputSchema: z.object({
+        query: z.string().trim().max(200).optional().describe("Fragment tytułu / nazwy obiektu / lokalizacji (bez imienia technika — do tego technicianName)"),
+        technicianId: zId.optional().describe("Id technika z listy w prompcie"),
+        technicianName: z.string().trim().max(100).optional().describe("Fragment imienia/nazwiska technika, gdy nie znasz id"),
+        type: z.enum(CALENDAR_EVENT_TYPES).optional().describe("Typ wydarzenia, np. urlop, serwis"),
+        status: z.enum(CALENDAR_EVENT_STATUSES).optional(),
+        from: zDateOrDt.optional().describe(`Początek zakresu, ${DATE_OR_DATETIME} (domyślnie dziś − ${SEARCH_PAST_DAYS} dni)`),
+        to: zDateOrDt.optional().describe(`Koniec zakresu (exclusive), ${DATE_OR_DATETIME} (domyślnie dziś + ${SEARCH_FUTURE_DAYS} dni)`),
+        includeCancelled: z.boolean().optional().describe("Uwzględnij anulowane (domyślnie false)"),
+      }),
+      execute: async (input) => {
+        const today = localNow().slice(0, 10);
+        const from = input.from ?? addDays(today, -SEARCH_PAST_DAYS);
+        const to = input.to ?? addDays(today, SEARCH_FUTURE_DAYS);
+        if (to <= from) return { error: "Parametr to musi być późniejszy niż from" };
+        const hasFilter = Boolean(input.query?.trim() || input.technicianId != null || input.technicianName?.trim() || input.type || input.status);
+        if (!hasFilter) return { error: "Podaj przynajmniej jeden filtr: query, technicianId/technicianName, type lub status (do grafiku w zakresie dat użyj list_events)" };
+        const base = () => [
+          isNull(schema.calendarEvents.deletedAt),
+          gt(schema.calendarEvents.endAt, from),
+          lt(schema.calendarEvents.startAt, to),
+          ...(input.includeCancelled ? [] : [ne(schema.calendarEvents.status, "cancelled")]),
+          ...(input.type ? [sql`${schema.calendarEvents.type} = ${input.type}` ] : []),
+          ...(input.status ? [sql`${schema.calendarEvents.status} = ${input.status}`] : []),
+          ...(input.technicianId != null
+            ? [sql`${schema.calendarEvents.id} IN (SELECT event_id FROM calendar_event_assignees WHERE technician_id = ${input.technicianId})`]
+            : []),
+          ...(input.technicianName?.trim()
+            ? [
+                sql`${schema.calendarEvents.id} IN (SELECT a.event_id FROM calendar_event_assignees a JOIN technicians t ON t.id = a.technician_id WHERE (t.first_name || ' ' || t.last_name) LIKE ${likePattern(input.technicianName)} ESCAPE '\\')`,
+              ]
+            : []),
+        ];
+        // Odległość od dziś (dni) — najbliższe wydarzenia pierwsze; remis: wcześniejsze startAt.
+        const distance = sql`abs(julianday(substr(${schema.calendarEvents.startAt}, 1, 10)) - julianday(${today}))`;
+        const hay = sql`coalesce(${schema.calendarEvents.title}, '') || ' ' || coalesce(${schema.objects.name}, '') || ' ' || coalesce(${schema.calendarEvents.location}, '')`;
+        const run = (textConds: unknown[]) =>
+          db
+            .select({ id: schema.calendarEvents.id })
+            .from(schema.calendarEvents)
+            .leftJoin(schema.objects, sql`${schema.objects.id} = ${schema.calendarEvents.objectId}`)
+            .where(and(...base(), ...(textConds as ReturnType<typeof sql>[])))
+            .orderBy(distance, asc(schema.calendarEvents.startAt), asc(schema.calendarEvents.id))
+            .limit(SEARCH_EVENTS_LIMIT + 1)
+            .all()
+            .map((r) => r.id);
+        const q = input.query?.trim() ?? "";
+        let ids = run(q ? [likeEsc(hay, likePattern(q))] : []);
+        // Fallback dla odmiany („Magazynie” vs „Magazyn”): każdy token po rdzeniu (jak find_object).
+        if (ids.length === 0 && q) {
+          const stems = q.split(/\s+/).filter(Boolean).map((t) => (t.length >= 5 ? t.slice(0, Math.max(4, t.length - 3)) : t));
+          if (stems.length) ids = run(stems.map((t) => likeEsc(hay, likePattern(t))));
+        }
+        const truncated = ids.length > SEARCH_EVENTS_LIMIT;
+        const kept = ids.slice(0, SEARCH_EVENTS_LIMIT);
+        const byId = new Map(loadEvents(db, kept).map((e) => [e.id, e]));
+        const events = kept.map((id) => byId.get(id)).filter((e): e is NonNullable<typeof e> => !!e).map(briefEvent);
+        return { events, count: events.length, truncated, from, to, today };
+      },
+    }),
+
+    get_event: lenientTool("get_event", {
       description: "Pełne dane jednego wydarzenia po id (opis, technicy, seria, czy usunięte) — do precyzyjnego dopasowania przed propose_changes.",
       inputSchema: z.object({ eventId: zId.describe("Id z list_events") }),
       execute: async ({ eventId }) => {
@@ -264,7 +403,7 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
       },
     }),
 
-    check_conflicts: tool({
+    check_conflicts: lenientTool("check_conflicts", {
       description: "Kolizje wskazanych techników z innymi wydarzeniami i urlopami w [startAt, endAt).",
       inputSchema: z.object({
         startAt: zDateOrDt.describe(DATE_OR_DATETIME),
@@ -293,7 +432,7 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
       },
     }),
 
-    find_free_slots: tool({
+    find_free_slots: lenientTool("find_free_slots", {
       description:
         "Najbliższe wolne okna (godziny pracy, pon–pt, bez kolizji i urlopów). technicianIds = [] → wszyscy aktywni, każdy slot ma listę wolnych. Wynik przedstaw przez ask_choice.",
       inputSchema: z.object({
@@ -347,7 +486,7 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
       },
     }),
 
-    ask_choice: tool({
+    ask_choice: lenientTool("ask_choice", {
       description:
         "JEDNO pytanie z 2–8 opcjami do kliknięcia (obiekt, technik, termin, typ, wydarzenie). UI pokaże przyciski; odpowiedź przyjdzie jako wiadomość użytkownika. Kończy turę.",
       inputSchema: z.object({
@@ -416,7 +555,7 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
       },
     }),
 
-    propose_event: tool({
+    propose_event: lenientTool("propose_event", {
       description:
         "Karta propozycji NOWEGO wydarzenia do ZATWIERDZENIA przez użytkownika. NIE zapisuje. Jedno wywołanie = jedna karta; kilka wydarzeń = kilka wywołań w tym samym kroku. Przy {error} popraw i wywołaj ponownie.",
       inputSchema: zEventInput.extend({
@@ -491,7 +630,7 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
       },
     }),
 
-    propose_changes: tool({
+    propose_changes: lenientTool("propose_changes", {
       description:
         "Paczka zmian ISTNIEJĄCYCH wydarzeń (update/status/cancel/delete/restore) i nieplanowanych, które się odbyły (create) — karty do ZATWIERDZENIA, NIE zapisuje. Jedno wywołanie = jedna paczka (1–20 pozycji). Pozycja z błędem nie blokuje pozostałych.",
       inputSchema: z.object({
