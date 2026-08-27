@@ -33,7 +33,11 @@ async function request<T>(
   const data = await response.json().catch(() => ({}));
 
   if (!response.ok || !data.success) {
-    throw new Error(data.error || `Request failed (${response.status})`);
+    // `status` pozwala UI odróżnić „endpointu jeszcze nie ma" (404) albo brak
+    // uprawnień (403) od zwykłego błędu walidacji — bez parsowania komunikatu.
+    throw Object.assign(new Error(data.error || `Request failed (${response.status})`), {
+      status: response.status,
+    });
   }
 
   return data;
@@ -253,6 +257,12 @@ export interface ObjectRecord {
   department: "sales" | "technical" | "accounting";
   monthlyValue: number | null;
   notes: string | null;
+  /**
+   * Współrzędne obiektu (kalkulacja dystansu biuro → obiekt). Uzupełniane
+   * leniwie geokoderem; brak pola = starszy backend, `null` = jeszcze nieznane.
+   */
+  latitude?: number | null;
+  longitude?: number | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -276,6 +286,9 @@ export interface ObjectInput {
   department?: "sales" | "technical" | "accounting";
   monthlyValue?: number;
   notes?: string;
+  /** Ignorowane przez starszy backend — bezpieczne do wysłania zawsze. */
+  latitude?: number | null;
+  longitude?: number | null;
 }
 
 export interface WorkflowTransition {
@@ -894,7 +907,35 @@ export interface CmaTrends {
 // Realizacje (dział Techniczny) — rejestr serwisów i montaży
 // ---------------------------------------------------------------------------
 
+/**
+ * Pole ZGODNOŚCIOWE — stary, jednowymiarowy „rodzaj”, dziś wyliczany przez backend
+ * z pary (`workType`, `billing`). Czytają go protokoły i starsze widoki; UI realizacji
+ * pokazuje i wysyła wyłącznie nową parę.
+ */
 export type RealizationKind = "service" | "warranty" | "installation";
+
+/** Rodzaj prac (CO robiono) — ten sam słownik co typ wydarzenia kalendarza + „inne”. */
+export type RealizationWorkType =
+  | "serwis"
+  | "montaz"
+  | "wizja"
+  | "demontaz"
+  | "konserwacja"
+  | "inne";
+
+export const REALIZATION_WORK_TYPES: RealizationWorkType[] = [
+  "serwis",
+  "montaz",
+  "wizja",
+  "demontaz",
+  "konserwacja",
+  "inne",
+];
+
+/** Typ rozliczenia (ZA ILE) — jak `billing` wydarzenia, ale bez „nie dotyczy”. */
+export type RealizationBilling = "paid" | "warranty" | "free";
+
+export const REALIZATION_BILLINGS: RealizationBilling[] = ["paid", "warranty", "free"];
 
 /** Skrót protokołu dołączany do realizacji (badge + deep-link w tabeli). */
 export interface RealizationProtocol {
@@ -904,11 +945,48 @@ export interface RealizationProtocol {
   signedAt: string | null;
 }
 
+/**
+ * Obiekt powiązany z realizacją — pinezka na mapie miesiąca. Backend bierze go
+ * z wydarzenia kalendarza (`source: "event"`), a dla wpisów ręcznych dopasowuje
+ * po nazwie `site` (`source: "name"`). `lat`/`lng` null = obiekt bez współrzędnych
+ * (realizacja trafia do licznika „bez lokalizacji”, nie na mapę).
+ */
+export interface RealizationLocation {
+  objectId: number;
+  name: string;
+  address: string | null;
+  city: string | null;
+  lat: number | null;
+  lng: number | null;
+  source: "event" | "name";
+}
+
+/** Adres i współrzędne biura — znacznik na mapie (GET /company/office). */
+export interface CompanyOffice {
+  address: string;
+  city: string;
+  lat: number | null;
+  lng: number | null;
+}
+
+/** Ślad automatu przy pojedynczym polu realizacji (kolumna `autofill`). */
+export interface AutofillMark {
+  source?: string;
+  detail?: string;
+  /** ISO timestamp zapisu. */
+  at?: string;
+}
+
 export interface Realization {
   id: number;
   date: string; // YYYY-MM-DD
   site: string;
-  kind: RealizationKind;
+  /** Rodzaj prac. Brak pola = starszy backend (przed rozdzieleniem `kind`). */
+  workType: RealizationWorkType;
+  /** Typ rozliczenia. Brak pola = starszy backend. */
+  billing: RealizationBilling;
+  /** Pole zgodnościowe, TYLKO do odczytu — backend wylicza je z `workType` + `billing`. */
+  readonly kind: RealizationKind;
   amountHours: number;
   amountMaterial: number;
   amountKm: number;
@@ -935,6 +1013,18 @@ export interface Realization {
    * `null` = realizacja bez protokołu, brak pola = starszy backend.
    */
   protocol?: RealizationProtocol | null;
+  /**
+   * Obiekt powiązany z realizacją — źródło pinezki na mapie miesiąca.
+   * `null` = nie udało się powiązać, brak pola = starszy backend.
+   */
+  location?: RealizationLocation | null;
+  /**
+   * Pola uzupełnione automatem (badge „auto" w tabeli). Backend zapisuje mapę
+   * `{ pole: { source, detail, at } }` jako JSON w kolumnie; akceptujemy też
+   * samą listę pól. Brak kolumny → UI schodzi do lokalnych znaczników z
+   * ostatniego zapisu (`components/realization/autofill-marks.ts`).
+   */
+  autofill?: string[] | Record<string, AutofillMark> | string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -942,7 +1032,8 @@ export interface Realization {
 export interface RealizationInput {
   date: string;
   site: string;
-  kind: RealizationKind;
+  workType: RealizationWorkType;
+  billing: RealizationBilling;
   amountHours: number | string;
   amountMaterial: number | string;
   amountKm: number | string;
@@ -965,7 +1056,14 @@ export interface RealizationSummary {
   freePotential: number;
   freeCost: number;
   grandTotal: number;
+  /**
+   * Kubełki pieniędzy w starym kształcie: `service` = płatne prace inne niż montaż,
+   * `installation` = płatne montaże, `warranty` = wszystko bezpłatne (gwarancja + darmowe).
+   */
   counts: { service: number; warranty: number; installation: number };
+  /** Rozbicie po nowych wymiarach; brak pola = starszy backend. */
+  byWorkType?: Record<RealizationWorkType, number>;
+  byBilling?: Record<RealizationBilling, number>;
   uninvoicedCount: number;
   months: { month: number; revenue: number; loss: number }[];
 }
@@ -989,6 +1087,14 @@ export async function getRealizationSummary(year: number, month: number) {
   return request<ApiResponse<RealizationSummary>>(
     `/realizations/summary?year=${year}&month=${month}`
   );
+}
+
+/**
+ * Adres biura dla znacznika na mapie. Lekki odczyt dla każdego zalogowanego —
+ * pełne ustawienia firmy (`/admin/company/settings`) wymagają admina.
+ */
+export async function getCompanyOffice() {
+  return request<ApiResponse<CompanyOffice>>("/company/office");
 }
 
 export async function createRealization(data: RealizationInput) {
@@ -1095,6 +1201,22 @@ export async function deleteTechnician(id: number) {
 // Cennik usług serwisowych
 // ---------------------------------------------------------------------------
 
+/**
+ * Rodzaj pozycji cennika. Materiały dopasowują się do pozycji protokołu przy
+ * automatycznym wyliczaniu realizacji, usługi dają stawkę RBH / KM.
+ * Starszy backend nie zwraca `kind` — UI traktuje brak jako „usługa".
+ */
+export type PriceItemKind = "service" | "material";
+
+/** Rodzaj pozycji z bezpiecznym domyślnym („usługa"), gdy backend go nie zwraca. */
+export const priceItemKind = (item: { kind?: string | null }): PriceItemKind =>
+  item.kind === "material" ? "material" : "service";
+
+export const PRICE_ITEM_KIND_LABEL: Record<PriceItemKind, string> = {
+  service: "Usługa",
+  material: "Materiał",
+};
+
 export interface PriceItem {
   id: number;
   /** Cennik, do którego należy pozycja. */
@@ -1104,6 +1226,8 @@ export interface PriceItem {
   price: number;
   position: number;
   active: boolean;
+  /** Brak pola = starszy backend (czytaj przez `priceItemKind`). */
+  kind?: PriceItemKind;
   createdAt: string;
   updatedAt: string;
 }
@@ -1114,6 +1238,8 @@ export interface PriceItemInput {
   price: number | string;
   position?: number;
   active?: boolean;
+  /** Pomijane przez starszy backend — bezpieczne do wysłania zawsze. */
+  kind?: PriceItemKind;
   /** Brak = cennik główny (POST) / bez zmiany (PUT). */
   priceListId?: number;
 }
@@ -1141,10 +1267,16 @@ export interface PriceListGroupInput {
 }
 
 /** Bez `listId` backend zwraca pozycje cennika głównego (zgodność wsteczna). */
-export async function getPriceList(listId?: number) {
-  return request<ApiResponse<PriceItem[]>>(
-    `/pricelist${listId ? `?listId=${listId}` : ""}`
-  );
+/**
+ * Pozycje cennika. `kind` zawęża wynik po stronie backendu (usługi / materiały);
+ * starszy backend parametr ignoruje, więc filtr trzeba i tak zastosować w UI.
+ */
+export async function getPriceList(listId?: number, kind?: PriceItemKind) {
+  const qs = new URLSearchParams();
+  if (listId) qs.set("listId", String(listId));
+  if (kind) qs.set("kind", kind);
+  const q = qs.toString();
+  return request<ApiResponse<PriceItem[]>>(`/pricelist${q ? `?${q}` : ""}`);
 }
 
 /** Cenniki: CRUD grup, cennik główny, duplikacja, przypisania, kopiowanie pozycji. */
@@ -1374,6 +1506,82 @@ export async function updateProtocol(id: number, data: ProtocolInput) {
 export async function deleteProtocol(id: number) {
   return request<ApiResponse<null>>(`/protocols/${id}`, { method: "DELETE" });
 }
+
+// --- Uzupełnianie protokołu z danych, które system już zna ------------------
+// Backend: src/lib/protocol-prefill.ts (wydarzenie → obiekt → kontrahent → cennik).
+// Podgląd nic nie zapisuje; zapis obejmuje wyłącznie wskazane pola. Protokół
+// podpisany albo zatwierdzony → 400 (przycisk jest wtedy ukryty).
+
+/** Pola protokołu objęte uzupełnianiem (kolejność = kolejność w dialogu). */
+export const PROTOCOL_PREFILL_FIELDS = [
+  "workDate",
+  "workType",
+  "actualHours",
+  "actualKm",
+  "contractor",
+  "salesperson",
+  "clientName",
+  "clientNip",
+  "clientCity",
+  "installationAddress",
+  "contact",
+  "activities",
+  "items",
+] as const;
+export type ProtocolPrefillField = (typeof PROTOCOL_PREFILL_FIELDS)[number];
+
+/** Kształt jak `AutofillSuggestion` w realizacjach — ta sama konwencja pól. */
+export interface ProtocolSuggestion {
+  field: ProtocolPrefillField | string;
+  label: string;
+  current: string | number | null;
+  suggested: string | number;
+  /** „kalendarz" | „obiekt" | „kontrahent" | „cennik" | „realizacja". */
+  source: string;
+  detail: string;
+  /** true = pole puste, można podstawić bez pytania; false = nadpisze istniejącą wartość. */
+  confident: boolean;
+}
+
+export interface ProtocolPrefillContext {
+  realizationId: number;
+  event: { id: number; type: string; title: string; startAt: string } | null;
+  object: { id: number; name: string } | null;
+  contractor: { id: number; name: string } | null;
+  priceList: { id: number; name: string; via: "technik" | "domyślny"; technician: string | null } | null;
+  materialCount: number;
+}
+
+export interface ProtocolPrefillPreview {
+  suggestions: ProtocolSuggestion[];
+  context: ProtocolPrefillContext | null;
+}
+
+export interface ProtocolPrefillApplied extends Protocol {
+  applied: string[];
+  skipped: { field: string; reason: string }[];
+}
+
+export const protocolPrefillApi = {
+  /** Podgląd sugestii „obecnie → proponowane" — bez zapisu. */
+  async preview(id: number): Promise<ProtocolPrefillPreview> {
+    const r = await request<ApiResponse<ProtocolPrefillPreview>>(`/protocols/${id}/prefill`);
+    const d = r.data;
+    return {
+      suggestions: Array.isArray(d?.suggestions) ? d.suggestions : [],
+      context: d?.context ?? null,
+    };
+  },
+
+  /** Zapisuje wskazane pola i zwraca zaktualizowany protokół. */
+  async apply(id: number, fields: string[]): Promise<ProtocolPrefillApplied> {
+    const r = await request<ApiResponse<ProtocolPrefillApplied>>(`/protocols/${id}/prefill`, {
+      method: "POST",
+      body: JSON.stringify({ fields }),
+    });
+    return r.data as ProtocolPrefillApplied;
+  },
+};
 
 // ---------------------------------------------------------------------------
 // Wyceny usług serwisowych
@@ -3570,3 +3778,365 @@ export const adminCalendarApi = {
     return r.data as AdminCalendarBackfillResult;
   },
 };
+
+// ---------------------------------------------------------------------------
+// Automatyczne uzupełnianie realizacji (kontrakt AUTOFILL §3–§4)
+// Podgląd nie zapisuje niczego; zapis obejmuje wyłącznie wskazane pola.
+// ---------------------------------------------------------------------------
+
+/** Pola realizacji objęte automatem (kolejność = kolejność w dialogu). */
+export const AUTOFILL_FIELDS = [
+  "actualHours",
+  "amountHours",
+  "amountMaterial",
+  "actualKm",
+  "amountKm",
+  "hourlyCost",
+  "caretaker",
+] as const;
+export type AutofillField = (typeof AUTOFILL_FIELDS)[number];
+
+export const AUTOFILL_FIELD_LABEL: Record<string, string> = {
+  actualHours: "Faktyczne godziny",
+  amountHours: "Kwota za godziny",
+  amountMaterial: "Materiały",
+  actualKm: "Faktyczne KM",
+  amountKm: "Kwota za KM",
+  hourlyCost: "Koszt godzinowy",
+  caretaker: "Opiekun",
+};
+
+/** Pola kwotowe — formatowane jako złotówki w dialogu i adnotacjach. */
+export const AUTOFILL_MONEY_FIELDS = new Set<string>([
+  "amountHours",
+  "amountMaterial",
+  "amountKm",
+  "hourlyCost",
+]);
+
+/**
+ * Pojedyncza propozycja automatu. `confident` = pole jest puste/zerowe, więc
+ * wartość można podstawić bez pytania; `false` = konflikt z tym, co już jest.
+ */
+export interface AutofillSuggestion {
+  field: AutofillField | string;
+  current: number | string | null;
+  suggested: number | string | null;
+  /** „kalendarz" | „protokół" | „kalkulacja" | „cennik" | „ustawienia". */
+  source: string;
+  detail: string;
+  confident: boolean;
+  /** Etykieta pola z backendu; brak → słownik `AUTOFILL_FIELD_LABEL`. */
+  label?: string;
+}
+
+export interface AutofillPreview {
+  suggestions: AutofillSuggestion[];
+  warnings: string[];
+}
+
+/** Wynik masowego uzupełniania (pętla po realizacjach — bez endpointu bulk). */
+export interface AutofillBulkRow {
+  id: number;
+  site: string;
+  fields: AutofillField[] | string[];
+  suggestions: AutofillSuggestion[];
+  error?: string;
+}
+
+const emptyPreview = (): AutofillPreview => ({ suggestions: [], warnings: [] });
+
+export const realizationAutofillApi = {
+  /** Podgląd sugestii — bez zapisu. */
+  async preview(id: number): Promise<AutofillPreview> {
+    const r = await request<ApiResponse<AutofillPreview>>(`/realizations/${id}/autofill`);
+    const d = r.data ?? emptyPreview();
+    return {
+      suggestions: Array.isArray(d.suggestions) ? d.suggestions : [],
+      warnings: Array.isArray(d.warnings) ? d.warnings : [],
+    };
+  },
+
+  /** Zapisuje wskazane pola i zwraca zaktualizowaną realizację. */
+  async apply(id: number, fields: string[]): Promise<Realization> {
+    const r = await request<ApiResponse<Realization>>(`/realizations/${id}/autofill`, {
+      method: "POST",
+      body: JSON.stringify({ fields }),
+    });
+    return r.data as Realization;
+  },
+
+  /**
+   * Masowy podgląd: pobiera sugestie po kolei (backend nie ma endpointu bulk —
+   * pętla po stronie klienta trzyma 1 request naraz, żeby nie zalać geokodera).
+   * Zwraca tylko wiersze, dla których automat coś proponuje.
+   */
+  async bulkPreview(
+    rows: { id: number; site: string }[],
+    opts?: { confidentOnly?: boolean }
+  ): Promise<AutofillBulkRow[]> {
+    const out: AutofillBulkRow[] = [];
+    for (const row of rows) {
+      try {
+        const preview = await realizationAutofillApi.preview(row.id);
+        const picked = preview.suggestions.filter((s) => !opts?.confidentOnly || s.confident);
+        if (picked.length > 0) {
+          out.push({ id: row.id, site: row.site, fields: picked.map((s) => s.field), suggestions: picked });
+        }
+      } catch (e) {
+        out.push({
+          id: row.id,
+          site: row.site,
+          fields: [],
+          suggestions: [],
+          error: e instanceof Error ? e.message : "Błąd podglądu",
+        });
+      }
+    }
+    return out;
+  },
+
+  /** Masowy zapis — po jednej realizacji, żeby błąd jednej nie ubił reszty. */
+  async bulkApply(rows: AutofillBulkRow[]): Promise<{ applied: number; failed: { id: number; error: string }[] }> {
+    let applied = 0;
+    const failed: { id: number; error: string }[] = [];
+    for (const row of rows) {
+      if (row.fields.length === 0) continue;
+      try {
+        await realizationAutofillApi.apply(row.id, row.fields as string[]);
+        applied += 1;
+      } catch (e) {
+        failed.push({ id: row.id, error: e instanceof Error ? e.message : "Błąd zapisu" });
+      }
+    }
+    return { applied, failed };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Administracja → Firma (kontrakt AUTOFILL §1): adres biura, stawki, automat
+// ---------------------------------------------------------------------------
+
+/** Skąd brać dystans biuro → obiekt. */
+export type CompanyKmSource = "route" | "straight" | "manual";
+
+export const KM_SOURCE_LABEL: Record<CompanyKmSource, string> = {
+  route: "Trasa drogowa (OSRM)",
+  straight: "Linia prosta × 1,3",
+  manual: "Ręcznie (bez kalkulacji)",
+};
+
+export interface CompanySettingsValues {
+  officeAddress: string;
+  officeCity: string;
+  officePostcode: string;
+  /** null = współrzędne nieustalone (geokoder ich jeszcze nie policzył). */
+  officeLat: number | null;
+  officeLng: number | null;
+  /** Stawka sprzedaży za roboczogodzinę (netto). */
+  rateHour: number;
+  /** Koszt wewnętrzny roboczogodziny. */
+  hourlyCost: number;
+  /** Stawka za kilometr. */
+  rateKm: number;
+  /** Dystans liczony w obie strony (×2). */
+  kmRoundTrip: boolean;
+  kmSource: CompanyKmSource;
+  /** Narzut procentowy na materiały z protokołu. */
+  materialMarkup: number;
+  autofillEnabled: boolean;
+  autofillFields: string[];
+  /** Czy realizacja podlicza się wstępnie już po oznaczeniu wydarzenia jako „wykonane”. */
+  autofillOnEventDone: boolean;
+}
+
+export type CompanySettingsField = keyof CompanySettingsValues;
+
+export interface AdminCompanySettings {
+  values: CompanySettingsValues;
+  sources?: Partial<Record<CompanySettingsField, AssistantSettingSource>>;
+  defaults?: Partial<CompanySettingsValues>;
+  meta?: {
+    autofillFields?: { value: string; label: string }[];
+    kmSources?: { value: CompanyKmSource; label: string }[];
+  };
+}
+
+/** PUT: dowolny podzbiór; `null` = usuń z bazy (powrót do domyślnego). */
+export type AdminCompanySettingsUpdate = {
+  [K in CompanySettingsField]?: CompanySettingsValues[K] | null;
+};
+
+export interface GeocodeResult {
+  lat: number;
+  lng: number;
+  display?: string;
+}
+
+/**
+ * Wynik „Testuj kalkulację” — dystans biuro → obiekt i kwoty z niego wynikające.
+ * Backend nie zwraca 500 przy braku adresu/sieci: wtedy `distance` = null,
+ * a powód siedzi w `error` (200), żeby panel mógł go pokazać obok pól.
+ */
+export interface CompanyDistanceTest {
+  object?: { id: number; name: string; address?: string | null; city?: string | null } | null;
+  distance: {
+    /** Dystans w jedną stronę. */
+    km: number;
+    /** Po uwzględnieniu round tripu — to trafia do `actualKm`. */
+    totalKm: number;
+    roundTrip: boolean;
+    method?: "route" | "straight" | string;
+    cached?: boolean;
+    /** Punkty z etykietami („Marszałkowska 1, 00-001 Warszawa" → nazwa obiektu). */
+    from?: { lat: number; lng: number; label?: string } | null;
+    to?: { lat: number; lng: number; label?: string } | null;
+  } | null;
+  amounts: {
+    actualKm: number;
+    amountKm: number | null;
+    rate: number | null;
+    /** „cennik: …” albo „stawka firmowa”. */
+    rateSource: string | null;
+    hourlyCost: number;
+    rateHour: number;
+  } | null;
+  /** Gotowe podsumowanie wyliczenia („12,4 km × 2 × 1,20 zł = 29,76 zł”). */
+  summary?: string;
+  error?: string | null;
+}
+
+/** Domyślne wartości używane, dopóki backend nie zwróci swoich. */
+export const COMPANY_FALLBACK_VALUES: CompanySettingsValues = {
+  officeAddress: "",
+  officeCity: "",
+  officePostcode: "",
+  officeLat: null,
+  officeLng: null,
+  rateHour: 0,
+  hourlyCost: 0,
+  rateKm: 0,
+  kmRoundTrip: true,
+  kmSource: "route",
+  materialMarkup: 0,
+  autofillEnabled: true,
+  autofillFields: [...AUTOFILL_FIELDS],
+  autofillOnEventDone: true,
+};
+
+/**
+ * Normalizacja kluczy z backendu: akceptujemy camelCase (`officeLat`) i wariant
+ * z podkreśleniami (`office_lat`), żeby panel działał niezależnie od tego,
+ * którą konwencję ostatecznie zwróci API.
+ */
+function normalizeKeyed<T>(raw: unknown): Partial<Record<CompanySettingsField, T>> {
+  if (!raw || typeof raw !== "object") return {};
+  const byLower = new Map<string, unknown>();
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    byLower.set(k.replace(/_/g, "").toLowerCase(), v);
+  }
+  const out: Partial<Record<CompanySettingsField, T>> = {};
+  for (const field of Object.keys(COMPANY_FALLBACK_VALUES) as CompanySettingsField[]) {
+    const v = byLower.get(field.toLowerCase());
+    if (v !== undefined) out[field] = v as T;
+  }
+  return out;
+}
+
+const asStr = (v: unknown, fb: string) => (typeof v === "string" ? v : v == null ? fb : String(v));
+const asNum = (v: unknown, fb: number) => {
+  const n = typeof v === "number" ? v : typeof v === "string" ? parseFloat(v.replace(",", ".")) : NaN;
+  return Number.isFinite(n) ? n : fb;
+};
+const asNumOrNull = (v: unknown): number | null => {
+  if (v == null || v === "") return null;
+  const n = asNum(v, NaN);
+  return Number.isFinite(n) ? n : null;
+};
+const asBool = (v: unknown, fb: boolean) =>
+  typeof v === "boolean" ? v : v === "true" || v === 1 ? true : v === "false" || v === 0 ? false : fb;
+
+/** Wartości z backendu → typy UI (liczby mogą przyjść jako tekst z app_settings). */
+function coerceCompanyValues(raw: unknown): CompanySettingsValues {
+  const v = normalizeKeyed<unknown>(raw);
+  const fb = COMPANY_FALLBACK_VALUES;
+  const kmSource = asStr(v.kmSource, fb.kmSource);
+  return {
+    officeAddress: asStr(v.officeAddress, fb.officeAddress),
+    officeCity: asStr(v.officeCity, fb.officeCity),
+    officePostcode: asStr(v.officePostcode, fb.officePostcode),
+    officeLat: asNumOrNull(v.officeLat),
+    officeLng: asNumOrNull(v.officeLng),
+    rateHour: asNum(v.rateHour, fb.rateHour),
+    hourlyCost: asNum(v.hourlyCost, fb.hourlyCost),
+    rateKm: asNum(v.rateKm, fb.rateKm),
+    kmRoundTrip: asBool(v.kmRoundTrip, fb.kmRoundTrip),
+    kmSource: (["route", "straight", "manual"] as string[]).includes(kmSource)
+      ? (kmSource as CompanyKmSource)
+      : fb.kmSource,
+    materialMarkup: asNum(v.materialMarkup, fb.materialMarkup),
+    autofillEnabled: asBool(v.autofillEnabled, fb.autofillEnabled),
+    autofillFields: Array.isArray(v.autofillFields) ? v.autofillFields.map(String) : fb.autofillFields,
+    autofillOnEventDone: asBool(v.autofillOnEventDone, fb.autofillOnEventDone),
+  };
+}
+
+function normalizeCompanySettings(raw: unknown): AdminCompanySettings {
+  const src = (raw ?? {}) as Record<string, unknown>;
+  return {
+    values: coerceCompanyValues(src.values),
+    sources: normalizeKeyed<AssistantSettingSource>(src.sources),
+    defaults: src.defaults ? coerceCompanyValues(src.defaults) : undefined,
+    meta: (src.meta as AdminCompanySettings["meta"]) ?? undefined,
+  };
+}
+
+export const adminCompanyApi = {
+  async settings(): Promise<AdminCompanySettings> {
+    const r = await request<ApiResponse<AdminCompanySettings>>("/admin/company/settings");
+    return normalizeCompanySettings(r.data);
+  },
+
+  async updateSettings(body: AdminCompanySettingsUpdate): Promise<AdminCompanySettings> {
+    const r = await request<ApiResponse<AdminCompanySettings>>("/admin/company/settings", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
+    return normalizeCompanySettings(r.data);
+  },
+
+  /**
+   * Geokodowanie adresu (Nominatim po stronie backendu, z cache w `geo_cache`).
+   * Bez pól backend bierze aktualny adres biura; `query` nadpisuje wszystko.
+   */
+  async geocode(body: {
+    address?: string;
+    city?: string;
+    postcode?: string;
+    query?: string;
+  }): Promise<GeocodeResult> {
+    const r = await request<ApiResponse<GeocodeResult>>("/admin/company/geocode", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    return r.data as GeocodeResult;
+  },
+
+  /** Kalkulacja dystansu do wskazanego obiektu (podgląd ustawień w praktyce). */
+  async testDistance(objectId: number): Promise<CompanyDistanceTest> {
+    const r = await request<ApiResponse<CompanyDistanceTest>>("/admin/company/test-distance", {
+      method: "POST",
+      body: JSON.stringify({ objectId }),
+    });
+    return r.data as CompanyDistanceTest;
+  },
+};
+
+/** Status błędu z `request` (404 = endpointu jeszcze nie ma, 403 = brak uprawnień). */
+export const errStatus = (e: unknown): number | undefined =>
+  typeof e === "object" && e !== null && "status" in e && typeof (e as { status: unknown }).status === "number"
+    ? (e as { status: number }).status
+    : undefined;
+
+/** Czy błąd oznacza „backend nie ma jeszcze tego endpointu". */
+export const isMissingEndpoint = (e: unknown): boolean => errStatus(e) === 404;

@@ -491,6 +491,7 @@ export function Layout({ children }: LayoutProps) {
                 children: [
                   { name: "Użytkownicy", href: "/admin/users", icon: Users },
                   { name: "Kalendarz", href: "/admin/kalendarz", icon: CalendarCog },
+                  { name: "Firma", href: "/admin/firma", icon: Building2 },
                   { name: "Asystent AI", href: "/admin/asystent", icon: Sparkles },
                 ],
               })}

@@ -283,13 +283,19 @@ export function Objects() {
         </CardContent>
       </Card>
 
-      <ObjectForm
-        open={formOpen}
-        onClose={closeForm}
-        onSubmit={editingObject ? handleUpdate : handleCreate}
-        object={editingObject}
-        preselectedContractorId={contractorFilter}
-      />
+      {/* Montujemy dopiero na otwarcie i z kluczem per obiekt — formularz czyta
+          `object` tylko w inicjalizatorze stanu, więc trwale zamontowany
+          pokazywałby puste pola przy edycji (wzorzec jak w PriceItemForm). */}
+      {formOpen && (
+        <ObjectForm
+          key={editingObject?.id ?? "new"}
+          open={formOpen}
+          onClose={closeForm}
+          onSubmit={editingObject ? handleUpdate : handleCreate}
+          object={editingObject}
+          preselectedContractorId={contractorFilter}
+        />
+      )}
     </div>
   );
 }

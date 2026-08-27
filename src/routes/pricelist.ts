@@ -1,8 +1,9 @@
 import { Hono } from "hono";
 import { db, schema } from "../db/index.js";
-import { eq, asc, inArray, ne, sql } from "drizzle-orm";
+import { and, eq, asc, inArray, ne, sql } from "drizzle-orm";
 import type { ApiResponse } from "../types/index.js";
-import type { NewPriceItem, PriceListGroup } from "../db/schema.js";
+import { PRICE_ITEM_KINDS } from "../db/schema.js";
+import type { NewPriceItem, PriceItemKind, PriceListGroup } from "../db/schema.js";
 
 const app = new Hono();
 
@@ -331,6 +332,7 @@ app.post("/lists/:id/duplicate", async (c) => {
         priceListId: created[0].id,
         name: i.name,
         unit: i.unit,
+        kind: i.kind,
         price: i.price,
         position: i.position,
         active: i.active,
@@ -562,6 +564,7 @@ app.post("/copy", async (c) => {
         priceListId: toListId,
         name: i.name,
         unit: i.unit,
+        kind: i.kind,
         price: i.price,
         position: ++next,
         active: i.active,
@@ -583,6 +586,16 @@ app.post("/copy", async (c) => {
 // Pozycje cennika — /api/pricelist
 // ---------------------------------------------------------------------------
 
+/** Jednostki towarowe — po nich klasyfikujemy pozycję bez podanego rodzaju (jak migracja 0041). */
+const MATERIAL_UNITS = new Set([
+  "SZT", "SZT.", "SZTUKA", "KPL", "KPL.", "MB", "M", "M2", "M²", "KG",
+]);
+
+/** Wstępny rodzaj pozycji dla klientów, które nie przysyłają `kind` (stary front, importy). */
+function inferKind(unit: string): PriceItemKind {
+  return MATERIAL_UNITS.has(unit.trim().toUpperCase()) ? "material" : "service";
+}
+
 function parseBody(body: Record<string, unknown>): {
   data?: Partial<NewPriceItem>;
   error?: string;
@@ -591,6 +604,15 @@ function parseBody(body: Record<string, unknown>): {
   const unit = typeof body.unit === "string" ? body.unit.trim().toUpperCase() : "";
   if (!name) return { error: "Nazwa usługi jest wymagana" };
   if (!unit) return { error: "Jednostka miary jest wymagana" };
+
+  // `kind` nieprzysłany = pole nietykane (PUT zostawia rodzaj, POST wnioskuje z jednostki).
+  let kind: PriceItemKind | undefined;
+  if (body.kind !== undefined && body.kind !== null && body.kind !== "") {
+    if (typeof body.kind !== "string" || !(PRICE_ITEM_KINDS as readonly string[]).includes(body.kind)) {
+      return { error: `Nieprawidłowy rodzaj pozycji (dozwolone: ${PRICE_ITEM_KINDS.join(", ")})` };
+    }
+    kind = body.kind as PriceItemKind;
+  }
 
   const priceRaw =
     typeof body.price === "string"
@@ -608,6 +630,7 @@ function parseBody(body: Record<string, unknown>): {
       price,
       position,
       active: body.active === undefined ? true : Boolean(body.active),
+      ...(kind === undefined ? {} : { kind }),
     },
   };
 }
@@ -655,10 +678,23 @@ app.get("/", async (c) => {
     listId = await ensureDefaultListId();
   }
 
+  // ?kind=service|material — filtr rodzaju (automat realizacji i formularz wyceny).
+  const kindRaw = c.req.query("kind");
+  if (kindRaw && !(PRICE_ITEM_KINDS as readonly string[]).includes(kindRaw)) {
+    return c.json<ApiResponse<null>>(
+      { success: false, error: `Parametr kind: dozwolone ${PRICE_ITEM_KINDS.join(", ")}` },
+      400
+    );
+  }
+
+  const where = kindRaw
+    ? and(eq(schema.priceList.priceListId, listId), eq(schema.priceList.kind, kindRaw as PriceItemKind))
+    : eq(schema.priceList.priceListId, listId);
+
   const rows = await db
     .select()
     .from(schema.priceList)
-    .where(eq(schema.priceList.priceListId, listId))
+    .where(where)
     .orderBy(asc(schema.priceList.position), asc(schema.priceList.id));
   return c.json({ success: true, data: rows });
 });
@@ -696,7 +732,11 @@ app.post("/", async (c) => {
 
   const result = await db
     .insert(schema.priceList)
-    .values({ ...data, priceListId: listId } as NewPriceItem)
+    .values({
+      ...data,
+      kind: data.kind ?? inferKind(data.unit ?? ""),
+      priceListId: listId,
+    } as NewPriceItem)
     .returning();
 
   return c.json(

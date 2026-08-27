@@ -4,6 +4,7 @@
 // Bezpieczny do ponownego uruchomienia — pomija miesiące z istniejącymi wpisami.
 import { db, schema } from "../src/db/index.js";
 import { like, gt, and, eq } from "drizzle-orm";
+import { splitLegacyKind } from "../src/lib/realization-kind.js";
 
 type Row = typeof schema.realizations.$inferInsert;
 
@@ -39,7 +40,8 @@ async function importMonth(label: string, prefix: string, rows: Row[]) {
     console.log(`${label}: pomijam — ma już ${existing.length} wpisów.`);
     return;
   }
-  await db.insert(schema.realizations).values(rows);
+  // Arkusz zna tylko stary, jednowymiarowy `kind` — rozbijamy go na rodzaj + typ.
+  await db.insert(schema.realizations).values(rows.map((r) => ({ ...r, ...splitLegacyKind(r.kind) })));
   console.log(`${label}: zaimportowano ${rows.length} realizacji.`);
 }
 

@@ -11,6 +11,7 @@ import {
   ClipboardList,
   Eye,
   HardHat,
+  MoreHorizontal,
   Pencil,
   Plus,
   Receipt,
@@ -32,7 +33,9 @@ import type {
   CalendarEventStatus,
   CalendarEventType,
   CalendarSeriesFreq,
+  RealizationBilling,
   RealizationKind,
+  RealizationWorkType,
 } from "@/lib/api";
 import type { RichTip, TipPill, TipRow, TipTone } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
@@ -752,12 +755,50 @@ export const REALIZATION_TYPES: readonly CalendarEventType[] = [
 export const realizationApplies = (type: CalendarEventType | string): boolean =>
   REALIZATION_TYPES.includes(type as CalendarEventType);
 
-/** Etykiety rodzajów realizacji (jak w zakładce Realizacje). */
+/**
+ * Etykiety pola ZGODNOŚCIOWEGO `kind` (stary, jednowymiarowy rodzaj). W tabeli
+ * realizacji nieużywane — tam są dwie osobne kolumny: rodzaj i typ rozliczenia.
+ */
 export const REALIZATION_KIND_LABEL: Record<RealizationKind, string> = {
   service: "Serwis płatny",
   warranty: "Gwarancyjny",
   installation: "Montaż",
 };
+
+/**
+ * Rodzaj prac realizacji — ten sam słownik i te same ikony co typy wydarzeń
+ * kalendarza (żeby realizacja i wydarzenie wyglądały tak samo), plus „inne”
+ * na prace spoza kalendarzowej piątki.
+ */
+export const REALIZATION_WORK_TYPE_ORDER: RealizationWorkType[] = [
+  "serwis",
+  "montaz",
+  "wizja",
+  "demontaz",
+  "konserwacja",
+  "inne",
+];
+
+export const REALIZATION_WORK_TYPE_META: Record<RealizationWorkType, EventTypeMeta> = {
+  serwis: EVENT_TYPE_META.serwis,
+  montaz: EVENT_TYPE_META.montaz,
+  wizja: EVENT_TYPE_META.wizja,
+  demontaz: EVENT_TYPE_META.demontaz,
+  konserwacja: EVENT_TYPE_META.konserwacja,
+  inne: {
+    label: "Inne",
+    icon: MoreHorizontal,
+    chip: "border-slate-400/60 text-slate-600 dark:text-slate-300",
+    chipActive: "bg-slate-500 border-slate-500 text-white",
+    cssVar: "--cal-biuro",
+  },
+};
+
+export const realizationWorkTypeLabel = (t: string): string =>
+  (REALIZATION_WORK_TYPE_META as Record<string, EventTypeMeta>)[t]?.label ?? t;
+
+/** Kolejność typów rozliczenia w filtrach i segmentach realizacji (płatne najpierw). */
+export const REALIZATION_BILLING_ORDER: RealizationBilling[] = ["paid", "warranty", "free"];
 
 export type RealizationBadgeKind = "invoiced" | "open";
 

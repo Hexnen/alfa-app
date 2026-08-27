@@ -288,6 +288,20 @@
       "when": 1787853104299,
       "tag": "0040_mysterious_whizzer",
       "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "6",
+      "when": 1787856046436,
+      "tag": "0041_absurd_sugar_man",
+      "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "6",
+      "when": 1787861662818,
+      "tag": "0042_zippy_swordsman",
+      "breakpoints": true
     }
   ]
 }

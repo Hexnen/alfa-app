@@ -3,6 +3,13 @@
 // jeśli luty 2026 ma już wpisy.
 import { db, schema } from "../src/db/index.js";
 import { like } from "drizzle-orm";
+import { splitLegacyKind } from "../src/lib/realization-kind.js";
+
+/** Arkusz zna tylko stary, jednowymiarowy `kind` — rozbijamy go na rodzaj + typ. */
+const withKindSplit = (r: typeof schema.realizations.$inferInsert) => ({
+  ...r,
+  ...splitLegacyKind(r.kind),
+});
 
 const ROWS: (typeof schema.realizations.$inferInsert)[] = [
   { date: "2026-02-01", site: "CS - Bud Świętojańska", kind: "warranty", amountHours: 35, note: "wymiana spalonego switcha", contractor1: "D. Jaworski" },
@@ -24,7 +31,7 @@ const existing = await db
 if (existing.length > 0) {
   console.log(`Pomijam import — luty 2026 ma już ${existing.length} wpisów.`);
 } else {
-  await db.insert(schema.realizations).values(ROWS);
+  await db.insert(schema.realizations).values(ROWS.map(withKindSplit));
   console.log(`Zaimportowano ${ROWS.length} realizacji.`);
 }
 

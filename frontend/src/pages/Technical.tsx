@@ -4,6 +4,9 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { RealizationForm } from "@/components/RealizationForm";
+import { AutoBadge, AutofillDialog } from "@/components/realization/AutofillDialog";
+import { autofillFieldsFor, markAutofilled } from "@/components/realization/autofill-marks";
+import { RealizationsMap } from "@/components/realization/RealizationsMap";
 import { TechnicianForm } from "@/components/TechnicianForm";
 import { TechnicalObjects } from "@/components/TechnicalObjects";
 import { PriceListTab } from "@/components/pricelist/PriceListTab";
@@ -24,9 +27,18 @@ import {
   Pencil,
   Trash2,
   Printer,
+  Wand2,
 } from "lucide-react";
 import { Link } from "react-router-dom";
-import { calendarEventHref, protocolHref } from "@/lib/calendar-labels";
+import {
+  BILLING_META,
+  billingBadgeClass,
+  calendarEventHref,
+  protocolHref,
+  REALIZATION_BILLING_ORDER,
+  REALIZATION_WORK_TYPE_META,
+  REALIZATION_WORK_TYPE_ORDER,
+} from "@/lib/calendar-labels";
 import { ProtocolBadge } from "@/components/CalendarEventBadges";
 import {
   AlertDialog,
@@ -52,6 +64,7 @@ import {
   updateTechnician,
   deleteTechnician,
   priceListsApi,
+  realizationAutofillApi,
   getProtocols,
   syncProtocols,
   updateProtocol,
@@ -61,9 +74,14 @@ import {
   createQuote,
   updateQuote,
   deleteQuote,
+  type AutofillBulkRow,
+  type AutofillMark,
+  type AutofillSuggestion,
   type Realization,
+  type RealizationBilling,
   type RealizationInput,
   type RealizationSummary,
+  type RealizationWorkType,
   type Technician,
   type TechnicianInput,
   type PriceListGroup,
@@ -88,20 +106,92 @@ const MONTH_NAMES = [
   "Grudzień",
 ];
 
-const KIND_META: Record<string, { label: string; badge: string }> = {
-  service: {
-    label: "Serwis płatny",
-    badge: "bg-emerald-100 text-emerald-700",
-  },
-  warranty: {
-    label: "Gwarancyjny",
-    badge: "bg-amber-100 text-amber-700",
-  },
-  installation: {
-    label: "Montaż",
-    badge: "bg-violet-100 text-violet-700",
-  },
-};
+/**
+ * Ślad automatu dla POJEDYNCZEGO pola (kolumna `autofill` w kształcie mapy).
+ * `autofillFieldsFor` mówi tylko, czy pole jest z automatu — to daje jeszcze źródło.
+ */
+function autofillMarkFor(row: Realization, field: string): AutofillMark | null {
+  let raw: unknown = row.autofill;
+  if (typeof raw === "string") {
+    try {
+      raw = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  if (!raw || Array.isArray(raw) || typeof raw !== "object") return null;
+  const mark = (raw as Record<string, AutofillMark>)[field];
+  return mark && typeof mark === "object" ? mark : null;
+}
+
+/** Rodzaj prac — ikona + etykieta, dokładnie jak przy wydarzeniu kalendarza. */
+function RealizationWorkTypeBadge({ workType }: { workType: RealizationWorkType }) {
+  const meta = REALIZATION_WORK_TYPE_META[workType] ?? REALIZATION_WORK_TYPE_META.inne;
+  const Icon = meta.icon;
+  return (
+    <span
+      data-testid={`realization-worktype-${workType}`}
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-xs font-medium",
+        meta.chip
+      )}
+    >
+      <Icon className="h-3.5 w-3.5" aria-hidden />
+      {meta.label}
+    </span>
+  );
+}
+
+/** Typ rozliczenia — ta sama pigułka co przy wydarzeniu (Płatny / Gwarancyjny / Darmowy). */
+function RealizationBillingBadge({ billing }: { billing: RealizationBilling }) {
+  const meta = BILLING_META[billing] ?? BILLING_META.paid;
+  const Icon = meta.icon;
+  return (
+    <span
+      data-testid={`realization-billing-${billing}`}
+      className={billingBadgeClass(billing)}
+      {...tip(`Rozliczenie: ${meta.label} — ${meta.hint}`)}
+    >
+      <Icon className="h-3.5 w-3.5" aria-hidden />
+      {meta.label}
+    </span>
+  );
+}
+
+const numFmt = new Intl.NumberFormat("pl-PL", { maximumFractionDigits: 2 });
+
+/**
+ * Faktyczne godziny / kilometry. Wartość z automatu dostaje różdżkę i tooltip ze
+ * źródłem — tak samo jak badge „auto" przy obiekcie, tylko przy konkretnej liczbie.
+ */
+function ActualValue({
+  row,
+  field,
+  suffix,
+}: {
+  row: Realization;
+  field: "actualHours" | "actualKm";
+  suffix: string;
+}) {
+  const value = Number(row[field] || 0);
+  if (!value) return <span className="text-muted-foreground">—</span>;
+
+  const text = `${numFmt.format(value)} ${suffix}`;
+  if (!autofillFieldsFor(row).includes(field)) return <>{text}</>;
+
+  const mark = autofillMarkFor(row, field);
+  const detail = mark?.detail ? `\n${mark.detail}` : mark?.source ? `\nźródło: ${mark.source}` : "";
+  return (
+    <span
+      data-testid={`realization-${field}-auto-${row.id}`}
+      className="inline-flex items-center gap-1 text-primary"
+      {...tip(`Uzupełnione automatem${detail}`)}
+    >
+      <Wand2 className="h-3 w-3" aria-hidden />
+      {text}
+    </span>
+  );
+}
 
 const PROTOCOL_TYPE_META: Record<string, { label: string; badge: string }> = {
   serwis: { label: "Serwis", badge: "bg-emerald-100 text-emerald-700" },
@@ -158,10 +248,20 @@ export function Technical() {
   const [highlightRow, setHighlightRow] = useState<number | null>(null);
   /** Filtr kolumny Protokół (wszystkie / z protokołem / bez protokołu). */
   const [protoFilter, setProtoFilter] = useState<RealizationProtocolFilter>("");
+  /** Filtr kolumny Rodzaj (serwis / montaż / …); "" = bez filtra. */
+  const [workTypeFilter, setWorkTypeFilter] = useState<RealizationWorkType | "">("");
+  /** Filtr kolumny Typ (płatny / gwarancyjny / darmowy); "" = bez filtra. */
+  const [billingFilter, setBillingFilter] = useState<RealizationBilling | "">("");
   /** Id realizacji, dla której trwa tworzenie protokołu (spinner w wierszu). */
   const [creatingProtoFor, setCreatingProtoFor] = useState<number | null>(null);
   const [syncProtoOpen, setSyncProtoOpen] = useState(false);
   const [syncingProtos, setSyncingProtos] = useState(false);
+  /** Realizacja, dla której otwarto automat prosto z tabeli (bez formularza). */
+  const [autofillRow, setAutofillRow] = useState<Realization | null>(null);
+  /** Masowe uzupełnianie widocznego miesiąca: podgląd → potwierdzenie. */
+  const [bulk, setBulk] = useState<AutofillBulkRow[] | null>(null);
+  const [bulkBusy, setBulkBusy] = useState<"preview" | "apply" | null>(null);
+  const [bulkError, setBulkError] = useState<string | null>(null);
 
   const [technicians, setTechnicians] = useState<Technician[]>([]);
   const [techLoading, setTechLoading] = useState(true);
@@ -688,10 +788,90 @@ export function Technical() {
     }
   };
 
+  /**
+   * Automat zapisał pola — odświeżamy wiersz w tabeli, podbijamy `updatedAt`
+   * otwartego formularza i zostawiamy lokalny znacznik dla badge'a „auto"
+   * (backend nie musi przechowywać kolumny `autofill`).
+   */
+  const handleAutofilled = (updated: Realization, applied: AutofillSuggestion[] | string[]) => {
+    const fields = applied.map((a) => (typeof a === "string" ? a : a.field));
+    markAutofilled(updated.id, fields, updated.updatedAt);
+    setRows((prev) => prev.map((r) => (r.id === updated.id ? { ...r, ...updated } : r)));
+    setEditing((prev) => (prev && prev.id === updated.id ? { ...prev, ...updated } : prev));
+    load();
+  };
+
+  /** Realizacje, w których automat ma co uzupełnić: zerowe kwoty i bez faktury. */
+  const autofillCandidates = rows.filter(
+    (r) => !r.invoiced && !r.amountHours && !r.amountMaterial && !r.amountKm
+  );
+  const canAutofill = (row: Realization) =>
+    !row.invoiced && !row.amountHours && !row.amountMaterial && !row.amountKm;
+
+  /** Masowy podgląd — po jednej realizacji, tylko pola bezkonfliktowe. */
+  const runBulkPreview = async () => {
+    if (!editable || autofillCandidates.length === 0) return;
+    setBulkBusy("preview");
+    setBulkError(null);
+    try {
+      const res = await realizationAutofillApi.bulkPreview(
+        autofillCandidates.map((r) => ({ id: r.id, site: r.site })),
+        { confidentOnly: true }
+      );
+      setBulk(res);
+      if (res.length === 0) setBulkError("Automat nie znalazł nic do uzupełnienia w tym miesiącu.");
+    } catch (error) {
+      setBulk(null);
+      setBulkError(
+        error instanceof Error ? error.message : "Nie udało się policzyć sugestii"
+      );
+    } finally {
+      setBulkBusy(null);
+    }
+  };
+
+  const runBulkApply = async () => {
+    if (!editable || !bulk) return;
+    setBulkBusy("apply");
+    try {
+      const res = await realizationAutofillApi.bulkApply(bulk);
+      // Znaczniki „auto" wymagają świeżego updatedAt — bierzemy je z przeładowania.
+      const fresh = await getRealizations(year, month);
+      const byId = new Map((fresh.data || []).map((r) => [r.id, r]));
+      for (const row of bulk) {
+        const updated = byId.get(row.id);
+        if (updated) markAutofilled(row.id, row.fields as string[], updated.updatedAt);
+      }
+      setBulk(null);
+      setBulkError(
+        res.failed.length > 0
+          ? `Uzupełniono ${res.applied}, nie udało się ${res.failed.length}.`
+          : null
+      );
+      await load();
+    } catch (error) {
+      setBulkError(error instanceof Error ? error.message : "Nie udało się zapisać");
+    } finally {
+      setBulkBusy(null);
+    }
+  };
+
   const missingProtocolCount = rows.filter((r) => !r.protocol).length;
   const withProtocolCount = rows.length - missingProtocolCount;
-  const visibleRows = rows.filter((r) =>
-    protoFilter === "with" ? !!r.protocol : protoFilter === "without" ? !r.protocol : true
+  /** Liczniki chipów rodzaju/typu — po pozostałych filtrach, żeby zgadzały się z tabelą. */
+  const countBy = <K extends string>(pick: (r: Realization) => K) => {
+    const out = {} as Record<K, number>;
+    for (const r of rows) out[pick(r)] = (out[pick(r)] ?? 0) + 1;
+    return out;
+  };
+  const workTypeCounts = countBy((r) => r.workType);
+  const billingCounts = countBy((r) => r.billing);
+
+  const visibleRows = rows.filter(
+    (r) =>
+      (protoFilter === "with" ? !!r.protocol : protoFilter === "without" ? !r.protocol : true) &&
+      (workTypeFilter === "" || r.workType === workTypeFilter) &&
+      (billingFilter === "" || r.billing === billingFilter)
   );
 
   const openEdit = (row: Realization) => {
@@ -788,7 +968,23 @@ export function Technical() {
               </span>
             )}
             {editable && (
-              <div className="ml-auto">
+              <div className="ml-auto flex flex-wrap items-center gap-2">
+                {autofillCandidates.length > 0 && (
+                  <Button
+                    variant="outline"
+                    data-testid="autofill-bulk-open"
+                    disabled={bulkBusy != null}
+                    onClick={() => void runBulkPreview()}
+                    {...tip(
+                      `Policz godziny, materiały i kilometry dla ${autofillCandidates.length} realizacji z zerowymi kwotami\nnajpierw podgląd, zapis dopiero po potwierdzeniu`
+                    )}
+                  >
+                    <Wand2 className="mr-2 h-4 w-4" aria-hidden />
+                    {bulkBusy === "preview"
+                      ? "Liczenie…"
+                      : `Uzupełnij brakujące (${autofillCandidates.length})`}
+                  </Button>
+                )}
                 <Button onClick={() => setFormOpen(true)}>
                   <Plus className="h-4 w-4 mr-2" />
                   Dodaj realizację
@@ -796,6 +992,16 @@ export function Technical() {
               </div>
             )}
           </div>
+
+          {bulkError && (
+            <div
+              className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-800 dark:text-amber-200"
+              role="status"
+              data-testid="autofill-bulk-note"
+            >
+              {bulkError}
+            </div>
+          )}
 
           {/* Kafelki podsumowań */}
           <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
@@ -818,6 +1024,85 @@ export function Technical() {
               </Card>
             ))}
           </div>
+
+          {/* Filtry: rodzaj prac i typ rozliczenia (chipy jak w kalendarzu) */}
+          {!loading && rows.length > 0 && (
+            <div className="space-y-2">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="mr-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  Rodzaj
+                </span>
+                {REALIZATION_WORK_TYPE_ORDER.filter(
+                  (t) => (workTypeCounts[t] ?? 0) > 0 || workTypeFilter === t
+                ).map((t) => {
+                  const meta = REALIZATION_WORK_TYPE_META[t];
+                  const active = workTypeFilter === t;
+                  const Icon = meta.icon;
+                  return (
+                    <button
+                      key={t}
+                      type="button"
+                      data-testid={`realization-worktype-filter-${t}`}
+                      aria-pressed={active}
+                      onClick={() => setWorkTypeFilter(active ? "" : t)}
+                      {...tip(`Rodzaj prac: ${meta.label} — ${workTypeCounts[t] ?? 0} w tym miesiącu`)}
+                      className={cn(
+                        "inline-flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:h-6",
+                        active ? meta.chipActive : meta.chip
+                      )}
+                    >
+                      <Icon className="h-3.5 w-3.5" aria-hidden />
+                      {meta.label}
+                      <span className="tabular-nums opacity-70">{workTypeCounts[t] ?? 0}</span>
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="mr-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  Typ
+                </span>
+                {REALIZATION_BILLING_ORDER.filter(
+                  (b) => (billingCounts[b] ?? 0) > 0 || billingFilter === b
+                ).map((b) => {
+                  const meta = BILLING_META[b];
+                  const active = billingFilter === b;
+                  const Icon = meta.icon;
+                  return (
+                    <button
+                      key={b}
+                      type="button"
+                      data-testid={`realization-billing-filter-${b}`}
+                      aria-pressed={active}
+                      onClick={() => setBillingFilter(active ? "" : b)}
+                      {...tip(`Rozliczenie: ${meta.label} (${meta.hint}) — ${billingCounts[b] ?? 0} w tym miesiącu`)}
+                      className={cn(
+                        "inline-flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:h-6",
+                        active ? meta.chipActive : meta.chip
+                      )}
+                    >
+                      <Icon className="h-3.5 w-3.5" aria-hidden />
+                      {meta.label}
+                      <span className="tabular-nums opacity-70">{billingCounts[b] ?? 0}</span>
+                    </button>
+                  );
+                })}
+                {(workTypeFilter || billingFilter) && (
+                  <button
+                    type="button"
+                    data-testid="realization-kind-filter-clear"
+                    onClick={() => {
+                      setWorkTypeFilter("");
+                      setBillingFilter("");
+                    }}
+                    className="ml-1 text-xs font-medium text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                  >
+                    Wyczyść filtry
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* Pasek protokołów: filtr + braki */}
           {!loading && rows.length > 0 && (
@@ -927,25 +1212,42 @@ export function Technical() {
                 </div>
               ) : visibleRows.length === 0 ? (
                 <div className="py-10 text-center text-muted-foreground">
-                  {protoFilter === "with"
-                    ? "Żadna realizacja w tym miesiącu nie ma jeszcze protokołu."
-                    : "Wszystkie realizacje w tym miesiącu mają protokół."}
+                  {workTypeFilter || billingFilter
+                    ? "Żadna realizacja w tym miesiącu nie pasuje do wybranych filtrów."
+                    : protoFilter === "with"
+                      ? "Żadna realizacja w tym miesiącu nie ma jeszcze protokołu."
+                      : "Wszystkie realizacje w tym miesiącu mają protokół."}
                 </div>
               ) : (
                 <div className="overflow-x-auto">
-                  <table className="w-full min-w-[1160px] text-sm">
+                  <table className="w-full min-w-[1360px] text-sm">
                     <thead>
                       <tr className="border-b text-left text-xs uppercase tracking-wide text-muted-foreground">
                         <th className="px-3 py-2 font-medium">Data</th>
                         <th className="px-3 py-2 font-medium">Obiekt</th>
+                        <th className="px-3 py-2 font-medium">Rodzaj</th>
                         <th className="px-3 py-2 font-medium">Typ</th>
+                        <th
+                          className="px-3 py-2 text-right font-medium"
+                          {...tip("Faktyczne godziny pracownicze (nie kwota)")}
+                        >
+                          Godz.
+                        </th>
+                        <th
+                          className="px-3 py-2 text-right font-medium"
+                          {...tip("Faktycznie przejechane kilometry (nie kwota)")}
+                        >
+                          KM
+                        </th>
                         <th className="px-3 py-2 text-right font-medium">
-                          Godziny
+                          Kwota godz.
                         </th>
                         <th className="px-3 py-2 text-right font-medium">
                           Materiały
                         </th>
-                        <th className="px-3 py-2 text-right font-medium">KM</th>
+                        <th className="px-3 py-2 text-right font-medium">
+                          Kwota KM
+                        </th>
                         <th className="px-3 py-2 text-right font-medium">
                           Rabat
                         </th>
@@ -973,13 +1275,43 @@ export function Technical() {
                           <td className="whitespace-nowrap px-3 py-2 tabular-nums">
                             {new Date(row.date).toLocaleDateString("pl-PL")}
                           </td>
-                          <td className="px-3 py-2 font-medium">{row.site}</td>
-                          <td className="px-3 py-2">
-                            <span
-                              className={`inline-flex rounded-md px-2 py-0.5 text-xs font-medium ${KIND_META[row.kind]?.badge ?? ""}`}
-                            >
-                              {KIND_META[row.kind]?.label ?? row.kind}
+                          <td className="px-3 py-2 font-medium">
+                            <span className="inline-flex flex-wrap items-center gap-1.5">
+                              {/* Obiekt z kartoteki (przez wydarzenie albo nazwę) → link do karty */}
+                              {row.location ? (
+                                <Link
+                                  to={`/objects/${row.location.objectId}`}
+                                  data-testid={`realization-object-link-${row.id}`}
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="text-primary hover:underline"
+                                  {...tip(
+                                    `Otwórz kartę obiektu\n${row.location.name}${
+                                      row.location.city ? ` — ${row.location.city}` : ""
+                                    }\npowiązanie: ${
+                                      row.location.source === "event" ? "z wydarzenia kalendarza" : "po nazwie"
+                                    }`
+                                  )}
+                                >
+                                  {row.site}
+                                </Link>
+                              ) : (
+                                row.site
+                              )}
+                              {/* „auto" = wartości z automatu (dopóki wpisu nie ruszy człowiek) */}
+                              <AutoBadge fields={autofillFieldsFor(row)} />
                             </span>
+                          </td>
+                          <td className="px-3 py-2">
+                            <RealizationWorkTypeBadge workType={row.workType} />
+                          </td>
+                          <td className="px-3 py-2">
+                            <RealizationBillingBadge billing={row.billing} />
+                          </td>
+                          <td className="px-3 py-2 text-right tabular-nums">
+                            <ActualValue row={row} field="actualHours" suffix="h" />
+                          </td>
+                          <td className="px-3 py-2 text-right tabular-nums">
+                            <ActualValue row={row} field="actualKm" suffix="km" />
                           </td>
                           <td className="px-3 py-2 text-right tabular-nums">
                             {money(row.amountHours)}
@@ -1087,6 +1419,20 @@ export function Technical() {
                                 className="flex justify-end gap-1"
                                 onClick={(e) => e.stopPropagation()}
                               >
+                                {canAutofill(row) && (
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-8 w-8 text-primary hover:text-primary"
+                                    data-testid={`autofill-row-open-${row.id}`}
+                                    onClick={() => setAutofillRow(row)}
+                                    {...tip(
+                                      "Uzupełnij automatycznie\ngodziny z kalendarza, materiały z protokołu, kilometry z kalkulacji"
+                                    )}
+                                  >
+                                    <Wand2 className="h-4 w-4" />
+                                  </Button>
+                                )}
                                 <Button
                                   variant="ghost"
                                   size="icon"
@@ -1117,9 +1463,11 @@ export function Technical() {
             </CardContent>
           </Card>
 
-          {/* Roczna tabela przychód / strata */}
+          {/* Podsumowanie roczne + mapa realizacji miesiąca obok (na lg+;
+              niżej mapa ląduje pod kaflem, pełna szerokość) */}
           {summary && (
-            <Card className="max-w-xl">
+            <div className="grid items-stretch gap-4 lg:grid-cols-[minmax(280px,1fr)_2fr]">
+            <Card>
               <CardContent className="p-4">
                 <h3 className="mb-3 text-sm font-semibold">
                   Rok {year} — przychód / strata
@@ -1160,6 +1508,8 @@ export function Technical() {
                 </table>
               </CardContent>
             </Card>
+            {!loading && <RealizationsMap rows={rows} className="min-h-[280px]" />}
+            </div>
           )}
         </TabsContent>
 
@@ -1225,6 +1575,16 @@ export function Technical() {
                         >
                           <td className="whitespace-nowrap px-3 py-2 font-medium tabular-nums">
                             {proto.number}
+                            {proto.status === "draft" &&
+                              !(proto.clientName || "").trim() && (
+                                <span
+                                  data-testid={`protocol-needs-prefill-${proto.id}`}
+                                  className="ml-2 inline-flex rounded-full bg-muted px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide text-muted-foreground"
+                                  title="Brak danych zleceniodawcy — otwórz protokół i użyj „Uzupełnij z danych”"
+                                >
+                                  do uzupełnienia
+                                </span>
+                              )}
                           </td>
                           <td className="whitespace-nowrap px-3 py-2 tabular-nums">
                             {new Date(proto.workDate).toLocaleDateString(
@@ -1510,6 +1870,11 @@ export function Technical() {
           onSign={handleProtoSign}
           onUnsign={handleProtoUnsign}
           protocol={editingProto}
+          editable={editable}
+          onPrefilled={(updated) => {
+            setEditingProto(updated);
+            loadProtocols();
+          }}
         />
       )}
 
@@ -1535,8 +1900,61 @@ export function Technical() {
           technicians={technicians
             .filter((t) => t.active)
             .map((t) => `${t.firstName} ${t.lastName}`.trim())}
+          onAutofilled={handleAutofilled}
         />
       )}
+
+      {/* Automat wywołany prosto z wiersza tabeli (bez otwierania formularza). */}
+      {autofillRow && (
+        <AutofillDialog
+          key={autofillRow.id}
+          open
+          realization={autofillRow}
+          onClose={() => setAutofillRow(null)}
+          onApplied={handleAutofilled}
+        />
+      )}
+
+      <AlertDialog open={!!bulk && bulk.length > 0} onOpenChange={(o) => !o && setBulk(null)}>
+        <AlertDialogContent data-testid="autofill-bulk-dialog">
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Uzupełnić {bulk?.length} {bulk?.length === 1 ? "realizację" : "realizacji"}?
+            </AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-2">
+                <p>
+                  Zapisane zostaną wyłącznie pola bezkonfliktowe (puste lub zerowe). Nic, co już ma wartość, nie
+                  zostanie nadpisane.
+                </p>
+                <ul className="max-h-56 space-y-1 overflow-y-auto rounded-md border bg-muted/30 p-2 text-xs">
+                  {bulk?.map((r) => (
+                    <li key={r.id} className="flex gap-2">
+                      <span className="min-w-0 flex-1 truncate font-medium text-foreground">{r.site}</span>
+                      <span className="shrink-0 tabular-nums">
+                        {r.fields.length} {r.fields.length === 1 ? "pole" : r.fields.length < 5 ? "pola" : "pól"}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={bulkBusy === "apply"}>Anuluj</AlertDialogCancel>
+            <AlertDialogAction
+              data-testid="autofill-bulk-confirm"
+              disabled={bulkBusy === "apply"}
+              onClick={(e) => {
+                e.preventDefault();
+                void runBulkApply();
+              }}
+            >
+              {bulkBusy === "apply" ? "Uzupełnianie…" : "Uzupełnij"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog open={syncProtoOpen} onOpenChange={setSyncProtoOpen}>
         <AlertDialogContent>

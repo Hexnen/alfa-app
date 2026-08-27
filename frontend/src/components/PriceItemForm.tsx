@@ -9,7 +9,30 @@ import {
   DialogTitle,
   DialogFooter,
 } from "./ui/dialog";
-import type { PriceItem, PriceItemInput } from "@/lib/api";
+import { tip } from "./ui/tooltip";
+import { cn } from "@/lib/utils";
+import {
+  priceItemKind,
+  PRICE_ITEM_KIND_LABEL,
+  type PriceItem,
+  type PriceItemInput,
+  type PriceItemKind,
+} from "@/lib/api";
+
+/** Co daje rodzaj pozycji — pokazujemy wprost, bo od tego zależy automat. */
+const KIND_HINT: Record<PriceItemKind, string> = {
+  service:
+    "Usługi dają stawki: pozycja w RBH/godz. wycenia godziny realizacji, pozycja w KM — kilometry.",
+  material:
+    "Materiały dopasowują się do pozycji z protokołu — z nich liczy się kwota „Materiały” w realizacji.",
+};
+
+/** Jednostki, które w praktyce oznaczają towar — podpowiedź przy nowej pozycji. */
+const MATERIAL_UNITS = new Set(["SZT", "KPL", "MB", "M", "M2", "KG"]);
+
+/** Podpowiedź rodzaju z jednostki (ta sama reguła, co migracja istniejących pozycji). */
+const guessKind = (unit: string): PriceItemKind =>
+  MATERIAL_UNITS.has(unit.trim().toUpperCase()) ? "material" : "service";
 
 interface PriceItemFormProps {
   open: boolean;
@@ -25,13 +48,32 @@ export function PriceItemForm({
   item,
 }: PriceItemFormProps) {
   const [loading, setLoading] = useState(false);
+  const initialUnit = item?.unit || "MB";
   const [formData, setFormData] = useState<PriceItemInput>({
     name: item?.name || "",
-    unit: item?.unit || "MB",
+    unit: initialUnit,
     price: item?.price ?? "",
     position: item?.position,
     active: item?.active ?? true,
+    kind: item ? priceItemKind(item) : guessKind(initialUnit),
   });
+  /**
+   * Rodzaju nie zgadujemy w kółko: podpowiedź z jednostki działa tylko dla
+   * nowej pozycji i tylko dopóki człowiek sam nie kliknie w segment.
+   */
+  const [kindTouched, setKindTouched] = useState(false);
+
+  const kind: PriceItemKind = formData.kind ?? "service";
+  const setKind = (k: PriceItemKind) => {
+    setKindTouched(true);
+    setFormData((p) => ({ ...p, kind: k }));
+  };
+  const handleUnitChange = (unit: string) =>
+    setFormData((p) => ({
+      ...p,
+      unit,
+      kind: item || kindTouched ? p.kind : guessKind(unit),
+    }));
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -55,8 +97,42 @@ export function PriceItemForm({
           </DialogTitle>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4">
+          {/* Rodzaj decyduje, jak automat realizacji użyje tej pozycji. */}
           <div className="space-y-2">
-            <Label htmlFor="price-name">Nazwa usługi *</Label>
+            <Label>Rodzaj *</Label>
+            <div
+              role="radiogroup"
+              aria-label="Rodzaj pozycji cennika"
+              data-testid="price-kind"
+              className="inline-flex rounded-lg border bg-muted/40 p-0.5"
+            >
+              {(Object.keys(PRICE_ITEM_KIND_LABEL) as PriceItemKind[]).map((k) => (
+                <button
+                  key={k}
+                  type="button"
+                  role="radio"
+                  aria-checked={kind === k}
+                  data-testid={`price-kind-${k}`}
+                  onClick={() => setKind(k)}
+                  className={cn(
+                    "rounded-md px-4 py-1.5 text-sm font-medium transition-colors",
+                    kind === k
+                      ? "bg-background text-foreground shadow-sm"
+                      : "text-muted-foreground hover:text-foreground"
+                  )}
+                  {...tip(KIND_HINT[k])}
+                >
+                  {PRICE_ITEM_KIND_LABEL[k]}
+                </button>
+              ))}
+            </div>
+            <p className="text-xs text-muted-foreground">{KIND_HINT[kind]}</p>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="price-name">
+              {kind === "material" ? "Nazwa materiału *" : "Nazwa usługi *"}
+            </Label>
             <Input
               id="price-name"
               value={formData.name}
@@ -74,9 +150,7 @@ export function PriceItemForm({
               <Input
                 id="price-unit"
                 value={formData.unit}
-                onChange={(e) =>
-                  setFormData((p) => ({ ...p, unit: e.target.value }))
-                }
+                onChange={(e) => handleUnitChange(e.target.value)}
                 placeholder="MB / RBH / KM"
                 required
               />

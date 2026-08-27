@@ -31,14 +31,19 @@ import {
   deletePriceItem,
   getPriceList,
   getTechnicians,
+  priceItemKind,
   priceListsApi,
   updatePriceItem,
+  PRICE_ITEM_KIND_LABEL,
   type PriceItem,
   type PriceItemInput,
+  type PriceItemKind,
   type PriceListGroup,
   type PriceListGroupInput,
   type Technician,
 } from "@/lib/api";
+import { cn } from "@/lib/utils";
+import { tip } from "@/components/ui/tooltip";
 
 const pln = new Intl.NumberFormat("pl-PL", {
   style: "currency",
@@ -48,6 +53,26 @@ const money = (v: number | null | undefined) => pln.format(Number(v || 0));
 
 const techName = (t: Technician) =>
   `${t.firstName} ${t.lastName}`.trim() || `#${t.id}`;
+
+/** Filtr rodzaju nad tabelą pozycji. */
+type KindFilter = "all" | PriceItemKind;
+
+const KIND_FILTER_LABEL: Record<KindFilter, string> = {
+  all: "Wszystkie",
+  service: "Usługi",
+  material: "Materiały",
+};
+
+/** Kolor pigułki rodzaju — usługa i materiał mają się różnić na pierwszy rzut oka. */
+const KIND_BADGE: Record<PriceItemKind, string> = {
+  service: "bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300",
+  material: "bg-amber-100 text-amber-800 dark:bg-amber-500/15 dark:text-amber-300",
+};
+
+const KIND_TIP: Record<PriceItemKind, string> = {
+  service: "Usługa — stawki RBH i KM automat bierze wyłącznie stąd",
+  material: "Materiał — pozycje protokołu wyceniają się wyłącznie po materiałach",
+};
 
 interface PriceListTabProps {
   /** Uprawnienie „edit" dla technical/cennik — read-only ukrywa akcje. */
@@ -72,6 +97,8 @@ export function PriceListTab({ editable }: PriceListTabProps) {
    */
   const [itemsVersion, setItemsVersion] = useState(0);
   const [selectedItemIds, setSelectedItemIds] = useState<number[]>([]);
+  /** Filtr rodzaju — czysto widokowy, nie zawęża zaznaczenia ani kopiowania. */
+  const [kindFilter, setKindFilter] = useState<KindFilter>("all");
 
   const [priceFormOpen, setPriceFormOpen] = useState(false);
   const [editingPrice, setEditingPrice] = useState<PriceItem | null>(null);
@@ -92,6 +119,15 @@ export function PriceListTab({ editable }: PriceListTabProps) {
   const [copyOpen, setCopyOpen] = useState(false);
 
   const selected = lists.find((l) => l.id === selectedId) ?? null;
+
+  // Filtrujemy w UI, a nie zapytaniem — lista pozycji jest krótka, a licznik
+  // przy każdym filtrze i tak wymaga kompletu (starszy backend `?kind=` zignoruje).
+  const kindCount = (k: KindFilter) =>
+    k === "all" ? items.length : items.filter((i) => priceItemKind(i) === k).length;
+  const visibleItems =
+    kindFilter === "all" ? items : items.filter((i) => priceItemKind(i) === kindFilter);
+  /** LP. zostaje z pełnej listy, żeby filtr nie przenumerowywał pozycji. */
+  const lpById = new Map(items.map((i, idx) => [i.id, idx + 1]));
 
   // --- ładowanie ---
   const loadLists = useCallback(async (keepId?: number) => {
@@ -472,6 +508,35 @@ export function PriceListTab({ editable }: PriceListTabProps) {
             </div>
           )}
 
+          {items.length > 0 && (
+            <div
+              role="radiogroup"
+              aria-label="Filtr rodzaju pozycji"
+              data-testid="pricelist-kind-filter"
+              className="inline-flex rounded-lg border bg-muted/40 p-0.5"
+            >
+              {(["all", "service", "material"] as KindFilter[]).map((k) => (
+                <button
+                  key={k}
+                  type="button"
+                  role="radio"
+                  aria-checked={kindFilter === k}
+                  data-testid={`pricelist-kind-filter-${k}`}
+                  onClick={() => setKindFilter(k)}
+                  className={cn(
+                    "rounded-md px-3 py-1 text-sm font-medium transition-colors",
+                    kindFilter === k
+                      ? "bg-background text-foreground shadow-sm"
+                      : "text-muted-foreground hover:text-foreground"
+                  )}
+                >
+                  {KIND_FILTER_LABEL[k]}
+                  <span className="ml-1.5 text-xs tabular-nums opacity-70">{kindCount(k)}</span>
+                </button>
+              ))}
+            </div>
+          )}
+
           {editable && items.length > 0 && (
             <div className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
               <Button
@@ -507,6 +572,13 @@ export function PriceListTab({ editable }: PriceListTabProps) {
                 <div className="py-10 text-center text-muted-foreground">
                   Cennik jest pusty.
                 </div>
+              ) : visibleItems.length === 0 ? (
+                <div className="py-10 text-center text-muted-foreground">
+                  Brak pozycji rodzaju „{KIND_FILTER_LABEL[kindFilter]}" w tym cenniku.{" "}
+                  <button type="button" className="underline" onClick={() => setKindFilter("all")}>
+                    Pokaż wszystkie
+                  </button>
+                </div>
               ) : (
                 <div className="overflow-x-auto">
                   <table className="w-full text-sm">
@@ -515,8 +587,9 @@ export function PriceListTab({ editable }: PriceListTabProps) {
                         {editable && <th className="w-10 px-3 py-2"></th>}
                         <th className="w-12 px-3 py-2 font-medium">LP.</th>
                         <th className="px-3 py-2 font-medium">
-                          Nazwa usługi serwisowej
+                          Nazwa pozycji
                         </th>
+                        <th className="px-3 py-2 font-medium">Rodzaj</th>
                         <th className="px-3 py-2 font-medium">J.M.</th>
                         <th className="px-3 py-2 text-right font-medium">
                           Cena sprzedaży (netto)
@@ -525,7 +598,7 @@ export function PriceListTab({ editable }: PriceListTabProps) {
                       </tr>
                     </thead>
                     <tbody>
-                      {items.map((item, idx) => (
+                      {visibleItems.map((item) => (
                         <tr
                           key={item.id}
                           className={`cursor-pointer border-b last:border-0 hover:bg-accent/50 ${!item.active ? "opacity-50" : ""}`}
@@ -546,7 +619,9 @@ export function PriceListTab({ editable }: PriceListTabProps) {
                               />
                             </td>
                           )}
-                          <td className="px-3 py-2 tabular-nums">{idx + 1}</td>
+                          <td className="px-3 py-2 tabular-nums">
+                            {lpById.get(item.id) ?? ""}
+                          </td>
                           <td className="px-3 py-2 font-medium">
                             {item.name}
                             {!item.active && (
@@ -554,6 +629,18 @@ export function PriceListTab({ editable }: PriceListTabProps) {
                                 (nieaktywna)
                               </span>
                             )}
+                          </td>
+                          <td className="px-3 py-2">
+                            <span
+                              data-testid={`price-kind-badge-${item.id}`}
+                              className={cn(
+                                "inline-flex rounded-md px-2 py-0.5 text-xs font-medium",
+                                KIND_BADGE[priceItemKind(item)]
+                              )}
+                              {...tip(KIND_TIP[priceItemKind(item)])}
+                            >
+                              {PRICE_ITEM_KIND_LABEL[priceItemKind(item)]}
+                            </span>
                           </td>
                           <td className="px-3 py-2">{item.unit}</td>
                           <td className="px-3 py-2 text-right font-semibold tabular-nums">

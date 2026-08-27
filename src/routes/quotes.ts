@@ -4,6 +4,7 @@ import { db, schema } from "../db/index.js";
 import { eq, and, like, desc, asc } from "drizzle-orm";
 import { ensureDefaultListId } from "./pricelist.js";
 import type { ApiResponse } from "../types/index.js";
+import { PRICE_ITEM_KINDS } from "../db/schema.js";
 import type { Quote } from "../db/schema.js";
 
 const app = new Hono();
@@ -140,6 +141,16 @@ app.post("/", async (c) => {
       ? body.date
       : new Date().toISOString().slice(0, 10);
 
+  // Opcjonalny `?kind=service|material` zawęża prefill do jednego rodzaju pozycji;
+  // bez parametru zachowanie jest jak dotąd — wszystkie aktywne pozycje cennika.
+  const kindRaw = c.req.query("kind");
+  if (kindRaw && !(PRICE_ITEM_KINDS as readonly string[]).includes(kindRaw)) {
+    return c.json<ApiResponse<null>>(
+      { success: false, error: `Parametr kind: dozwolone ${PRICE_ITEM_KINDS.join(", ")}` },
+      400
+    );
+  }
+
   let items = parseItems(body);
   if (!items || items.length === 0) {
     const listId = await resolvePrefillListId(c, body);
@@ -149,7 +160,7 @@ app.post("/", async (c) => {
       .where(eq(schema.priceList.priceListId, listId))
       .orderBy(asc(schema.priceList.position), asc(schema.priceList.id));
     items = priceRows
-      .filter((p) => p.active)
+      .filter((p) => p.active && (!kindRaw || p.kind === kindRaw))
       .map((p) => ({
         name: p.name,
         qty: "",

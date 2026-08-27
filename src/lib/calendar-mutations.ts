@@ -461,7 +461,8 @@ function applyUpdate(
   logEventDiff(tx, row, after, ctx);
   syncAssignees(tx, after, input.technicianIds, ctx);
   // Realizacje: utworzenie / synchronizacja / odpięcie wg ustawień (calendar-realizations.ts).
-  onEventUpdated(tx, after, ctx);
+  // `row` (stan sprzed) pozwala wykryć przejście statusu na „wykonane” → wstępne podliczenie.
+  onEventUpdated(tx, after, ctx, row);
   return after;
 }
 
@@ -592,7 +593,7 @@ export function moveEvent(tx: Tx, id: number, body: Record<string, unknown>, ctx
     .returning()
     .get();
   logEventDiff(tx, row, after, ctx);
-  onEventUpdated(tx, after, ctx);
+  onEventUpdated(tx, after, ctx, row);
   return after;
 }
 

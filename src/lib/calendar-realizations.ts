@@ -10,15 +10,32 @@
  *  - kwot NIGDY nie dotykamy (amountHours, amountMaterial, amountKm, discount, hourlyCost,
  *    actualKm i caretaker należą do księgowości),
  *  - realizacja ZAFAKTUROWANA (`invoiced`) i protokół PODPISANY (`signedAt`) są nietykalne,
- *  - anulowanie/usunięcie wydarzenia kasuje realizację tylko wtedy, gdy jest „nietknięta”.
+ *  - anulowanie/usunięcie wydarzenia kasuje realizację tylko wtedy, gdy jest „nietknięta”,
+ *  - oznaczenie wydarzenia jako „wykonane” WSTĘPNIE podlicza realizację (godziny, km, stawki)
+ *    — bez czekania na podpis protokołu; sterowane `company.autofill_on_event_done`.
  */
 import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { schema } from "../db/index.js";
-import type { CalendarEvent as CalendarEventRow, CalendarEventType, NewRealization, Realization } from "../db/schema.js";
+import type {
+  CalendarEvent as CalendarEventRow,
+  CalendarEventType,
+  NewRealization,
+  Realization,
+  RealizationBilling,
+  RealizationWorkType,
+} from "../db/schema.js";
+import {
+  realizationBillingOf,
+  realizationKindFrom,
+  realizationWorkTypeOf,
+  REALIZATION_BILLING_LABELS,
+  REALIZATION_WORK_TYPE_LABELS,
+} from "./realization-kind.js";
 import { logActivity, type ActivityUser, type DbOrTx, type Tx } from "./activity-log.js";
 import { getCalendarConfig, isRealizationType, type CalendarSettingsValues } from "./calendar-config.js";
 import { diffMinutes } from "./calendar-recurrence.js";
 import { createProtocolForRealizationSync } from "../routes/protocols.js";
+import { workTypeFromEventType, workTypeFromKind } from "./protocol-prefill.js";
 
 export const CALENDAR_ENTITY = "calendar_event";
 
@@ -34,6 +51,11 @@ export type RealizationKind = "service" | "warranty" | "installation";
 export interface MappedRealization {
   date: string;
   site: string;
+  /** Rodzaj prac — wprost z typu wydarzenia. */
+  workType: RealizationWorkType;
+  /** Typ rozliczenia — wprost z `calendar_events.billing` (NULL → płatny). */
+  billing: RealizationBilling;
+  /** Pole zgodnościowe, wyliczane z pary powyżej. */
   kind: RealizationKind;
   contractor1: string;
   contractor2: string;
@@ -63,11 +85,13 @@ function objectNameById(dbx: DbOrTx, id: number | null): string | null {
   return o?.name ?? null;
 }
 
-/** Rodzaj realizacji: gwarancja z rozliczenia, montaż z typu, w pozostałych serwis. */
+/**
+ * Pole zgodnościowe `kind` dla wydarzenia. Rodzaj i typ realizacji biorą się
+ * teraz wprost z `type`/`billing` wydarzenia (patrz `mapEventToRealization`);
+ * ta funkcja liczy już tylko stary, jednowymiarowy skrót.
+ */
 export function realizationKindOf(ev: Pick<CalendarEventRow, "type" | "billing">): RealizationKind {
-  if (ev.billing === "warranty") return "warranty";
-  if (ev.type === "montaz") return "installation";
-  return "service";
+  return realizationKindFrom(realizationWorkTypeOf(ev.type), realizationBillingOf(ev.billing));
 }
 
 /** Długość wydarzenia w godzinach zaokrąglona do 0,25 (all-day → 0). */
@@ -93,10 +117,14 @@ export function realizationNote(ev: Pick<CalendarEventRow, "id" | "title" | "des
 export function mapEventToRealization(dbx: DbOrTx, ev: CalendarEventRow): MappedRealization {
   const names = eventTechnicianNames(dbx, ev.id);
   const site = objectNameById(dbx, ev.objectId) || (ev.location || "").trim() || ev.title;
+  const workType = realizationWorkTypeOf(ev.type);
+  const billing = realizationBillingOf(ev.billing);
   return {
     date: ev.startAt.slice(0, 10),
     site,
-    kind: realizationKindOf(ev),
+    workType,
+    billing,
+    kind: realizationKindFrom(workType, billing),
     contractor1: names[0] ?? "",
     contractor2: names[1] ?? "",
     actualHours: eventHours(ev),
@@ -142,6 +170,100 @@ function logForEvent(tx: Tx, ev: CalendarEventRow, ctx: RealizationCtx, input: {
     newValue: input.newValue ?? null,
     summary: input.summary,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Wstępne podliczenie realizacji po oznaczeniu wydarzenia jako „wykonane”
+//
+// `computeAutofill` jest ASYNCHRONICZNE (kalkulacja dystansu), a `applySuggestions` otwiera
+// własną, krótką transakcję — nie da się (i nie wolno) tego zrobić wewnątrz synchronicznej
+// transakcji zapisu wydarzenia. Dlatego hak trafia do kolejki, którą opróżniamy dopiero PO
+// commicie (`setImmediate`; better-sqlite3 jest synchroniczny, więc transakcja jest już
+// zamknięta, zanim event loop odda sterowanie). Konsekwencje:
+//   - błąd kalkulacji / brak wpisu w `geo_cache` NIGDY nie wywróci zapisu wydarzenia,
+//   - gdy transakcja się wycofa, realizacja nie będzie istnieć → hak po prostu nic nie zrobi.
+// `flushEventDoneAutofill()` pozwala poczekać na wynik (testy, ścieżki, które chcą go pokazać).
+// ---------------------------------------------------------------------------
+
+interface PendingEventDoneAutofill {
+  realizationId: number;
+  eventId: number;
+  user: ActivityUser;
+}
+
+const pendingEventDone: PendingEventDoneAutofill[] = [];
+let flushScheduled = false;
+let flushInFlight: Promise<void> | null = null;
+
+/** Wynik jednego podliczenia — zwracany przez `flushEventDoneAutofill` (diagnostyka i testy). */
+export interface EventDoneAutofillOutcome {
+  realizationId: number;
+  eventId: number;
+  applied: string[];
+  warnings: string[];
+}
+
+/** Wyniki ostatnich podliczeń — odczytywane (i czyszczone) przez `flushEventDoneAutofill`. */
+const doneOutcomes: EventDoneAutofillOutcome[] = [];
+const OUTCOMES_CAP = 50;
+
+function queueEventDoneAutofill(entry: PendingEventDoneAutofill): void {
+  // Ta sama realizacja w jednej transakcji (np. seria + sync) = jedno podliczenie.
+  if (pendingEventDone.some((p) => p.realizationId === entry.realizationId)) return;
+  pendingEventDone.push(entry);
+  if (flushScheduled) return;
+  flushScheduled = true;
+  setImmediate(() => {
+    void runFlush();
+  });
+}
+
+async function drainEventDoneAutofill(): Promise<void> {
+  // Import dynamiczny: realization-autofill.ts importuje `eventHours` z tego modułu,
+  // statyczny import w drugą stronę zamknąłby cykl.
+  const { autofillAfterEventDone } = await import("./realization-autofill.js");
+  while (pendingEventDone.length > 0) {
+    const entry = pendingEventDone.shift()!;
+    try {
+      // Dopisek zawsze „(przez automat)” — liczy automat, niezależnie od tego, kto (człowiek
+      // czy asystent) oznaczył wydarzenie jako wykonane.
+      const res = await autofillAfterEventDone(entry.realizationId, {
+        user: entry.user,
+        eventId: entry.eventId,
+      });
+      doneOutcomes.push({
+        realizationId: entry.realizationId,
+        eventId: entry.eventId,
+        applied: res?.applied ?? [],
+        warnings: res?.warnings ?? [],
+      });
+    } catch (err) {
+      // Hak ma własny try/catch — to tylko ostatnia siatka bezpieczeństwa.
+      console.error("Wstępne podliczenie realizacji nie powiodło się:", err);
+    }
+  }
+  if (doneOutcomes.length > OUTCOMES_CAP) doneOutcomes.splice(0, doneOutcomes.length - OUTCOMES_CAP);
+}
+
+/** Czeka na trwające podliczenie i opróżnia kolejkę. Nigdy nie rzuca. */
+async function runFlush(): Promise<void> {
+  flushScheduled = false;
+  while (flushInFlight) await flushInFlight;
+  if (pendingEventDone.length === 0) return;
+  flushInFlight = drainEventDoneAutofill().finally(() => {
+    flushInFlight = null;
+  });
+  await flushInFlight;
+}
+
+/**
+ * Opróżnia kolejkę wstępnych podliczeń i zwraca ich wyniki (od poprzedniego wywołania).
+ * W produkcji kolejka opróżnia się sama z `setImmediate`; ta funkcja jest po to, żeby
+ * testy (i ewentualne trasy) mogły na wynik POCZEKAĆ.
+ */
+export async function flushEventDoneAutofill(): Promise<EventDoneAutofillOutcome[]> {
+  await runFlush();
+  return doneOutcomes.splice(0, doneOutcomes.length);
 }
 
 /** "2026-08-27" → "27.08" (dopisek w adnotacji realizacji). */
@@ -194,7 +316,9 @@ export function ensureRealizationForEvent(tx: Tx, ev: CalendarEventRow, ctx: Rea
     .values(mapped as NewRealization)
     .returning()
     .get();
-  const protocol = createProtocolForRealizationSync(tx, created);
+  // `ev` przekazujemy jawnie: `calendar_events.realization_id` ustawiamy dopiero niżej,
+  // więc prefill protokołu nie odnalazłby jeszcze wydarzenia (src/lib/protocol-prefill.ts).
+  const protocol = createProtocolForRealizationSync(tx, created, ev);
   tx.update(schema.calendarEvents)
     .set({ realizationId: created.id, updatedAt: sql`(datetime('now'))` })
     .where(eq(schema.calendarEvents.id, ev.id))
@@ -228,6 +352,8 @@ export function syncRealizationFromEvent(tx: Tx, ev: CalendarEventRow, ctx: Real
   const changed =
     r.date !== mapped.date ||
     r.site !== mapped.site ||
+    r.workType !== mapped.workType ||
+    r.billing !== mapped.billing ||
     r.kind !== mapped.kind ||
     (r.contractor1 ?? "") !== mapped.contractor1 ||
     (r.contractor2 ?? "") !== mapped.contractor2 ||
@@ -253,6 +379,8 @@ export function syncRealizationFromEvent(tx: Tx, ev: CalendarEventRow, ctx: Real
     .set({
       date: mapped.date,
       site: mapped.site,
+      workType: mapped.workType,
+      billing: mapped.billing,
       kind: mapped.kind,
       contractor1: mapped.contractor1,
       contractor2: mapped.contractor2,
@@ -267,7 +395,9 @@ export function syncRealizationFromEvent(tx: Tx, ev: CalendarEventRow, ctx: Real
     tx.update(schema.protocols)
       .set({
         workDate: mapped.date,
-        workType: mapped.kind === "installation" ? "montaz" : "serwis",
+        // Typ prac wprost z typu wydarzenia (wizja i demontaż mają w protokole własne
+        // wartości) — to samo mapowanie, co przy tworzeniu szkicu (protocol-prefill.ts).
+        workType: workTypeFromEventType(ev.type) ?? workTypeFromKind(mapped.kind),
         contractor: [mapped.contractor1, mapped.contractor2].filter(Boolean).join(", "),
         updatedAt: sql`(datetime('now'))`,
       })
@@ -278,7 +408,14 @@ export function syncRealizationFromEvent(tx: Tx, ev: CalendarEventRow, ctx: Real
   const bits: string[] = [];
   if (r.date !== mapped.date) bits.push(`data ${r.date} → ${mapped.date}`);
   if (r.site !== mapped.site) bits.push(`obiekt ${r.site} → ${mapped.site}`);
-  if (r.kind !== mapped.kind) bits.push(`rodzaj ${r.kind} → ${mapped.kind}`);
+  if (r.workType !== mapped.workType) {
+    bits.push(
+      `rodzaj ${REALIZATION_WORK_TYPE_LABELS[r.workType]} → ${REALIZATION_WORK_TYPE_LABELS[mapped.workType]}`,
+    );
+  }
+  if (r.billing !== mapped.billing) {
+    bits.push(`typ ${REALIZATION_BILLING_LABELS[r.billing]} → ${REALIZATION_BILLING_LABELS[mapped.billing]}`);
+  }
   if ((r.contractor1 ?? "") !== mapped.contractor1 || (r.contractor2 ?? "") !== mapped.contractor2) {
     bits.push(`wykonawcy → ${[mapped.contractor1, mapped.contractor2].filter(Boolean).join(", ") || "—"}`);
   }
@@ -343,16 +480,34 @@ export function detachRealizationForEvent(tx: Tx, ev: CalendarEventRow, ctx: Rea
 // Punkty wejścia dla calendar-mutations.ts
 // ---------------------------------------------------------------------------
 
-/** Po utworzeniu wydarzenia. */
+/**
+ * Po utworzeniu wydarzenia. Wydarzenie zapisane od razu jako „wykonane” (wpis wstecz)
+ * dostaje to samo wstępne podliczenie, co przy zmianie statusu na „wykonane”.
+ */
 export function onEventCreated(tx: Tx, ev: CalendarEventRow, ctx: RealizationCtx): void {
   ensureRealizationForEvent(tx, ev, ctx);
+  if (ev.status !== "done" || ev.realizationOptout || ev.realizationId == null) return;
+  queueEventDoneAutofill({
+    realizationId: ev.realizationId,
+    eventId: ev.id,
+    user: ctx.user,
+  });
 }
 
 /**
  * Po edycji wydarzenia (PUT, move, zmiana statusu). Rozstrzyga: odpiąć (typ nieobjęty /
  * anulowane), utworzyć (brak realizacji, ustawienie pozwala) albo zsynchronizować.
+ *
+ * `before` (stan sprzed zapisu) służy do wykrycia przejścia statusu:
+ *  - „cokolwiek” → `done`  : po ensure/sync kolejkujemy WSTĘPNE podliczenie realizacji
+ *    (`company.autofill_on_event_done`; w trybie `auto_realization = "on_done"` realizacja
+ *    dopiero tu powstaje i od razu jest podliczana). `realization_optout` = pomijamy,
+ *  - `done` → „cokolwiek”  : wyliczonych wartości NIE cofamy (człowiek może je poprawić) —
+ *    zostaje tylko ostrzeżenie w activity_log.
+ * Bez `before` (ścieżki, które nie znają stanu sprzed) hak się nie odpala — lepiej nic
+ * nie zrobić niż podliczyć przy każdej edycji wykonanego wydarzenia.
  */
-export function onEventUpdated(tx: Tx, ev: CalendarEventRow, ctx: RealizationCtx): void {
+export function onEventUpdated(tx: Tx, ev: CalendarEventRow, ctx: RealizationCtx, before?: CalendarEventRow | null): void {
   const cfg = getCalendarConfig().values;
   if (ev.deletedAt) return;
   if (!isRealizationType(ev.type as CalendarEventType, cfg)) {
@@ -365,9 +520,39 @@ export function onEventUpdated(tx: Tx, ev: CalendarEventRow, ctx: RealizationCtx
   }
   if (ev.realizationId == null) {
     ensureRealizationForEvent(tx, ev, ctx, { config: cfg });
+  } else {
+    syncRealizationFromEvent(tx, ev, ctx, { config: cfg });
+  }
+
+  const wasDone = before?.status === "done";
+  if (!wasDone && ev.status === "done") {
+    if (ev.realizationOptout || ev.realizationId == null) return;
+    queueEventDoneAutofill({
+      realizationId: ev.realizationId,
+      eventId: ev.id,
+      user: ctx.user,
+    });
     return;
   }
-  syncRealizationFromEvent(tx, ev, ctx, { config: cfg });
+  if (wasDone && ev.status !== "done") warnAutofillKeptAfterUndone(tx, ev, ctx);
+}
+
+/**
+ * Cofnięcie statusu „wykonane” nie kasuje tego, co automat już policzył — dopisujemy
+ * ostrzeżenie do activity_log, żeby było widać, skąd wzięły się kwoty.
+ */
+function warnAutofillKeptAfterUndone(tx: Tx, ev: CalendarEventRow, ctx: RealizationCtx): void {
+  if (ev.realizationId == null) return;
+  const r = realizationById(tx, ev.realizationId);
+  if (!r || !r.autofill || r.autofill === "{}") return;
+  logForEvent(tx, ev, ctx, {
+    action: "updated",
+    summary:
+      `Cofnięto status „wykonane”, ale wstępne wyliczenia realizacji #${r.id} zostają ` +
+      "— popraw je ręcznie, jeśli praca się nie odbyła",
+    oldValue: r.id,
+    newValue: r.id,
+  });
 }
 
 /** Po soft-delete wydarzenia. */

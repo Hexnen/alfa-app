@@ -447,6 +447,122 @@ async function main() {
 
   r = await call("DELETE", "/pricelist/lists/999999");
   ok("DELETE nieistniejącego → 404", r.status === 404, r);
+
+  // -------------------------------------------------------------------------
+  // 10. Rodzaj pozycji: usługa / materiał (price_list.kind)
+  // -------------------------------------------------------------------------
+  r = await call("POST", "/pricelist/lists", { name: `${PREFIX} Rodzaje` });
+  ok("cennik do testów rodzaju utworzony", r.status === 201, r);
+  const listK = r.data;
+
+  // Migracja 0041: każda istniejąca pozycja ma poprawny rodzaj (NOT NULL + enum).
+  const allItems = db.select().from(schema.priceList).all();
+  ok(
+    "wszystkie pozycje w bazie mają kind ∈ {service, material}",
+    allItems.every((i) => i.kind === "service" || i.kind === "material"),
+    allItems.filter((i) => i.kind !== "service" && i.kind !== "material").slice(0, 3)
+  );
+
+  r = await call("POST", "/pricelist", {
+    name: `${PREFIX} ROBOCZOGODZINA`,
+    unit: "rbh",
+    price: 100,
+    priceListId: listK.id,
+  });
+  ok("POST bez kind, jednostka RBH → service", r.status === 201 && r.data.kind === "service", r.data);
+  const svc = r.data;
+
+  r = await call("POST", "/pricelist", {
+    name: `${PREFIX} KAMERA`,
+    unit: "szt",
+    price: 400,
+    priceListId: listK.id,
+  });
+  ok("POST bez kind, jednostka SZT → material (wnioskowanie jak w migracji)", r.status === 201 && r.data.kind === "material", r.data);
+  const mat = r.data;
+
+  r = await call("POST", "/pricelist", {
+    name: `${PREFIX} RYCZAŁT`,
+    unit: "SZT",
+    kind: "service",
+    price: 50,
+    priceListId: listK.id,
+  });
+  ok("jawny kind ma pierwszeństwo przed jednostką", r.status === 201 && r.data.kind === "service", r.data);
+
+  r = await call("POST", "/pricelist", {
+    name: `${PREFIX} ZŁY RODZAJ`,
+    unit: "SZT",
+    kind: "towar",
+    price: 1,
+    priceListId: listK.id,
+  });
+  ok("nieprawidłowy kind → 400", r.status === 400 && /rodzaj/i.test(r.error ?? ""), r);
+
+  r = await call("PUT", `/pricelist/${svc.id}`, {
+    name: svc.name,
+    unit: svc.unit,
+    price: svc.price,
+    kind: "material",
+  });
+  ok("PUT zmienia rodzaj na material", r.status === 200 && r.data.kind === "material", r.data);
+
+  r = await call("PUT", `/pricelist/${svc.id}`, { name: svc.name, unit: svc.unit, price: 120 });
+  ok("PUT bez kind zostawia rodzaj bez zmian", r.status === 200 && r.data.kind === "material" && r.data.price === 120, r.data);
+
+  r = await call("PUT", `/pricelist/${svc.id}`, {
+    name: svc.name,
+    unit: svc.unit,
+    price: 120,
+    kind: "service",
+  });
+  ok("PUT wraca na service", r.status === 200 && r.data.kind === "service", r.data);
+
+  r = await call("PUT", `/pricelist/${svc.id}`, { name: svc.name, unit: svc.unit, price: 120, kind: "xxx" });
+  ok("PUT z nieprawidłowym kind → 400", r.status === 400, r);
+
+  r = await call("GET", `/pricelist?listId=${listK.id}&kind=material`);
+  ok(
+    "GET ?kind=material zwraca tylko materiały",
+    r.status === 200 && r.data.length === 1 && r.data[0].id === mat.id,
+    r.data
+  );
+
+  r = await call("GET", `/pricelist?listId=${listK.id}&kind=service`);
+  ok("GET ?kind=service zwraca tylko usługi (2)", r.status === 200 && r.data.length === 2, r.data);
+
+  r = await call("GET", `/pricelist?listId=${listK.id}`);
+  ok("GET bez kind zwraca wszystkie (3)", r.status === 200 && r.data.length === 3, r.data);
+
+  r = await call("GET", `/pricelist?listId=${listK.id}&kind=towar`);
+  ok("GET ?kind=nieznany → 400", r.status === 400, r);
+
+  // Rodzaj przenosi się przy duplikacji cennika i kopiowaniu pozycji
+  r = await call("POST", `/pricelist/lists/${listK.id}/duplicate`, { name: `${PREFIX} Rodzaje kopia` });
+  ok("duplikat cennika 201", r.status === 201, r);
+  const listKCopy = r.data;
+  r = await call("GET", `/pricelist?listId=${listKCopy.id}&kind=material`);
+  ok("duplikacja zachowuje rodzaj pozycji", r.status === 200 && r.data.length === 1, r.data);
+
+  r = await call("POST", "/pricelist/copy", {
+    fromListId: listK.id,
+    toListId: listKCopy.id,
+    itemIds: [mat.id],
+  });
+  ok("kopiowanie pozycji zachowuje rodzaj", r.status === 201 && r.data[0].kind === "material", r.data?.[0]);
+
+  await call("DELETE", `/pricelist/lists/${listKCopy.id}?force=1`);
+  await call("DELETE", `/pricelist/lists/${listK.id}?force=1`);
+  // Pozycje przeniesione forsownie do głównego to dane testowe — usuwamy.
+  r = await call("GET", "/pricelist");
+  for (const i of (r.data as any[]).filter((i) => String(i.name).startsWith(PREFIX))) {
+    await call("DELETE", `/pricelist/${i.id}`);
+  }
+  r = await call("GET", "/pricelist");
+  ok("po testach rodzaju główny cennik bez zmian", r.data.length === mainItemsBefore, {
+    got: r.data?.length,
+    want: mainItemsBefore,
+  });
 }
 
 try {

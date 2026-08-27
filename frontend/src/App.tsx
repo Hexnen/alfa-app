@@ -29,6 +29,7 @@ import { Ofi } from "./pages/Ofi";
 import { AdminUsers } from "./pages/AdminUsers";
 import { AdminAssistant } from "./pages/AdminAssistant";
 import { AdminCalendar } from "./pages/AdminCalendar";
+import { AdminCompany } from "./pages/AdminCompany";
 import { PublicOrderForm } from "./pages/PublicOrderForm";
 import { useAuth } from "./auth/AuthProvider";
 import { usePerms, tabKeyForPath } from "./auth/permissions";
@@ -105,6 +106,7 @@ function AuthedApp() {
           <Route path="/admin/users" element={<AdminUsers />} />
           <Route path="/admin/asystent" element={<AdminAssistant />} />
           <Route path="/admin/kalendarz" element={<AdminCalendar />} />
+          <Route path="/admin/firma" element={<AdminCompany />} />
         </Routes>
       </Layout>
   );

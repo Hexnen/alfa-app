@@ -57,6 +57,11 @@ export const objects = sqliteTable("objects", {
     .notNull(),
   monthlyValue: real("monthly_value"),
   notes: text("notes"),
+  // Współrzędne obiektu (WGS84). NULL = jeszcze nieustalone; uzupełniane leniwie
+  // geokoderem przy pierwszej kalkulacji dystansu (src/lib/geo.ts) albo ręcznie
+  // z formularza obiektu — z nich liczy się dystans biuro → obiekt.
+  latitude: real("latitude"),
+  longitude: real("longitude"),
   createdAt: text("created_at")
     .default(sql`(datetime('now'))`)
     .notNull(),
@@ -447,15 +452,51 @@ export type NewUser = typeof users.$inferInsert;
 export type Session = typeof sessions.$inferSelect;
 export type NewSession = typeof sessions.$inferInsert;
 
+/**
+ * Rodzaj prac realizacji — ten sam słownik co `calendar_events.type` (bez typów
+ * biurowych/urlopowych, za to z workiem „inne”). Odpowiada na pytanie CO robiono.
+ */
+export const REALIZATION_WORK_TYPES = [
+  "serwis",
+  "montaz",
+  "wizja",
+  "demontaz",
+  "konserwacja",
+  "inne",
+] as const;
+export type RealizationWorkType = (typeof REALIZATION_WORK_TYPES)[number];
+
+/**
+ * Typ rozliczenia realizacji — ten sam słownik co `calendar_events.billing`,
+ * ale bez NULL (realizacja zawsze jest jakoś rozliczana). Odpowiada na pytanie ZA ILE.
+ */
+export const REALIZATION_BILLINGS = ["paid", "warranty", "free"] as const;
+export type RealizationBilling = (typeof REALIZATION_BILLINGS)[number];
+
 // Realizacje — rejestr serwisów i montaży działu technicznego
 // (odwzorowanie miesięcznego arkusza Excel "Realizacje", np. "2026 2 Luty.xlsx").
-// Każdy wiersz to dokładnie jeden typ: serwis płatny / serwis gwarancyjny
-// (bezpłatny) / montaż. Suma netto = godziny + materiały + km - rabat,
-// liczona w API zamiast excelowych formuł.
+// Wiersz opisują DWA niezależne wymiary: `work_type` (rodzaj prac: serwis, montaż,
+// wizja…) i `billing` (typ rozliczenia: płatne / gwarancyjne / darmowe).
+// Suma netto = godziny + materiały + km - rabat, liczona w API zamiast excelowych formuł.
 export const realizations = sqliteTable("realizations", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   date: text("date").notNull(), // YYYY-MM-DD
   site: text("site").notNull(), // Obiekt
+  // Rodzaj prac (CO) — źródło prawdy dla protokołów i statystyk.
+  workType: text("work_type", { enum: REALIZATION_WORK_TYPES })
+    .default("serwis")
+    .notNull(),
+  // Typ rozliczenia (ZA ILE) — źródło prawdy dla przychodu/straty.
+  billing: text("billing", { enum: REALIZATION_BILLINGS })
+    .default("paid")
+    .notNull(),
+  /**
+   * Pole ZGODNOŚCIOWE — stary, jednowymiarowy „rodzaj”. NIE jest już edytowane
+   * wprost: przy każdym zapisie wyliczamy je z (`work_type`, `billing`) przez
+   * `realizationKindFrom()` (billing=warranty → warranty, work_type=montaz →
+   * installation, inaczej service). Żyje dalej, bo czytają je protokoły
+   * (`workTypeFromKind`), wyceny i starsze raporty.
+   */
   kind: text("kind", {
     enum: ["service", "warranty", "installation"],
   })
@@ -474,6 +515,10 @@ export const realizations = sqliteTable("realizations", {
   actualHours: real("actual_hours").default(0).notNull(), // Faktyczne godziny pracownicze
   actualKm: real("actual_km").default(0).notNull(), // Faktyczne KM
   hourlyCost: real("hourly_cost").default(0).notNull(), // Koszt godzinowy
+  // Ślad automatu (src/lib/realization-autofill.ts): JSON { [pole]: { source, detail, at } }
+  // dla pól uzupełnionych automatycznie. NULL = nic nie uzupełniano. Wpis pola znika,
+  // gdy ktoś zmieni tę wartość ręcznie (PUT /realizations/:id) — badge „auto" nie kłamie.
+  autofill: text("autofill"),
   createdAt: text("created_at")
     .default(sql`(datetime('now'))`)
     .notNull(),
@@ -538,6 +583,10 @@ export const priceLists = sqliteTable("price_lists", {
 export type PriceListGroup = typeof priceLists.$inferSelect;
 export type NewPriceListGroup = typeof priceLists.$inferInsert;
 
+// Rodzaj pozycji cennika — porządkuje kalkulację realizacji (materiały vs robocizna).
+export const PRICE_ITEM_KINDS = ["service", "material"] as const;
+export type PriceItemKind = (typeof PRICE_ITEM_KINDS)[number];
+
 // Cennik usług serwisowych — z załącznika do protokołu powykonawczego
 // ("CENNIK USŁUG SERWISOWYCH", wer. 20260127).
 export const priceList = sqliteTable("price_list", {
@@ -549,6 +598,12 @@ export const priceList = sqliteTable("price_list", {
     .references(() => priceLists.id, { onDelete: "restrict" }),
   name: text("name").notNull(), // Nazwa usługi
   unit: text("unit").notNull(), // JM: KM / RBH / MB / SZT...
+  // Rodzaj pozycji: usługa (robocizna, dojazd) albo materiał (towar z protokołu).
+  // Automat realizacji dopasowuje pozycje protokołu WYŁĄCZNIE do materiałów,
+  // a stawki RBH/KM szuka wyłącznie wśród usług.
+  kind: text("kind", { enum: PRICE_ITEM_KINDS })
+    .default("service")
+    .notNull(),
   price: real("price").default(0).notNull(), // cena netto
   position: integer("position").default(0).notNull(), // kolejność (LP)
   active: integer("active", { mode: "boolean" }).default(true).notNull(),
@@ -1498,3 +1553,23 @@ export const appSettings = sqliteTable("app_settings", {
 });
 
 export type AppSetting = typeof appSettings.$inferSelect;
+
+// ============================================================================
+// CACHE GEOKODERA I TRAS (src/lib/geo.ts)
+// Każde zapytanie do Nominatim/OSRM idzie przez tę tabelę — aplikacja i testy
+// nigdy nie zależą twardo od sieci. TTL 90 dni (GEO_CACHE_TTL_DAYS), klucze:
+//   geo:<sha1(zapytanie)>            → { lat, lng, display }
+//   route:<lat,lng>|<lat,lng>        → { km, method }
+// Wpis o wartości { error } NIE jest zapisywany — brak sieci nie truje cache'u.
+// ============================================================================
+
+export const geoCache = sqliteTable("geo_cache", {
+  key: text("key").primaryKey(),
+  value: text("value").notNull(), // JSON
+  createdAt: text("created_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+});
+
+export type GeoCacheRow = typeof geoCache.$inferSelect;
+export type NewGeoCacheRow = typeof geoCache.$inferInsert;

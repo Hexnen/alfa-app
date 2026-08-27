@@ -5,6 +5,7 @@ import contractsRoutes from "./contracts.js";
 import historyRoutes from "./history.js";
 import ordersRoutes from "./orders.js";
 import realizationsRoutes from "./realizations.js";
+import companyRoutes from "./company.js";
 import techniciansRoutes from "./technicians.js";
 import pricelistRoutes from "./pricelist.js";
 import cameraModelsRoutes from "./camera-models.js";
@@ -21,6 +22,7 @@ import publicRoutes from "./public.js";
 import adminRoutes from "./admin.js";
 import adminAssistantRoutes from "./admin-assistant.js";
 import adminCalendarRoutes from "./admin-calendar.js";
+import adminCompanyRoutes from "./admin-company.js";
 import assistantRoutes from "./assistant.js";
 import calendarRoutes, { calendarPublicRoutes } from "./calendar.js";
 import activityRoutes from "./activity.js";
@@ -51,6 +53,7 @@ api.use("*", requireAuth);
 // /admin/assistant PRZED /admin — Hono dopasowuje po kolejności rejestracji.
 api.route("/admin/assistant", adminAssistantRoutes);
 api.route("/admin/calendar", adminCalendarRoutes);
+api.route("/admin/company", adminCompanyRoutes);
 api.route("/admin", adminRoutes);
 
 // --- ASYSTENT AI (kalendarz) — dostęp wg ustawienia assistant.access (admin lub edytorzy kalendarza);
@@ -173,6 +176,8 @@ api.route("/contracts", contractsRoutes);
 api.route("/history", historyRoutes);
 api.route("/orders", ordersRoutes);
 api.route("/realizations", realizationsRoutes);
+// Dane firmy tylko do odczytu dla zalogowanych (znacznik biura na mapach).
+api.route("/company", companyRoutes);
 api.route("/technicians", techniciansRoutes);
 api.route("/pricelist", pricelistRoutes);
 api.route("/camera-models", cameraModelsRoutes);

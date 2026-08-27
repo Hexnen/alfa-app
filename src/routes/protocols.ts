@@ -3,23 +3,28 @@ import { createHash } from "crypto";
 import { db, schema } from "../db/index.js";
 import { eq, like, asc, desc, notInArray, and } from "drizzle-orm";
 import type { ApiResponse } from "../types/index.js";
-import type { Protocol, Realization } from "../db/schema.js";
+import type { CalendarEvent, Protocol, Realization } from "../db/schema.js";
+import { getUser } from "../middleware/auth.js";
+import { AUTOFILL_SHORT_LABELS, autofillAfterProtocolSigned } from "../lib/realization-autofill.js";
+import {
+  buildProtocolPrefill,
+  isProtocolPrefillField,
+  prefillPatch,
+  PROTOCOL_PREFILL_LABELS,
+  protocolPrefillSuggestions,
+  type ProtocolPrefillField,
+} from "../lib/protocol-prefill.js";
+import { logActivity } from "../lib/activity-log.js";
 
 const app = new Hono();
 
-export interface ProtocolItem {
-  name: string;
-  serial: string;
-  unit: string;
-  qty: string;
-}
-
-// Domyślne pozycje materiałowe z wzoru protokołu
-export const DEFAULT_ITEMS: ProtocolItem[] = [
-  { name: "KABEL UTP KAT 5E.", serial: "", unit: "mb", qty: "" },
-  { name: "KABEL ZASILAJĄCY", serial: "", unit: "mb", qty: "" },
-  { name: "PESZEL - RURA KARBOWANA", serial: "", unit: "mb", qty: "" },
-];
+// Wzór pozycji i typ pozycji mieszkają w src/lib/protocol-prefill.ts (tam powstaje
+// wstępne wypełnienie protokołu); tutaj tylko re-eksport dla dotychczasowych importów.
+export {
+  DEFAULT_ITEMS,
+  type ProtocolItem,
+} from "../lib/protocol-prefill.js";
+import type { ProtocolItem } from "../lib/protocol-prefill.js";
 
 // Typ transakcji drizzle/better-sqlite3 — pozwala współdzielić helpery między db i tx.
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -47,30 +52,42 @@ export function nextProtocolNumberSync(tx: Tx, workDate: string): string {
 
 /**
  * Buduje protokół (prefill) z realizacji — używane też przy tworzeniu realizacji.
+ * Wszystkie pola pochodzą z `buildProtocolPrefill` (wydarzenie → obiekt → kontrahent
+ * → cennik; szczegóły w src/lib/protocol-prefill.ts), więc szkic protokołu jest od
+ * razu wypełniony danymi klienta, adresem, wykonawcami i pozycjami z cennika.
+ *
  * Alokacja numeru i insert w jednej transakcji (przekazany tx), więc kolejne
  * numery i ograniczenia UNIQUE(number/realizationId) nie kolidują przy
  * równoległych żądaniach. Idempotentne po realizationId (ON CONFLICT DO NOTHING).
+ *
+ * `event` przekazuje wołający, który tworzy realizację z wydarzenia — w tym momencie
+ * `calendar_events.realization_id` jest jeszcze puste (podpięcie następuje po insercie
+ * protokołu), więc bez tego argumentu wydarzenia nie dałoby się odnaleźć.
  */
-export function createProtocolForRealizationSync(tx: Tx, r: Realization) {
-  const contractor = [r.contractor1, r.contractor2].filter(Boolean).join(", ");
+export function createProtocolForRealizationSync(
+  tx: Tx,
+  r: Realization,
+  event?: CalendarEvent | null
+) {
+  const { values } = buildProtocolPrefill(tx, r, { event });
   return tx
     .insert(schema.protocols)
     .values({
       realizationId: r.id,
-      number: nextProtocolNumberSync(tx, r.date),
-      workDate: r.date,
-      workType: r.kind === "installation" ? "montaz" : "serwis",
-      actualHours: r.actualHours,
-      actualKm: r.actualKm,
-      contractor,
-      salesperson: r.caretaker || "",
-      clientName: "",
-      clientNip: "",
-      clientCity: "",
-      installationAddress: r.site,
-      contact: "",
-      activities: r.note || "",
-      items: JSON.stringify(DEFAULT_ITEMS),
+      number: nextProtocolNumberSync(tx, values.workDate),
+      workDate: values.workDate,
+      workType: values.workType,
+      actualHours: values.actualHours,
+      actualKm: values.actualKm,
+      contractor: values.contractor,
+      salesperson: values.salesperson,
+      clientName: values.clientName,
+      clientNip: values.clientNip,
+      clientCity: values.clientCity,
+      installationAddress: values.installationAddress,
+      contact: values.contact,
+      activities: values.activities,
+      items: JSON.stringify(values.items),
       status: "draft",
     })
     .onConflictDoNothing({ target: schema.protocols.realizationId })
@@ -211,6 +228,167 @@ app.get("/:id", async (c) => {
   return c.json({
     success: true,
     data: withParsedItems({ ...row.protocol, site: row.site, kind: row.kind } as never),
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Uzupełnianie istniejącego protokołu z danych, które system już zna
+// (src/lib/protocol-prefill.ts). Podgląd nic nie zapisuje; zapis obejmuje
+// WYŁĄCZNIE wskazane pola. Protokół podpisany jest nietykalny → 400.
+// ---------------------------------------------------------------------------
+
+/** Protokół + jego realizacja (obie potrzebne do policzenia prefillu). */
+function protocolWithRealization(id: number) {
+  const protocol = db.select().from(schema.protocols).where(eq(schema.protocols.id, id)).get();
+  if (!protocol) return null;
+  const realization = db
+    .select()
+    .from(schema.realizations)
+    .where(eq(schema.realizations.id, protocol.realizationId))
+    .get();
+  return realization ? { protocol, realization } : { protocol, realization: null };
+}
+
+/** Protokół podpisany albo zatwierdzony — prefill go nie dotyka. */
+function prefillLockReason(p: Protocol): string | null {
+  if (p.signedAt || p.signaturePng || p.contentHash) {
+    return "Protokół jest podpisany — usuń podpis, zanim uzupełnisz dane.";
+  }
+  if (p.status === "final") {
+    return "Protokół jest zatwierdzony — cofnij zatwierdzenie, zanim uzupełnisz dane.";
+  }
+  return null;
+}
+
+/** Lista pól z body → tylko znane nazwy (wzorzec z realizations.ts). */
+function parsePrefillFields(raw: unknown): { fields?: ProtocolPrefillField[]; error?: string } {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    return { error: "Wskaż pola do uzupełnienia (fields: string[])" };
+  }
+  const out: ProtocolPrefillField[] = [];
+  for (const v of raw) {
+    if (typeof v !== "string" || !isProtocolPrefillField(v)) {
+      return { error: `Nieznane pole protokołu: ${String(v)}` };
+    }
+    if (!out.includes(v)) out.push(v);
+  }
+  return { fields: out };
+}
+
+/** Podgląd — sugestie „obecnie → proponowane” wraz ze źródłem. Nic nie zapisuje. */
+app.get("/:id/prefill", (c) => {
+  const id = parseInt(c.req.param("id"));
+  if (!Number.isFinite(id)) {
+    return c.json<ApiResponse<null>>({ success: false, error: "Nieprawidłowy identyfikator" }, 400);
+  }
+  const found = protocolWithRealization(id);
+  if (!found) {
+    return c.json<ApiResponse<null>>({ success: false, error: "Nie znaleziono protokołu" }, 404);
+  }
+  const locked = prefillLockReason(found.protocol);
+  if (locked) return c.json<ApiResponse<null>>({ success: false, error: locked }, 400);
+  if (!found.realization) {
+    return c.json<ApiResponse<null>>(
+      { success: false, error: "Protokół nie ma powiązanej realizacji — nie ma z czego uzupełniać" },
+      404
+    );
+  }
+
+  const prefill = buildProtocolPrefill(db, found.realization);
+  return c.json({
+    success: true,
+    data: {
+      suggestions: protocolPrefillSuggestions(found.protocol, prefill, { realization: found.realization }),
+      context: prefill.context,
+    },
+  });
+});
+
+/** Zapis wskazanych pól. Nieznane pole → 400, protokół podpisany → 400. */
+app.post("/:id/prefill", async (c) => {
+  const id = parseInt(c.req.param("id"));
+  if (!Number.isFinite(id)) {
+    return c.json<ApiResponse<null>>({ success: false, error: "Nieprawidłowy identyfikator" }, 400);
+  }
+  const body = await c.req.json<Record<string, unknown>>().catch(() => ({}) as Record<string, unknown>);
+  const { fields, error } = parsePrefillFields(body.fields);
+  if (error || !fields) {
+    return c.json<ApiResponse<null>>({ success: false, error }, 400);
+  }
+  const expectedUpdatedAt =
+    typeof body.expectedUpdatedAt === "string" ? body.expectedUpdatedAt : null;
+
+  const user = getUser(c);
+
+  // Odczyt, wyliczenie i zapis w jednej synchronicznej transakcji — prefill jest
+  // czysto odczytowy, więc nic nie wychodzi do sieci i nic się nie przeplata.
+  const outcome = db.transaction((tx) => {
+    const protocol = tx.select().from(schema.protocols).where(eq(schema.protocols.id, id)).get();
+    if (!protocol) return { status: 404 as const, error: "Nie znaleziono protokołu" };
+    const locked = prefillLockReason(protocol);
+    if (locked) return { status: 400 as const, error: locked };
+    if (expectedUpdatedAt !== null && protocol.updatedAt !== expectedUpdatedAt) {
+      return { status: 409 as const, error: "Protokół został w międzyczasie zmieniony. Odśwież i spróbuj ponownie." };
+    }
+    const realization = tx
+      .select()
+      .from(schema.realizations)
+      .where(eq(schema.realizations.id, protocol.realizationId))
+      .get();
+    if (!realization) {
+      return {
+        status: 404 as const,
+        error: "Protokół nie ma powiązanej realizacji — nie ma z czego uzupełniać",
+      };
+    }
+
+    const prefill = buildProtocolPrefill(tx, realization);
+    const suggestions = protocolPrefillSuggestions(protocol, prefill, { realization });
+    const applied = fields.filter((f) => suggestions.some((s) => s.field === f));
+    const skipped = fields
+      .filter((f) => !applied.includes(f))
+      .map((f) => ({ field: f, reason: "brak sugestii dla tego pola" }));
+    if (applied.length === 0) {
+      return { status: 200 as const, protocol, applied, skipped, suggestions };
+    }
+
+    const updated = tx
+      .update(schema.protocols)
+      .set({ ...prefillPatch(applied, prefill), updatedAt: new Date().toISOString() })
+      .where(eq(schema.protocols.id, id))
+      .returning()
+      .all();
+    if (updated.length === 0) {
+      return { status: 409 as const, error: "Protokół został w międzyczasie zmieniony. Odśwież i spróbuj ponownie." };
+    }
+
+    logActivity(tx, {
+      entityType: "protocol",
+      entityId: id,
+      objectId: prefill.context.object?.id ?? null,
+      user,
+      action: "updated",
+      field: "prefill",
+      oldValue: null,
+      newValue: JSON.stringify(applied),
+      summary: `Uzupełniono protokół ${protocol.number} z danych systemu: ${applied
+        .map((f) => PROTOCOL_PREFILL_LABELS[f].toLowerCase())
+        .join(", ")}`,
+      summarySuffix: "(przez automat)",
+    });
+
+    return { status: 200 as const, protocol: updated[0], applied, skipped, suggestions };
+  });
+
+  if (outcome.status !== 200) {
+    return c.json<ApiResponse<null>>({ success: false, error: outcome.error }, outcome.status);
+  }
+
+  const saved = withParsedItems(outcome.protocol);
+  return c.json({
+    success: true,
+    data: { ...saved, protocol: saved, applied: outcome.applied, skipped: outcome.skipped },
+    message: outcome.applied.length > 0 ? "Protokół uzupełniony" : "Nie było czego uzupełnić",
   });
 });
 
@@ -439,10 +617,30 @@ app.post("/:id/sign", async (c) => {
     );
   }
 
+  // Po podpisie znane są realne godziny i materiały — automat dolicza wtedy pola
+  // realizacji, które są jeszcze puste (patrz src/lib/realization-autofill.ts).
+  // Sugestie sprzeczne z ręcznie wpisanymi wartościami są POMIJANE, a każdy błąd
+  // kalkulacji (brak sieci, brak adresu obiektu) jest połykany — podpis już jest
+  // zapisany i nie wolno go wywrócić.
+  let autofill: { applied: string[]; warnings: string[]; message: string } | null = null;
+  const realizationId = outcome.data.realizationId;
+  if (realizationId != null) {
+    const res = await autofillAfterProtocolSigned(realizationId, getUser(c));
+    if (res && res.applied.length > 0) {
+      autofill = {
+        applied: res.applied,
+        warnings: res.warnings,
+        message: `Uzupełniono automatycznie: ${res.applied
+          .map((f) => AUTOFILL_SHORT_LABELS[f])
+          .join(", ")}`,
+      };
+    }
+  }
+
   return c.json({
     success: true,
-    data: withParsedItems(outcome.data),
-    message: "Protokół podpisany",
+    data: { ...withParsedItems(outcome.data), autofill },
+    message: autofill ? `Protokół podpisany — ${autofill.message}` : "Protokół podpisany",
   });
 });
 

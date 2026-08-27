@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { Loader2, MapPin } from "lucide-react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
@@ -17,7 +18,10 @@ import {
   DialogTitle,
   DialogFooter,
 } from "./ui/dialog";
+import { tip } from "./ui/tooltip";
 import {
+  adminCompanyApi,
+  errStatus,
   getContractors,
   type Contractor,
   type ObjectRecord,
@@ -29,6 +33,39 @@ import {
   statusLabels,
   departmentLabels,
 } from "@/lib/utils";
+
+/**
+ * Geokodowanie adresu obiektu. Najpierw backend (`/admin/company/geocode`) —
+ * ma cache w `geo_cache` i własny User-Agent. Endpoint jest jednak zamknięty
+ * dla adminów, więc pozostałym użytkownikom zostaje zapytanie prosto z
+ * przeglądarki do Nominatim, tak jak robi to już `LocationPicker`.
+ */
+async function geocodeAddress(query: string): Promise<{ lat: number; lng: number; display?: string }> {
+  try {
+    return await adminCompanyApi.geocode({ query });
+  } catch (e) {
+    const status = errStatus(e);
+    // 403 = nie admin, 404 = starszy backend bez geokodera. Inne błędy (np. „nie
+    // znaleziono adresu”) są merytoryczne — nie ma po co pytać drugi raz.
+    if (status !== 403 && status !== 404) throw e;
+  }
+  const url =
+    "https://nominatim.openstreetmap.org/search?format=json&limit=1&accept-language=pl&countrycodes=pl&q=" +
+    encodeURIComponent(query);
+  const res = await fetch(url, { headers: { Accept: "application/json" } });
+  if (!res.ok) throw new Error("Geokoder nie odpowiedział");
+  const hits = (await res.json()) as { lat: string; lon: string; display_name?: string }[];
+  const hit = hits?.[0];
+  if (!hit) throw new Error("Nie znaleziono tego adresu");
+  return { lat: parseFloat(hit.lat), lng: parseFloat(hit.lon), display: hit.display_name };
+}
+
+/** Współrzędna z inputa: pusty → null, żeby backend wiedział „wyczyść”. */
+const parseCoord = (v: string): number | null => {
+  if (v.trim() === "") return null;
+  const n = parseFloat(v.replace(",", "."));
+  return Number.isFinite(n) ? n : null;
+};
 
 interface ObjectFormProps {
   open: boolean;
@@ -58,7 +95,12 @@ export function ObjectForm({
     department: object?.department || "sales",
     monthlyValue: object?.monthlyValue || undefined,
     notes: object?.notes || "",
+    latitude: object?.latitude ?? null,
+    longitude: object?.longitude ?? null,
   });
+  /** Stan przycisku „Ustal z adresu” + komunikat pod polami współrzędnych. */
+  const [geocoding, setGeocoding] = useState(false);
+  const [geoNote, setGeoNote] = useState<string | null>(null);
 
   useEffect(() => {
     if (open) {
@@ -100,6 +142,23 @@ export function ObjectForm({
       ...prev,
       [name]: name === "contractorId" ? parseInt(value) : value,
     }));
+  };
+
+  const addressLine = [formData.address, formData.city].map((s) => (s || "").trim()).filter(Boolean).join(", ");
+
+  const runGeocode = async () => {
+    if (!addressLine) return;
+    setGeocoding(true);
+    setGeoNote(null);
+    try {
+      const hit = await geocodeAddress(addressLine);
+      setFormData((prev) => ({ ...prev, latitude: hit.lat, longitude: hit.lng }));
+      setGeoNote(hit.display ? `Znaleziono: ${hit.display}` : "Współrzędne ustalone.");
+    } catch (error) {
+      setGeoNote(error instanceof Error ? error.message : "Nie udało się ustalić współrzędnych");
+    } finally {
+      setGeocoding(false);
+    }
   };
 
   return (
@@ -161,6 +220,68 @@ export function ObjectForm({
                   onChange={handleChange}
                 />
               </div>
+            </div>
+
+            {/* Współrzędne — z nich liczy się dystans biuro → obiekt (kilometry
+                w realizacjach). Puste = automat ustali je sam przy kalkulacji. */}
+            <div className="space-y-2">
+              <div className="flex flex-wrap items-end gap-3">
+                <div className="space-y-2">
+                  <Label htmlFor="latitude">Szerokość (lat)</Label>
+                  <Input
+                    id="latitude"
+                    name="latitude"
+                    data-testid="object-latitude"
+                    type="number"
+                    step="0.000001"
+                    className="w-40 tabular-nums"
+                    placeholder="np. 52.406374"
+                    value={formData.latitude ?? ""}
+                    onChange={(e) =>
+                      setFormData((prev) => ({ ...prev, latitude: parseCoord(e.target.value) }))
+                    }
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="longitude">Długość (lng)</Label>
+                  <Input
+                    id="longitude"
+                    name="longitude"
+                    data-testid="object-longitude"
+                    type="number"
+                    step="0.000001"
+                    className="w-40 tabular-nums"
+                    placeholder="np. 16.925168"
+                    value={formData.longitude ?? ""}
+                    onChange={(e) =>
+                      setFormData((prev) => ({ ...prev, longitude: parseCoord(e.target.value) }))
+                    }
+                  />
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  data-testid="object-geocode"
+                  disabled={geocoding || !addressLine}
+                  onClick={() => void runGeocode()}
+                  {...tip(
+                    addressLine
+                      ? `Zapytaj geokoder o współrzędne dla: ${addressLine}`
+                      : "Najpierw wpisz adres albo miasto"
+                  )}
+                >
+                  {geocoding ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
+                  ) : (
+                    <MapPin className="mr-2 h-4 w-4" aria-hidden />
+                  )}
+                  Ustal z adresu
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground" data-testid="object-geo-note">
+                {geoNote ??
+                  "Z tych współrzędnych automat liczy kilometry biuro → obiekt. Puste pola uzupełni sam przy pierwszej kalkulacji."}
+              </p>
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">

@@ -10,13 +10,19 @@ import {
   DialogTitle,
   DialogFooter,
 } from "./ui/dialog";
-import { Printer, Plus, Trash2, PenLine } from "lucide-react";
+import { Printer, Plus, Trash2, PenLine, Wand2 } from "lucide-react";
 import { printProtocol } from "@/lib/protocolPrint";
 import { SignatureDialog } from "./SignatureDialog";
+import {
+  PrefillHint,
+  ProtocolPrefillDialog,
+} from "./protocol/ProtocolPrefillDialog";
 import type {
   Protocol,
   ProtocolInput,
   ProtocolItem,
+  ProtocolPrefillApplied,
+  ProtocolSuggestion,
   ProtocolWorkType,
 } from "@/lib/api";
 
@@ -27,6 +33,10 @@ interface ProtocolFormProps {
   onSign: (signaturePng: string, signerName: string) => Promise<void>;
   onUnsign: () => Promise<void>;
   protocol: Protocol;
+  /** false = podgląd (uprawnienie tylko do odczytu) — bez uzupełniania z danych. */
+  editable?: boolean;
+  /** Protokół zapisany przez „Uzupełnij z danych" — lista na stronie może się odświeżyć. */
+  onPrefilled?: (updated: Protocol) => void;
 }
 
 export function ProtocolForm({
@@ -36,9 +46,14 @@ export function ProtocolForm({
   onSign,
   onUnsign,
   protocol,
+  editable = true,
+  onPrefilled,
 }: ProtocolFormProps) {
   const [loading, setLoading] = useState(false);
   const [signOpen, setSignOpen] = useState(false);
+  const [prefillOpen, setPrefillOpen] = useState(false);
+  /** Pola uzupełnione w tej sesji formularza → adnotacja „z kalendarza/obiektu/…". */
+  const [hints, setHints] = useState<Record<string, ProtocolSuggestion>>({});
   const [formData, setFormData] = useState<ProtocolInput>({
     workDate: protocol.workDate,
     workType: protocol.workType,
@@ -91,6 +106,44 @@ export function ProtocolForm({
   const removeItem = (idx: number) =>
     setFormData((p) => ({ ...p, items: p.items.filter((_, i) => i !== idx) }));
 
+  /**
+   * Protokół podpisany albo zatwierdzony jest nietykalny (backend odrzuca prefill 400),
+   * więc przycisk „Uzupełnij z danych" pokazujemy tylko dla szkicu i tylko z prawem edycji.
+   */
+  const sealed =
+    protocol.status === "final" || !!protocol.signaturePng || !!protocol.signedAt;
+  const canPrefill = editable && !sealed;
+
+  /** Podstawia do formularza WYŁĄCZNIE pola, które backend faktycznie zapisał. */
+  const applyPrefill = (
+    updated: ProtocolPrefillApplied,
+    applied: ProtocolSuggestion[]
+  ) => {
+    setFormData((p) => {
+      const next: ProtocolInput = { ...p };
+      const raw = updated as unknown as Record<string, unknown>;
+      for (const s of applied) {
+        if (s.field === "items") next.items = updated.items;
+        else if (s.field === "actualHours") next.actualHours = updated.actualHours;
+        else if (s.field === "actualKm") next.actualKm = updated.actualKm;
+        else if (s.field === "workType") next.workType = updated.workType;
+        else if (typeof raw[s.field] === "string") {
+          (next as unknown as Record<string, unknown>)[s.field] = raw[s.field];
+        }
+      }
+      return next;
+    });
+    setHints((h) => ({
+      ...h,
+      ...Object.fromEntries(applied.map((s) => [s.field, s])),
+    }));
+    onPrefilled?.(updated);
+  };
+
+  /** Adnotacja „skąd to jest" pod polem uzupełnionym automatem. */
+  const hint = (field: string) =>
+    hints[field] ? <PrefillHint suggestion={hints[field]} /> : null;
+
   const handlePrint = () =>
     printProtocol({
       ...protocol,
@@ -106,15 +159,30 @@ export function ProtocolForm({
         <DialogHeader>
           <DialogTitle className="flex items-center justify-between gap-4 pr-6">
             <span>Protokół końcowy {protocol.number}</span>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={handlePrint}
-            >
-              <Printer className="h-4 w-4 mr-2" />
-              Drukuj / PDF
-            </Button>
+            <div className="flex items-center gap-2">
+              {canPrefill && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  data-testid="protocol-prefill-open"
+                  title="Podstaw dane z kalendarza, obiektu, kontrahenta i cennika"
+                  onClick={() => setPrefillOpen(true)}
+                >
+                  <Wand2 className="h-4 w-4 mr-2" />
+                  Uzupełnij z danych
+                </Button>
+              )}
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={handlePrint}
+              >
+                <Printer className="h-4 w-4 mr-2" />
+                Drukuj / PDF
+              </Button>
+            </div>
           </DialogTitle>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4">
@@ -127,6 +195,7 @@ export function ProtocolForm({
                 onChange={(e) => setField("workDate", e.target.value)}
                 required
               />
+              {hint("workDate")}
             </div>
             <div className="space-y-2">
               <Label>Typ prac</Label>
@@ -142,6 +211,7 @@ export function ProtocolForm({
                 <option value="wizja">Wizja lokalna</option>
                 <option value="inne">Inne</option>
               </select>
+              {hint("workType")}
             </div>
             <div className="space-y-2">
               <Label>Faktyczne godziny</Label>
@@ -152,6 +222,7 @@ export function ProtocolForm({
                 value={formData.actualHours}
                 onChange={(e) => setField("actualHours", e.target.value)}
               />
+              {hint("actualHours")}
             </div>
             <div className="space-y-2">
               <Label>Przejechane km</Label>
@@ -162,6 +233,7 @@ export function ProtocolForm({
                 value={formData.actualKm}
                 onChange={(e) => setField("actualKm", e.target.value)}
               />
+              {hint("actualKm")}
             </div>
           </div>
 
@@ -172,6 +244,7 @@ export function ProtocolForm({
                 value={formData.contractor || ""}
                 onChange={(e) => setField("contractor", e.target.value)}
               />
+              {hint("contractor")}
             </div>
             <div className="space-y-2">
               <Label>Handlowiec</Label>
@@ -179,6 +252,7 @@ export function ProtocolForm({
                 value={formData.salesperson || ""}
                 onChange={(e) => setField("salesperson", e.target.value)}
               />
+              {hint("salesperson")}
             </div>
           </div>
 
@@ -191,6 +265,7 @@ export function ProtocolForm({
                   value={formData.clientName || ""}
                   onChange={(e) => setField("clientName", e.target.value)}
                 />
+                {hint("clientName")}
               </div>
               <div className="space-y-2">
                 <Label>NIP</Label>
@@ -198,6 +273,7 @@ export function ProtocolForm({
                   value={formData.clientNip || ""}
                   onChange={(e) => setField("clientNip", e.target.value)}
                 />
+                {hint("clientNip")}
               </div>
               <div className="space-y-2">
                 <Label>Miejscowość</Label>
@@ -205,6 +281,7 @@ export function ProtocolForm({
                   value={formData.clientCity || ""}
                   onChange={(e) => setField("clientCity", e.target.value)}
                 />
+                {hint("clientCity")}
               </div>
               <div className="space-y-2 sm:col-span-2">
                 <Label>Adres montażu</Label>
@@ -214,6 +291,7 @@ export function ProtocolForm({
                     setField("installationAddress", e.target.value)
                   }
                 />
+                {hint("installationAddress")}
               </div>
               <div className="space-y-2">
                 <Label>Kontakt</Label>
@@ -221,6 +299,7 @@ export function ProtocolForm({
                   value={formData.contact || ""}
                   onChange={(e) => setField("contact", e.target.value)}
                 />
+                {hint("contact")}
               </div>
             </div>
           </div>
@@ -232,15 +311,19 @@ export function ProtocolForm({
               onChange={(e) => setField("activities", e.target.value)}
               rows={4}
             />
+            {hint("activities")}
           </div>
 
           <div className="space-y-2">
             <div className="flex items-center justify-between">
               <Label>Urządzenia / materiały</Label>
-              <Button type="button" variant="outline" size="sm" onClick={addItem}>
-                <Plus className="h-4 w-4 mr-1" />
-                Pozycja
-              </Button>
+              <div className="flex items-center gap-2">
+                {hint("items")}
+                <Button type="button" variant="outline" size="sm" onClick={addItem}>
+                  <Plus className="h-4 w-4 mr-1" />
+                  Pozycja
+                </Button>
+              </div>
             </div>
             <div className="space-y-2">
               {formData.items.map((it, idx) => (
@@ -374,6 +457,15 @@ export function ProtocolForm({
         onSave={onSign}
         defaultSignerName={formData.clientName || formData.contact || ""}
       />
+
+      {prefillOpen && (
+        <ProtocolPrefillDialog
+          open={prefillOpen}
+          protocol={protocol}
+          onClose={() => setPrefillOpen(false)}
+          onApplied={applyPrefill}
+        />
+      )}
     </Dialog>
   );
 }
