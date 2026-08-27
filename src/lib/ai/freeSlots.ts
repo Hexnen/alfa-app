@@ -169,6 +169,55 @@ export function computeFreeSlots(busy: BusyInterval[], opts: FreeSlotOptions): F
   return out;
 }
 
+/** Wydarzenie bez przypisanego technika (nieprzydzielona praca firmy) — skrót dla narzędzi dostępności. */
+export interface UnassignedEvent {
+  id: number;
+  type: string;
+  title: string;
+  startAt: string;
+  endAt: string;
+  allDay: boolean;
+  status: string;
+  objectName: string | null;
+  location: string | null;
+}
+
+/**
+ * Wydarzenia BEZ przypisanych techników nachodzące na [from, to) (bez usuniętych/anulowanych/urlopów).
+ * find_free_slots i check_conflicts liczą tylko przypisanych — takie wydarzenia to praca firmy,
+ * której nikt jeszcze nie wziął; model ma o nich powiedzieć przy pytaniu o dostępność.
+ */
+export function loadUnassignedEvents(from: string, to: string, limit = 20): UnassignedEvent[] {
+  return db
+    .select({
+      id: schema.calendarEvents.id,
+      type: schema.calendarEvents.type,
+      title: schema.calendarEvents.title,
+      startAt: schema.calendarEvents.startAt,
+      endAt: schema.calendarEvents.endAt,
+      allDay: schema.calendarEvents.allDay,
+      status: schema.calendarEvents.status,
+      objectName: schema.objects.name,
+      location: schema.calendarEvents.location,
+    })
+    .from(schema.calendarEvents)
+    .leftJoin(schema.objects, sql`${schema.objects.id} = ${schema.calendarEvents.objectId}`)
+    .where(
+      and(
+        isNull(schema.calendarEvents.deletedAt),
+        ne(schema.calendarEvents.status, "cancelled"),
+        ne(schema.calendarEvents.type, "urlop"),
+        lt(schema.calendarEvents.startAt, to),
+        gt(schema.calendarEvents.endAt, from),
+        sql`NOT EXISTS (SELECT 1 FROM calendar_event_assignees a WHERE a.event_id = ${schema.calendarEvents.id})`
+      )
+    )
+    .orderBy(asc(schema.calendarEvents.startAt), asc(schema.calendarEvents.id))
+    .limit(limit)
+    .all()
+    .map((r) => ({ ...r, title: r.title.replace(/\s+/g, " ").trim().slice(0, 120), objectName: r.objectName ?? null }));
+}
+
 /** Zajętość techników w zakresie [from, to) — wydarzenia i urlopy (bez usuniętych/anulowanych). */
 export function loadBusyIntervals(technicianIds: number[], from: string, to: string): BusyInterval[] {
   if (technicianIds.length === 0) return [];

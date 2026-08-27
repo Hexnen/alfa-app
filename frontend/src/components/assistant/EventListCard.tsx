@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { CalendarRange, CalendarSearch, Check, ExternalLink, Loader2, MessageSquareText, MoveRight, Sparkles, XCircle, type LucideIcon } from "lucide-react";
+import { CalendarRange, CalendarSearch, Check, ExternalLink, Loader2, MessageSquareText, MoveRight, Sparkles, UserPlus, UserX, XCircle, type LucideIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import type { AssistantBriefEvent, AssistantQuickChangeKind, AssistantShowEventsOutput, CalendarEventStatus, CalendarEventType } from "@/lib/api";
+import type { AssistantBriefEvent, AssistantQuickChangeKind, AssistantShowEventsGroupBy, AssistantShowEventsOutput, CalendarEventStatus, CalendarEventType } from "@/lib/api";
 import { EVENT_STATUS_META, EVENT_TYPE_META, EVENT_TYPE_UI, eventStatusLabel, eventTypeLabel, fmtRange, initials, notesLabel, parseLocal, statusBadgeClass } from "@/lib/calendar-labels";
 import { cn } from "@/lib/utils";
 import { ObjectPeek } from "./ObjectPeek";
@@ -16,6 +16,10 @@ export interface EventListActions {
   canEdit: boolean;
   /** Blokada (stream / zapis / trwa quick-change). */
   busy?: boolean;
+  /** Akcje „Wykonane / Anuluj / Przesuń…” (tylko karta z `suggestActions`); „Przypisz mnie” niezależne. */
+  suggest?: boolean;
+  /** Technik bieżącego użytkownika („Przypisz mnie”); null/brak = bez tej akcji. */
+  technicianId?: number | null;
   /** eventId → rodzaj wykonanej w tej sesji szybkiej akcji (przycisk oznaczony jako wykonany). */
   quickDone?: ReadonlyMap<number, AssistantQuickChangeKind>;
   /** „Wykonane” / „Anuluj” → POST /quick-change (drawer wstawia parę wiadomości albo robi fallback). */
@@ -173,8 +177,12 @@ export function EventListRows({ events, source, onOpenEvent, onPreview, actions,
         const id = e.id;
         const done = id != null ? actions?.quickDone?.get(id) : undefined;
         const isActing = id != null && acting === id;
-        const showQuick = Boolean(actions?.canEdit) && !deleted && id != null;
+        const showQuick = Boolean(actions?.canEdit) && Boolean(actions?.suggest) && !deleted && id != null;
         const disabled = Boolean(actions?.busy) || acting != null;
+        const unassigned = techs.length === 0 && !deleted;
+        const me = actions?.technicianId ?? null;
+        // „Przypisz mnie”: użytkownik ma technika, wydarzenie otwarte i jeszcze bez niego.
+        const showAssignMe = Boolean(actions?.canEdit) && me != null && !deleted && id != null && status !== "cancelled" && status !== "done" && !techs.some((t) => t.id === me);
         return (
           <li
             key={id ?? i}
@@ -215,6 +223,12 @@ export function EventListRows({ events, source, onOpenEvent, onPreview, actions,
                   {overdue && (
                     <span className="inline-flex items-center rounded-full bg-amber-100 px-1.5 py-0 text-[10px] font-medium text-amber-800 dark:bg-amber-500/20 dark:text-amber-200" data-testid="assistant-event-overdue">
                       po terminie
+                    </span>
+                  )}
+                  {unassigned && (
+                    <span className="inline-flex items-center gap-0.5 rounded-full bg-amber-100 px-1.5 py-0 text-[10px] font-medium text-amber-800 dark:bg-amber-500/20 dark:text-amber-200" data-testid="assistant-event-unassigned">
+                      <UserX className="h-3 w-3" aria-hidden />
+                      bez technika
                     </span>
                   )}
                   {deleted && (
@@ -265,6 +279,17 @@ export function EventListRows({ events, source, onOpenEvent, onPreview, actions,
                 <RowAction icon={CalendarSearch} label="Pokaż" tone="primary" onClick={() => onPreview({ ...eventRangeOf(e)!, focus: true }, source)} testId="assistant-event-show" />
               )}
               {id != null && <RowAction icon={ExternalLink} label="Otwórz" onClick={() => onOpenEvent(id)} testId="assistant-event-open" />}
+              {showAssignMe && (
+                <RowAction
+                  icon={UserPlus}
+                  label={done === "assign_me" ? "Przypisano" : "Przypisz mnie"}
+                  tone="primary"
+                  onClick={() => quick(e, "assign_me")}
+                  disabled={disabled || done === "assign_me" || isActing}
+                  pending={isActing && done !== "assign_me"}
+                  testId="assistant-event-assign-me"
+                />
+              )}
               {showQuick && actions && (
                 <>
                   {status !== "done" && (
@@ -314,13 +339,119 @@ export interface EventListCardProps {
   actions?: EventListActions;
 }
 
-/** Karta `show_events`: nagłówek (tytuł + liczba), notatka, wiersze wydarzeń. */
+// ---------------------------------------------------------------------------
+// Zestawienia (groupBy): sekcje karty
+// ---------------------------------------------------------------------------
+
+const WEEKDAY_SHORT = ["nd", "pon", "wt", "śr", "czw", "pt", "sob"];
+const pad2 = (n: number) => String(n).padStart(2, "0");
+/** „YYYY-MM-DD” → lokalna data (bez błędów strefy). */
+const dayOf = (iso: string): Date => {
+  const [y, m, d] = iso.slice(0, 10).split("-").map(Number);
+  return new Date(y, m - 1, d);
+};
+const dayKey = (d: Date) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+/** „czw 27.08” (+ „.YYYY”, gdy inny rok niż bieżący). */
+function fmtDay(iso: string, now: Date): string {
+  const d = dayOf(iso);
+  const base = `${WEEKDAY_SHORT[d.getDay()]} ${pad2(d.getDate())}.${pad2(d.getMonth() + 1)}`;
+  return d.getFullYear() === now.getFullYear() ? base : `${base}.${d.getFullYear()}`;
+}
+/** Nagłówek dnia: „Dziś · czw 27.08” / „Jutro · pt 28.08” / „pon 31.08”. */
+function dayLabel(iso: string, now: Date): string {
+  const today = dayKey(now);
+  const tomorrow = dayKey(new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1));
+  const key = iso.slice(0, 10);
+  const d = fmtDay(key, now);
+  if (key === today) return `Dziś · ${d}`;
+  if (key === tomorrow) return `Jutro · ${d}`;
+  return d;
+}
+/** Zakres do nagłówka karty: ostatni dzień = `to` − 1 dzień (to exclusive) dla samej daty / północy; dla daty z godziną — dzień `to`. */
+function fmtRangeHeader(from: string, to: string, now = new Date()): string {
+  const start = from.slice(0, 10);
+  let last = to.slice(0, 10);
+  if (to.length === 10 || /T00:00$/.test(to)) {
+    const d = dayOf(to);
+    d.setDate(d.getDate() - 1);
+    last = dayKey(d);
+  }
+  if (last < start) last = start;
+  return start === last ? fmtDay(start, now) : `${fmtDay(start, now)} – ${fmtDay(last, now)}`;
+}
+
+interface EventGroup {
+  key: string;
+  label: string;
+  events: AssistantBriefEvent[];
+}
+
+const NO_TECH = "Bez technika";
+const NO_OBJECT = "Bez obiektu";
+const collator = new Intl.Collator("pl");
+
+/** Dzieli listę na sekcje wg `groupBy` (pomijając pozycje bez sensownego klucza, np. bez daty przy `day`). */
+function groupEvents(events: AssistantBriefEvent[], groupBy: AssistantShowEventsGroupBy, range: { from: string; to: string } | null, now = new Date()): EventGroup[] {
+  const map = new Map<string, EventGroup>();
+  const push = (key: string, label: string, e: AssistantBriefEvent) => {
+    const g = map.get(key) ?? { key, label, events: [] };
+    g.events.push(e);
+    map.set(key, g);
+  };
+  if (groupBy === "day") {
+    const floor = range?.from?.slice(0, 10) ?? null;
+    for (const e of events) {
+      if (typeof e.startAt !== "string") continue;
+      let key = e.startAt.slice(0, 10);
+      // Wydarzenie trwające od przed zakresem → pierwszy dzień zakresu.
+      if (floor && key < floor) key = floor;
+      push(key, dayLabel(key, now), e);
+    }
+    return [...map.values()].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  }
+  if (groupBy === "technician") {
+    for (const e of events) {
+      const techs = techsOf(e);
+      if (techs.length === 0) push("tech:none", NO_TECH, e);
+      for (const t of techs) push(`tech:${t.id}`, t.name, e);
+    }
+    return [...map.values()].sort((a, b) => (a.key === "tech:none" ? 1 : b.key === "tech:none" ? -1 : collator.compare(a.label, b.label)));
+  }
+  if (groupBy === "object") {
+    for (const e of events) {
+      const label = e.objectName ?? e.location ?? null;
+      if (!label) push("obj:none", NO_OBJECT, e);
+      else push(`obj:${e.objectId != null ? e.objectId : label.toLowerCase()}`, label, e);
+    }
+    return [...map.values()].sort((a, b) => (a.key === "obj:none" ? 1 : b.key === "obj:none" ? -1 : collator.compare(a.label, b.label)));
+  }
+  // type: kolejność jak EVENT_TYPE_META (nieznane typy na końcu).
+  const order = Object.keys(EVENT_TYPE_META);
+  for (const e of events) {
+    const t = e.type ?? "";
+    push(`type:${t}`, eventTypeLabel(t), e);
+  }
+  const idx = (k: string) => {
+    const i = order.indexOf(k.slice("type:".length));
+    return i < 0 ? order.length : i;
+  };
+  return [...map.values()].sort((a, b) => idx(a.key) - idx(b.key));
+}
+
+/** Karta `show_events`: nagłówek (tytuł + liczba + zakres), notatka, wiersze wydarzeń — płasko albo w sekcjach (`groupBy`). */
 export function EventListCard({ toolCallId, output, onOpenEvent, onPreview, actions }: EventListCardProps) {
   const title = output.title || "Wydarzenia";
   const count = output.count || output.events.length;
   const missing = output.missing?.length ?? 0;
+  const now = useMemo(() => new Date(), []);
+  const rowActions: EventListActions | undefined = actions ? { ...actions, suggest: output.suggestActions } : undefined;
+  const groups = useMemo(
+    () => (output.groupBy && output.events.length > 0 ? groupEvents(output.events, output.groupBy, output.range ?? null, now) : null),
+    [output.groupBy, output.events, output.range, now]
+  );
+  const rangeLabel = output.range ? fmtRangeHeader(output.range.from, output.range.to, now) : "";
   return (
-    <div className="rounded-lg border bg-background text-sm shadow-sm" role="group" aria-label={`${title} (${count})`} data-testid="assistant-event-list" data-toolcall={toolCallId}>
+    <div className="rounded-lg border bg-background text-sm shadow-sm" role="group" aria-label={`${title} (${count})`} data-testid="assistant-event-list" data-toolcall={toolCallId} data-group-by={output.groupBy ?? undefined}>
       <div className="flex items-start gap-2 px-3 pt-2.5 pb-1.5">
         <CalendarSearch className="mt-0.5 h-4 w-4 shrink-0 text-primary" aria-hidden />
         <div className="min-w-0 flex-1">
@@ -330,12 +461,29 @@ export function EventListCard({ toolCallId, output, onOpenEvent, onPreview, acti
               {count}
             </span>
           </div>
+          {rangeLabel && (
+            <p className="mt-0.5 text-xs tabular-nums text-muted-foreground" data-testid="assistant-event-list-range">
+              {rangeLabel}
+            </p>
+          )}
           {output.note && <p className="mt-0.5 text-xs text-muted-foreground">{output.note}</p>}
           {missing > 0 && <p className="mt-0.5 text-xs text-muted-foreground">Nie znaleziono: #{output.missing!.join(", #")}</p>}
         </div>
       </div>
       {output.events.length === 0 ? (
         <p className="border-t px-3 py-2 text-xs text-muted-foreground">Brak wydarzeń do pokazania.</p>
+      ) : groups ? (
+        <div className="border-t">
+          {groups.map((g) => (
+            <section key={g.key} data-testid="assistant-event-group" data-group-key={g.key} aria-label={`${g.label} (${g.events.length})`}>
+              <div className="flex items-center gap-1.5 border-b bg-muted/40 px-3 py-1 text-xs font-medium">
+                <span className="min-w-0 truncate">{g.label}</span>
+                <span className="shrink-0 rounded-full bg-muted px-1.5 text-[10px] tabular-nums text-muted-foreground">{g.events.length}</span>
+              </div>
+              <EventListRows events={g.events} source={`events:${toolCallId}`} toolCallId={toolCallId} onOpenEvent={onOpenEvent} onPreview={onPreview} actions={rowActions} className="border-b last:border-b-0" />
+            </section>
+          ))}
+        </div>
       ) : (
         <EventListRows
           events={output.events}
@@ -343,7 +491,7 @@ export function EventListCard({ toolCallId, output, onOpenEvent, onPreview, acti
           toolCallId={toolCallId}
           onOpenEvent={onOpenEvent}
           onPreview={onPreview}
-          actions={output.suggestActions ? actions : undefined}
+          actions={rowActions}
           className="border-t"
         />
       )}

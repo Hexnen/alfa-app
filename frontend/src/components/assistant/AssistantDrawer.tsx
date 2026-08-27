@@ -313,6 +313,7 @@ export function AssistantDrawer({ onClose, onEventsChanged, onEditProposal, onEd
           maxChars={status?.messageMaxChars && status.messageMaxChars > 0 ? status.messageMaxChars : DEFAULT_MAX_CHARS}
           escRef={escRef}
           canEdit={canEditCalendar}
+          technicianId={status?.technicianId ?? null}
           onChatCreated={onChatCreated}
           onEventsChanged={onEventsChanged}
           onEditProposal={onEditProposal}
@@ -343,6 +344,7 @@ function ChatSession({
   maxChars,
   escRef,
   canEdit,
+  technicianId,
   onChatCreated,
   onEventsChanged,
   onEditProposal,
@@ -359,6 +361,8 @@ function ChatSession({
   escRef: React.MutableRefObject<(() => boolean) | null>;
   /** Edit do technical/kalendarz — szybkie akcje na karcie listy wydarzeń. */
   canEdit: boolean;
+  /** Technik bieżącego użytkownika (GET /assistant/status) — „Przypisz mnie”. */
+  technicianId: number | null;
   onChatCreated: (c: AssistantChat) => void;
   onEventsChanged: AssistantDrawerProps["onEventsChanged"];
   onEditProposal: AssistantDrawerProps["onEditProposal"];
@@ -781,6 +785,7 @@ function ChatSession({
       confirm: (id, t) => `Potwierdź wydarzenie #${id}${t ? ` „${t}”` : ""}`,
       restore: (id, t) => `Przywróć wydarzenie #${id}${t ? ` „${t}”` : ""}`,
       delete: (id, t) => `Usuń wydarzenie #${id}${t ? ` „${t}”` : ""}`,
+      assign_me: (id, t) => `Przypisz mnie do wydarzenia #${id}${t ? ` „${t}”` : ""}`,
     }),
     []
   );
@@ -922,6 +927,7 @@ function ChatSession({
           onQuickChange={onQuickChange}
           onSendText={send}
           canEdit={canEdit}
+          technicianId={technicianId}
           quickDone={quickDone}
           onContinue={onContinue}
           onRetry={onRetry}

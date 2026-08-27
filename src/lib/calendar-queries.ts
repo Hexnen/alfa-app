@@ -54,6 +54,37 @@ export function techName(t: { firstName: string; lastName: string }): string {
   return `${t.firstName} ${t.lastName}`.trim();
 }
 
+const foldName = (s: string) => s.normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim();
+
+/**
+ * Technik odpowiadający zalogowanemu użytkownikowi (asystent: „ja/mnie/jestem” = ten technik).
+ * Dopasowanie po `users.displayName` ↔ „imię nazwisko” technika (bez rozróżniania wielkości liter,
+ * także „nazwisko imię”). Gdy displayName to samo imię — jedyny AKTYWNY technik o tym imieniu.
+ * Brak / niejednoznaczne → null.
+ */
+export function findTechnicianForUser(user: { displayName?: string | null }, dbx: DbOrTx = db): TechnicianBrief | null {
+  const raw = foldName(user.displayName || "");
+  if (!raw) return null;
+  const techs = dbx
+    .select({ id: schema.technicians.id, firstName: schema.technicians.firstName, lastName: schema.technicians.lastName, active: schema.technicians.active })
+    .from(schema.technicians)
+    .all();
+  const brief = (t: (typeof techs)[number]): TechnicianBrief => ({ id: t.id, name: techName(t), active: t.active });
+  const full = techs.filter((t) => {
+    const f = foldName(t.firstName);
+    const l = foldName(t.lastName);
+    return raw === foldName(`${f} ${l}`) || (l !== "" && raw === foldName(`${l} ${f}`));
+  });
+  if (full.length === 1) return brief(full[0]);
+  if (full.length > 1) {
+    const active = full.filter((t) => t.active);
+    return active.length === 1 ? brief(active[0]) : null;
+  }
+  if (raw.includes(" ")) return null;
+  const byFirst = techs.filter((t) => t.active && foldName(t.firstName) === raw);
+  return byFirst.length === 1 ? brief(byFirst[0]) : null;
+}
+
 /**
  * Wszyscy technicy (aktywni najpierw, potem po nazwisku) w kształcie dla promptu
  * i narzędzi asystenta. Nazwa historyczna: lista zawiera też nieaktywnych (flaga `active`),

@@ -33,7 +33,7 @@ import {
   type Change,
   type ResolvedChange,
 } from "./calendarChanges.js";
-import { addDays, computeFreeSlots, loadBusyIntervals, localNow } from "./freeSlots.js";
+import { addDays, computeFreeSlots, loadBusyIntervals, loadUnassignedEvents, localNow, type UnassignedEvent } from "./freeSlots.js";
 
 export { PROPOSAL_TITLE_MAX };
 
@@ -68,6 +68,24 @@ const GET_EVENT_NOTES = 10;
 const NOTE_CLIP = 300;
 /** Limit wydarzeń w jednej karcie show_events. */
 const SHOW_EVENTS_MAX = 30;
+/** Grupowanie karty show_events; domyślnie „day”, gdy > SHOW_EVENTS_GROUP_MIN wydarzeń albo zakres > 1 dnia. */
+export const SHOW_EVENTS_GROUP_BY = ["day", "technician", "object", "type"] as const;
+export type ShowEventsGroupBy = (typeof SHOW_EVENTS_GROUP_BY)[number];
+const SHOW_EVENTS_GROUP_MIN = 3;
+
+/** Wydarzenia bez technika w [from, to) + zdanie dla modelu (dostępność ≠ brak pracy do wzięcia). */
+function unassignedInfo(from: string, to: string): { unassignedEvents: UnassignedEvent[]; note?: string } {
+  const unassignedEvents = loadUnassignedEvents(from, to);
+  if (unassignedEvents.length === 0) return { unassignedEvents };
+  const list = unassignedEvents
+    .slice(0, 3)
+    .map((e) => `„${e.title}” ${e.allDay ? e.startAt.slice(0, 10) : e.startAt.replace("T", " ")}`)
+    .join(", ");
+  return {
+    unassignedEvents,
+    note: `${unassignedEvents.length} wydarzeń BEZ przypisanego technika w tym zakresie (${list}${unassignedEvents.length > 3 ? ", …" : ""}) — to nieprzydzielona praca firmy: powiedz o tym wprost i zaproponuj przypisanie (propose_changes update technicianIds).`,
+  };
+}
 
 /** Etykiety pól zod → czytelny komunikat dla modelu (PL, krótko, bez stacka). */
 function formatIssue(issue: z.core.$ZodIssue): string {
@@ -550,12 +568,15 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
           .map((r) => r.id);
         const truncated = ids.length > LIST_EVENTS_LIMIT;
         const events = loadEvents(db, ids.slice(0, LIST_EVENTS_LIMIT)).map(briefEvent);
+        // Grafik JEDNEGO technika: pusta lista ≠ „nic do roboty” — dołączamy wydarzenia bez technika w tym oknie.
+        const unassigned = technicianId != null ? unassignedInfo(from, to) : {};
         return {
           events,
           count: events.length,
           truncated,
           from,
           to,
+          ...unassigned,
           ...(truncatedRange
             ? { truncatedRange: true as const, note: `Zakres ${span} dni przycięto do limitu ${cfg.maxHorizonDays} dni (do ${to}). Do szukania konkretnego wydarzenia użyj search_events.` }
             : {}),
@@ -669,7 +690,7 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
     }),
 
     show_events: lenientTool("show_events", {
-      description: "Interaktywna karta z listą wydarzeń (zamiast listy tekstem). suggestActions dla zaległych/do rozliczenia.",
+      description: "Interaktywna karta-ZESTAWIENIE wydarzeń (zamiast tabeli/listy tekstem); groupBy = sekcje (dzień/technik/obiekt/typ), range = zakres w nagłówku. suggestActions dla zaległych/do rozliczenia.",
       inputSchema: z.object({
         eventIds: z
           .array(zId)
@@ -680,8 +701,11 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
         title: z.string().trim().max(80).optional().describe("nagłówek karty"),
         note: z.string().trim().max(300).optional(),
         suggestActions: z.boolean().optional(),
+        groupBy: z.enum(SHOW_EVENTS_GROUP_BY).optional().describe("sekcje karty; domyślnie day gdy >3 wydarzeń lub zakres >1 dnia"),
+        range: z.object({ from: zDateOrDt, to: zDateOrDt.describe("exclusive") }).optional().describe("zakres przeglądu do nagłówka (jak w list_events)"),
       }),
-      execute: async ({ eventIds, title, note, suggestActions }) => {
+      execute: async ({ eventIds, title, note, suggestActions, groupBy, range }) => {
+        if (range && range.to <= range.from) return { error: "range.to musi być późniejsze niż range.from" };
         // loadEvents zwraca też usunięte (soft-delete) — pokazujemy je z deleted:true.
         const loaded = loadEvents(db, eventIds);
         const found = new Set(loaded.map((e) => e.id));
@@ -689,12 +713,20 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
         const events = [...loaded]
           .sort((a, b) => (a.startAt < b.startAt ? -1 : a.startAt > b.startAt ? 1 : a.id - b.id))
           .map((e) => ({ ...briefEvent(e), deleted: e.deletedAt != null }));
+        // Domyślne grupowanie po dniu: więcej niż kilka wydarzeń albo przegląd dłuższy niż dzień
+        // (zakres z range albo rozrzut dat wydarzeń).
+        const days = new Set(events.map((e) => e.startAt.slice(0, 10)));
+        const multiDay = (range ? spanDays(range.from, range.to) > 1 : false) || days.size > 1;
+        const effectiveGroupBy: ShowEventsGroupBy | null = groupBy ?? (events.length > SHOW_EVENTS_GROUP_MIN || multiDay ? "day" : null);
         return {
           events,
           title: title || null,
           note: note || null,
           count: events.length,
           suggestActions: Boolean(suggestActions),
+          groupBy: effectiveGroupBy,
+          range: range ?? null,
+          unassignedCount: events.filter((e) => !e.deleted && e.technicians.length === 0 && e.type !== "urlop").length,
           ...(missing.length ? { missing } : {}),
         };
       },
@@ -725,7 +757,9 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
             .filter((t) => technicianIds.includes(t.id))
             .map((t) => ({ id: t.id, name: techName(t) })),
         }));
-        return { conflicts, count: conflicts.length };
+        // Wydarzenia bez technika w tym oknie nie kolidują z nikim — ale to praca, której nikt nie wziął.
+        const unassigned = unassignedInfo(startAt, endAt);
+        return { conflicts, count: conflicts.length, ...unassigned };
       },
     }),
 
@@ -775,10 +809,15 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
           ...s,
           freeTechnicians: s.technicianIds.map((id) => ({ id, name: names.get(id) ?? `#${id}` })),
         }));
+        // Wydarzenia bez technika: sloty ich nie widzą (liczymy tylko przypisanych) — dla pytań
+        // „czy jestem wolny?” to kluczowa informacja. Zakres: od `from` do końca dnia ostatniego slotu
+        // (albo pierwszego dnia horyzontu, gdy slotów brak).
+        const lastDay = out.length ? out[out.length - 1].startAt.slice(0, 10) : from;
+        const unassigned = unassignedInfo(from, addDays(lastDay, 1));
         if (out.length === 0) {
-          return { slots: out, note: `Brak wolnego okna ${input.durationHours} h w ciągu ${horizonDays} dni od ${from} (${earliest}–${latest})` };
+          return { slots: out, note: `Brak wolnego okna ${input.durationHours} h w ciągu ${horizonDays} dni od ${from} (${earliest}–${latest})`, unassignedEvents: unassigned.unassignedEvents };
         }
-        return { slots: out, mode: anyMode ? ("any" as const) : ("all" as const) };
+        return { slots: out, mode: anyMode ? ("any" as const) : ("all" as const), ...unassigned };
       },
     }),
 

@@ -6,6 +6,7 @@ import type {
   AssistantConflict,
   AssistantProposalOutput,
   AssistantResolvedChange,
+  AssistantShowEventsGroupBy,
   AssistantShowEventsOutput,
 } from "@/lib/api";
 
@@ -201,6 +202,8 @@ export function eventsOf(p: ToolPart): AssistantBriefEvent[] {
   return o.events.filter((e): e is AssistantBriefEvent => Boolean(e) && typeof e === "object" && typeof (e as { id?: unknown }).id === "number");
 }
 
+const GROUP_BY = new Set<AssistantShowEventsGroupBy>(["day", "technician", "object", "type"]);
+
 /** Wynik `show_events` znormalizowany do karty (albo null — inne narzędzie / błąd / brak wyniku). */
 export function showEventsOf(p: ToolPart): AssistantShowEventsOutput | null {
   if (toolName(p) !== "show_events" || p.state !== "output-available") return null;
@@ -216,6 +219,8 @@ export function showEventsOf(p: ToolPart): AssistantShowEventsOutput | null {
     count: typeof o.count === "number" ? o.count : events.length,
     suggestActions: Boolean(o.suggestActions),
     missing: Array.isArray(o.missing) ? o.missing.filter((x): x is number => typeof x === "number") : undefined,
+    groupBy: GROUP_BY.has(o.groupBy as AssistantShowEventsGroupBy) ? (o.groupBy as AssistantShowEventsGroupBy) : null,
+    range: o.range && typeof o.range === "object" && typeof o.range.from === "string" && typeof o.range.to === "string" ? { from: o.range.from, to: o.range.to } : null,
   };
 }
 

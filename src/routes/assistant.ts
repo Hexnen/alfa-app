@@ -61,7 +61,7 @@ import { assembleSystemPrompt, localToday, PROPOSAL_INTENT_RE } from "../lib/ai/
 import { randomBytes } from "node:crypto";
 import { buildCalendarActions, buildCalendarTools, zChoiceAction, type ChoiceAction, type ChoiceOption } from "../lib/ai/calendarTools.js";
 import { estimateTokens, trimHistoryToBudget } from "../lib/ai/context.js";
-import { listActiveTechnicians, type CalendarEventJson } from "../lib/calendar-queries.js";
+import { findTechnicianForUser, listActiveTechnicians, loadEvent, type CalendarEventJson } from "../lib/calendar-queries.js";
 import { ApiError } from "../lib/calendar-labels.js";
 import { applyChange, CHANGES_MAX, zChange, type Change } from "../lib/ai/calendarChanges.js";
 import { localNow } from "../lib/ai/freeSlots.js";
@@ -186,13 +186,14 @@ function summarizeToolPart(p: StoredPart): string {
 }
 
 /** Szybkie akcje z karty show_events (POST /chats/:id/quick-change). */
-export type QuickChangeKind = "done" | "cancel" | "confirm" | "restore" | "delete";
+export type QuickChangeKind = "done" | "cancel" | "confirm" | "restore" | "delete" | "assign_me";
 const QUICK_LABELS: Record<QuickChangeKind, string> = {
   done: "Wykonane",
   cancel: "Anulowanie",
   confirm: "Potwierdzenie",
   restore: "Przywrócenie",
   delete: "Usunięcie",
+  assign_me: "Przypisz mnie",
 };
 const QUICK_VERBS: Record<QuickChangeKind, string> = {
   done: "oznaczył jako wykonane",
@@ -200,6 +201,7 @@ const QUICK_VERBS: Record<QuickChangeKind, string> = {
   confirm: "potwierdził",
   restore: "przywrócił",
   delete: "usunął",
+  assign_me: "przypisał siebie do",
 };
 
 /**
@@ -343,6 +345,8 @@ app.get("/status", (c) => {
       configured,
       enabled,
       allowed: hasAssistantAccess(user),
+      /** Technik odpowiadający użytkownikowi (front: „Przypisz mnie” na kartach wydarzeń); null = brak dopasowania. */
+      technicianId: findTechnicianForUser(user)?.id ?? null,
       model: cfg.values.model,
       keySource: source,
       ...(reason ? { reason } : {}),
@@ -608,14 +612,27 @@ app.post("/chats/:id/choose", async (c) => {
 // Szybka akcja z karty show_events — karta zmiany bez tury modelu (POST /chats/:id/quick-change)
 // ---------------------------------------------------------------------------
 
-const QUICK_KINDS: readonly QuickChangeKind[] = ["done", "cancel", "confirm", "restore", "delete"];
+const QUICK_KINDS: readonly QuickChangeKind[] = ["done", "cancel", "confirm", "restore", "delete", "assign_me"];
 const QUICK_NOTE_MAX = 1000;
 /** Change.reason ma limit 300 (zChange) — dłuższa notatka jest przycinana. */
 const REASON_MAX = 300;
 
-/** Szybka akcja → pozycja Change (jak w propose_changes). */
-function quickChangeOf(kind: QuickChangeKind, eventId: number, note: string | undefined): Change {
+/**
+ * Szybka akcja → pozycja Change (jak w propose_changes). `assign_me` = update technicianIds
+ * (pełna lista + technik użytkownika); zwraca `{ error }`, gdy użytkownik nie jest technikiem,
+ * wydarzenie nie istnieje albo już jest przypisany.
+ */
+function quickChangeOf(kind: QuickChangeKind, eventId: number, note: string | undefined, user: User): Change | { error: string } {
   const reason = note ? note.slice(0, REASON_MAX) : undefined;
+  if (kind === "assign_me") {
+    const me = findTechnicianForUser(user);
+    if (!me) return { error: "Twoje konto nie odpowiada żadnemu technikowi z listy — przypisz technika ręcznie" };
+    const ev = loadEvent(db, eventId);
+    if (!ev || ev.deletedAt) return { error: `Wydarzenie #${eventId} nie istnieje` };
+    const current = ev.technicians.map((t) => t.id);
+    if (current.includes(me.id)) return { error: `${me.name} jest już przypisany do „${ev.title}”` };
+    return { kind: "update", eventId, patch: { technicianIds: [...current, me.id] }, ...(reason ? { reason } : {}) };
+  }
   switch (kind) {
     case "done":
       return { kind: "status", eventId, status: "done", ...(note ? { note } : {}) };
@@ -659,7 +676,8 @@ app.post("/chats/:id/quick-change", async (c) => {
   const turn = reserveTurn(chat.id);
   if (!turn) return c.json({ success: false, code: "busy", error: BUSY_MESSAGE }, 409);
   try {
-    const change = quickChangeOf(kind, eventId, note || undefined);
+    const change = quickChangeOf(kind, eventId, note || undefined, user);
+    if ("error" in change) return c.json({ success: false, code: "invalid", error: change.error }, 400);
     const output = buildCalendarActions(conf).resolveChangesPreview([change]);
     const resolved = output.changes[0];
     if (resolved?.error) return c.json({ success: false, code: "invalid", error: resolved.error }, 400);
@@ -984,6 +1002,10 @@ app.post("/chats/:id/message", async (c) => {
     const system = assembleSystemPrompt({
       ...localToday(),
       user: { displayName: user.displayName || user.email },
+      currentUser: (() => {
+        const t = findTechnicianForUser(user);
+        return t ? { name: t.name, technicianId: t.id } : null;
+      })(),
       technicians: listActiveTechnicians(),
       types: CALENDAR_EVENT_TYPES,
       statuses: CALENDAR_EVENT_STATUSES,

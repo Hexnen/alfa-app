@@ -2643,6 +2643,8 @@ export interface AssistantStatus {
   /** Maksymalna długość wiadomości użytkownika (znaki); brak → 4000. */
   messageMaxChars?: number;
   turnTimeoutMs?: number;
+  /** Technik dopasowany do bieżącego użytkownika (imię i nazwisko) — „Przypisz mnie”; null gdy brak. */
+  technicianId?: number | null;
 }
 
 export interface AssistantChat {
@@ -2716,10 +2718,16 @@ export interface AssistantShowEventsOutput {
   suggestActions: boolean;
   /** Id z wejścia, których nie znaleziono. */
   missing?: number[];
+  /** Zestawienie: sekcje karty (null = płaska lista). */
+  groupBy?: AssistantShowEventsGroupBy | null;
+  /** Zakres zestawienia do nagłówka (`to` exclusive). */
+  range?: { from: string; to: string } | null;
 }
 
-/** Szybka akcja z karty listy wydarzeń (POST /assistant/chats/:id/quick-change). */
-export type AssistantQuickChangeKind = "done" | "cancel" | "confirm" | "restore" | "delete";
+export type AssistantShowEventsGroupBy = "day" | "technician" | "object" | "type";
+
+/** Szybka akcja z karty listy wydarzeń (POST /assistant/chats/:id/quick-change). `assign_me` = dopisz mnie do techników. */
+export type AssistantQuickChangeKind = "done" | "cancel" | "confirm" | "restore" | "delete" | "assign_me";
 
 export interface AssistantQuickChangeBody {
   eventId: number;

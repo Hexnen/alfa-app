@@ -9,8 +9,8 @@
 import { db, schema } from "../src/db/index.js";
 import { eq, like } from "drizzle-orm";
 import { buildCalendarTools, escapeLike, PROPOSAL_TITLE_MAX } from "../src/lib/ai/calendarTools.js";
-import { PROPOSAL_INTENT_RE } from "../src/lib/ai/calendarPrompt.js";
-import { listActiveTechnicians } from "../src/lib/calendar-queries.js";
+import { assembleSystemPrompt, PROPOSAL_INTENT_RE } from "../src/lib/ai/calendarPrompt.js";
+import { findTechnicianForUser, listActiveTechnicians } from "../src/lib/calendar-queries.js";
 import type { User } from "../src/db/schema.js";
 
 let failures = 0;
@@ -277,6 +277,73 @@ try {
     } finally {
       db.delete(schema.calendarEvents).where(like(schema.calendarEvents.title, `${PREFIX}%`)).run();
     }
+  }
+
+  // show_events: groupBy / range (zestawienia)
+  {
+    const mk = (title: string, day: number, techId?: number) => {
+      const id = db
+        .insert(schema.calendarEvents)
+        .values({ type: "serwis", title: `${PREFIX} ${title}`, startAt: `${shift(day)}T08:00`, endAt: `${shift(day)}T10:00`, allDay: false, status: "planned" })
+        .returning({ id: schema.calendarEvents.id })
+        .get().id;
+      if (techId != null) db.insert(schema.calendarEventAssignees).values({ eventId: id, technicianId: techId }).run();
+      return id;
+    };
+    const g1 = mk("G1", 1, tid);
+    const g2 = mk("G2", 1);
+    const g3 = mk("G3", 3);
+    try {
+      type Grouped = { groupBy: string | null; range: { from: string; to: string } | null; unassignedCount: number; error?: string };
+      const s1 = (await exec(tools.show_events, { eventIds: [g1, g2] })) as Grouped;
+      ok("show_events: 2 wydarzenia tego samego dnia bez range → groupBy null, range null", s1.groupBy === null && s1.range === null, s1);
+      const s2 = (await exec(tools.show_events, { eventIds: [g1, g2, g3] })) as Grouped;
+      ok("show_events: wydarzenia z 2 dni → domyślnie groupBy day", s2.groupBy === "day", s2);
+      const s3 = (await exec(tools.show_events, { eventIds: [g1], range: { from: shift(0), to: shift(7) } })) as Grouped;
+      ok("show_events: range > 1 dnia → domyślnie day, range przekazany", s3.groupBy === "day" && s3.range?.from === shift(0) && s3.range?.to === shift(7), s3);
+      const s4 = (await exec(tools.show_events, { eventIds: [g1, g2], groupBy: "technician" })) as Grouped;
+      ok("show_events: jawne groupBy technician; unassignedCount = 1", s4.groupBy === "technician" && s4.unassignedCount === 1, s4);
+      const s5 = (await exec(tools.show_events, { eventIds: [g1], groupBy: "week" })) as Grouped;
+      ok("show_events: groupBy spoza enum → błąd walidacji", typeof s5.error === "string" && /groupBy/.test(s5.error), s5);
+      const s6 = (await exec(tools.show_events, { eventIds: [g1], range: { from: shift(3), to: shift(1) } })) as Grouped;
+      ok("show_events: range.to <= from → error", typeof s6.error === "string", s6);
+
+      // unassignedEvents: find_free_slots / check_conflicts / list_events(technicianId) widzą G2 (bez technika), nie G1
+      type Unassigned = { unassignedEvents?: { id: number }[]; note?: string };
+      const u1 = (await exec(tools.check_conflicts, { startAt: `${shift(1)}T08:00`, endAt: `${shift(1)}T12:00`, technicianIds: [tid] })) as Unassigned & { conflicts: unknown[] };
+      ok("check_conflicts: unassignedEvents zawiera wydarzenie bez technika + note", !!u1.unassignedEvents?.some((e) => e.id === g2) && !u1.unassignedEvents.some((e) => e.id === g1) && /bez przypisanego technika/i.test(u1.note ?? ""), u1);
+      const u2 = (await exec(tools.check_conflicts, { startAt: `${shift(3)}T12:00`, endAt: `${shift(3)}T14:00`, technicianIds: [tid] })) as Unassigned;
+      ok("check_conflicts: okno bez wydarzeń bez technika → unassignedEvents [] i bez note", Array.isArray(u2.unassignedEvents) && u2.unassignedEvents.length === 0 && u2.note === undefined, u2);
+      const u3 = (await exec(tools.find_free_slots, { technicianIds: [tid], durationHours: 1, from: shift(1), horizonDays: 1, limit: 1 })) as Unassigned & { slots: unknown[] };
+      ok("find_free_slots: unassignedEvents z dnia slotu", !!u3.unassignedEvents?.some((e) => e.id === g2), u3);
+      const u4 = (await exec(tools.list_events, { from: shift(1), to: shift(2), technicianId: tid })) as Unassigned & { events: { id: number }[] };
+      ok("list_events z technicianId: events tylko G1, unassignedEvents = G2", u4.events.some((e) => e.id === g1) && !u4.events.some((e) => e.id === g2) && !!u4.unassignedEvents?.some((e) => e.id === g2), u4);
+      const u5 = (await exec(tools.list_events, { from: shift(1), to: shift(2) })) as Unassigned & { events: { id: number }[] };
+      ok("list_events bez technicianId: G1 i G2 w events, bez unassignedEvents", u5.events.some((e) => e.id === g2) && u5.unassignedEvents === undefined, u5);
+    } finally {
+      db.delete(schema.calendarEventAssignees).where(eq(schema.calendarEventAssignees.eventId, g1)).run();
+      db.delete(schema.calendarEvents).where(like(schema.calendarEvents.title, `${PREFIX}%`)).run();
+    }
+  }
+
+  // findTechnicianForUser (currentUser w prompcie / „Przypisz mnie”)
+  {
+    const full = techs[0]?.name ?? "";
+    const [first, ...rest] = full.split(" ");
+    const f1 = findTechnicianForUser({ displayName: full });
+    ok(`findTechnicianForUser: pełne imię i nazwisko („${full}”) → id ${tid}`, f1?.id === tid, f1);
+    const f2 = findTechnicianForUser({ displayName: `${rest.join(" ")} ${first}`.toUpperCase() });
+    ok("findTechnicianForUser: „NAZWISKO IMIĘ” (bez wielkości liter) → to samo id", f2?.id === tid, f2);
+    const sameFirst = techs.filter((t) => t.name.split(" ")[0].toLowerCase() === first.toLowerCase()).length;
+    const f3 = findTechnicianForUser({ displayName: first });
+    ok(`findTechnicianForUser: samo imię („${first}”) → ${sameFirst === 1 ? "jedyny aktywny" : "niejednoznaczne → null"}`, sameFirst === 1 ? f3?.id === tid : f3 === null, f3);
+    ok("findTechnicianForUser: obcy displayName → null", findTechnicianForUser({ displayName: "Nikt Taki Nieistniejący" }) === null);
+    ok("findTechnicianForUser: pusty → null", findTechnicianForUser({ displayName: "" }) === null);
+    const prompt = assembleSystemPrompt({ today: "2026-08-27", weekday: "czwartek", user: { displayName: full }, currentUser: { name: full, technicianId: tid }, technicians: techs });
+    ok("prompt: currentUser → zdanie „Użytkownik jest technikiem <id>:<name>”", prompt.includes(`Użytkownik jest technikiem ${tid}:${full}`), prompt.slice(0, 400));
+    const prompt2 = assembleSystemPrompt({ today: "2026-08-27", weekday: "czwartek", user: { displayName: "x" }, currentUser: null, technicians: techs });
+    ok("prompt: currentUser null → zdanie o braku dopasowania", /nie odpowiada żadnemu technikowi/.test(prompt2));
+    ok("prompt: reguła 12a o unassignedEvents i zakaz tabel (14)", /unassignedEvents/.test(prompt) && /ZAKAZ tabel/.test(prompt));
   }
 
   // check_conflicts

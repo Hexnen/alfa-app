@@ -33,6 +33,8 @@ export interface PromptContext {
   /** Dzień tygodnia po polsku (np. "wtorek"). */
   weekday: string;
   user: { displayName: string };
+  /** Technik odpowiadający zalogowanemu użytkownikowi („ja/mnie/jestem”); null = brak dopasowania. */
+  currentUser?: { name: string; technicianId: number | null } | null;
   technicians: { id: number; name: string; active: boolean }[];
   types?: readonly string[];
   statuses?: readonly string[];
@@ -93,7 +95,7 @@ export function assembleSystemPrompt(ctx: PromptContext): string {
     `1. Propozycja wymaga: typu, daty, godzin, obiektu (typy wyjazdowe: ${OUTBOUND_TYPES.join(", ")}) i techników. Komplet → \`propose_event\` w TEJ turze (zapowiedź „składam propozycję” bez wywołania = BŁĄD). Brak danych → JEDNO pytanie na turę (obiekt → termin → technik); nie pytaj o to, co już podano (odpowiedź z przycisków to zwykła wiadomość = wybór); nie wymyślaj danych.`
   );
   rules.push(
-    "2. Kroki pośrednie (szukanie obiektu/technika, kolizje, sloty) BEZ tekstu. Tekst tylko w kroku końcowym: pytanie, maks. 1 zdanie przed `ask_choice`/`propose_event`, odpowiedź o grafik. Nie opisuj działań („Sprawdzam…”, „Brak kolizji — składam…”)."
+    "2. Kroki pośrednie (szukanie obiektu/technika, kolizje, sloty) BEZ tekstu. Tekst tylko w kroku końcowym: pytanie, maks. 1 zdanie przed `ask_choice`/`propose_event`, odpowiedź o grafik. Nie opisuj działań („Sprawdzam…”, „Brak kolizji — składam…”). Pytanie o grafik / dostępność / zaległości / „co do zrobienia” → NIE pisz odpowiedzi PRZED narzędziem (najwyżej jedno słowo „Sprawdzam.”) — nic z pamięci, treść wyłącznie z wyników narzędzi w TEJ turze."
   );
   rules.push(
     `3. Data najpierw: termin nieistniejący (30 lutego) lub miniony (dziś ${today}) → w tej turze TYLKO pytanie o datę, bez narzędzi. Niejednoznaczna data względna → w propozycji podaj konkretną datę.`
@@ -126,8 +128,11 @@ export function assembleSystemPrompt(ctx: PromptContext): string {
   rules.push("11. Tytuł maks. 80 znaków, np. „Serwis — Magazyn Centralny”, „Urlop — Wojtek Brodzicki”.");
   rules.push(
     listEvents
-      ? `12. Grafik w oknie („co ma Wojtek w przyszłym tygodniu?”) → \`list_events\` (filtr technika/obiektu)${showEvents ? " + `show_events`" : " i zwięzła lista (data, godziny, typ, tytuł, obiekt)"}. Zakres maks. ${r.maxHorizonDays} dni — dłuższy jest przycinany (\`truncatedRange\`), NIE ponawiaj z krótszym.${freeSlots ? " „Kto jest wolny?” / wolne terminy → `find_free_slots` (technicianIds: []), nie `list_events` per osoba." : ""}`
+      ? `12. PRZEGLĄD („co na dziś / jutro / w tym tygodniu / na teraz i przyszły tydzień”, „co do zrobienia”, „grafik Wojtka”) → DOKŁADNIE JEDNO \`list_events\` na CAŁY zakres (od teraz do końca zakresu; „na teraz i przyszły tydzień” = od ${today} do niedzieli przyszłego tygodnia włącznie; filtr technika/obiektu gdy o kogoś/coś pytano)${showEvents ? " → `show_events` z WSZYSTKIMI id, `groupBy` (\"day\" dla zakresów, \"technician\" gdy pytanie „kto co robi”, \"object\"/\"type\" na życzenie) i `range` {from, to} jak w list_events" : " i zwięzła lista (data, godziny, typ, tytuł, obiekt)"}. Zakres maks. ${r.maxHorizonDays} dni — dłuższy jest przycinany (\`truncatedRange\`), NIE ponawiaj z krótszym.${freeSlots ? " „Kto jest wolny?” / wolne terminy → `find_free_slots` (technicianIds: []), nie `list_events` per osoba." : ""}`
       : "12. Brak narzędzia grafiku — na pytania o grafik odpowiedz, że podgląd jest w kalendarzu."
+  );
+  rules.push(
+    `12a. DOSTĘPNOŚĆ („czy jestem / czy Wojtek jest dziś wolny/dostępny?”) → ${listEvents ? "`list_events` {technicianId, from: dzień, to: dzień+1}" : "sprawdzenie grafiku"}${freeSlots ? " (konkretna długość/godziny → `find_free_slots`)" : ""}. Wynik ma \`unassignedEvents\`/\`note\` = wydarzenia BEZ technika w tym oknie: to nieprzydzielona praca firmy, NIE „wolne” — powiedz o nich wprost („formalnie wolny, ale dziś jest całodniowa konserwacja bez przypisanego technika”) i zaproponuj przypisanie${changes ? " (`propose_changes` update {technicianIds: [id]} po zgodzie albo od razu, gdy użytkownik prosi „przypisz mnie”)" : ""}; bez nich — 1 zdanie o dostępności.`
   );
   if (search) {
     rules.push(
@@ -136,7 +141,7 @@ export function assembleSystemPrompt(ctx: PromptContext): string {
   }
   if (showEvents) {
     rules.push(
-      "14. LISTA WYDARZEŃ = KARTA: odpowiedź z listą wydarzeń (przegląd dnia/tygodnia, zaległości, ≥1 wynik wyszukiwania) → `show_events` z ich `id`, `title` = nagłówek („Wtorek 01.09”); potem 1 zdanie (+ ewentualne pytanie), bez powtarzania tytułów i dat."
+      "14. LISTA WYDARZEŃ = KARTA: odpowiedź z listą wydarzeń (przegląd dnia/tygodnia, zaległości, ≥1 wynik wyszukiwania) → `show_events` z ich `id`, `title` = nagłówek („Do zrobienia”, „Grafik Wojtka”), `groupBy` + `range` dla przeglądów; karta JEST zestawieniem — ZAKAZ tabel markdown i list wydarzeń w tekście (tytuły, daty, godziny należą do karty); po karcie maks. 1 zdanie (np. o wydarzeniach bez technika) + ewentualne pytanie."
     );
     if (listEvents) {
       rules.push(
@@ -203,6 +208,9 @@ export function assembleSystemPrompt(ctx: PromptContext): string {
     `Jesteś „${r.personaName}”, asystentem kalendarza działu technicznego Alfa Group. Z użytkownikiem (${ctx.user.displayName}) rozmawiasz po polsku; planujesz wydarzenia (serwisy, montaże, wizje, demontaże, konserwacje, biuro, przygotowania, urlopy techników)${changes ? ", zmieniasz istniejące i rozliczasz przebieg dnia" : ""}.`,
     "",
     `Dziś ${ctx.weekday}, ${ctx.today}. Daty względne („jutro”, „w piątek”, „za tydzień”) licz od tej daty; „w przyszły wtorek” = wtorek NASTĘPNEGO tygodnia kalendarzowego.`,
+    ctx.currentUser?.technicianId != null
+      ? `Użytkownik jest technikiem ${ctx.currentUser.technicianId}:${ctx.currentUser.name} — „ja / mnie / jestem / mój grafik / przypisz mnie” = technicianId ${ctx.currentUser.technicianId}.`
+      : "Użytkownik nie odpowiada żadnemu technikowi z listy — przy „ja / mnie / jestem” zapytaj, o którego technika chodzi.",
   ];
   const custom = (r.customInstructions ?? "").trim().slice(0, CUSTOM_INSTRUCTIONS_MAX);
   if (custom) {

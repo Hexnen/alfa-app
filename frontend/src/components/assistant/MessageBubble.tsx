@@ -40,6 +40,7 @@ import {
   showEventsOf,
   isAborted,
   isErrorPart,
+  isLocalPart,
   isReasoningPart,
   isTextPart,
   isToolPart,
@@ -319,6 +320,44 @@ function ToolRow({ part, live, links }: { part: ToolPart; live: boolean; links: 
   );
 }
 
+const TABLE_SEP_RE = /^\s*\|?\s*:?-{3,}/;
+const TABLE_ROW_RE = /^\s*\|/;
+
+/**
+ * Wykrywa tabelę markdown (wiersz `| …` + wiersz separatora `|---`). Zwraca krótkie zdanie
+ * sprzed tabeli (≤ 200 znaków, bez wierszy tabeli) jako `lead` i resztę (tabela + dalszy tekst)
+ * jako `rest`; null, gdy tabeli nie ma.
+ */
+function splitAtTable(text: string): { lead: string; rest: string } | null {
+  const lines = text.split("\n");
+  let at = -1;
+  for (let i = 0; i + 1 < lines.length; i++) {
+    if (TABLE_ROW_RE.test(lines[i]) && TABLE_SEP_RE.test(lines[i + 1])) {
+      at = i;
+      break;
+    }
+  }
+  if (at < 0) return null;
+  const before = lines.slice(0, at).join("\n").trim();
+  const lead = before && before.length <= 200 && !before.split("\n").some((l) => TABLE_ROW_RE.test(l)) ? before : "";
+  const rest = lead ? lines.slice(at).join("\n") : text;
+  return { lead, rest };
+}
+
+/** Wydarzenia z wyników list_events/search_events w wiadomości (unikalne id, wg startAt, potem id). */
+function listedEvents(parts: ChatMessage["parts"]) {
+  const byId = new Map<number, ReturnType<typeof eventsOf>[number]>();
+  for (const p of parts) {
+    if (!isToolPart(p) || !/^tool-(list_events|search_events)$/.test(String(p.type))) continue;
+    for (const e of eventsOf(p)) if (e.id != null && !byId.has(e.id)) byId.set(e.id, e);
+  }
+  return [...byId.values()].sort((a, b) => {
+    const sa = a.startAt ?? "";
+    const sb = b.startAt ?? "";
+    return sa < sb ? -1 : sa > sb ? 1 : (a.id ?? 0) - (b.id ?? 0);
+  });
+}
+
 /** Zwinięte rozumowanie modelu. */
 function ReasoningRow({ text, streaming }: { text: string; streaming: boolean }) {
   const [open, setOpen] = useState(false);
@@ -367,6 +406,8 @@ export interface MessageBubbleProps {
   onSendText?: (text: string) => void;
   /** Użytkownik ma edit do technical/kalendarz (szybkie akcje na liście wydarzeń). */
   canEdit?: boolean;
+  /** Technik bieżącego użytkownika („Przypisz mnie” na liście wydarzeń); null = brak. */
+  technicianId?: number | null;
   /** eventId → szybka akcja wykonana w tej sesji (przycisk oznaczony jako wykonany). */
   quickDone?: ReadonlyMap<number, AssistantQuickChangeKind>;
   /** Blokada akcji na kartach (stream w toku / trwa zapis). */
@@ -399,6 +440,7 @@ export const MessageBubble = memo(function MessageBubble({
   onQuickChange,
   onSendText,
   canEdit = false,
+  technicianId = null,
   quickDone,
   busy,
   onContinue,
@@ -410,7 +452,7 @@ export const MessageBubble = memo(function MessageBubble({
   const [bulk, setBulk] = useState<"idle" | "running">("idle");
   const toolLinks: ToolRowLinks = { onOpenEvent, onPreview };
   const eventActions: EventListActions | undefined =
-    onQuickChange && onSendText ? { canEdit, busy, quickDone, onQuickChange, onSendText } : undefined;
+    onQuickChange && onSendText ? { canEdit, busy, quickDone, technicianId, onQuickChange, onSendText } : undefined;
 
   // Wiadomości systemowe („Wydarzenie #12 zapisane”) — dyskretny separator;
   // ukryty, gdy decyzję widać już na karcie propozycji.
@@ -450,6 +492,7 @@ export const MessageBubble = memo(function MessageBubble({
   // Tekst, po którym w tej samej wiadomości idzie jeszcze narzędzie, to narracja
   // kroku pośredniego („Sprawdzam kolizje…”) — wyciszony, jedna linia.
   let lastToolIdx = -1;
+  const isLocalMessage = parts.some(isLocalPart);
   parts.forEach((p, i) => {
     if (isTextPart(p)) lastTextIdx = i;
     if (isToolPart(p)) lastToolIdx = i;
@@ -487,26 +530,21 @@ export const MessageBubble = memo(function MessageBubble({
             if (isTextPart(p)) {
               if (!p.text.trim()) return null;
               const isLive = streaming && i === lastTextIdx;
-              if (i < lastToolIdx && !isLive) {
-                // Tekst z kroku pośredniego (przed kolejnym narzędziem): krótka
-                // narracja („Najpierw znajdę…") jako wyciszona linia; dłuższa
-                // treść (np. pytanie z wyjaśnieniem) w pełnym, lecz wyciszonym dymku —
-                // nigdy nie ucinamy tego, co model napisał do użytkownika.
+              // Wiadomość lokalna (POST /choose, /quick-change) ma tekst PRZED kartą celowo — nie zwijamy.
+              if (i < lastToolIdx && !isLive && !isLocalMessage) {
+                // Tekst PRZED narzędziem w tej samej wiadomości = odpowiedź „z pamięci” / narracja
+                // kroku pośredniego. Pytanie do użytkownika („?”) zostaje w całości (wyciszone);
+                // krótka wstawka („Sprawdzam.”) jako jedna linia; wszystko inne zwijamy pod
+                // „pokaż tekst” — deterministycznie, bez liczenia na prompt. Nic nie ucinamy.
                 const oneLine = p.text.replace(/[*_`#]+/g, "").replace(/\s+/g, " ").trim();
-                // Model bywa uparty: wypisuje listę tekstem tuż przed kartą
-                // (show_events / propozycje), która i tak pokazuje to samo.
-                // Taki tekst zwijamy pod „Pokaż tekst” — deterministycznie, bez promptu.
-                const nextTool = parts.slice(i + 1).find(isToolPart);
-                const cardNext = !!nextTool && /^tool-(show_events|propose_changes|propose_event)$/.test(String(nextTool.type));
-                if (cardNext && oneLine.length > 100) {
+                if (oneLine.includes("?")) {
                   return (
-                    <details key={i} className="text-xs text-muted-foreground" data-testid="assistant-interim-text">
-                      <summary className="cursor-pointer select-none">{oneLine.slice(0, 80)}… <span className="underline">pokaż tekst</span></summary>
-                      <div className="mt-1"><Prose text={p.text} streaming={false} /></div>
-                    </details>
+                    <div key={i} className="text-muted-foreground" data-testid="assistant-interim-text">
+                      <Prose text={p.text} streaming={false} />
+                    </div>
                   );
                 }
-                if (oneLine.length <= 100 && !oneLine.includes("?")) {
+                if (oneLine.length <= 30) {
                   return (
                     <p key={i} className="text-xs text-muted-foreground" data-testid="assistant-interim-text">
                       {oneLine}
@@ -514,10 +552,46 @@ export const MessageBubble = memo(function MessageBubble({
                   );
                 }
                 return (
-                  <div key={i} className="text-muted-foreground" data-testid="assistant-interim-text">
-                    <Prose text={p.text} streaming={false} />
-                  </div>
+                  <details key={i} className="text-xs text-muted-foreground" data-testid="assistant-interim-text">
+                    <summary className="cursor-pointer select-none">
+                      {oneLine.slice(0, 80)}… <span className="underline">pokaż tekst</span>
+                    </summary>
+                    <div className="mt-1">
+                      <Prose text={p.text} streaming={false} />
+                    </div>
+                  </details>
                 );
+              }
+              // Tabela markdown z wydarzeniami w tekście końcowym → wiersze z wyników
+              // list_events/search_events (karta jest zestawieniem), tekst zwinięty.
+              if (!isLive) {
+                const split = splitAtTable(p.text);
+                if (split) {
+                  const hasCard = parts.some((x) => isToolPart(x) && showEventsOf(x) != null);
+                  const events = hasCard ? [] : listedEvents(parts);
+                  return (
+                    <div key={i} className="flex flex-col gap-1.5">
+                      {split.lead && <Prose text={split.lead} streaming={false} />}
+                      {events.length > 0 && (
+                        <div className="rounded-lg border bg-background shadow-sm" data-testid="assistant-table-fallback">
+                          <EventListRows
+                            events={events}
+                            source={`events:table:${m.id}`}
+                            onOpenEvent={onOpenEvent}
+                            onPreview={onPreview}
+                            actions={eventActions ? { ...eventActions, suggest: false } : undefined}
+                          />
+                        </div>
+                      )}
+                      <details className="text-xs text-muted-foreground" data-testid="assistant-table-text">
+                        <summary className="cursor-pointer select-none underline">pokaż tekst</summary>
+                        <div className="mt-1">
+                          <Prose text={split.rest} streaming={false} />
+                        </div>
+                      </details>
+                    </div>
+                  );
+                }
               }
               return <Prose key={i} text={p.text} streaming={isLive} />;
             }
