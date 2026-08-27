@@ -31,7 +31,7 @@ export const TOOL_META = [
   { name: "find_free_slots", label: "Wolne terminy", description: "Najbliższe wolne okna dla wskazanych techników (godziny pracy, pon–pt, bez kolizji i urlopów).", required: false },
   { name: "ask_choice", label: "Pytania z przyciskami", description: "Doprecyzowanie wyboru (obiekt, technik, termin) kartą z przyciskami zamiast pytania tekstowego.", required: false },
   { name: "propose_event", label: "Zaproponuj wydarzenie", description: "Karta propozycji do zatwierdzenia — nie da się wyłączyć.", required: true },
-  { name: "get_event", label: "Szczegóły wydarzenia", description: "Pełne dane jednego wydarzenia (opis, technicy, seria) — do precyzyjnego dopasowania przy zmianach.", required: false },
+  { name: "get_event", label: "Szczegóły wydarzenia", description: "Pełne dane jednego wydarzenia (opis, technicy, seria) + notatki z dziennika — do pytań o przebieg i dopasowania przy zmianach.", required: false },
   {
     name: "propose_changes",
     label: "Zmiany w wydarzeniach",

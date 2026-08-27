@@ -239,6 +239,13 @@
       "when": 1787770848264,
       "tag": "0033_tired_speed",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "6",
+      "when": 1787815619847,
+      "tag": "0034_shallow_titania",
+      "breakpoints": true
     }
   ]
 }

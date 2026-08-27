@@ -20,25 +20,29 @@ import { eq, and, desc, asc, isNull, inArray, sql, lt, gt, gte, ne } from "drizz
 import { type CalendarEventType, type CalendarEventStatus } from "../db/schema.js";
 import { getUser } from "../middleware/auth.js";
 import { describeRule } from "../lib/calendar-recurrence.js";
-import { conflictEventIds, loadEvent, loadEvents, type CalendarEventJson } from "../lib/calendar-queries.js";
+import { conflictEventIds, loadEvent, loadEvents, loadNotes, type CalendarEventJson, type Note } from "../lib/calendar-queries.js";
 import {
   CALENDAR_ENTITY as ENTITY,
   DATE_RE,
+  addNote,
   createEvent,
   deleteEvent,
+  deleteNote,
+  getEventRow,
   isValidCalendarDate,
   moveEvent,
   parseInput,
   parseScope,
   restoreEvent,
   updateEvent,
+  updateNote,
   type ParsedInput,
 } from "../lib/calendar-mutations.js";
 import { ApiError, STATUS_LABELS, TYPE_LABELS } from "../lib/calendar-labels.js";
 
 // Re-eksporty dla dotychczasowych importów (asystent, testy).
 export { ApiError, STATUS_LABELS, TYPE_LABELS, loadEvents, parseInput };
-export type { CalendarEventJson, ParsedInput };
+export type { CalendarEventJson, Note, ParsedInput };
 
 const app = new Hono();
 export const calendarPublicRoutes = new Hono();
@@ -119,7 +123,58 @@ app.get("/events/:id", (c) => {
     .orderBy(desc(schema.activityLog.createdAt), desc(schema.activityLog.id))
     .limit(500)
     .all();
-  return c.json({ success: true, data: { ...ev, history } });
+  const notes = loadNotes(db, id);
+  return c.json({ success: true, data: { ...ev, notes, notesCount: notes.length, history } });
+});
+
+// ---------------------------------------------------------------------------
+// Notatki: GET/POST /events/:id/notes, PUT/DELETE /notes/:noteId (autor lub admin)
+// ---------------------------------------------------------------------------
+
+app.get("/events/:id/notes", (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id)) return c.json({ success: false, error: "Nieprawidłowe id" }, 400);
+  const ev = getEventRow(db, id);
+  if (!ev) return c.json({ success: false, error: "Wydarzenie nie istnieje" }, 404);
+  return c.json({ success: true, data: loadNotes(db, id) });
+});
+
+app.post("/events/:id/notes", async (c) => {
+  const user = getUser(c);
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id)) return c.json({ success: false, error: "Nieprawidłowe id" }, 400);
+  try {
+    const body = (await c.req.json().catch(() => null)) as { text?: unknown } | null;
+    const note = db.transaction((tx) => addNote(tx, { eventId: id, text: String(body?.text ?? ""), ctx: { user } }));
+    return c.json({ success: true, data: note }, 201);
+  } catch (error) {
+    return handleError(c, error, "dodawania notatki");
+  }
+});
+
+app.put("/notes/:noteId", async (c) => {
+  const user = getUser(c);
+  const noteId = Number(c.req.param("noteId"));
+  if (!Number.isInteger(noteId)) return c.json({ success: false, error: "Nieprawidłowe id" }, 400);
+  try {
+    const body = (await c.req.json().catch(() => null)) as { text?: unknown } | null;
+    const note = db.transaction((tx) => updateNote(tx, noteId, body?.text, { user }));
+    return c.json({ success: true, data: note });
+  } catch (error) {
+    return handleError(c, error, "edycji notatki");
+  }
+});
+
+app.delete("/notes/:noteId", (c) => {
+  const user = getUser(c);
+  const noteId = Number(c.req.param("noteId"));
+  if (!Number.isInteger(noteId)) return c.json({ success: false, error: "Nieprawidłowe id" }, 400);
+  try {
+    db.transaction((tx) => deleteNote(tx, noteId, { user }));
+    return c.json({ success: true, data: { id: noteId } });
+  } catch (error) {
+    return handleError(c, error, "usuwania notatki");
+  }
 });
 
 // ---------------------------------------------------------------------------

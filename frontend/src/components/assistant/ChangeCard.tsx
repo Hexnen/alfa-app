@@ -13,6 +13,7 @@ import {
   Pencil,
   Plus,
   RotateCcw,
+  StickyNote,
   Trash2,
   X,
   XCircle,
@@ -23,6 +24,7 @@ import type { AssistantApplyResult, AssistantBriefEvent, AssistantChangeDiff, As
 import { EVENT_STATUS_META, eventTypeLabel, fmtRange } from "@/lib/calendar-labels";
 import { cn } from "@/lib/utils";
 import { changeKey, type ChangeDecision, type PreviewRange } from "./parts";
+import { NotesBadge } from "@/components/CalendarEventNotes";
 import { ObjectPeek } from "./ObjectPeek";
 
 // ---------------------------------------------------------------------------
@@ -36,7 +38,16 @@ const KIND_META: Record<AssistantChangeKind, { icon: LucideIcon; label: string; 
   delete: { icon: Trash2, label: "Usunięcie", tone: "bg-red-500/15 text-red-700 dark:text-red-300", ring: "border-l-red-500" },
   restore: { icon: RotateCcw, label: "Przywrócenie", tone: "bg-amber-500/15 text-amber-700 dark:text-amber-300", ring: "border-l-amber-500" },
   create: { icon: Plus, label: "Nowe", tone: "bg-violet-500/15 text-violet-700 dark:text-violet-300", ring: "border-l-violet-500" },
+  note: { icon: StickyNote, label: "Notatka", tone: "bg-amber-500/15 text-amber-700 dark:text-amber-300", ring: "border-l-amber-500" },
 };
+
+/** Treść notatki z propozycji `kind: "note"` (diff „Notatka” / surowa zmiana / summary). */
+function noteTextOf(c: AssistantResolvedChange): string {
+  const d = c.diff?.find((r) => r.field === "Notatka");
+  if (d && d.to != null && d.to !== "") return String(d.to);
+  if (c.change && c.change.kind === "note" && c.change.text) return c.change.text;
+  return (c.summary ?? "").replace(/^Notatka:\s*/i, "");
+}
 
 const statusLabel = (s: unknown): string => (typeof s === "string" && EVENT_STATUS_META[s as CalendarEventStatus]?.label) || (typeof s === "string" ? s : "");
 
@@ -55,7 +66,7 @@ function diffRows(c: AssistantResolvedChange): AssistantChangeDiff[] {
   const b = c.before;
   const a = c.after;
   const rows: AssistantChangeDiff[] = [];
-  if (c.kind === "create") return rows;
+  if (c.kind === "create" || c.kind === "note") return rows;
   if (!a) return rows;
   if (b?.title !== a.title && a.title) rows.push({ field: "Tytuł", from: b?.title ?? null, to: a.title });
   if (rangeOf(b) !== rangeOf(a) && rangeOf(a)) rows.push({ field: "Termin", from: rangeOf(b) || null, to: rangeOf(a) });
@@ -77,7 +88,7 @@ const fmtVal = (v: AssistantChangeDiff["from"]): string => {
 function previewOf(c: AssistantResolvedChange): PreviewRange | null {
   const a = c.after;
   const b = c.before;
-  if (c.kind === "delete" || c.kind === "cancel") return null;
+  if (c.kind === "delete" || c.kind === "cancel" || c.kind === "note") return null;
   if (!a?.startAt || !a?.endAt) return null;
   const moved = !b || b.startAt !== a.startAt || b.endAt !== a.endAt || Boolean(b.allDay) !== Boolean(a.allDay);
   if (!moved && c.kind !== "create" && c.kind !== "restore") return null;
@@ -234,8 +245,11 @@ export function ChangeCard({ toolCallId, changes, note, decisions, busy = false,
           const evId = c.eventId ?? c.before?.id ?? c.after?.id ?? null;
           const obj = c.after?.objectName ?? c.before?.objectName ?? null;
           const objId = c.after?.objectId ?? c.before?.objectId ?? null;
-          const rows = diffRows(c);
-          const reason = (c.reason ?? c.note ?? "").trim();
+          const isNote = c.kind === "note";
+          const rows = isNote ? [] : diffRows(c);
+          const noteText = isNote ? noteTextOf(c) : "";
+          const notesCount = c.before?.notesCount ?? c.after?.notesCount ?? 0;
+          const reason = (c.reason ?? (isNote ? "" : c.note) ?? "").trim();
           const pend = pending.get(c.index) ?? null;
           const err = errors.get(c.index) ?? null;
           const preview = previews.get(c.index);
@@ -277,9 +291,10 @@ export function ChangeCard({ toolCallId, changes, note, decisions, busy = false,
                       <span className="min-w-0 max-w-full truncate font-semibold leading-snug">{title}</span>
                     )}
                   </div>
-                  {(obj || createRange) && (
+                  {(obj || createRange || notesCount > 0) && (
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
                       {createRange && <span>{createRange}</span>}
+                      {notesCount > 0 && <NotesBadge count={notesCount} />}
                       {obj && (
                         <span className="inline-flex items-center gap-1">
                           <MapPin className="h-3 w-3" aria-hidden />
@@ -314,7 +329,15 @@ export function ChangeCard({ toolCallId, changes, note, decisions, busy = false,
                       })}
                     </dl>
                   )}
-                  {rows.length === 0 && c.summary && !c.error && <p className="text-xs text-foreground/80">{c.summary}</p>}
+                  {isNote && noteText && !c.error && (
+                    <blockquote
+                      className="whitespace-pre-wrap break-words border-l-2 border-amber-500/60 pl-2 text-xs italic text-foreground/90"
+                      data-testid="change-note-text"
+                    >
+                      „{noteText}”
+                    </blockquote>
+                  )}
+                  {!isNote && rows.length === 0 && c.summary && !c.error && <p className="text-xs text-foreground/80">{c.summary}</p>}
                   {reason && <p className="text-xs italic text-muted-foreground">{reason}</p>}
 
                   {c.warnings && c.warnings.length > 0 && decision?.status !== "applied" && (

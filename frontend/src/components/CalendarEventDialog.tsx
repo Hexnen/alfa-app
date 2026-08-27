@@ -18,6 +18,7 @@ import {
   CircleCheck,
   Clock,
   ExternalLink,
+  FileText,
   History,
   Loader2,
   MapPin,
@@ -61,6 +62,7 @@ import {
   type CalendarEventInput,
   type CalendarEventStatus,
   type CalendarEventType,
+  type CalendarNote,
   type CalendarSeriesFreq,
   type CalendarSeriesScope,
   type ObjectWithContractor,
@@ -87,12 +89,14 @@ import {
   fmtRange,
   fmtShort,
   fmtTimestamp,
+  notesLabel,
   parseLocal,
   seriesShortLabel,
   toDateStr,
   toDateTimeStr,
 } from "@/lib/calendar-labels";
 import { cn } from "@/lib/utils";
+import { CalendarEventNotes } from "@/components/CalendarEventNotes";
 
 export type CalendarDialogMode = "create" | "edit" | "view";
 
@@ -127,6 +131,8 @@ interface CalendarEventDialogProps {
    * ten dialog i otwiera inne). Bez propa pozycje kolizji są tylko tekstem.
    */
   onOpenEvent?: (id: number) => void;
+  /** Zmiana liczby notatek (zapis natychmiastowy, poza „Zapisz”) — rodzic aktualizuje licznik w kalendarzu. */
+  onNotesChanged?: (eventId: number, count: number) => void;
   /**
    * W trybie `view`: pokazuje akcje „Edytuj / Potwierdź / Wykonane”.
    * Rodzic przełącza dialog w tryb `edit` (ten sam event).
@@ -1041,10 +1047,31 @@ export function CalendarEventDialog({
   onDeleted,
   onOpenEvent,
   onEdit,
+  onNotesChanged,
 }: CalendarEventDialogProps) {
   const readOnly = mode === "view";
   const isEdit = mode === "edit" && !!event;
   const navigate = useNavigate();
+  /** Notatki z GET /calendar/events/:id; null = jeszcze nie wczytane (komponent notatek sam dociągnie). */
+  const [notes, setNotes] = useState<CalendarNote[] | null>(null);
+  const [notesCount, setNotesCount] = useState<number>(event?.notesCount ?? 0);
+  /** Tryb create: „Pierwsza notatka” wysyłana po utworzeniu wydarzenia. */
+  const [firstNote, setFirstNote] = useState("");
+  const handleNotesCount = useCallback(
+    (count: number) => {
+      setNotesCount(count);
+      if (!event) return;
+      onNotesChanged?.(event.id, count);
+      // Historia w dialogu: dopisy note_added/… pojawiają się od razu.
+      calendarApi
+        .getEvent(event.id)
+        .then((res) => setHistory(res.data?.history || []))
+        .catch(() => {
+          /* historia odświeży się przy kolejnym otwarciu */
+        });
+    },
+    [event, onNotesChanged]
+  );
 
   const initialRef = useRef<FormState>(buildInitial(event, prefill));
   const [form, setForm] = useState<FormState>(initialRef.current);
@@ -1064,6 +1091,8 @@ export function CalendarEventDialog({
     where: mode !== "create" || !!init.objectId || !!init.location,
     repeat: mode === "create" && !!init.recFreq,
     notes: mode !== "create" || !!init.description,
+    journal: true,
+    firstNote: false,
     history: false,
   });
   const toggleSec = (k: keyof typeof openSec) =>
@@ -1074,8 +1103,8 @@ export function CalendarEventDialog({
   const [confirmClose, setConfirmClose] = useState(false);
 
   const dirty = useMemo(
-    () => !readOnly && JSON.stringify(form) !== JSON.stringify(initialRef.current),
-    [form, readOnly]
+    () => !readOnly && (JSON.stringify(form) !== JSON.stringify(initialRef.current) || firstNote.trim() !== ""),
+    [form, readOnly, firstNote]
   );
 
   // Słowniki
@@ -1103,7 +1132,16 @@ export function CalendarEventDialog({
     calendarApi
       .getEvent(event.id)
       .then((res) => {
-        if (!cancelled) setHistory(res.data?.history || []);
+        if (cancelled) return;
+        setHistory(res.data?.history || []);
+        const n = res.data?.notes;
+        if (Array.isArray(n)) {
+          setNotes(n);
+          setNotesCount(n.length);
+        } else {
+          // Starszy backend bez notatek — komponent spróbuje GET /notes sam.
+          setNotes(null);
+        }
       })
       .catch(() => {
         /* brak historii nie blokuje edycji */
@@ -1389,7 +1427,17 @@ export function CalendarEventDialog({
         const res = isEdit
           ? await calendarApi.update(event!.id, input, scope)
           : await calendarApi.create(input);
-        if (res.data) onSaved?.(res.data);
+        let saved = res.data;
+        // Pierwsza notatka: osobne API po utworzeniu. Błąd nie cofa utworzenia — wydarzenie już istnieje.
+        if (!isEdit && saved && firstNote.trim()) {
+          try {
+            await calendarApi.addNote(saved.id, firstNote.trim());
+            saved = { ...saved, notesCount: (saved.notesCount ?? 0) + 1 };
+          } catch {
+            /* notatkę można dopisać w edycji */
+          }
+        }
+        if (saved) onSaved?.(saved);
         onClose();
       } catch (err) {
         setError(err instanceof Error ? err.message : "Błąd zapisu");
@@ -1397,7 +1445,7 @@ export function CalendarEventDialog({
         setSaving(false);
       }
     },
-    [form, isEdit, event, onSaved, onClose]
+    [form, isEdit, event, onSaved, onClose, firstNote]
   );
 
   const handleSubmit = () => {
@@ -1699,12 +1747,20 @@ export function CalendarEventDialog({
           )}
         </dd>
         <dt className="flex items-center gap-1.5 text-muted-foreground">
-          <StickyNote className="h-3.5 w-3.5" /> Notatki
+          <FileText className="h-3.5 w-3.5" /> Opis
         </dt>
         <dd className="whitespace-pre-wrap">
           {event.description || <span className="text-muted-foreground">—</span>}
         </dd>
       </dl>
+      <Section id="sec-journal" icon={StickyNote} title={`Notatki (${notesCount})`}>
+        <CalendarEventNotes
+          eventId={event.id}
+          initialNotes={notes}
+          canEdit={!!onEdit && !event.deletedAt}
+          onCountChange={handleNotesCount}
+        />
+      </Section>
     </div>
   );
 
@@ -2187,11 +2243,11 @@ export function CalendarEventDialog({
         </Section>
       )}
 
-      {/* Notatki */}
+      {/* Opis (stały) */}
       <Section
         id="sec-notes"
-        icon={StickyNote}
-        title="Notatki"
+        icon={FileText}
+        title="Opis"
         open={openSec.notes}
         onToggle={() => toggleSec("notes")}
         summary={form.description ? form.description.slice(0, 60) : "brak"}
@@ -2205,10 +2261,57 @@ export function CalendarEventDialog({
             value={form.description}
             onChange={(e) => set("description", e.target.value)}
             rows={3}
-            placeholder="Uwagi dla techników, zakres prac, kontakt na miejscu…"
+            placeholder="Stały opis: zakres prac, kontakt na miejscu, uwagi dla techników…"
           />
+          <p className="text-[11px] text-muted-foreground">
+            Przebieg i ustalenia dopisuj jako notatki — mają autora i czas.
+          </p>
         </div>
       </Section>
+
+      {/* Notatki (dziennik) — edycja: zapis natychmiastowy; tworzenie: pierwsza notatka po utworzeniu */}
+      {isEdit && event ? (
+        <Section
+          id="sec-journal"
+          icon={StickyNote}
+          title={`Notatki (${notesCount})`}
+          open={openSec.journal}
+          onToggle={() => toggleSec("journal")}
+          summary={notesCount ? notesLabel(notesCount) : "brak"}
+        >
+          <CalendarEventNotes
+            eventId={event.id}
+            initialNotes={notes}
+            canEdit={!event.deletedAt}
+            onCountChange={handleNotesCount}
+          />
+        </Section>
+      ) : mode === "create" ? (
+        <Section
+          id="sec-first-note"
+          icon={StickyNote}
+          title="Pierwsza notatka"
+          open={openSec.firstNote}
+          onToggle={() => toggleSec("firstNote")}
+          summary={firstNote.trim() ? firstNote.trim().slice(0, 60) : "opcjonalnie"}
+        >
+          <div className="space-y-1">
+            <Label htmlFor="cal-first-note" className="sr-only">
+              Pierwsza notatka
+            </Label>
+            <Textarea
+              id="cal-first-note"
+              value={firstNote}
+              onChange={(e) => setFirstNote(e.target.value)}
+              rows={2}
+              maxLength={4000}
+              placeholder="np. Klient prosi o telefon przed przyjazdem"
+              data-testid="first-note-input"
+            />
+            <p className="text-[11px] text-muted-foreground">Zostanie dodana do dziennika zaraz po utworzeniu wydarzenia.</p>
+          </div>
+        </Section>
+      ) : null}
     </div>
   );
 

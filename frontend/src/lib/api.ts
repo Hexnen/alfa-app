@@ -2341,6 +2341,24 @@ export interface CalendarEvent {
   seriesTotal?: number;
   /** Tylko w odpowiedzi POST z recurrence. */
   occurrencesCount?: number;
+  /** Liczba notatek (lista + szczegóły). Brak = 0 (starszy backend). */
+  notesCount?: number;
+  /** Notatki — tylko w GET /calendar/events/:id. */
+  notes?: CalendarNote[];
+}
+
+export type CalendarNoteSource = "user" | "assistant" | "system";
+
+/** Notatka do wydarzenia (dziennik) — osobna od `description` (stały opis). */
+export interface CalendarNote {
+  id: number;
+  eventId: number;
+  userId: number | null;
+  userLabel: string | null;
+  source: CalendarNoteSource;
+  text: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface CalendarEventWithHistory extends CalendarEvent {
@@ -2380,7 +2398,10 @@ export type ActivityAction =
   | "moved"
   | "assigned"
   | "unassigned"
-  | "status_changed";
+  | "status_changed"
+  | "note_added"
+  | "note_updated"
+  | "note_deleted";
 
 export interface ActivityEventRef {
   id: number;
@@ -2539,6 +2560,32 @@ export const calendarApi = {
     );
   },
 
+  // --- Notatki (dziennik wydarzenia) — zapisywane od razu, niezależnie od formularza ---
+
+  async notes(eventId: number) {
+    return request<ApiResponse<CalendarNote[]>>(`/calendar/events/${eventId}/notes`);
+  },
+
+  async addNote(eventId: number, text: string) {
+    return request<ApiResponse<CalendarNote>>(`/calendar/events/${eventId}/notes`, {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    });
+  },
+
+  /** Autor lub admin. */
+  async updateNote(noteId: number, text: string) {
+    return request<ApiResponse<CalendarNote>>(`/calendar/notes/${noteId}`, {
+      method: "PUT",
+      body: JSON.stringify({ text }),
+    });
+  },
+
+  /** Soft delete; autor lub admin. */
+  async deleteNote(noteId: number) {
+    return request<ApiResponse<null>>(`/calendar/notes/${noteId}`, { method: "DELETE" });
+  },
+
   /** Bieżący token ICS (null, jeśli jeszcze nie wygenerowano) — bez rotacji. */
   async getFeedToken() {
     return request<ApiResponse<{ token: string; url: string } | null>>(
@@ -2602,6 +2649,8 @@ export interface AssistantChat {
 export interface AssistantProposal extends CalendarEventInput {
   objectName?: string | null;
   technicianNames?: string[];
+  /** Liczba notatek istniejącego wydarzenia (propozycje edycji); brak = 0. */
+  notesCount?: number;
 }
 
 export interface AssistantProposalOutput {
@@ -2668,9 +2717,11 @@ export interface AssistantBriefEvent {
   seriesId?: number | null;
   deleted?: boolean;
   deletedAt?: string | null;
+  /** Liczba notatek (brak = 0). */
+  notesCount?: number;
 }
 
-export type AssistantChangeKind = "update" | "status" | "cancel" | "delete" | "restore" | "create";
+export type AssistantChangeKind = "update" | "status" | "cancel" | "delete" | "restore" | "create" | "note";
 
 export interface AssistantChangePatch {
   title?: string;
@@ -2692,6 +2743,7 @@ export type AssistantChange =
   | { kind: "cancel"; eventId: number; reason?: string }
   | { kind: "delete"; eventId: number; reason?: string }
   | { kind: "restore"; eventId: number }
+  | { kind: "note"; eventId: number; text: string }
   | { kind: "create"; event: CalendarEventInput & { objectName?: string | null; technicianNames?: string[] }; reason?: string };
 
 export interface AssistantChangeDiff {

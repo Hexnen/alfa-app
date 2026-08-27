@@ -17,8 +17,12 @@ import {
   type CalendarEventType,
   type CalendarEventStatus,
   type CalendarSeriesFreq,
+  type CalendarEventNote as CalendarEventNoteRow,
+  type CalendarNoteSource,
+  CALENDAR_NOTE_MAX,
 } from "../db/schema.js";
-import { logActivity, logFieldDiffs, type ActivityUser, type DbOrTx, type Tx } from "./activity-log.js";
+import { logActivity, logFieldDiffs, userLabelOf, type ActivityUser, type DbOrTx, type Tx } from "./activity-log.js";
+import { noteOfRow, type Note } from "./calendar-queries.js";
 import { expandOccurrences, describeRule, shiftLocal, diffMinutes, type RecurrenceRule } from "./calendar-recurrence.js";
 import { ApiError, STATUS_LABELS, TYPE_LABELS } from "./calendar-labels.js";
 
@@ -26,7 +30,7 @@ export const CALENDAR_ENTITY = "calendar_event";
 
 /** Kto i „czym” wykonuje zmianę (suffix trafia do summary każdego wpisu activity_log). */
 export interface MutationCtx {
-  user: ActivityUser & { id: number };
+  user: ActivityUser & { id: number; role?: string | null };
   summarySuffix?: string | null;
 }
 
@@ -535,4 +539,98 @@ export function restoreEvent(tx: Tx, id: number, ctx: MutationCtx): CalendarEven
     summary: `Przywrócono wydarzenie „${row.title}” (${fmtDate(row.startAt)})`,
   });
   return after;
+}
+
+// ---------------------------------------------------------------------------
+// Notatki (dziennik wydarzenia) — osobna tabela calendar_event_notes, soft delete,
+// każda operacja loguje note_added / note_updated / note_deleted do activity_log.
+// ---------------------------------------------------------------------------
+
+/** Skrót notatki do summary activity_log (pierwsze 120 znaków, bez nowych linii). */
+function noteSummary(text: string, max = 120): string {
+  const t = text.replace(/\s+/g, " ").trim();
+  return t.length > max ? `${t.slice(0, max - 1)}…` : t;
+}
+
+/** Walidacja treści notatki (trim, 1–CALENDAR_NOTE_MAX znaków). Rzuca ApiError. */
+export function parseNoteText(raw: unknown): string {
+  const s = typeof raw === "string" ? raw.trim() : "";
+  if (!s) throw new ApiError(400, "Treść notatki jest wymagana");
+  if (s.length > CALENDAR_NOTE_MAX) throw new ApiError(400, `Notatka jest za długa (max ${CALENDAR_NOTE_MAX} znaków)`);
+  return s;
+}
+
+export function getNoteRow(dbx: DbOrTx, id: number): CalendarEventNoteRow | undefined {
+  return dbx.select().from(schema.calendarEventNotes).where(eq(schema.calendarEventNotes.id, id)).get();
+}
+
+/** Autor notatki albo admin może ją edytować/usuwać. */
+export function canManageNote(note: Pick<CalendarEventNoteRow, "userId">, user: { id: number; role?: string | null }): boolean {
+  return note.userId === user.id || user.role === "admin";
+}
+
+export interface AddNoteInput {
+  eventId: number;
+  text: string;
+  ctx: MutationCtx;
+  /** Domyślnie "user"; asystent → "assistant" (etykieta „Asystent (kto zatwierdził)”). */
+  source?: CalendarNoteSource;
+}
+
+/** Dodaje notatkę do wydarzenia (event musi istnieć i nie być usunięty). */
+export function addNote(tx: DbOrTx, input: AddNoteInput): Note {
+  const ev = getEventRow(tx, input.eventId);
+  if (!ev) throw new ApiError(404, "Wydarzenie nie istnieje");
+  if (ev.deletedAt) throw new ApiError(409, "Wydarzenie jest usunięte — najpierw je przywróć");
+  const text = parseNoteText(input.text);
+  const source = input.source ?? "user";
+  const who = userLabelOf(input.ctx.user);
+  const userLabel = source === "assistant" ? `Asystent${who ? ` (${who})` : ""}` : source === "system" ? "System" : who;
+  const row = tx
+    .insert(schema.calendarEventNotes)
+    .values({ eventId: ev.id, userId: input.ctx.user.id, userLabel, source, text })
+    .returning()
+    .get();
+  logActivity(tx, {
+    entityType: CALENDAR_ENTITY, entityId: ev.id, objectId: ev.objectId, user: input.ctx.user, summarySuffix: input.ctx.summarySuffix,
+    action: "note_added", field: "note", newValue: row.id, summary: `Dodano notatkę: ${noteSummary(text)}`,
+  });
+  return noteOfRow(row);
+}
+
+/** Edycja treści notatki (autor lub admin). */
+export function updateNote(tx: DbOrTx, noteId: number, rawText: unknown, ctx: MutationCtx): Note {
+  const note = getNoteRow(tx, noteId);
+  if (!note || note.deletedAt) throw new ApiError(404, "Notatka nie istnieje");
+  if (!canManageNote(note, ctx.user)) throw new ApiError(403, "Tylko autor notatki lub administrator może ją edytować");
+  const text = parseNoteText(rawText);
+  if (text === note.text) return noteOfRow(note);
+  const ev = getEventRow(tx, note.eventId);
+  const after = tx
+    .update(schema.calendarEventNotes)
+    .set({ text, updatedAt: sql`(datetime('now'))` })
+    .where(eq(schema.calendarEventNotes.id, noteId))
+    .returning()
+    .get();
+  logActivity(tx, {
+    entityType: CALENDAR_ENTITY, entityId: note.eventId, objectId: ev?.objectId ?? null, user: ctx.user, summarySuffix: ctx.summarySuffix,
+    action: "note_updated", field: "note", oldValue: noteSummary(note.text), newValue: noteSummary(text), summary: `Zmieniono notatkę: ${noteSummary(text)}`,
+  });
+  return noteOfRow(after);
+}
+
+/** Soft delete notatki (autor lub admin). */
+export function deleteNote(tx: DbOrTx, noteId: number, ctx: MutationCtx): void {
+  const note = getNoteRow(tx, noteId);
+  if (!note || note.deletedAt) throw new ApiError(404, "Notatka nie istnieje");
+  if (!canManageNote(note, ctx.user)) throw new ApiError(403, "Tylko autor notatki lub administrator może ją usunąć");
+  const ev = getEventRow(tx, note.eventId);
+  tx.update(schema.calendarEventNotes)
+    .set({ deletedAt: sql`(datetime('now'))`, updatedAt: sql`(datetime('now'))` })
+    .where(eq(schema.calendarEventNotes.id, noteId))
+    .run();
+  logActivity(tx, {
+    entityType: CALENDAR_ENTITY, entityId: note.eventId, objectId: ev?.objectId ?? null, user: ctx.user, summarySuffix: ctx.summarySuffix,
+    action: "note_deleted", field: "note", oldValue: noteSummary(note.text), summary: `Usunięto notatkę: ${noteSummary(note.text)}`,
+  });
 }

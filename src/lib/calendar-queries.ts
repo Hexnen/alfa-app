@@ -8,7 +8,7 @@ import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, sql } from "drizzle-or
 import { alias } from "drizzle-orm/sqlite-core";
 import { db, schema } from "../db/index.js";
 import type { DbOrTx } from "./activity-log.js";
-import type { CalendarEventStatus, CalendarEventType, CalendarSeriesFreq } from "../db/schema.js";
+import type { CalendarEventNote, CalendarEventStatus, CalendarEventType, CalendarNoteSource, CalendarSeriesFreq } from "../db/schema.js";
 
 /**
  * Id wydarzeń kolidujących z zakresem [startAt, endAt) dla podanych techników
@@ -117,6 +117,50 @@ export interface CalendarEventJson {
   createdAt: string;
   updatedAt: string;
   deletedAt: string | null;
+  /** Liczba nieusuniętych notatek (dziennik wydarzenia). */
+  notesCount: number;
+}
+
+/** Notatka wydarzenia (kontrakt z frontem: CalendarNote). */
+export interface Note {
+  id: number;
+  eventId: number;
+  userId: number | null;
+  userLabel: string | null;
+  source: CalendarNoteSource;
+  text: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export function noteOfRow(r: CalendarEventNote): Note {
+  return { id: r.id, eventId: r.eventId, userId: r.userId, userLabel: r.userLabel, source: r.source, text: r.text, createdAt: r.createdAt, updatedAt: r.updatedAt };
+}
+
+/** Nieusunięte notatki wydarzenia, od najstarszej (dziennik). */
+export function loadNotes(dbx: DbOrTx, eventId: number, limit = 500): Note[] {
+  return dbx
+    .select()
+    .from(schema.calendarEventNotes)
+    .where(and(eq(schema.calendarEventNotes.eventId, eventId), isNull(schema.calendarEventNotes.deletedAt)))
+    .orderBy(asc(schema.calendarEventNotes.createdAt), asc(schema.calendarEventNotes.id))
+    .limit(limit)
+    .all()
+    .map(noteOfRow);
+}
+
+/** Liczba nieusuniętych notatek per wydarzenie — jedno zapytanie zbiorcze. */
+export function notesCountByEvent(dbx: DbOrTx, ids: number[]): Map<number, number> {
+  const out = new Map<number, number>();
+  if (ids.length === 0) return out;
+  const rows = dbx
+    .select({ eventId: schema.calendarEventNotes.eventId, n: sql<number>`count(*)` })
+    .from(schema.calendarEventNotes)
+    .where(and(inArray(schema.calendarEventNotes.eventId, ids), isNull(schema.calendarEventNotes.deletedAt)))
+    .groupBy(schema.calendarEventNotes.eventId)
+    .all();
+  for (const r of rows) out.set(r.eventId, Number(r.n));
+  return out;
 }
 
 const createdUsers = alias(schema.users, "cu");
@@ -169,6 +213,7 @@ export function loadEvents(dbx: DbOrTx, ids: number[]): CalendarEventJson[] {
     }
   }
 
+  const notesCount = notesCountByEvent(dbx, ids);
   const label = (email: string | null, name: string | null) => (email == null ? null : (name || "").trim() || email);
 
   const byId = new Map<number, CalendarEventJson>();
@@ -199,6 +244,7 @@ export function loadEvents(dbx: DbOrTx, ids: number[]): CalendarEventJson[] {
       createdAt: e.createdAt,
       updatedAt: e.updatedAt,
       deletedAt: e.deletedAt,
+      notesCount: notesCount.get(e.id) ?? 0,
     });
   }
   return ids.map((id) => byId.get(id)).filter((x): x is CalendarEventJson => !!x);

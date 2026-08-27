@@ -10,8 +10,8 @@ import type { CalendarEventStatus, CalendarEventType } from "../db/schema.js";
  * (handler mapuje status → HTTP). Narzędzie propose_event asystenta odróżnia nią błędy walidacji.
  */
 export class ApiError extends Error {
-  status: 400 | 404 | 409;
-  constructor(status: 400 | 404 | 409, message: string) {
+  status: 400 | 403 | 404 | 409;
+  constructor(status: 400 | 403 | 404 | 409, message: string) {
     super(message);
     this.status = status;
   }

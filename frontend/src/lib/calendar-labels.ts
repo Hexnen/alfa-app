@@ -8,6 +8,7 @@ import {
   HardHat,
   Pencil,
   Plus,
+  StickyNote,
   Trash2,
   TreePalm,
   Undo2,
@@ -365,6 +366,9 @@ export const ACTIVITY_ACTION_META: Record<string, { icon: LucideIcon; verb: stri
   assigned: { icon: UserPlus, verb: "Przypisał(a)", tone: "text-sky-600 dark:text-sky-400" },
   unassigned: { icon: UserMinus, verb: "Odpisał(a)", tone: "text-slate-500 dark:text-slate-400" },
   status_changed: { icon: CalendarCheck, verb: "Zmienił(a) status", tone: "text-violet-600 dark:text-violet-400" },
+  note_added: { icon: StickyNote, verb: "Dodał(a) notatkę", tone: "text-amber-600 dark:text-amber-400" },
+  note_updated: { icon: StickyNote, verb: "Zmienił(a) notatkę", tone: "text-amber-600 dark:text-amber-400" },
+  note_deleted: { icon: StickyNote, verb: "Usunął(-ęła) notatkę", tone: "text-slate-500 dark:text-slate-400" },
 };
 
 /** Opcje filtra akcji w panelu Aktywność. */
@@ -376,6 +380,7 @@ export const ACTIVITY_FILTER_OPTIONS: { value: string; label: string }[] = [
   { value: "assigned", label: "Przypisania" },
   { value: "deleted", label: "Usunięcia" },
   { value: "restored", label: "Przywrócenia" },
+  { value: "note_added", label: "Notatki" },
 ];
 
 /** Ikona akcji feedu (fallback: ołówek). */
@@ -390,7 +395,29 @@ export const ACTIVITY_ACTION_LABELS: Record<string, string> = {
   assigned: "przypisał(a) technika",
   unassigned: "odpisał(a) technika",
   status_changed: "zmienił(a) status",
+  note_added: "dodał(a) notatkę",
+  note_updated: "zmienił(a) notatkę",
+  note_deleted: "usunął(-ęła) notatkę",
 };
+
+const NOTE_ACTIONS = new Set(["note_added", "note_updated", "note_deleted"]);
+export const isNoteActivity = (action: string): boolean => NOTE_ACTIONS.has(action);
+
+/**
+ * Treść notatki z wpisu activity_log (backend: summary = „Dodano notatkę: …” / „Zmieniono …” / „Usunięto …”,
+ * opcjonalnie z sufiksem „(przez asystenta)”) → { text, via }.
+ */
+export function noteActivityParts(entry: ActivityEntry): { text: string; via: string | null } {
+  let s = (entry.summary ?? entry.newValue ?? entry.oldValue ?? "").replace(/^(Dodano|Zmieniono|Usunięto)\s+notatkę:\s*/i, "").trim();
+  let via: string | null = null;
+  const m = /\s*\((przez [^)]+)\)\s*$/i.exec(s);
+  if (m) {
+    via = m[1];
+    s = s.slice(0, m.index).trim();
+  }
+  return { text: s, via };
+}
+export const noteActivityText = (entry: ActivityEntry): string => noteActivityParts(entry).text;
 
 /** Etykiety pól logowanych przez backend (diff per pole). */
 export const ACTIVITY_FIELD_LABELS: Record<string, string> = {
@@ -443,6 +470,10 @@ function fieldValue(field: string | null, v: string | null): string {
  */
 export function describeActivity(entry: ActivityEntry): string {
   const who = entry.userLabel || "System";
+  if (isNoteActivity(entry.action)) {
+    const { text: t, via } = noteActivityParts(entry);
+    return `${who} ${ACTIVITY_ACTION_LABELS[entry.action]}${via ? ` (${via})` : ""}${t ? `: „${t}”` : ""}`;
+  }
   if (entry.summary) return `${who} — ${entry.summary}`;
   const a = entry.action;
   switch (a) {
@@ -489,6 +520,10 @@ export function activityParts(entry: ActivityEntry): {
   const who = entry.userLabel || "System";
   const a = entry.action;
   const verb = ACTIVITY_ACTION_META[a]?.verb ?? ACTIVITY_ACTION_LABELS[a] ?? a;
+  if (isNoteActivity(a)) {
+    const { text: t, via } = noteActivityParts(entry);
+    return { who, verb: via ? `${verb} (${via})` : verb, detail: t ? `„${t}”` : null };
+  }
   switch (a) {
     case "created": {
       const m = entry.summary ? /w ramach serii.*$/.exec(entry.summary) : null;
@@ -536,6 +571,18 @@ export function activityParts(entry: ActivityEntry): {
     default:
       return { who, verb, detail: entry.summary ?? null };
   }
+}
+
+/** Limit długości notatki (backend: 4000). */
+export const NOTE_MAX = 4000;
+
+/** „1 notatka” / „3 notatki” / „7 notatek”. */
+export function notesLabel(n: number): string {
+  const abs = Math.abs(n);
+  const last = abs % 10;
+  const tens = abs % 100;
+  const word = abs === 1 ? "notatka" : last >= 2 && last <= 4 && !(tens >= 12 && tens <= 14) ? "notatki" : "notatek";
+  return `${n} ${word}`;
 }
 
 /** Inicjały: „Jan Kowalski” → „JK”; „msajdak” → „MS”. */

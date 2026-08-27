@@ -139,9 +139,9 @@ try {
   ok("[0] warning kolizja z evBusy", c[0].warnings.some((w) => /Kolizja/.test(w) && w.includes("Zajęty jutro")), c[0].warnings);
   ok("[0] summary zawiera powód", /przełożone/.test(c[0].summary), c[0].summary);
   ok("[1] done + actualEndAt HH:MM → endAt 16:00, status done", c[1].after?.endAt === `${TODAY}T16:00` && c[1].after?.status === "done" && c[1].after?.startAt === `${TODAY}T13:00`, c[1].after);
-  ok("[1] opis: [Przebieg 27.08] Plan: … + notatka", /\[Przebieg 27\.08\] Plan: 27\.08\.2026 13:00–15:00\. wymienił 2 kamery/.test(c[1].after?.description ?? ""), c[1].after?.description);
+  ok("[1] opis bez zmian + note: „Przebieg 27.08: Wykonano 13:00–16:00 (plan 13:00–15:00). wymienił 2 kamery”", c[1].after?.description === c[1].before?.description && c[1].note === "Przebieg 27.08: Wykonano 13:00–16:00 (plan 13:00–15:00). wymienił 2 kamery" && diffOf(c[1], "Notatka")?.to === c[1].note, { note: c[1].note, description: c[1].after?.description });
   ok("[1] diff Status Zaplanowane → Wykonane", diffOf(c[1], "Status")?.from === "Zaplanowane" && diffOf(c[1], "Status")?.to === "Wykonane", c[1].diff);
-  ok("[2] cancel → status cancelled + powód w opisie (stary opis zachowany)", c[2].after?.status === "cancelled" && /^Plan serwisu\n\n\[Anulowano 27\.08\] klient nie wpuścił$/.test(c[2].after?.description ?? ""), c[2].after);
+  ok("[2] cancel → status cancelled + powód jako notatka (opis bez zmian)", c[2].after?.status === "cancelled" && c[2].after?.description === "Plan serwisu" && c[2].note === "Anulowano: klient nie wpuścił", c[2].after);
   ok("[3] delete → after.deleted", c[3].after?.deleted === true && c[3].before?.deleted === false && !c[3].error, c[3]);
   ok("[4] restore → after.deleted=false", c[4].after?.deleted === false && c[4].before?.deleted === true && !c[4].error, c[4]);
   ok("[5] create w przeszłości → status done (daySummaryDefaultStatus), before brak", c[5].after?.status === "done" && c[5].before === undefined && c[5].after?.id === null, c[5]);
@@ -162,9 +162,11 @@ try {
 
   // apply: status done → activity_log z dopiskiem, description, godziny
   const a1 = applyChange({ kind: "status", eventId: evMont, status: "done", actualStartAt: "13:30", actualEndAt: "16:00", note: "wymienił 2 kamery" }, 1, { cfg, today: TODAY }, { user });
-  ok("applyChange done: event po zapisie", a1.event.status === "done" && a1.event.startAt === `${TODAY}T13:30` && a1.event.endAt === `${TODAY}T16:00` && /\[Przebieg 27\.08\]/.test(a1.event.description ?? ""), a1.event);
+  ok("applyChange done: event po zapisie", a1.event.status === "done" && a1.event.startAt === `${TODAY}T13:30` && a1.event.endAt === `${TODAY}T16:00` && a1.event.description == null && a1.event.notesCount === 1, a1.event);
+  const n1 = db.select().from(schema.calendarEventNotes).where(eq(schema.calendarEventNotes.eventId, evMont)).all();
+  ok("applyChange done: notatka source=assistant, „Asystent (…)”, Przebieg", n1.length === 1 && n1[0].source === "assistant" && /^Asystent \(/.test(n1[0].userLabel ?? "") && /^Przebieg 27\.08: Wykonano 13:30–16:00 \(plan 13:00–15:00\)\. wymienił 2 kamery$/.test(n1[0].text), n1);
   const l1 = logs(evMont);
-  ok("activity_log: moved + status_changed + updated(opis), wszystkie z „(przez asystenta)”", l1.length >= 3 && l1.every((l) => /\(przez asystenta\)$/.test(l.summary ?? "")) && l1.some((l) => l.action === "status_changed") && l1.some((l) => l.action === "moved"), l1.map((l) => `${l.action}: ${l.summary}`));
+  ok("activity_log: moved + status_changed + note_added, wszystkie z „(przez asystenta)”", l1.length >= 3 && l1.every((l) => /\(przez asystenta\)$/.test(l.summary ?? "")) && l1.some((l) => l.action === "status_changed") && l1.some((l) => l.action === "moved") && l1.some((l) => l.action === "note_added"), l1.map((l) => `${l.action}: ${l.summary}`));
   // apply: update przesunięcie + technicy
   const a2 = applyChange({ kind: "update", eventId: evServ, patch: { startAt: "2026-08-28T14:00", technicianIds: [t1, t2] } }, 0, { cfg, today: TODAY }, { user });
   ok("applyChange update: przesunięte + 2 techników", a2.event.startAt === "2026-08-28T14:00" && a2.event.endAt === "2026-08-28T16:00" && a2.event.technicians.length === 2, a2.event);

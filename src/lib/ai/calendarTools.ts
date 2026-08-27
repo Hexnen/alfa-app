@@ -14,7 +14,7 @@ import { db, schema } from "../../db/index.js";
 import { CALENDAR_EVENT_STATUSES, CALENDAR_EVENT_TYPES, CALENDAR_SERIES_FREQS, type User } from "../../db/schema.js";
 import { ApiError } from "../calendar-labels.js";
 import { parseInput, type ParsedInput } from "../calendar-mutations.js";
-import { conflictEventIds, listActiveTechnicians, loadEvent, loadEvents, techName } from "../calendar-queries.js";
+import { conflictEventIds, listActiveTechnicians, loadEvent, loadEvents, loadNotes, techName } from "../calendar-queries.js";
 import { ASSISTANT_DEFAULTS, type AssistantSettingsValues } from "./assistantConfig.js";
 import {
   CHANGES_MAX,
@@ -61,6 +61,9 @@ const SEARCH_EVENTS_LIMIT = 20;
 const SEARCH_PAST_DAYS = 90;
 const SEARCH_FUTURE_DAYS = 180;
 const HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+/** get_event: ile ostatnich notatek i do ilu znaków każda. */
+const GET_EVENT_NOTES = 10;
+const NOTE_CLIP = 300;
 
 /** Etykiety pól zod → czytelny komunikat dla modelu (PL, krótko, bez stacka). */
 function formatIssue(issue: z.core.$ZodIssue): string {
@@ -167,6 +170,7 @@ function briefEvent(e: ReturnType<typeof loadEvents>[number]) {
     objectName: clip(e.objectName),
     location: clip(e.location),
     technicians: e.technicians.map((t) => ({ id: t.id, name: techName(t) })),
+    notesCount: e.notesCount,
     ...(e.seriesId != null ? { seriesId: e.seriesId } : {}),
   };
 }
@@ -384,7 +388,7 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
     }),
 
     get_event: lenientTool("get_event", {
-      description: "Pełne dane jednego wydarzenia po id (opis, technicy, seria, czy usunięte) — do precyzyjnego dopasowania przed propose_changes.",
+      description: "Pełne dane jednego wydarzenia po id (opis, technicy, seria, czy usunięte) + notatki (dziennik: co się działo, ustalenia; ostatnie 10) — do pytań o przebieg i przed propose_changes.",
       inputSchema: z.object({ eventId: zId.describe("Id z list_events") }),
       execute: async ({ eventId }) => {
         const e = loadEvent(db, eventId);
@@ -398,6 +402,9 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
             createdByLabel: e.createdByLabel,
             updatedAt: e.updatedAt,
             ...(e.series ? { series: { id: e.series.id, freq: e.series.freq, interval: e.series.interval } } : {}),
+            notesCount: e.notesCount,
+            // Dziennik: ostatnie 10 notatek (najstarsza pierwsza), tekst przycięty do 300 znaków.
+            notes: loadNotes(db, eventId).slice(-GET_EVENT_NOTES).map((n) => ({ userLabel: n.userLabel, createdAt: n.createdAt, text: clip(n.text, NOTE_CLIP) })),
           },
         };
       },

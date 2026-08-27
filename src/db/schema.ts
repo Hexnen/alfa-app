@@ -1237,6 +1237,40 @@ export const calendarEventAssignees = sqliteTable(
 export type CalendarEventAssignee = typeof calendarEventAssignees.$inferSelect;
 export type NewCalendarEventAssignee = typeof calendarEventAssignees.$inferInsert;
 
+// Notatki do wydarzenia — dziennik (wiele wpisów, z autorem i czasem). `description`
+// wydarzenia pozostaje stałym opisem; notatki dopisują użytkownicy i asystent (source).
+export const CALENDAR_NOTE_SOURCES = ["user", "assistant", "system"] as const;
+export type CalendarNoteSource = (typeof CALENDAR_NOTE_SOURCES)[number];
+export const CALENDAR_NOTE_MAX = 4000;
+
+export const calendarEventNotes = sqliteTable(
+  "calendar_event_notes",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    eventId: integer("event_id")
+      .notNull()
+      .references(() => calendarEvents.id, { onDelete: "cascade" }),
+    userId: integer("user_id").references(() => users.id, { onDelete: "set null" }),
+    // Snapshot autora (displayName || email); dla asystenta „Asystent (kto zatwierdził)”.
+    userLabel: text("user_label"),
+    source: text("source", { enum: CALENDAR_NOTE_SOURCES }).default("user").notNull(),
+    text: text("text").notNull(),
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+    updatedAt: text("updated_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+    deletedAt: text("deleted_at"), // soft delete
+  },
+  (t) => ({
+    eventCreatedIdx: index("calendar_event_notes_event_created_idx").on(t.eventId, t.createdAt),
+  })
+);
+
+export type CalendarEventNote = typeof calendarEventNotes.$inferSelect;
+export type NewCalendarEventNote = typeof calendarEventNotes.$inferInsert;
+
 // ============================================================================
 // ACTIVITY LOG — generyczny dziennik zmian dla całej aplikacji
 // (kalendarz jest pierwszym konsumentem; w przyszłości magazyn itd.)
@@ -1251,6 +1285,9 @@ export const ACTIVITY_ACTIONS = [
   "assigned",
   "unassigned",
   "status_changed",
+  "note_added",
+  "note_updated",
+  "note_deleted",
 ] as const;
 export type ActivityAction = (typeof ACTIVITY_ACTIONS)[number];
 

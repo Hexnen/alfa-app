@@ -17,6 +17,7 @@ import { CALENDAR_EVENT_STATUSES, CALENDAR_EVENT_TYPES, type CalendarEventStatus
 import type { DbOrTx, Tx } from "../activity-log.js";
 import { ApiError, STATUS_LABELS, TYPE_LABELS } from "../calendar-labels.js";
 import {
+  addNote,
   createEvent,
   deleteEvent,
   fmtDate,
@@ -49,6 +50,8 @@ export const zIds = z.array(zId).max(20);
 
 /** Maks. długość tytułu propozycji (karta + kalendarz; parseInput dopuszcza 300). */
 export const PROPOSAL_TITLE_MAX = 80;
+/** Maks. długość notatki z propose_changes (kind: note). */
+export const NOTE_TEXT_MAX = 2000;
 
 /** Dane nowego wydarzenia (wspólne: propose_event i propose_changes/create). */
 export const zEventInput = z.object({
@@ -75,7 +78,7 @@ const zPatch = z
     allDay: z.boolean().optional(),
     objectId: zId.nullable().optional().describe("Id z find_object; null = bez obiektu"),
     location: z.string().trim().max(200).nullable().optional(),
-    description: z.string().trim().max(2000).nullable().optional().describe("ZASTĘPUJE opis (do dopisania notatki użyj kind: status)"),
+    description: z.string().trim().max(2000).nullable().optional().describe("ZASTĘPUJE stały opis (do dopisania informacji o przebiegu/ustaleniach użyj kind: note)"),
     technicianIds: zIds.optional().describe("PEŁNA nowa lista techników"),
     status: z.enum(CALENDAR_EVENT_STATUSES).optional(),
   })
@@ -94,10 +97,15 @@ export const zChange = z.discriminatedUnion("kind", [
     status: z.enum(["confirmed", "done", "cancelled"]),
     actualStartAt: zActualTime.optional().describe("Faktyczny początek (done): data z godziną albo HH:MM tego dnia"),
     actualEndAt: zActualTime.optional().describe("Faktyczny koniec (done): data z godziną albo HH:MM tego dnia"),
-    note: z.string().trim().max(1000).optional().describe("Notatka z przebiegu — dopisywana do opisu"),
+    note: z.string().trim().max(1000).optional().describe("Przebieg — zapisywany jako notatka wydarzenia (nie zmienia opisu)"),
     reason: z.string().trim().max(300).optional(),
   }),
   z.object({ kind: z.literal("cancel"), eventId: zId, reason: z.string().trim().max(300).optional() }),
+  z.object({
+    kind: z.literal("note"),
+    eventId: zId,
+    text: z.string().trim().min(1).max(NOTE_TEXT_MAX).describe("Treść notatki (dziennik wydarzenia: przebieg, ustalenia, prośby klienta)"),
+  }),
   z.object({ kind: z.literal("delete"), eventId: zId, reason: z.string().trim().max(300).optional() }),
   z.object({ kind: z.literal("restore"), eventId: zId }),
   z.object({
@@ -152,13 +160,16 @@ export interface ResolvedChange {
   /** Jedno zdanie do nagłówka pozycji. */
   summary: string;
   warnings: string[];
+  /** Notatka, która zostanie dodana do dziennika wydarzenia przy zatwierdzeniu (kind note; status done z note; cancel z reason). */
+  note?: string;
   /** Zmiana niewykonalna (event nie istnieje, walidacja) — karta bez przycisków. */
   error?: string;
 }
 
 /** Co dokładnie wykonać przy zatwierdzeniu (wszystko przez calendar-mutations). */
 export type PlannedOp =
-  | { kind: "update"; eventId: number; input: ParsedInput }
+  | { kind: "update"; eventId: number; input: ParsedInput; note?: string }
+  | { kind: "note"; eventId: number; text: string }
   | { kind: "delete"; eventId: number }
   | { kind: "restore"; eventId: number }
   | { kind: "create"; input: ParsedInput };
@@ -311,6 +322,11 @@ function conflictWarnings(dbx: DbOrTx, input: ParsedInput, excludeId: number | n
   });
 }
 
+/** "09:00–13:00" z dwóch dat tego samego dnia (inny dzień: pełne daty). */
+function fmtTimes(startAt: string, endAt: string): string {
+  return startAt.slice(0, 10) === endAt.slice(0, 10) ? `${startAt.slice(11, 16)}–${endAt.slice(11, 16)}` : `${fmtDate(startAt)}–${fmtDate(endAt)}`;
+}
+
 /** Pełna data faktycznego czasu: HH:MM → dzień wydarzenia. */
 function actualToDt(raw: string, eventDay: string): string {
   return HHMM_RE.test(raw) ? `${eventDay}T${raw}` : raw;
@@ -319,11 +335,6 @@ function actualToDt(raw: string, eventDay: string): string {
 /** "27.08" z YYYY-MM-DD. */
 function ddmm(date: string): string {
   return `${date.slice(8, 10)}.${date.slice(5, 7)}`;
-}
-
-function appendNote(description: string | null, note: string): string {
-  const base = (description ?? "").trimEnd();
-  return base ? `${base}\n\n${note}` : note;
 }
 
 /** ParsedInput → surowe body dla parseInput (ponowne scalanie z patchem). */
@@ -426,6 +437,24 @@ export function resolveChange(dbx: DbOrTx, change: Change, index: number, opts: 
           op: { kind: "restore", eventId: ev.id },
         };
       }
+      case "note": {
+        const ev = loadExisting(dbx, change.eventId, "note");
+        const before = briefOfEvent(ev);
+        const text = change.text.trim();
+        return {
+          resolved: {
+            ...base,
+            eventId: ev.id,
+            before,
+            after: before,
+            diff: [{ field: "Notatka", from: "", to: text }],
+            summary: clip(`Notatka: ${before.title} — ${text}`.replace(/\s+/g, " "), 300) ?? `Notatka: ${text}`,
+            warnings: ev.seriesId != null ? ["Wydarzenie należy do serii — notatka trafi tylko do tego wystąpienia."] : [],
+            note: text,
+          },
+          op: { kind: "note", eventId: ev.id, text },
+        };
+      }
       case "update":
       case "status":
       case "cancel": {
@@ -434,6 +463,8 @@ export function resolveChange(dbx: DbOrTx, change: Change, index: number, opts: 
         const body = inputBodyOf(ev);
         const day = ev.startAt.slice(0, 10);
         let headline = "";
+        // Przebieg / powód anulowania → osobna notatka w dzienniku (description zostaje stałym opisem).
+        let note: string | undefined;
         if (change.kind === "update") {
           const p = change.patch;
           if (p.title !== undefined) body.title = p.title;
@@ -455,7 +486,7 @@ export function resolveChange(dbx: DbOrTx, change: Change, index: number, opts: 
         } else if (change.kind === "cancel" || (change.kind === "status" && change.status === "cancelled")) {
           const reason = (change.kind === "cancel" ? change.reason : (change.note || change.reason)) ?? "";
           body.status = "cancelled";
-          if (reason) body.description = appendNote(ev.description, `[Anulowano ${ddmm(today)}] ${reason}`);
+          if (reason) note = `Anulowano: ${reason}`;
           headline = `Anulowanie${reason ? ` — ${reason}` : ""}`;
         } else {
           // status: confirmed | done (+ faktyczne godziny + notatka)
@@ -472,15 +503,17 @@ export function resolveChange(dbx: DbOrTx, change: Change, index: number, opts: 
             body.endAt = e;
             planChanged = s !== ev.startAt || e !== ev.endAt;
           }
-          const plan = planChanged ? `Plan: ${fmtRange(ev.startAt, ev.endAt, ev.allDay)}.` : "";
-          const noteText = [plan, change.note?.trim()].filter(Boolean).join(" ");
-          if (noteText) body.description = appendNote(ev.description, `[Przebieg ${ddmm(day)}] ${noteText}`);
+          // Jedna notatka: „Przebieg 27.08: Wykonano 13:30–16:00 (plan 09:00–11:00). Wymieniono 2 kamery.”
+          const done = planChanged ? `Wykonano ${fmtTimes(body.startAt as string, body.endAt as string)} (plan ${fmtTimes(ev.startAt, ev.endAt)}).` : "";
+          const noteText = [done, change.note?.trim()].filter(Boolean).join(" ");
+          if (noteText) note = `Przebieg ${ddmm(day)}: ${noteText}`;
           headline = change.status === "done" ? "Wykonane" : "Potwierdzone";
           if (change.reason) headline += ` — ${change.reason}`;
         }
         const input = parseInput(body);
         const after = briefOfInput(dbx, input, { id: ev.id, seriesId: ev.seriesId });
         const diff = diffBriefs(before, after);
+        if (note) diff.push({ field: "Notatka", from: "", to: note });
         if (diff.length === 0) throw new ApiError(400, `Wydarzenie #${ev.id}: zmiana nie zmienia żadnego pola`);
         const warnings: string[] = [];
         const rangeChanged = before.startAt !== after.startAt || before.endAt !== after.endAt || before.technicianIds.join() !== after.technicianIds.join();
@@ -488,8 +521,8 @@ export function resolveChange(dbx: DbOrTx, change: Change, index: number, opts: 
         if (ev.seriesId != null) warnings.push("Wydarzenie należy do serii — zmiana dotyczy tylko tego wystąpienia.");
         const summary = `${headline}: ${before.title} — ${diff.map((d) => `${d.field.toLowerCase()} ${d.from ?? "—"} → ${d.to ?? "—"}`).join("; ")}`;
         return {
-          resolved: { ...base, eventId: ev.id, before, after, diff, summary: clip(summary.replace(/\s+/g, " "), 300) ?? summary, warnings },
-          op: { kind: "update", eventId: ev.id, input },
+          resolved: { ...base, eventId: ev.id, before, after, diff, summary: clip(summary.replace(/\s+/g, " "), 300) ?? summary, warnings, ...(note ? { note } : {}) },
+          op: { kind: "update", eventId: ev.id, input, ...(note ? { note } : {}) },
         };
       }
     }
@@ -513,6 +546,10 @@ export function executeOp(tx: Tx, op: PlannedOp, ctx: MutationCtx): number {
       return createEvent(tx, op.input, ctx).firstId;
     case "update":
       updateEvent(tx, op.eventId, op.input, "this", ctx);
+      if (op.note) addNote(tx, { eventId: op.eventId, text: op.note, ctx, source: "assistant" });
+      return op.eventId;
+    case "note":
+      addNote(tx, { eventId: op.eventId, text: op.text, ctx, source: "assistant" });
       return op.eventId;
     case "delete":
       deleteEvent(tx, op.eventId, "this", ctx);

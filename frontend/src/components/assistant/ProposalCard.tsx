@@ -16,6 +16,7 @@ import {
 import { cn } from "@/lib/utils";
 import type { PreviewRange, ProposalDecision } from "./parts";
 import { ObjectPeek } from "./ObjectPeek";
+import { NotesBadge } from "@/components/CalendarEventNotes";
 
 export interface ProposalCardProps {
   toolCallId: string;
@@ -175,6 +176,11 @@ export function ProposalCard({
             </dd>
           </div>
           {p.description && <div className="whitespace-pre-wrap break-words pt-0.5 text-foreground/80">{p.description}</div>}
+          {(p.notesCount ?? 0) > 0 && (
+            <div className="pt-0.5">
+              <NotesBadge count={p.notesCount} />
+            </div>
+          )}
         </dl>
 
         {conflicts.length > 0 && decision?.status !== "saved" && (

@@ -57,6 +57,7 @@ import {
   Repeat,
   Rss,
   Sparkles,
+  StickyNote,
   Tags,
   Trash2,
   Undo2,
@@ -84,6 +85,7 @@ import {
   type ActivityEntry,
   type AssistantStatus,
   type CalendarEvent,
+  type CalendarNote,
   type CalendarEventInput,
   type CalendarEventStatus,
   type CalendarEventType,
@@ -117,6 +119,7 @@ import {
   type CalendarEventPrefill,
 } from "@/components/CalendarEventDialog";
 import { CalendarBoard, isOverdue, type BoardGroupBy } from "@/components/CalendarBoard";
+import { NotesBadge } from "@/components/CalendarEventNotes";
 import { AssistantDrawer, type AssistantEventChangeKind, type AssistantPreview } from "@/components/assistant/AssistantDrawer";
 import { cn } from "@/lib/utils";
 import "./Calendar.css";
@@ -1074,6 +1077,7 @@ export function Calendar() {
         cancel: "Anulowano",
         delete: "Usunięto",
         restore: "Przywrócono",
+        note: "Dodano notatkę",
       };
       const name = ev?.title ?? title ?? "wydarzenie";
       if (!ev && kind === "update" && title && !ev) {
@@ -1716,6 +1720,9 @@ export function Calendar() {
           void loadEvents();
         }}
         onDeleted={handleDeleted}
+        onNotesChanged={(id, count) =>
+          setAllEvents((list) => list.map((e) => (e.id === id ? { ...e, notesCount: count } : e)))
+        }
         onOpenEvent={(id) => void openEventById(id)}
       />
 
@@ -2055,6 +2062,28 @@ function EventPreview({
   const status = EVENT_STATUS_META[ev.status];
   const canMutate = editable && !ev.deletedAt;
   const overdue = isOverdue(ev, new Date());
+  const notesCount = ev.notesCount ?? ev.notes?.length ?? 0;
+  // Ostatnia notatka jedną linią: z listy nie mamy treści — dociągamy tylko gdy licznik > 0.
+  const inlineLast = ev.notes?.length ? ev.notes[ev.notes.length - 1] : null;
+  const [fetchedLast, setFetchedLast] = useState<{ id: number; note: CalendarNote | null } | null>(null);
+  useEffect(() => {
+    if (inlineLast || !notesCount) return;
+    let cancelled = false;
+    calendarApi
+      .notes(ev.id)
+      .then((res) => {
+        if (cancelled) return;
+        const list = res.data ?? [];
+        setFetchedLast({ id: ev.id, note: list.length ? list[list.length - 1] : null });
+      })
+      .catch(() => {
+        /* starszy backend — bez linii notatki */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [ev.id, inlineLast, notesCount]);
+  const lastNote = inlineLast ?? (fetchedLast?.id === ev.id && notesCount ? fetchedLast.note : null);
 
   useLayoutEffect(() => {
     const el = ref.current;
@@ -2116,6 +2145,7 @@ function EventPreview({
               </span>
             )}
             {ev.deletedAt && <span className="text-[10px] font-semibold text-red-600">usunięte</span>}
+            <NotesBadge count={notesCount} />
           </div>
         </div>
         <Button variant="ghost" size="icon" className="-mr-1 -mt-1 h-7 w-7" onClick={onClose} aria-label="Zamknij podgląd">
@@ -2158,6 +2188,15 @@ function EventPreview({
           <div className="flex gap-2">
             <dt className="w-4 shrink-0 text-muted-foreground"><AlertCircle className="h-3.5 w-3.5" aria-label="Opis" /></dt>
             <dd className="line-clamp-2 text-muted-foreground">{ev.description}</dd>
+          </div>
+        )}
+        {lastNote && (
+          <div className="flex gap-2" data-testid="preview-last-note">
+            <dt className="w-4 shrink-0 text-amber-600 dark:text-amber-400"><StickyNote className="h-3.5 w-3.5" aria-label="Ostatnia notatka" /></dt>
+            <dd className="min-w-0 truncate" title={lastNote.text}>
+              <span className="text-muted-foreground">{lastNote.userLabel || (lastNote.source === "assistant" ? "Asystent" : "—")}:</span>{" "}
+              {lastNote.text.replace(/\s+/g, " ")}
+            </dd>
           </div>
         )}
       </dl>
