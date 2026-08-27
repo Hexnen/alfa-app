@@ -436,11 +436,22 @@ export const MessageBubble = memo(function MessageBubble({
               if (!p.text.trim()) return null;
               const isLive = streaming && i === lastTextIdx;
               if (i < lastToolIdx && !isLive) {
+                // Tekst z kroku pośredniego (przed kolejnym narzędziem): krótka
+                // narracja („Najpierw znajdę…") jako wyciszona linia; dłuższa
+                // treść (np. pytanie z wyjaśnieniem) w pełnym, lecz wyciszonym dymku —
+                // nigdy nie ucinamy tego, co model napisał do użytkownika.
                 const oneLine = p.text.replace(/[*_`#]+/g, "").replace(/\s+/g, " ").trim();
+                if (oneLine.length <= 100 && !oneLine.includes("?")) {
+                  return (
+                    <p key={i} className="text-xs text-muted-foreground" data-testid="assistant-interim-text">
+                      {oneLine}
+                    </p>
+                  );
+                }
                 return (
-                  <p key={i} className="truncate text-xs text-muted-foreground" title={oneLine} data-testid="assistant-interim-text">
-                    {oneLine}
-                  </p>
+                  <div key={i} className="text-muted-foreground" data-testid="assistant-interim-text">
+                    <Prose text={p.text} streaming={false} />
+                  </div>
                 );
               }
               return <Prose key={i} text={p.text} streaming={isLive} />;
