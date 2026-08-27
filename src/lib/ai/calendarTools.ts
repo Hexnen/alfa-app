@@ -65,6 +65,8 @@ const HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 /** get_event: ile ostatnich notatek i do ilu znaków każda. */
 const GET_EVENT_NOTES = 10;
 const NOTE_CLIP = 300;
+/** Limit wydarzeń w jednej karcie show_events. */
+const SHOW_EVENTS_MAX = 30;
 
 /** Etykiety pól zod → czytelny komunikat dla modelu (PL, krótko, bez stacka). */
 function formatIssue(issue: z.core.$ZodIssue): string {
@@ -577,6 +579,39 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
             // Dziennik: ostatnie 10 notatek (najstarsza pierwsza), tekst przycięty do 300 znaków.
             notes: loadNotes(db, eventId).slice(-GET_EVENT_NOTES).map((n) => ({ userLabel: n.userLabel, createdAt: n.createdAt, text: clip(n.text, NOTE_CLIP) })),
           },
+        };
+      },
+    }),
+
+    show_events: lenientTool("show_events", {
+      description:
+        "Pokazuje użytkownikowi interaktywną listę wydarzeń (karta z otwieraniem, podglądem w kalendarzu i szybkimi akcjami). Używaj ZAWSZE, gdy odpowiedź zawiera listę wydarzeń — zamiast wypisywać je tekstem. suggestActions=true dla zaległych/do rozliczenia.",
+      inputSchema: z.object({
+        eventIds: z
+          .array(zId)
+          .min(1)
+          .max(SHOW_EVENTS_MAX)
+          .refine((ids) => new Set(ids).size === ids.length, { message: "id wydarzeń muszą być unikalne" })
+          .describe("Id wydarzeń z list_events/search_events (1–30, unikalne)"),
+        title: z.string().trim().max(80).optional().describe("Nagłówek karty, np. „Zaległe wydarzenia”, „Wtorek 01.09”"),
+        note: z.string().trim().max(300).optional().describe("Krótka uwaga pod nagłówkiem"),
+        suggestActions: z.boolean().optional().describe("true → karta podpowiada szybkie akcje (wykonane/anuluj) — dla zaległych/do rozliczenia"),
+      }),
+      execute: async ({ eventIds, title, note, suggestActions }) => {
+        // loadEvents zwraca też usunięte (soft-delete) — pokazujemy je z deleted:true.
+        const loaded = loadEvents(db, eventIds);
+        const found = new Set(loaded.map((e) => e.id));
+        const missing = eventIds.filter((id) => !found.has(id));
+        const events = [...loaded]
+          .sort((a, b) => (a.startAt < b.startAt ? -1 : a.startAt > b.startAt ? 1 : a.id - b.id))
+          .map((e) => ({ ...briefEvent(e), deleted: e.deletedAt != null }));
+        return {
+          events,
+          title: title || null,
+          note: note || null,
+          count: events.length,
+          suggestActions: Boolean(suggestActions),
+          ...(missing.length ? { missing } : {}),
         };
       },
     }),

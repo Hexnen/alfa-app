@@ -22,9 +22,11 @@
  *                   toolCallId?: string|null, changeIndex?: number|null }
  *                                                                   (rola system; decyzja usera o karcie —
  *                                                                    changeIndex = pozycja w paczce propose_changes)
- *  - data-local   { source: "choice", toolCallId, optionIndex, label }  (asystent; wiadomość wygenerowana LOKALNIE
- *                   przez POST /chats/:id/choose — bez modelu; jej tool-part ma toolCallId `local_*` i do modelu
- *                   idzie ZAWSZE jako streszczenie tekstowe, nigdy jako tool-call)
+ *  - data-local   { source: "choice", toolCallId, optionIndex, label }
+ *                 | { source: "quick", eventId, kind, fromToolCallId?, label }
+ *                                                                   (asystent; wiadomość wygenerowana LOKALNIE
+ *                   przez POST /chats/:id/choose lub /quick-change — bez modelu; jej tool-part ma toolCallId
+ *                   `local_*` i do modelu idzie ZAWSZE jako streszczenie tekstowe, nigdy jako tool-call)
  *
  * Zmiany istniejących wydarzeń (propose_changes): zatwierdzenie idzie przez POST /apply-changes
  * (serwer wykonuje przez src/lib/calendar-mutations.ts w transakcji per zmiana, activity_log
@@ -206,6 +208,12 @@ function summarizeToolPart(p: StoredPart): string {
       const n = Array.isArray(out.changes) ? out.changes.length : 0;
       return `[narzędzie propose_changes: paczka ${n} zmian pokazana użytkownikowi do zatwierdzenia]`;
     }
+    if (name === "show_events") {
+      // Karta z listą pokazana użytkownikowi — model nie ma powtarzać listy w tekście.
+      const evs = (Array.isArray(out.events) ? out.events : []) as { id?: number; title?: string | null }[];
+      const items = evs.slice(0, 12).map((e) => `#${e.id} „${e.title ?? ""}”`).join(", ");
+      return `[karta z listą ${evs.length} wydarzeń: ${items}${evs.length > 12 ? ", …" : ""}]`;
+    }
     const list = Object.values(out).find((v) => Array.isArray(v)) as unknown[] | undefined;
     if (list) return `[narzędzie ${name}: ${list.length} wyników]`;
     if (name === "propose_event") return "[narzędzie propose_event: karta propozycji pokazana użytkownikowi]";
@@ -214,14 +222,40 @@ function summarizeToolPart(p: StoredPart): string {
   return `[narzędzie ${name}: ok]`;
 }
 
-/** Part data-local: wiadomość asystenta wygenerowana przez POST /chats/:id/choose (bez modelu). */
-export type LocalNoteData = { source: "choice"; toolCallId: string; optionIndex: number; label: string };
+/** Szybkie akcje z karty show_events (POST /chats/:id/quick-change). */
+export type QuickChangeKind = "done" | "cancel" | "confirm" | "restore" | "delete";
+const QUICK_LABELS: Record<QuickChangeKind, string> = {
+  done: "Wykonane",
+  cancel: "Anulowanie",
+  confirm: "Potwierdzenie",
+  restore: "Przywrócenie",
+  delete: "Usunięcie",
+};
+const QUICK_VERBS: Record<QuickChangeKind, string> = {
+  done: "oznaczył jako wykonane",
+  cancel: "anulował",
+  confirm: "potwierdził",
+  restore: "przywrócił",
+  delete: "usunął",
+};
+
+/**
+ * Part data-local: wiadomość asystenta wygenerowana LOKALNIE (bez modelu):
+ *  - source "choice" — klik opcji ask_choice z action (POST /chats/:id/choose);
+ *  - source "quick"  — szybka akcja z karty show_events (POST /chats/:id/quick-change).
+ */
+export type LocalNoteData =
+  | { source: "choice"; toolCallId: string; optionIndex: number; label: string }
+  | { source: "quick"; eventId: number; kind: QuickChangeKind; fromToolCallId?: string; label: string };
 
 /** Streszczenie karty z wiadomości lokalnej — model widzi wybór użytkownika, nie tool-call `local_*`. */
 function summarizeLocalToolPart(p: StoredPart, local: LocalNoteData): string {
   const name = p.toolName || p.type.replace(/^tool-/, "");
   const out = p.output as Record<string, unknown> | undefined;
   const label = local?.label ?? "";
+  if (local?.source === "quick") {
+    return `[Użytkownik szybką akcją ${QUICK_VERBS[local.kind] ?? local.kind} #${local.eventId} — karta zmiany czeka na zatwierdzenie]`;
+  }
   if (name === "propose_changes") {
     const first = (Array.isArray(out?.changes) ? out!.changes[0] : undefined) as { eventId?: number } | undefined;
     return `[wybór użytkownika: ${label} → propozycja zmiany${first?.eventId != null ? ` #${first.eventId}` : ""} pokazana do zatwierdzenia]`;
@@ -594,6 +628,98 @@ app.post("/chats/:id/choose", async (c) => {
     });
     touchChat(chat.id, isFirst && chat.title === "Nowy czat" ? optionValue.slice(0, 60) : undefined);
     console.log(`[assistant] czat ${chat.id} (${user.email}): wybór lokalny „${label}” → ${toolPart.type} ${toolPart.toolCallId}`);
+    return c.json({ success: true, data: { userMessage: uiMessageOf(userRow), assistantMessage: uiMessageOf(assistantRow) } });
+  } finally {
+    releaseTurn(chat.id, turn);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Szybka akcja z karty show_events — karta zmiany bez tury modelu (POST /chats/:id/quick-change)
+// ---------------------------------------------------------------------------
+
+const QUICK_KINDS: readonly QuickChangeKind[] = ["done", "cancel", "confirm", "restore", "delete"];
+const QUICK_NOTE_MAX = 1000;
+/** Change.reason ma limit 300 (zChange) — dłuższa notatka jest przycinana. */
+const REASON_MAX = 300;
+
+/** Szybka akcja → pozycja Change (jak w propose_changes). */
+function quickChangeOf(kind: QuickChangeKind, eventId: number, note: string | undefined): Change {
+  const reason = note ? note.slice(0, REASON_MAX) : undefined;
+  switch (kind) {
+    case "done":
+      return { kind: "status", eventId, status: "done", ...(note ? { note } : {}) };
+    case "confirm":
+      return { kind: "status", eventId, status: "confirmed" };
+    case "cancel":
+      return { kind: "cancel", eventId, ...(reason ? { reason } : {}) };
+    case "restore":
+      return { kind: "restore", eventId };
+    case "delete":
+      return { kind: "delete", eventId, ...(reason ? { reason } : {}) };
+  }
+}
+
+/**
+ * POST /chats/:id/quick-change { eventId, kind: "done"|"cancel"|"confirm"|"restore"|"delete", note?, fromToolCallId? }
+ * Klik szybkiej akcji na karcie show_events: bez modelu, zapis pary wiadomości (user: „Szybka akcja: …”;
+ * asystent: tekst + karta tool-propose_changes z toolCallId `local_*` + part data-local {source:"quick"}).
+ * Zatwierdzenie karty idzie zwykłą drogą (POST /apply-changes). Wymaga allowModifications (403);
+ * propose_changes wyłączone → { fallback: true } (front wysyła zwykłą wiadomość); zmiana niewykonalna
+ * (np. już wykonane) → 400 code "invalid" z powodem; 409 busy gdy trwa tura.
+ */
+app.post("/chats/:id/quick-change", async (c) => {
+  const user = getCtxUser(c);
+  const chat = getOwnedChat(Number(c.req.param("id")), user);
+  if (!chat) return c.json({ success: false, error: "Nie znaleziono czatu" }, 404);
+  const body = (await c.req.json().catch(() => ({}))) as { eventId?: unknown; kind?: unknown; note?: unknown; fromToolCallId?: unknown };
+  const eventId = Number(body.eventId);
+  if (!Number.isInteger(eventId) || eventId <= 0) return c.json({ success: false, error: "Pole eventId jest wymagane" }, 400);
+  const kind = body.kind as QuickChangeKind;
+  if (!QUICK_KINDS.includes(kind)) return c.json({ success: false, error: `Pole kind: oczekiwano ${QUICK_KINDS.join(" | ")}` }, 400);
+  if (body.note != null && typeof body.note !== "string") return c.json({ success: false, error: "Pole note: oczekiwano tekstu" }, 400);
+  const note = typeof body.note === "string" ? body.note.trim() : "";
+  if (note.length > QUICK_NOTE_MAX) return c.json({ success: false, error: `Pole note: maks. ${QUICK_NOTE_MAX} znaków` }, 400);
+  const fromToolCallId = typeof body.fromToolCallId === "string" && body.fromToolCallId.trim() ? body.fromToolCallId.trim().slice(0, 64) : undefined;
+
+  const conf = getAssistantConfig().values;
+  if (!conf.allowModifications) return c.json({ success: false, code: "forbidden", error: "Asystent nie ma włączonych modyfikacji" }, 403);
+  if (conf.disabledTools.includes("propose_changes")) return c.json({ success: true, data: { fallback: true as const } });
+
+  const turn = reserveTurn(chat.id);
+  if (!turn) return c.json({ success: false, code: "busy", error: BUSY_MESSAGE }, 409);
+  try {
+    const change = quickChangeOf(kind, eventId, note || undefined);
+    const output = buildCalendarActions(conf).resolveChangesPreview([change]);
+    const resolved = output.changes[0];
+    if (resolved?.error) return c.json({ success: false, code: "invalid", error: resolved.error }, 400);
+    const title =
+      resolved?.before?.title ??
+      db.select({ title: schema.calendarEvents.title }).from(schema.calendarEvents).where(eq(schema.calendarEvents.id, eventId)).get()?.title ??
+      `#${eventId}`;
+
+    const label = QUICK_LABELS[kind];
+    const userText = `Szybka akcja: ${label} — ${title}`.slice(0, MESSAGE_MAX_CHARS);
+    const assistantText = `Szybka akcja: ${label} — „${title}”.`;
+    const toolPart: StoredPart = { type: "tool-propose_changes", toolCallId: localCallId(), state: "output-available", input: { changes: [change] }, output };
+    const localData: LocalNoteData = { source: "quick", eventId, kind, ...(fromToolCallId ? { fromToolCallId } : {}), label };
+    const assistantParts: StoredPart[] = [{ type: "text", text: assistantText }, toolPart, { type: "data-local", data: localData }];
+    const isFirst = !loadMessages(chat.id).some((m) => m.role === "user");
+    const { userRow, assistantRow } = db.transaction((tx) => {
+      const userRow = tx
+        .insert(schema.assistantMessages)
+        .values({ chatId: chat.id, role: "user", content: userText, parts: [{ type: "text", text: userText }] })
+        .returning()
+        .get();
+      const assistantRow = tx
+        .insert(schema.assistantMessages)
+        .values({ chatId: chat.id, role: "assistant", content: assistantText, parts: assistantParts })
+        .returning()
+        .get();
+      return { userRow, assistantRow };
+    });
+    touchChat(chat.id, isFirst && chat.title === "Nowy czat" ? userText.slice(0, 60) : undefined);
+    console.log(`[assistant] czat ${chat.id} (${user.email}): szybka akcja ${kind} #${eventId} → ${toolPart.toolCallId}`);
     return c.json({ success: true, data: { userMessage: uiMessageOf(userRow), assistantMessage: uiMessageOf(assistantRow) } });
   } finally {
     releaseTurn(chat.id, turn);

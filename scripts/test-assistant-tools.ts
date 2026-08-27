@@ -248,8 +248,39 @@ try {
     }
   }
 
+  // show_events: kolejność wg startAt, deleted, nieistniejące → missing, limit 30, unikalność
+  {
+    const mk = (title: string, day: number, deletedAt: string | null = null) =>
+      db
+        .insert(schema.calendarEvents)
+        .values({ type: "serwis", title: `${PREFIX} ${title}`, startAt: `${shift(day)}T08:00`, endAt: `${shift(day)}T10:00`, allDay: false, status: "planned", deletedAt })
+        .returning({ id: schema.calendarEvents.id })
+        .get().id;
+    const evLate = mk("Późne", 5);
+    const evEarly = mk("Wczesne", 1);
+    const evDel = mk("Usunięte", 3, new Date().toISOString());
+    try {
+      type Shown = { events: { id: number; title: string | null; deleted: boolean; technicians: unknown[]; notesCount: number }[]; count: number; missing?: number[]; title: string | null; note: string | null; suggestActions: boolean; error?: string };
+      const sh1 = (await exec(tools.show_events, { eventIds: [evLate, 99999999, evDel, evEarly], title: "Test", suggestActions: true })) as Shown;
+      ok("show_events: nieistniejące id pominięte + missing", !sh1.error && sh1.count === 3 && sh1.missing?.length === 1 && sh1.missing[0] === 99999999, sh1);
+      ok("show_events: kolejność wg startAt rosnąco", sh1.events.map((e) => e.id).join(",") === [evEarly, evDel, evLate].join(","), sh1.events.map((e) => e.id));
+      ok("show_events: deleted:true dla soft-delete, false dla reszty", sh1.events.find((e) => e.id === evDel)?.deleted === true && sh1.events.find((e) => e.id === evEarly)?.deleted === false, sh1);
+      ok("show_events: kształt briefEvent (technicians, notesCount) + title/note/suggestActions", Array.isArray(sh1.events[0].technicians) && typeof sh1.events[0].notesCount === "number" && sh1.title === "Test" && sh1.note === null && sh1.suggestActions === true, sh1);
+      const sh2 = (await exec(tools.show_events, { eventIds: [evEarly] })) as Shown;
+      ok("show_events: bez missing gdy wszystkie istnieją; suggestActions domyślnie false; title null", sh2.missing === undefined && sh2.suggestActions === false && sh2.title === null, sh2);
+      const sh3 = (await exec(tools.show_events, { eventIds: Array.from({ length: 31 }, (_, i) => i + 1) })) as Shown;
+      ok("show_events: 31 id → błąd walidacji (maks. 30)", typeof sh3.error === "string" && /maks\. 30/.test(sh3.error), sh3);
+      const sh4 = (await exec(tools.show_events, { eventIds: [evEarly, evEarly] })) as Shown;
+      ok("show_events: duplikaty id → błąd walidacji", typeof sh4.error === "string" && /unikalne/.test(sh4.error), sh4);
+      const sh5 = (await exec(tools.show_events, { eventIds: [] })) as Shown;
+      ok("show_events: pusta lista → błąd walidacji", typeof sh5.error === "string", sh5);
+    } finally {
+      db.delete(schema.calendarEvents).where(like(schema.calendarEvents.title, `${PREFIX}%`)).run();
+    }
+  }
+
   // check_conflicts
-  const k1 = (await exec(tools.check_conflicts, { startAt: "2026-09-01T10:00", endAt: "2026-09-01T08:00", technicianIds: [tid] })) as { error?: string };
+  const k1 =(await exec(tools.check_conflicts, { startAt: "2026-09-01T10:00", endAt: "2026-09-01T08:00", technicianIds: [tid] })) as { error?: string };
   ok("check_conflicts: endAt <= startAt → error", typeof k1.error === "string", k1);
 
   // PROPOSAL_INTENT_RE

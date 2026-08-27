@@ -1,4 +1,13 @@
-import type { AssistantChangesOutput, AssistantChoiceOption, AssistantChoiceOutput, AssistantConflict, AssistantProposalOutput, AssistantResolvedChange } from "@/lib/api";
+import type {
+  AssistantBriefEvent,
+  AssistantChangesOutput,
+  AssistantChoiceOption,
+  AssistantChoiceOutput,
+  AssistantConflict,
+  AssistantProposalOutput,
+  AssistantResolvedChange,
+  AssistantShowEventsOutput,
+} from "@/lib/api";
 
 /**
  * Luźne typy partów UIMessage (ai@7). `ai` typuje je generycznie po narzędziach,
@@ -174,6 +183,40 @@ export function choiceOf(p: ToolPart): AssistantChoiceOutput | null {
   const out = p.output as AssistantChoiceOutput | undefined;
   if (!out || typeof out !== "object" || !Array.isArray(out.options) || out.options.length === 0) return null;
   return out;
+}
+
+/** Narzędzia, których wynik zawiera tablicę `events` w kształcie `AssistantBriefEvent`. */
+const EVENT_LIST_TOOLS = new Set(["show_events", "list_events", "search_events"]);
+
+/**
+ * Lista wydarzeń z wyniku `show_events` / `list_events` / `search_events` (albo pusta tablica —
+ * inne narzędzie, błąd, brak wyniku). Odrzucamy elementy bez numerycznego `id`.
+ */
+export function eventsOf(p: ToolPart): AssistantBriefEvent[] {
+  if (!EVENT_LIST_TOOLS.has(toolName(p)) || p.state !== "output-available") return [];
+  const out = p.output;
+  if (!out || typeof out !== "object") return [];
+  const o = out as { events?: unknown; error?: unknown };
+  if (typeof o.error === "string" || !Array.isArray(o.events)) return [];
+  return o.events.filter((e): e is AssistantBriefEvent => Boolean(e) && typeof e === "object" && typeof (e as { id?: unknown }).id === "number");
+}
+
+/** Wynik `show_events` znormalizowany do karty (albo null — inne narzędzie / błąd / brak wyniku). */
+export function showEventsOf(p: ToolPart): AssistantShowEventsOutput | null {
+  if (toolName(p) !== "show_events" || p.state !== "output-available") return null;
+  const out = p.output;
+  if (!out || typeof out !== "object") return null;
+  const o = out as Partial<AssistantShowEventsOutput> & { error?: unknown };
+  if (typeof o.error === "string") return null;
+  const events = eventsOf(p);
+  return {
+    events,
+    title: typeof o.title === "string" && o.title.trim() ? o.title.trim() : null,
+    note: typeof o.note === "string" && o.note.trim() ? o.note.trim() : null,
+    count: typeof o.count === "number" ? o.count : events.length,
+    suggestActions: Boolean(o.suggestActions),
+    missing: Array.isArray(o.missing) ? o.missing.filter((x): x is number => typeof x === "number") : undefined,
+  };
 }
 
 /** Tekst wysyłany po kliknięciu opcji ask_choice (value ma pierwszeństwo nad label). */

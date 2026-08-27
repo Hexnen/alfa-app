@@ -83,6 +83,7 @@ export function assembleSystemPrompt(ctx: PromptContext): string {
   const freeSlots = has("find_free_slots");
   const conflicts = has("check_conflicts");
   const search = has("search_events");
+  const showEvents = has("show_events");
 
   // --- Zasady: dane i pytania ---
   const rules: string[] = [];
@@ -142,7 +143,7 @@ export function assembleSystemPrompt(ctx: PromptContext): string {
   // --- Grafik, horyzont, status ---
   rules.push(
     has("list_events")
-      ? `15. Pytania o grafik w ZADANYM oknie („co ma Wojtek w przyszłym tygodniu?”, „ile serwisów we wrześniu?”) → \`list_events\` z filtrem technika/obiektu i zwięzła lista (data, godziny, typ, tytuł, obiekt). Zakres jednego zapytania maks. ${r.maxHorizonDays} dni — dłuższy jest automatycznie przycinany (pole \`truncatedRange\`), więc NIE próbuj kolejnych zakresów „365 → 91 → 90”. ${freeSlots ? "Pytania o WOLNYCH techników / wolne terminy („kto jest wolny w piątek?”) → `find_free_slots` (technicianIds: [] dla wszystkich), nie `list_events` per osoba." : ""}`
+      ? `15. Pytania o grafik w ZADANYM oknie („co ma Wojtek w przyszłym tygodniu?”, „ile serwisów we wrześniu?”) → \`list_events\` z filtrem technika/obiektu i ${showEvents ? "karta `show_events` z id wyników (patrz 15d)" : "zwięzła lista (data, godziny, typ, tytuł, obiekt)"}. Zakres jednego zapytania maks. ${r.maxHorizonDays} dni — dłuższy jest automatycznie przycinany (pole \`truncatedRange\`), więc NIE próbuj kolejnych zakresów „365 → 91 → 90”. ${freeSlots ? "Pytania o WOLNYCH techników / wolne terminy („kto jest wolny w piątek?”) → `find_free_slots` (technicianIds: [] dla wszystkich), nie `list_events` per osoba." : ""}`
       : "15. Nie masz narzędzia do przeglądania grafiku — na pytania o grafik odpowiedz, że podgląd jest dostępny w kalendarzu."
   );
   if (search) {
@@ -151,6 +152,14 @@ export function assembleSystemPrompt(ctx: PromptContext): string {
     );
     rules.push(
       "15b. Filtr `type` w `search_events` TYLKO gdy użytkownik użył nazwy typu (serwis, montaż, wizja lokalna, demontaż, konserwacja, urlop). Potoczne słowa („wizyta”, „byliśmy”, „odbyło się”, „pojechał”, „byli na obiekcie”) NIE oznaczają typu — „wizyta” to NIE „wizja lokalna”. Pierwsze wyszukanie = `search_events` po obiekcie/techniku BEZ `type` i BEZ `status`. Wynik z polem `relaxed` oznacza, że narzędzie samo zdjęło filtr typu/statusu — użyj tych wyników, nie szukaj ponownie z innym typem. `find_object` przed `search_events` nie jest potrzebny (query szuka też po nazwie obiektu, z odmianą)."
+    );
+  }
+  if (showEvents) {
+    rules.push(
+      "15d. LISTA WYDARZEŃ = KARTA: gdy odpowiedź zawiera listę wydarzeń (przegląd dnia/tygodnia, zaległości, wyniki wyszukiwania ≥ 1 wydarzenia), ZAWSZE wywołaj `show_events` z ich `id` (z `list_events`/`search_events`) zamiast wypisywać je tekstem; `title` = nagłówek (np. „Wtorek 01.09”, „Serwisy Wojtka”). Tekst po karcie = 1 zdanie podsumowania + ewentualne pytanie. NIE powtarzaj tytułów ani dat z karty."
+    );
+    rules.push(
+      `15e. Zaległe / przeterminowane / do rozliczenia („co zaległe?”, „co nie rozliczone?”) → \`list_events\` od ${ctx.today} − 60 dni do jutra, wybierz wydarzenia o statusie planned/confirmed z \`endAt\` przed teraz (pomiń typ urlop oraz wydarzenia trwające dziś) → \`show_events\` z ich id, \`suggestActions: true\`, \`title: "Zaległe wydarzenia"\`. Brak takich → jedno zdanie, bez karty.`
     );
   }
   rules.push(

@@ -563,7 +563,7 @@ export function Calendar() {
     }
     base.push({
       id: "assistant-ghost",
-      title: g.type === "slot" ? "Wolny termin" : `${g.before ? "Nowy termin" : "Propozycja"}: ${g.title ?? ""}`.trim(),
+      title: g.type === "slot" ? "Wolny termin" : `${g.before ? "Nowy termin" : g.eventId != null ? "Podgląd" : "Propozycja"}: ${g.title ?? ""}`.trim(),
       start: g.startAt,
       end: g.endAt,
       allDay: Boolean(g.allDay),

@@ -995,6 +995,9 @@ export interface Technician {
   firstName: string;
   lastName: string;
   phone: string | null;
+  email: string | null;
+  company: string | null;
+  nip: string | null;
   type: TechnicianType;
   notes: string | null;
   active: boolean;
@@ -1006,6 +1009,9 @@ export interface TechnicianInput {
   firstName: string;
   lastName: string;
   phone?: string;
+  email?: string;
+  company?: string;
+  nip?: string;
   type: TechnicianType;
   notes?: string;
   active?: boolean;
@@ -2701,6 +2707,39 @@ export type AssistantChooseResult =
   | { fallback: true }
   | { fallback?: false; userMessage: AssistantUIMessage; assistantMessage: AssistantUIMessage };
 
+/** Wynik `show_events` — karta listy wydarzeń (elementy w kształcie `AssistantBriefEvent`, jak list_events/search_events). */
+export interface AssistantShowEventsOutput {
+  events: AssistantBriefEvent[];
+  title: string | null;
+  note: string | null;
+  count: number;
+  suggestActions: boolean;
+  /** Id z wejścia, których nie znaleziono. */
+  missing?: number[];
+}
+
+/** Szybka akcja z karty listy wydarzeń (POST /assistant/chats/:id/quick-change). */
+export type AssistantQuickChangeKind = "done" | "cancel" | "confirm" | "restore" | "delete";
+
+export interface AssistantQuickChangeBody {
+  eventId: number;
+  kind: AssistantQuickChangeKind;
+  note?: string;
+  fromToolCallId?: string;
+}
+
+/** Błąd API asystenta z kodem z backendu (`forbidden` / `invalid` / `busy`). */
+export class AssistantApiError extends Error {
+  code?: string;
+  status: number;
+  constructor(message: string, status: number, code?: string) {
+    super(message);
+    this.name = "AssistantApiError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
 /** Wynik `ask_choice` — karta pytania z przyciskami. */
 export interface AssistantChoiceOutput {
   awaitingUserChoice?: boolean;
@@ -2917,16 +2956,45 @@ export const assistantApi = {
       method: "POST",
       body: JSON.stringify({ toolCallId, optionIndex, ...(optionLabel ? { optionLabel } : {}) }),
     });
-    if (!r || typeof r !== "object") return { fallback: true };
-    if ("fallback" in r && r.fallback) return { fallback: true };
-    const ok = r as { userMessage?: AssistantUIMessage; assistantMessage?: AssistantUIMessage };
-    if (!ok.userMessage || !ok.assistantMessage) return { fallback: true };
-    return {
-      userMessage: { ...ok.userMessage, id: String(ok.userMessage.id) },
-      assistantMessage: { ...ok.assistantMessage, id: String(ok.assistantMessage.id) },
-    };
+    return normalizeChooseResult(r);
+  },
+  /**
+   * Szybka akcja z karty listy wydarzeń („Wykonane” / „Anuluj”) — backend bez modelu dopisuje
+   * wiadomość użytkownika i asystenta z kartą `propose_changes` (jak /choose). `{ fallback: true }`
+   * → wyślij polecenie zwykłą ścieżką. Błędy: `AssistantApiError` z `code` (forbidden / invalid / busy).
+   */
+  async quickChange(chatId: number, body: AssistantQuickChangeBody): Promise<AssistantChooseResult> {
+    const response = await fetch(`${API_BASE}/assistant/chats/${chatId}/quick-change`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const raw: unknown = await response.json().catch(() => null);
+    const obj = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : null;
+    const codeOf = (o: Record<string, unknown> | null) => (o && typeof o.code === "string" ? o.code : undefined);
+    if (!response.ok) {
+      const msg = (obj && (typeof obj.error === "string" ? obj.error : typeof obj.message === "string" ? obj.message : "")) || `Request failed (${response.status})`;
+      throw new AssistantApiError(msg, response.status, codeOf(obj));
+    }
+    if (obj && "success" in obj) {
+      if (!obj.success) throw new AssistantApiError(typeof obj.error === "string" ? obj.error : "Request failed", response.status, codeOf(obj));
+      return normalizeChooseResult(obj.data as AssistantChooseResult | null);
+    }
+    return normalizeChooseResult(raw as AssistantChooseResult | null);
   },
 };
+
+/** Odpowiedź /choose i /quick-change → para wiadomości albo `{ fallback: true }`. */
+function normalizeChooseResult(r: AssistantChooseResult | null | undefined): AssistantChooseResult {
+  if (!r || typeof r !== "object") return { fallback: true };
+  if ("fallback" in r && r.fallback) return { fallback: true };
+  const ok = r as { userMessage?: AssistantUIMessage; assistantMessage?: AssistantUIMessage };
+  if (!ok.userMessage || !ok.assistantMessage) return { fallback: true };
+  return {
+    userMessage: { ...ok.userMessage, id: String(ok.userMessage.id) },
+    assistantMessage: { ...ok.assistantMessage, id: String(ok.assistantMessage.id) },
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Administracja asystenta AI (admin-only) — kontrakt v2:

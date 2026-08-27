@@ -20,13 +20,14 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import type { AssistantChoiceOption, AssistantProposal } from "@/lib/api";
+import type { AssistantChoiceOption, AssistantProposal, AssistantQuickChangeKind } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Prose } from "./Prose";
 import { ProposalCard, type ProposalCardProps } from "./ProposalCard";
 import { ChoiceCard, type ChoiceCardProps } from "./ChoiceCard";
 import { ChangeCard, type ChangeCardProps } from "./ChangeCard";
 import { ObjectPeek } from "./ObjectPeek";
+import { EventListCard, EventListRows, type EventListActions, type EventListRowsProps } from "./EventListCard";
 import { fmtRange } from "@/lib/calendar-labels";
 import {
   ERROR_HINTS,
@@ -35,6 +36,8 @@ import {
   conflictsBefore,
   errorOf,
   errorText,
+  eventsOf,
+  showEventsOf,
   isAborted,
   isErrorPart,
   isReasoningPart,
@@ -154,6 +157,14 @@ const TOOL_LABELS: Record<string, ToolLabel> = {
       return n === 0 ? "Brak zmian do zatwierdzenia" : `Zmiany gotowe: ${plural(n, "pozycja", "pozycje", "pozycji")}`;
     },
   },
+  show_events: {
+    icon: CalendarSearch,
+    running: () => "Przygotowuję listę wydarzeń…",
+    done: (o) => {
+      const n = typeof o.count === "number" ? o.count : arrLen(o.events);
+      return n === 0 ? "Brak wydarzeń do pokazania" : `Pokazuję ${plural(n, "wydarzenie", "wydarzenia", "wydarzeń")}`;
+    },
+  },
 };
 
 function asRecord(v: unknown): Record<string, unknown> {
@@ -163,8 +174,30 @@ function asRecord(v: unknown): Record<string, unknown> {
 type FoundObject = { id?: number; name?: string; address?: string | null; city?: string | null };
 type FreeSlot = { startAt: string; endAt: string; weekday?: string };
 
-/** Rozwijane szczegóły wyniku narzędzia: lista obiektów (z podglądem) albo lista wolnych slotów. */
-function toolDetails(name: string, output: Record<string, unknown>): { count: number; render: () => ReactElement } | null {
+/** Sprzężenie z kalendarzem dla rozwijanej listy wydarzeń w wierszu narzędzia (list_events / search_events). */
+interface ToolRowLinks {
+  onOpenEvent: (id: number) => void;
+  onPreview?: EventListRowsProps["onPreview"];
+}
+
+/** Rozwijane szczegóły wyniku narzędzia: lista obiektów (z podglądem), lista wolnych slotów albo lista wydarzeń. */
+function toolDetails(name: string, output: Record<string, unknown>, part: ToolPart, links: ToolRowLinks): { count: number; render: () => ReactElement } | null {
+  if (name === "list_events" || name === "search_events") {
+    const events = eventsOf(part);
+    if (events.length === 0) return null;
+    return {
+      count: events.length,
+      render: () => (
+        <EventListRows
+          events={events}
+          source={`events:${part.toolCallId}`}
+          onOpenEvent={links.onOpenEvent}
+          onPreview={links.onPreview}
+          className="mt-1 rounded-md border"
+        />
+      ),
+    };
+  }
   if (name === "find_object") {
     const objs = (Array.isArray(output.objects) ? output.objects : []) as FoundObject[];
     if (objs.length === 0) return null;
@@ -213,7 +246,7 @@ function toolDetails(name: string, output: Record<string, unknown>): { count: nu
 }
 
 /** Jeden wiersz statusu narzędzia. */
-function ToolRow({ part, live }: { part: ToolPart; live: boolean }) {
+function ToolRow({ part, live, links }: { part: ToolPart; live: boolean; links: ToolRowLinks }) {
   const name = toolName(part);
   const meta = TOOL_LABELS[name];
   const Icon = meta?.icon ?? Sparkles;
@@ -243,7 +276,7 @@ function ToolRow({ part, live }: { part: ToolPart; live: boolean }) {
   else label = meta ? meta.done(output, input) : `Zakończono ${name}`;
 
   const warn = name === "check_conflicts" && !failed && arrLen(output.conflicts) > 0;
-  const details = !failed && part.state === "output-available" ? toolDetails(name, output) : null;
+  const details = !failed && part.state === "output-available" ? toolDetails(name, output, part, links) : null;
   const [open, setOpen] = useState(false);
 
   const row = (
@@ -328,6 +361,14 @@ export interface MessageBubbleProps {
   /** Opcja z gotową `action` → karta od razu (POST /choose); toolCallId karty `ask_choice`. */
   onChooseAction?: (toolCallId: string, optionIndex: number, option: AssistantChoiceOption) => void | Promise<void>;
   onCustomChoice: ChoiceCardProps["onCustom"];
+  /** Karta listy wydarzeń: „Wykonane” / „Anuluj” → POST /quick-change (drawer). */
+  onQuickChange?: EventListActions["onQuickChange"];
+  /** Karta listy wydarzeń: „Przesuń…” → zwykła wiadomość do modelu. */
+  onSendText?: (text: string) => void;
+  /** Użytkownik ma edit do technical/kalendarz (szybkie akcje na liście wydarzeń). */
+  canEdit?: boolean;
+  /** eventId → szybka akcja wykonana w tej sesji (przycisk oznaczony jako wykonany). */
+  quickDone?: ReadonlyMap<number, AssistantQuickChangeKind>;
   /** Blokada akcji na kartach (stream w toku / trwa zapis). */
   busy?: boolean;
   /** Ostatnia wiadomość asystenta była przerwana → „Kontynuuj”. */
@@ -355,6 +396,10 @@ export const MessageBubble = memo(function MessageBubble({
   onChoose,
   onChooseAction,
   onCustomChoice,
+  onQuickChange,
+  onSendText,
+  canEdit = false,
+  quickDone,
   busy,
   onContinue,
   onRetry,
@@ -363,6 +408,9 @@ export const MessageBubble = memo(function MessageBubble({
   const parts = m.parts || [];
   const isUser = m.role === "user";
   const [bulk, setBulk] = useState<"idle" | "running">("idle");
+  const toolLinks: ToolRowLinks = { onOpenEvent, onPreview };
+  const eventActions: EventListActions | undefined =
+    onQuickChange && onSendText ? { canEdit, busy, quickDone, onQuickChange, onSendText } : undefined;
 
   // Wiadomości systemowe („Wydarzenie #12 zapisane”) — dyskretny separator;
   // ukryty, gdy decyzję widać już na karcie propozycji.
@@ -445,6 +493,19 @@ export const MessageBubble = memo(function MessageBubble({
                 // treść (np. pytanie z wyjaśnieniem) w pełnym, lecz wyciszonym dymku —
                 // nigdy nie ucinamy tego, co model napisał do użytkownika.
                 const oneLine = p.text.replace(/[*_`#]+/g, "").replace(/\s+/g, " ").trim();
+                // Model bywa uparty: wypisuje listę tekstem tuż przed kartą
+                // (show_events / propozycje), która i tak pokazuje to samo.
+                // Taki tekst zwijamy pod „Pokaż tekst” — deterministycznie, bez promptu.
+                const nextTool = parts.slice(i + 1).find(isToolPart);
+                const cardNext = !!nextTool && /^tool-(show_events|propose_changes|propose_event)$/.test(String(nextTool.type));
+                if (cardNext && oneLine.length > 100) {
+                  return (
+                    <details key={i} className="text-xs text-muted-foreground" data-testid="assistant-interim-text">
+                      <summary className="cursor-pointer select-none">{oneLine.slice(0, 80)}… <span className="underline">pokaż tekst</span></summary>
+                      <div className="mt-1"><Prose text={p.text} streaming={false} /></div>
+                    </details>
+                  );
+                }
                 if (oneLine.length <= 100 && !oneLine.includes("?")) {
                   return (
                     <p key={i} className="text-xs text-muted-foreground" data-testid="assistant-interim-text">
@@ -517,7 +578,11 @@ export const MessageBubble = memo(function MessageBubble({
                   />
                 );
               }
-              return <ToolRow key={p.toolCallId || i} part={p} live={streaming} />;
+              const shown = showEventsOf(p);
+              if (shown) {
+                return <EventListCard key={p.toolCallId || i} toolCallId={p.toolCallId} output={shown} onOpenEvent={onOpenEvent} onPreview={onPreview} actions={eventActions} />;
+              }
+              return <ToolRow key={p.toolCallId || i} part={p} live={streaming} links={toolLinks} />;
             }
             return null;
           })}

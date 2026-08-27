@@ -6,11 +6,13 @@ import { Link, useSearchParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { usePerms } from "@/auth/permissions";
 import {
+  AssistantApiError,
   assistantApi,
   calendarApi,
   systemNoteText,
   type AssistantApplyResult,
   type AssistantChangeKind,
+  type AssistantQuickChangeKind,
   type AssistantChat,
   type AssistantProposal,
   type AssistantResolvedChange,
@@ -76,7 +78,8 @@ const isDesktop = () => window.matchMedia("(min-width: 1024px)").matches;
 
 /** Prawy drawer „Asystent” — na desktopie kolumna obok kalendarza, na mobile pełny ekran. */
 export function AssistantDrawer({ onClose, onEventsChanged, onEditProposal, onEditEvent, onOpenEvent, onPreviewRange }: AssistantDrawerProps) {
-  const { isAdmin } = usePerms();
+  const { isAdmin, canEdit } = usePerms();
+  const canEditCalendar = canEdit("technical/kalendarz");
   const [searchParams, setSearchParams] = useSearchParams();
   const [status, setStatus] = useState<AssistantStatus | null>(null);
   const [chats, setChats] = useState<AssistantChat[]>([]);
@@ -309,6 +312,7 @@ export function AssistantDrawer({ onClose, onEventsChanged, onEditProposal, onEd
           maxSteps={status?.maxSteps && status.maxSteps > 0 ? status.maxSteps : DEFAULT_MAX_STEPS}
           maxChars={status?.messageMaxChars && status.messageMaxChars > 0 ? status.messageMaxChars : DEFAULT_MAX_CHARS}
           escRef={escRef}
+          canEdit={canEditCalendar}
           onChatCreated={onChatCreated}
           onEventsChanged={onEventsChanged}
           onEditProposal={onEditProposal}
@@ -338,6 +342,7 @@ function ChatSession({
   maxSteps,
   maxChars,
   escRef,
+  canEdit,
   onChatCreated,
   onEventsChanged,
   onEditProposal,
@@ -352,6 +357,8 @@ function ChatSession({
   maxSteps: number;
   maxChars: number;
   escRef: React.MutableRefObject<(() => boolean) | null>;
+  /** Edit do technical/kalendarz — szybkie akcje na karcie listy wydarzeń. */
+  canEdit: boolean;
   onChatCreated: (c: AssistantChat) => void;
   onEventsChanged: AssistantDrawerProps["onEventsChanged"];
   onEditProposal: AssistantDrawerProps["onEditProposal"];
@@ -738,6 +745,62 @@ function ChatSession({
     [busy, choosing, send, clearError, setMessages, onTitleMaybeChanged]
   );
   const onCustomChoice = useCallback(() => inputRef.current?.focus(), []);
+
+  // --- Karta listy wydarzeń (show_events): szybkie akcje ------------------------------------------
+  /** eventId → szybka akcja wykonana w tej sesji (przycisk na karcie oznaczony jako wykonany). */
+  const [quickDone, setQuickDone] = useState<Map<number, AssistantQuickChangeKind>>(() => new Map());
+  const QUICK_TEXT: Record<AssistantQuickChangeKind, (id: number, title: string) => string> = useMemo(
+    () => ({
+      done: (id, t) => `Oznacz wydarzenie #${id}${t ? ` „${t}”` : ""} jako wykonane`,
+      cancel: (id, t) => `Anuluj wydarzenie #${id}${t ? ` „${t}”` : ""}`,
+      confirm: (id, t) => `Potwierdź wydarzenie #${id}${t ? ` „${t}”` : ""}`,
+      restore: (id, t) => `Przywróć wydarzenie #${id}${t ? ` „${t}”` : ""}`,
+      delete: (id, t) => `Usuń wydarzenie #${id}${t ? ` „${t}”` : ""}`,
+    }),
+    []
+  );
+  /**
+   * „Wykonane” / „Anuluj” → POST /quick-change: backend (bez modelu) dopisuje wiadomość użytkownika
+   * i asystenta z kartą `propose_changes` (jak /choose). `fallback` → polecenie tekstem przez model;
+   * błąd (forbidden / invalid / busy) → toast rodzica.
+   */
+  const onQuickChange = useCallback<NonNullable<MessageBubbleProps["onQuickChange"]>>(
+    async (eventId, kind, title, fromToolCallId) => {
+      const text = QUICK_TEXT[kind](eventId, title);
+      const chatId = chatIdRef.current;
+      if (chatId == null || busy || choosing) {
+        send(text);
+        return;
+      }
+      setChoosing(true);
+      try {
+        const r = await assistantApi.quickChange(chatId, { eventId, kind, ...(fromToolCallId ? { fromToolCallId } : {}) });
+        if ("fallback" in r && r.fallback) {
+          send(text);
+          return;
+        }
+        clearError();
+        setMessages((ms) => [...ms, r.userMessage as unknown as UIMessage, r.assistantMessage as unknown as UIMessage]);
+        setQuickDone((m) => new Map(m).set(eventId, kind));
+        onTitleMaybeChanged();
+      } catch (e) {
+        const code = e instanceof AssistantApiError ? e.code : undefined;
+        const msg =
+          code === "forbidden"
+            ? "Modyfikacje wydarzeń przez asystenta są wyłączone."
+            : code === "busy"
+              ? "Asystent jeszcze kończy poprzednią odpowiedź — spróbuj za chwilę."
+              : e instanceof Error && e.message
+                ? e.message
+                : "Nie udało się przygotować zmiany.";
+        // Sygnał błędu do rodzica (toast) — ten sam kanał co błąd wczytania wydarzenia do edycji.
+        onEventsChanged(null, "update", msg);
+      } finally {
+        setChoosing(false);
+      }
+    },
+    [QUICK_TEXT, busy, choosing, send, clearError, setMessages, onTitleMaybeChanged, onEventsChanged]
+  );
   const onInsertSuggestion = useCallback(
     (text: string) => {
       setComposer(text);
@@ -831,6 +894,10 @@ function ChatSession({
           onChoose={onChoose}
           onChooseAction={onChooseAction}
           onCustomChoice={onCustomChoice}
+          onQuickChange={onQuickChange}
+          onSendText={send}
+          canEdit={canEdit}
+          quickDone={quickDone}
           onContinue={onContinue}
           onRetry={onRetry}
         />
