@@ -225,6 +225,20 @@
       "when": 1787743049956,
       "tag": "0031_grey_firedrake",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "6",
+      "when": 1787769508065,
+      "tag": "0032_sleepy_nomad",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "6",
+      "when": 1787770848264,
+      "tag": "0033_tired_speed",
+      "breakpoints": true
     }
   ]
 }

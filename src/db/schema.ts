@@ -1287,3 +1287,87 @@ export const activityLog = sqliteTable(
 
 export type ActivityLogEntry = typeof activityLog.$inferSelect;
 export type NewActivityLogEntry = typeof activityLog.$inferInsert;
+
+// ============================================================================
+// ASYSTENT AI (kalendarz) — czaty adminów z botem planującym wydarzenia.
+// Wiadomości trzymają UIMessage.parts (JSON) — tool-calle i karty propozycji
+// przeżywają reload; content to tekstowy fallback (wyszukiwanie / podgląd).
+// ============================================================================
+
+export const assistantChats = sqliteTable("assistant_chats", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  title: text("title").default("Nowy czat").notNull(),
+  createdAt: text("created_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+  updatedAt: text("updated_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+});
+
+export type AssistantChat = typeof assistantChats.$inferSelect;
+export type NewAssistantChat = typeof assistantChats.$inferInsert;
+
+export const ASSISTANT_MESSAGE_ROLES = ["user", "assistant", "system"] as const;
+export type AssistantMessageRole = (typeof ASSISTANT_MESSAGE_ROLES)[number];
+
+export const assistantMessages = sqliteTable(
+  "assistant_messages",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    chatId: integer("chat_id")
+      .notNull()
+      .references(() => assistantChats.id, { onDelete: "cascade" }),
+    role: text("role", { enum: ASSISTANT_MESSAGE_ROLES }).notNull(),
+    content: text("content").default("").notNull(), // tekst fallback
+    parts: text("parts", { mode: "json" }), // UIMessage.parts
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+  },
+  (t) => ({
+    chatCreatedIdx: index("assistant_messages_chat_created_idx").on(t.chatId, t.createdAt),
+  })
+);
+
+export type AssistantMessage = typeof assistantMessages.$inferSelect;
+export type NewAssistantMessage = typeof assistantMessages.$inferInsert;
+
+// Prosty log zużycia tokenów per tura (koszt/monitoring w panelu admina).
+export const assistantUsage = sqliteTable("assistant_usage", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  chatId: integer("chat_id").references(() => assistantChats.id, { onDelete: "set null" }),
+  userId: integer("user_id").references(() => users.id, { onDelete: "set null" }),
+  model: text("model").notNull(),
+  promptTokens: integer("prompt_tokens").default(0).notNull(),
+  completionTokens: integer("completion_tokens").default(0).notNull(),
+  reasoningTokens: integer("reasoning_tokens").default(0).notNull(),
+  steps: integer("steps").default(0).notNull(),
+  toolCalls: integer("tool_calls").default(0).notNull(),
+  finishReason: text("finish_reason"),
+  ms: integer("ms").default(0).notNull(),
+  createdAt: text("created_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+});
+
+export type AssistantUsage = typeof assistantUsage.$inferSelect;
+export type NewAssistantUsage = typeof assistantUsage.$inferInsert;
+
+// ============================================================================
+// USTAWIENIA APLIKACJI (generyczny key/value; np. konfiguracja Asystenta AI z panelu admina)
+// ============================================================================
+
+export const appSettings = sqliteTable("app_settings", {
+  key: text("key").primaryKey(),
+  value: text("value").notNull(),
+  updatedBy: integer("updated_by").references(() => users.id, { onDelete: "set null" }),
+  updatedAt: text("updated_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+});
+
+export type AppSetting = typeof appSettings.$inferSelect;

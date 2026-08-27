@@ -1,0 +1,80 @@
+/* Asystent kalendarza — typografia markdownu (bez pluginu typography) + kursor streamu. */
+.asst-prose { overflow-wrap: anywhere; }
+.asst-prose p { margin: 0.35em 0; }
+.asst-prose p:first-child { margin-top: 0; }
+.asst-prose p:last-child { margin-bottom: 0; }
+.asst-prose strong, .asst-prose b { font-weight: 600; }
+.asst-prose em, .asst-prose i { font-style: italic; }
+.asst-prose ul, .asst-prose ol { margin: 0.35em 0; padding-left: 1.25em; }
+.asst-prose ul { list-style: disc; }
+.asst-prose ol { list-style: decimal; }
+.asst-prose li { margin: 0.1em 0; }
+.asst-prose h1, .asst-prose h2, .asst-prose h3, .asst-prose h4 {
+  font-weight: 600; font-size: 1.02em; margin: 0.5em 0 0.25em;
+}
+.asst-prose hr { margin: 0.6em 0; border: 0; border-top: 1px solid hsl(var(--border)); }
+.asst-prose blockquote {
+  border-left: 3px solid hsl(var(--border)); padding-left: 0.75em; margin: 0.35em 0;
+  color: hsl(var(--muted-foreground));
+}
+.asst-prose code { background: hsl(var(--muted)); padding: 0.1em 0.3em; border-radius: 0.25rem; font-size: 0.9em; }
+.asst-prose pre { background: hsl(var(--muted)); padding: 0.5em 0.75em; border-radius: 0.375rem; overflow-x: auto; margin: 0.4em 0; }
+.asst-prose pre code { background: none; padding: 0; }
+.asst-prose table { border-collapse: collapse; font-size: 0.92em; margin: 0.4em 0; }
+.asst-prose th, .asst-prose td { border: 1px solid hsl(var(--border)); padding: 0.15em 0.5em; }
+.asst-prose a { text-decoration: underline; }
+/* Dymek użytkownika (tło primary) — kod/cytaty dziedziczą kolor. */
+.asst-prose-onprimary code, .asst-prose-onprimary blockquote { color: inherit; background: hsl(var(--primary-foreground) / 0.15); }
+
+.asst-streaming > p:last-child::after,
+.asst-streaming > h1:last-child::after,
+.asst-streaming > h2:last-child::after,
+.asst-streaming > h3:last-child::after,
+.asst-streaming > li:last-child::after {
+  content: "▍"; margin-left: 0.05em; color: hsl(var(--primary));
+  animation: asst-caret 1s ease-in-out infinite;
+}
+@keyframes asst-caret { 0%, 100% { opacity: 1; } 50% { opacity: 0.2; } }
+
+.asst-drawer-in { animation: asst-in 160ms ease-out; }
+@keyframes asst-in { from { opacity: 0; transform: translateX(12px); } to { opacity: 1; transform: none; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .asst-streaming > p:last-child::after { animation: none; }
+  .asst-drawer-in { animation: none; }
+}
+
+/* Widmo propozycji na siatce: w siatce godzinowej event tła, w miesiącu/liście zwykły wpis. */
+.alfa-calendar .fc .fc-event.fc-event-ghost,
+.alfa-calendar .fc .fc-bg-event.fc-event-ghost {
+  --ev: var(--cal-biuro);
+  background: repeating-linear-gradient(135deg, hsl(var(--ev) / 0.28) 0 6px, hsl(var(--ev) / 0.1) 6px 12px);
+  border: 2px dashed hsl(var(--ev) / 0.9);
+  border-radius: 4px;
+  opacity: 1;
+  animation: asst-ghost-in 240ms ease-out;
+}
+.alfa-calendar .fc .fc-event.fc-event-ghost { cursor: default; }
+.alfa-calendar .fc .fc-event.fc-event-ghost:hover { transform: none; box-shadow: none; }
+.alfa-calendar .fc .fc-event.fc-event-ghost .fc-event-title,
+.alfa-calendar .fc .fc-bg-event.fc-event-ghost .fc-event-title {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: hsl(var(--foreground));
+  padding: 1px 4px;
+  font-style: normal;
+}
+.alfa-calendar .fc .fc-daygrid-day.fc-day-ghost {
+  background: hsl(var(--primary) / 0.08);
+  box-shadow: inset 0 0 0 2px hsl(var(--primary) / 0.6);
+}
+/* Wydarzenia kolidujące z propozycją */
+.alfa-calendar .fc .fc-event.fc-event-conflict {
+  box-shadow: 0 0 0 2px hsl(var(--cal-overdue) / 0.8);
+  animation: asst-conflict 1.2s ease-in-out 2;
+}
+@keyframes asst-ghost-in { from { opacity: 0; transform: scale(0.97); } to { opacity: 1; transform: none; } }
+@keyframes asst-conflict { 0%, 100% { box-shadow: 0 0 0 2px hsl(var(--cal-overdue) / 0.8); } 50% { box-shadow: 0 0 0 4px hsl(var(--cal-overdue) / 0.35); } }
+@media (prefers-reduced-motion: reduce) {
+  .alfa-calendar .fc .fc-bg-event.fc-event-ghost, .alfa-calendar .fc .fc-event.fc-event-conflict { animation: none; }
+}

@@ -19,9 +19,11 @@ import warehouseRoutes from "./warehouse.js";
 import authRoutes from "./auth.js";
 import publicRoutes from "./public.js";
 import adminRoutes from "./admin.js";
+import adminAssistantRoutes from "./admin-assistant.js";
+import assistantRoutes from "./assistant.js";
 import calendarRoutes, { calendarPublicRoutes } from "./calendar.js";
 import activityRoutes from "./activity.js";
-import { requireAuth, tabPermissionGuard } from "../middleware/auth.js";
+import { requireAuth, requireAssistantAccess, tabPermissionGuard } from "../middleware/auth.js";
 import { db, schema } from "../db/index.js";
 import { sql, eq } from "drizzle-orm";
 
@@ -43,9 +45,21 @@ api.route("/calendar", calendarPublicRoutes);
 // --- Wszystkie pozostałe trasy API — chronione sesją ---
 api.use("*", requireAuth);
 
-// --- ADMIN — panel zarządzania użytkownikami (własny requireAdmin) ---
+// --- ADMIN — panel zarządzania użytkownikami + konfiguracja asystenta (własny requireAdmin) ---
 // Zamontowane przed strażnikiem zakładek (który i tak nie obejmuje /admin).
+// /admin/assistant PRZED /admin — Hono dopasowuje po kolejności rejestracji.
+api.route("/admin/assistant", adminAssistantRoutes);
 api.route("/admin", adminRoutes);
+
+// --- ASYSTENT AI (kalendarz) — dostęp wg ustawienia assistant.access (admin lub edytorzy kalendarza);
+// nie jest zakładką (poza TABS/API_TAB_MAP). GET /assistant/status jest dla każdego zalogowanego
+// (zwraca allowed), reszta /assistant/* za requireAssistantAccess.
+// Endpoint /assistant/chats/:id/message streamuje UI Message Stream (SSE), nie {success,data}.
+api.use("/assistant/*", async (c, next) => {
+  if (c.req.method === "GET" && c.req.path.replace(/^\/api/, "") === "/assistant/status") return next();
+  return requireAssistantAccess(c, next);
+});
+api.route("/assistant", assistantRoutes);
 
 // --- Strażnik uprawnień do zakładek (view/edit) dla tras modułowych ---
 api.use("*", tabPermissionGuard);

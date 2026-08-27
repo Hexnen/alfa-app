@@ -27,6 +27,7 @@ import { CmaCameraOutages } from "./pages/CmaCameraOutages";
 import { CmaSettings } from "./pages/CmaSettings";
 import { Ofi } from "./pages/Ofi";
 import { AdminUsers } from "./pages/AdminUsers";
+import { AdminAssistant } from "./pages/AdminAssistant";
 import { PublicOrderForm } from "./pages/PublicOrderForm";
 import { useAuth } from "./auth/AuthProvider";
 import { usePerms, tabKeyForPath } from "./auth/permissions";
@@ -101,6 +102,7 @@ function AuthedApp() {
           <Route path="/cma/braki-kamer" element={<CmaCameraOutages />} />
           <Route path="/cma/ustawienia" element={<CmaSettings />} />
           <Route path="/admin/users" element={<AdminUsers />} />
+          <Route path="/admin/asystent" element={<AdminAssistant />} />
         </Routes>
       </Layout>
   );

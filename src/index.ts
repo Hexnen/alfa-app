@@ -1,3 +1,5 @@
+// TZ procesu (Europe/Warsaw) — MUSI być pierwszym importem (patrz src/lib/tz.ts).
+import "./lib/tz.js";
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
@@ -127,3 +129,10 @@ serve({
 // Start the CMA mail poller (no-op when import is disabled
 // or credentials are missing; never throws)
 void startMailPoller();
+
+// Asystent AI: retencja czatów (assistant.retention_days; 0 = wyłączona) przy starcie i co 24 h
+// oraz domknięcie tur osieroconych restartem (ostatnia wiadomość czatu = user → „Odpowiedź przerwana").
+const { startRetentionScheduler } = await import("./lib/ai/retention.js");
+const { repairOrphanedTurns } = await import("./routes/assistant.js");
+startRetentionScheduler();
+repairOrphanedTurns();

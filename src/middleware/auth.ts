@@ -2,7 +2,8 @@ import type { Context, Next } from "hono";
 import { getCookie } from "hono/cookie";
 import { SESSION_COOKIE, getSessionUser } from "../lib/auth/sessions.js";
 import type { User } from "../db/schema.js";
-import { isAdmin, maxLevel } from "../lib/auth/permissions.js";
+import { isAdmin, maxLevel, canEdit } from "../lib/auth/permissions.js";
+import { resolveField } from "../lib/ai/assistantConfig.js";
 
 /** Chroni trasy API: wymaga ważnej sesji i ustawia `user` w kontekście. */
 export async function requireAuth(c: Context, next: Next) {
@@ -20,6 +21,24 @@ export async function requireAdmin(c: Context, next: Next) {
   const user = c.get("user") as User | undefined;
   if (!user || !isAdmin(user)) {
     return c.json({ success: false, error: "Wymagane uprawnienia administratora" }, 403);
+  }
+  return next();
+}
+
+/**
+ * Czy użytkownik ma dostęp do Asystenta AI wg ustawienia `assistant.access`
+ * (admins | calendar_editors = admin LUB edycja technical/kalendarz). Czytane przy każdym żądaniu.
+ */
+export function hasAssistantAccess(user: Pick<User, "role" | "permissions">): boolean {
+  if (isAdmin(user)) return true;
+  return resolveField("access").value === "calendar_editors" && canEdit(user, "technical/kalendarz");
+}
+
+/** Wymaga dostępu do asystenta (po requireAuth); GET /assistant/status jest poza tym strażnikiem. */
+export async function requireAssistantAccess(c: Context, next: Next) {
+  const user = c.get("user") as User | undefined;
+  if (!user || !hasAssistantAccess(user)) {
+    return c.json({ success: false, error: "Brak dostępu do asystenta" }, 403);
   }
   return next();
 }

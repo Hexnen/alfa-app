@@ -36,6 +36,7 @@ import {
   diffMinutes,
   type RecurrenceRule,
 } from "../lib/calendar-recurrence.js";
+import { conflictEventIds } from "../lib/calendar-queries.js";
 
 const app = new Hono();
 export const calendarPublicRoutes = new Hono();
@@ -44,35 +45,10 @@ const ENTITY = "calendar_event";
 
 // better-sqlite3 jest synchroniczny — callback db.transaction MUSI być
 // synchroniczny. Błędy walidacji w transakcji rzucamy jako ApiError.
-class ApiError extends Error {
-  status: 400 | 404 | 409;
-  constructor(status: 400 | 404 | 409, message: string) {
-    super(message);
-    this.status = status;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Etykiety PL (do summary w activity_log i ICS)
-// ---------------------------------------------------------------------------
-
-export const TYPE_LABELS: Record<CalendarEventType, string> = {
-  serwis: "Serwis",
-  montaz: "Montaż",
-  wizja: "Wizja lokalna",
-  demontaz: "Demontaż",
-  biuro: "Biuro",
-  przygotowanie: "Przygotowanie",
-  konserwacja: "Konserwacja",
-  urlop: "Urlop",
-};
-
-export const STATUS_LABELS: Record<CalendarEventStatus, string> = {
-  planned: "Zaplanowane",
-  confirmed: "Potwierdzone",
-  done: "Wykonane",
-  cancelled: "Anulowane",
-};
+// ApiError i etykiety PL (summary w activity_log, ICS) żyją w src/lib/calendar-labels.ts;
+// re-eksport dla dotychczasowych importów (asystent, testy).
+import { ApiError, STATUS_LABELS, TYPE_LABELS } from "../lib/calendar-labels.js";
+export { ApiError, STATUS_LABELS, TYPE_LABELS };
 
 /** "2026-09-12T08:00" → "12.09.2026 08:00"; "2026-09-12" → "12.09.2026". */
 function fmtDate(s: string | null | undefined): string {
@@ -136,7 +112,7 @@ const createdUsers = alias(schema.users, "cu");
 const updatedUsers = alias(schema.users, "uu");
 
 /** Pobiera i serializuje wydarzenia po id (kolejność wg `ids`). */
-function loadEvents(dbx: DbOrTx, ids: number[]): CalendarEventJson[] {
+export function loadEvents(dbx: DbOrTx, ids: number[]): CalendarEventJson[] {
   if (ids.length === 0) return [];
   const rows = dbx
     .select({
@@ -239,7 +215,7 @@ function loadEvent(dbx: DbOrTx, id: number): CalendarEventJson | null {
 // Walidacja wejścia
 // ---------------------------------------------------------------------------
 
-interface ParsedInput {
+export interface ParsedInput {
   type: CalendarEventType;
   title: string;
   description: string | null;
@@ -332,8 +308,9 @@ function parseRecurrence(raw: unknown): RecurrenceRule | null {
   return { freq: r.freq as CalendarSeriesFreq, interval, until, count };
 }
 
-/** Walidacja CalendarEventInput (bez sprawdzania istnienia referencji — to w transakcji). */
-function parseInput(body: unknown): ParsedInput {
+/** Walidacja CalendarEventInput (bez sprawdzania istnienia referencji — to w transakcji).
+ *  Eksportowana: reużywana 1:1 przez narzędzie propose_event asystenta AI (src/lib/ai/calendarTools.ts). */
+export function parseInput(body: unknown): ParsedInput {
   if (!body || typeof body !== "object") throw new ApiError(400, "Nieprawidłowe dane wejściowe");
   const b = body as Record<string, unknown>;
 
@@ -915,22 +892,8 @@ app.get("/conflicts", (c) => {
     if (technicianIds.length === 0 || !startAt || !endAt) {
       return c.json({ success: true, data: [] });
     }
-    const conds = [
-      isNull(schema.calendarEvents.deletedAt),
-      ne(schema.calendarEvents.status, "cancelled"),
-      lt(schema.calendarEvents.startAt, endAt),
-      gt(schema.calendarEvents.endAt, startAt),
-      sql`${schema.calendarEvents.id} IN (SELECT event_id FROM calendar_event_assignees WHERE technician_id IN (${sql.join(technicianIds.map((id) => sql`${id}`), sql`, `)}))`,
-    ];
-    if (excludeId != null && Number.isInteger(excludeId)) conds.push(ne(schema.calendarEvents.id, excludeId));
-    const ids = db
-      .select({ id: schema.calendarEvents.id })
-      .from(schema.calendarEvents)
-      .where(and(...conds))
-      .orderBy(asc(schema.calendarEvents.startAt))
-      .limit(200)
-      .all()
-      .map((r) => r.id);
+    // Zapytanie wspólne z asystentem AI (src/lib/calendar-queries.ts) — zachowanie bez zmian.
+    const ids = conflictEventIds(db, { technicianIds, startAt, endAt, excludeId });
     // conflictKind: "urlop" = technik na urlopie (osobny komunikat na froncie), "event" = zwykła kolizja
     const data = loadEvents(db, ids).map((e) => ({ ...e, conflictKind: e.type === "urlop" ? "urlop" : "event" }));
     return c.json({ success: true, data });

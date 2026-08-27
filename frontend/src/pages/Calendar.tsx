@@ -56,6 +56,7 @@ import {
   RefreshCw,
   Repeat,
   Rss,
+  Sparkles,
   Tags,
   Trash2,
   Undo2,
@@ -77,9 +78,11 @@ import { usePerms } from "@/auth/permissions";
 import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
 import {
   activityApi,
+  assistantApi,
   calendarApi,
   getTechnicians,
   type ActivityEntry,
+  type AssistantStatus,
   type CalendarEvent,
   type CalendarEventInput,
   type CalendarEventStatus,
@@ -114,6 +117,7 @@ import {
   type CalendarEventPrefill,
 } from "@/components/CalendarEventDialog";
 import { CalendarBoard, isOverdue, type BoardGroupBy } from "@/components/CalendarBoard";
+import { AssistantDrawer, type AssistantPreview } from "@/components/assistant/AssistantDrawer";
 import { cn } from "@/lib/utils";
 import "./Calendar.css";
 
@@ -236,7 +240,8 @@ function toFcEvent(ev: CalendarEvent, now: Date): EventInput {
     ].filter(Boolean),
     // Usunięte nie do przesuwania; dla pozostałych NIE nadpisujemy — o DnD
     // decyduje globalne `editable` (uprawnienie edit), per-event true by je obeszło.
-    editable: ev.deletedAt ? false : undefined,
+    // Klucz musi być NIEOBECNY: FullCalendar przepuszcza `editable: undefined` przez Boolean() → false.
+    ...(ev.deletedAt ? { editable: false } : {}),
     extendedProps: { ev },
   };
 }
@@ -349,7 +354,7 @@ function isTypingTarget(el: EventTarget | null): boolean {
 }
 
 export function Calendar() {
-  const { canEdit } = usePerms();
+  const { canEdit, isAdmin } = usePerms();
   const editable = canEdit("technical/kalendarz");
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
@@ -360,6 +365,8 @@ export function Calendar() {
     () => readStoredView() ?? (mobile ? "listWeek" : "dayGridMonth")
   );
   const isBoard = view === "board";
+  const isBoardRef = useRef(isBoard);
+  isBoardRef.current = isBoard;
   /** Data „kotwicy” — utrzymuje ciągłość nawigacji między siatką a Tablicą. */
   const [anchorDate, setAnchorDate] = useState<Date>(() => new Date());
   /** Grupowanie kolumn Tablicy. */
@@ -514,7 +521,37 @@ export function Calendar() {
   }, [loadError]);
 
   const now = useMemo(() => new Date(), [events]); // eslint-disable-line react-hooks/exhaustive-deps
-  const fcEvents = useMemo(() => events.map((e) => toFcEvent(e, now)), [events, now]);
+  // Widmo propozycji asystenta (karta / hover slotu): event tła + klasy konfliktów na siatce.
+  const [assistantPreview, setAssistantPreview] = useState<AssistantPreview>(null);
+  const fcEvents = useMemo(() => {
+    const base = events.map((e) => toFcEvent(e, now));
+    const g = assistantPreview;
+    if (!g) return base;
+    const conflict = new Set(g.conflictIds ?? []);
+    if (conflict.size) {
+      for (const ev of base) {
+        if (conflict.has(Number(ev.id))) ev.classNames = [...(ev.classNames as string[]), "fc-event-conflict"];
+      }
+    }
+    // Siatka godzinowa: event tła rozciągnięty na slot; miesiąc/lista: zwykły (nieedytowalny)
+    // wpis z ramką przerywaną — FullCalendar nie rysuje timed background-eventów w dayGrid.
+    const timeGrid = view.startsWith("timeGrid");
+    base.push({
+      id: "assistant-ghost",
+      title: g.type === "slot" ? "Wolny termin" : `Propozycja: ${g.title ?? ""}`.trim(),
+      start: g.startAt,
+      end: g.endAt,
+      allDay: Boolean(g.allDay),
+      display: timeGrid ? "background" : "block",
+      classNames: ["fc-event-ghost", g.type && g.type !== "slot" ? `cal-type-${g.type}` : ""].filter(Boolean),
+      editable: false,
+      startEditable: false,
+      durationEditable: false,
+      overlap: true,
+      extendedProps: { ghost: true },
+    });
+    return base;
+  }, [events, now, assistantPreview, view]);
   const visibleCount = useMemo(() => events.filter((e) => !e.deletedAt).length, [events]);
 
   // --- Dialog wydarzenia ---
@@ -982,6 +1019,67 @@ export function Calendar() {
 
   // --- Panel Aktywność ---
   const [activityOpen, setActivityOpen] = useState(false);
+
+  // --- Panel Asystent — dostęp wg `status.allowed` (admin lub edytor kalendarza,
+  // zależnie od ustawienia „access” w administracji); do czasu odpowiedzi
+  // backendu fallback = isAdmin. Wyklucza się z Aktywnością (jedna kolumna boczna).
+  const [assistantOpen, setAssistantOpen] = useState(false);
+  const [assistantStatus, setAssistantStatus] = useState<AssistantStatus | null>(null);
+  useEffect(() => {
+    let alive = true;
+    assistantApi
+      .status()
+      .then((st) => {
+        if (alive) setAssistantStatus(st);
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, []);
+  const assistantAllowed = assistantStatus?.allowed ?? isAdmin;
+  /** Callback z karty propozycji „Edytuj” — wołany po zapisie z dialogu (zamiast Zatwierdź). */
+  const assistantSavedRef = useRef<((ev: CalendarEvent) => void) | null>(null);
+  const closeAssistant = useCallback(() => setAssistantOpen(false), []);
+  const onAssistantEventCreated = useCallback(
+    (ev: CalendarEvent) => {
+      announce(`Zapisano „${ev.title}”`);
+      notify({
+        kind: "info",
+        message: (
+          <span>
+            Zapisano <strong>{ev.title}</strong> — {fmtRange(ev.startAt, ev.endAt, ev.allDay)}
+          </span>
+        ),
+        action: { label: "Otwórz", icon: ExternalLink, onClick: () => void openEventById(ev.id) },
+        duration: 8000,
+      });
+      void loadEvents();
+    },
+    [announce, notify, openEventById, loadEvents]
+  );
+  /** Widmo na siatce; `focus` („Pokaż w kalendarzu”) albo termin poza widokiem → gotoDate. */
+  const onAssistantPreview = useCallback((r: AssistantPreview) => {
+    setAssistantPreview(r);
+    if (!r) return;
+    const day = r.startAt.slice(0, 10);
+    const api = calendarRef.current?.getApi();
+    let outside = true;
+    if (api && !isBoardRef.current) {
+      const v = api.view;
+      const d = new Date(`${day}T00:00`);
+      outside = d < v.activeStart || d >= v.activeEnd;
+    }
+    // Poza cyklem efektów (karta zgłasza z useEffect; gotoDate FullCalendara robi flushSync).
+    if (r.focus || outside) setTimeout(() => gotoDateRef.current(day), 0);
+  }, []);
+  const onAssistantEditProposal = useCallback(
+    (prefill: CalendarEventPrefill, onSaved: (ev: CalendarEvent) => void) => {
+      assistantSavedRef.current = onSaved;
+      openCreate(prefill);
+    },
+    [openCreate]
+  );
   const [activity, setActivity] = useState<ActivityEntry[]>([]);
   const [activityLoading, setActivityLoading] = useState(false);
 
@@ -1190,10 +1288,29 @@ export function Calendar() {
             size="sm"
             className="h-10 md:h-9"
             aria-pressed={activityOpen}
-            onClick={() => setActivityOpen((o) => !o)}
+            onClick={() => {
+              setAssistantOpen(false);
+              setActivityOpen((o) => !o);
+            }}
           >
             <Activity className="mr-1 h-4 w-4" /> Aktywność
           </Button>
+          {assistantAllowed && (
+            <Button
+              variant={assistantOpen ? "secondary" : "outline"}
+              size="sm"
+              className="h-10 md:h-9"
+              aria-pressed={assistantOpen}
+              onClick={() => {
+                setActivityOpen(false);
+                setAssistantOpen((o) => !o);
+              }}
+              title="Asystent kalendarza (AI)"
+              data-testid="assistant-toggle"
+            >
+              <Sparkles className="mr-1 h-4 w-4" /> Asystent
+            </Button>
+          )}
           <Button variant="outline" size="sm" className="h-10 md:h-9" onClick={() => setIcsOpen(true)}>
             <Rss className="mr-1 h-4 w-4" /> <span className="hidden sm:inline">Subskrybuj (ICS)</span>
             <span className="sm:hidden">ICS</span>
@@ -1206,7 +1323,13 @@ export function Calendar() {
         </div>
       </div>
 
-      <div className={cn("grid gap-4", activityOpen && "lg:grid-cols-[1fr_360px]")}>
+      <div
+        className={cn(
+          "grid gap-4",
+          activityOpen && "lg:grid-cols-[1fr_360px]",
+          assistantOpen && "lg:grid-cols-[1fr_420px]"
+        )}
+      >
         <Card className="min-w-0">
           <CardContent className="space-y-3 p-3 sm:p-4">
             {/* Toolbar — rząd 1: nawigacja + tytuł | widoki */}
@@ -1491,6 +1614,17 @@ export function Calendar() {
             onRefresh={() => void loadActivity()}
           />
         )}
+
+        {/* Panel Asystent (wg status.allowed) */}
+        {assistantOpen && assistantAllowed && (
+          <AssistantDrawer
+            onClose={closeAssistant}
+            onPreviewRange={onAssistantPreview}
+            onEventCreated={onAssistantEventCreated}
+            onEditProposal={onAssistantEditProposal}
+            onOpenEvent={(id) => void openEventById(id)}
+          />
+        )}
       </div>
 
       {/* Podgląd wydarzenia (jeden klik) */}
@@ -1517,8 +1651,18 @@ export function Calendar() {
         mode={dialogMode}
         event={dialogEvent}
         prefill={dialogPrefill}
-        onClose={() => setDialogOpen(false)}
+        onClose={() => {
+          assistantSavedRef.current = null;
+          setDialogOpen(false);
+        }}
         onSaved={(ev) => {
+          const fromAssistant = assistantSavedRef.current;
+          assistantSavedRef.current = null;
+          if (fromAssistant) {
+            // Propozycja asystenta zapisana z dialogu — toast + wpis systemowy w czacie.
+            fromAssistant(ev);
+            return;
+          }
           announce(`Zapisano „${ev.title}”`);
           void loadEvents();
         }}

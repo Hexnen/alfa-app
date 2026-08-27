@@ -321,8 +321,27 @@ Migration files are stored in `src/db/migrations/`. The migration system:
 The backend supports these environment variables:
 - `PORT` - Server port (default: 4001)
 - `HOST` - Server host (default: 0.0.0.0)
+- `OPENROUTER_API_KEY`, `OPENROUTER_KEY_FILE`, `OPENROUTER_MODEL` - Asystent AI (patrz sekcja "Asystent AI (kalendarz)")
 
 No `.env` file is currently used; defaults are in code.
+
+## Asystent AI (kalendarz)
+
+Chatbot dla adminów (`user.role === "admin"`) na stronie Kalendarza: proponuje wydarzenia jako karty do zatwierdzenia; zapis wyłącznie przez istniejący `POST /api/calendar/events` po kliknięciu Zatwierdź na froncie — bot nigdy nie zapisuje sam.
+
+- Backend: `src/routes/assistant.ts` (montowane pod `/api/assistant` z `requireAdmin`), `src/lib/ai/{provider,calendarPrompt,calendarTools,context}.ts`, wspólne zapytania kalendarza w `src/lib/calendar-queries.ts`. Tabele: `assistant_chats`, `assistant_messages` (parts JSON = `UIMessage.parts`), `assistant_usage` (tokeny/czas per tura).
+- Stack: Vercel AI SDK `ai@7` + `@ai-sdk/openai-compatible` (OpenRouter). `POST /api/assistant/chats/:id/message` zwraca UI Message Stream (SSE), pozostałe endpointy `{ success, data }`.
+- Klucz API (kolejność): tabela `app_settings` (`assistant.api_key`, panel admina) → env `OPENROUTER_API_KEY` → plik wskazany przez `OPENROUTER_KEY_FILE` → `./data/openrouter.key` (volume `/app/data` na Dokploy). Bez klucza strumień zwraca part `data-error` z kodem `no_key`, a `GET /api/assistant/status` → `configured: false`.
+- Model: DB `assistant.model` → env `OPENROUTER_MODEL` → `deepseek/deepseek-v4-flash` (musi wspierać tool-calling). Routing: DB `assistant.provider_sort` → env `OPENROUTER_PROVIDER_SORT` → `latency` (`price`, `throughput`, pusty = bez sortowania; tylko gdy baseUrl to OpenRouter). Endpoint: DB `assistant.base_url` → env `OPENROUTER_BASE_URL` → OpenRouter (dowolne API zgodne z OpenAI).
+- Lokalny test: `OPENROUTER_KEY_FILE=/ścieżka/do/klucza npm run dev` — nie kopiuj klucza do repo ani do `data/` na stałe.
+
+### Konfiguracja z panelu admina (`/admin/asystent`)
+
+- Wszystkie ustawienia asystenta żyją w generycznej tabeli `app_settings` (key/value, `src/lib/settings.ts`: `getSetting/setSetting/deleteSetting`), klucze `assistant.*`. Precedencja KAŻDEGO pola: **DB → env → domyślne**; wartości czytane przy każdej turze (bez restartu). Jedno źródło prawdy: `src/lib/ai/assistantConfig.ts` — `ASSISTANT_FIELDS` (klucz DB, env, typ, walidacja, etykieta PL), `ASSISTANT_DEFAULTS`, `getAssistantConfig()` → `{ values, sources, isOpenRouter, enabledTools }`. Nowe pole = wpis w `ASSISTANT_FIELDS` + `ASSISTANT_DEFAULTS` + użycie w turze; front dostaje je automatycznie w `values/sources/defaults`.
+- Pola: dostawca (`enabled`, `baseUrl`, `providerLabel`, `model`, `providerSort`, klucz API), generowanie (`temperature`, `maxOutputTokens`, `maxSteps`, `historyTokenBudget`, `reasoningEffort` → `providerOptions.openrouter.reasoning.effort`), prompt/osobowość (`customInstructions` — sekcja „Dodatkowe instrukcje administratora” na końcu system promptu, `personaName`, `greeting`, `suggestions` — tylko UI), reguły kalendarza (`workStart/workEnd`, `defaultDurationHours`, `allDayTypes`, `defaultStatus`, `allowRecurrence`, `maxHorizonDays` — wstrzykiwane do promptu w `calendarPrompt.ts` i jako defaults `propose_event`/limit `list_events` w `calendarTools.ts`), narzędzia (`disabledTools` — `buildCalendarTools(user, config)` pomija wyłączone; `propose_event` nie do wyłączenia), dostęp i limity (`access`: `admins` | `calendar_editors` = admin LUB edycja `technical/kalendarz`; `retentionDays` — `src/lib/ai/retention.ts`, prune przy starcie i co 24 h; `dailyTurnLimit` — z `assistant_usage` per user/dzień, przekroczenie → `data-error` `quota`).
+- Dostęp do `/api/assistant/*`: middleware `requireAssistantAccess` (`src/middleware/auth.ts`, czyta `assistant.access` przy każdym żądaniu); `GET /api/assistant/status` jest dla każdego zalogowanego i zwraca `allowed`, `enabled`, `configured`, `reason`, `persona`, `access` — front chowa po nim przycisk. Bez dostępu: 403 `Brak dostępu do asystenta`.
+- Endpointy admina (`src/routes/admin-assistant.ts`, `requireAdmin`, `{ success, data }`): `GET/PUT /api/admin/assistant/settings` (`{ values, sources, defaults, apiKey: { set, source, masked }, isOpenRouter, env, meta }`; PUT: pole pominięte = bez zmian, `null` = usuń z DB, `apiKey: ""` = bez zmian; błędy 400 z listą po `; `), `GET /models?refresh=1` (OpenRouter: filtr `supported_parameters ∋ tools`, ceny USD/1M; inne API: `data[].id`; cache 1 h / negatywny 60 s), `POST /test` (`generateText` bez narzędzi, zawsze HTTP 200, wynik w `data.ok`), `GET /prompt-preview`, `GET /usage?days=7|30|90` (koszt z cen z cache modeli, `costCoverage`), `GET /turns` (paginacja), `DELETE /chats` (wszystkie czaty; usage zostaje z `chat_id = NULL`).
+- Każda zmiana trafia do `activity_log` (`entityType: "app_settings"`, `entityId: 0`, `field` = klucz DB, summary PL). **Bezpieczeństwo klucza:** klucz w DB jest przechowywany jawnie w SQLite (`data/alfa.db` na volume — chroń backupy), NIGDY nie wraca do frontu poza maską (`sk-or-…abcd`) i NIGDY nie trafia do `activity_log` (old/new = NULL). Błędy generacji klasyfikuje wspólny `src/lib/ai/errors.ts` (`classifyError/describeError`).
 
 ## Deployment Notes
 

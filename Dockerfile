@@ -58,6 +58,8 @@ COPY --from=frontend /app/frontend/dist ./frontend/dist
 RUN mkdir -p ./data
 
 ENV NODE_ENV=production
+# Kalendarz/asystent liczą „dzisiaj” lokalnie — proces ma działać w czasie warszawskim (patrz src/lib/tz.ts).
+ENV TZ=Europe/Warsaw
 ENV PORT=4001
 ENV HOST=0.0.0.0
 EXPOSE 4001

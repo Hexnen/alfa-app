@@ -14,6 +14,7 @@ import {
   X,
   LogOut,
   Shield,
+  Sparkles,
   type LucideIcon,
 } from "lucide-react";
 import { useMemo, useState } from "react";
@@ -28,6 +29,8 @@ type NavChild = {
   // Optional custom active matcher (needed when sibling paths overlap, e.g.
   // "/orders" is a prefix of "/orders/formularz").
   isActive?: (pathname: string) => boolean;
+  /** Opcjonalna ikona podzakładki (np. w grupie Administracja). */
+  icon?: LucideIcon;
 };
 type NavItem = {
   name: string;
@@ -173,9 +176,12 @@ export function Layout({ children }: LayoutProps) {
       : location.pathname === child.href ||
         location.pathname.startsWith(child.href + "/");
 
+  // Grupa jest aktywna także wtedy, gdy aktywna jest dowolna podzakładka
+  // (np. Administracja ma href /admin/users, a /admin/asystent to rodzeństwo).
   const isSectionActive = (item: NavItem) =>
     location.pathname === item.href ||
-    location.pathname.startsWith(item.href + "/");
+    location.pathname.startsWith(item.href + "/") ||
+    (item.children?.some(isChildActive) ?? false);
 
   // A section is expanded when the user toggled it, otherwise it auto-opens
   // whenever the current route lives inside it.
@@ -266,6 +272,7 @@ export function Layout({ children }: LayoutProps) {
                   )}
                   onClick={() => setSidebarOpen(false)}
                 >
+                  {child.icon && <child.icon className="h-4 w-4" />}
                   {child.name}
                 </Link>
               );
@@ -320,6 +327,10 @@ export function Layout({ children }: LayoutProps) {
                 name: "Administracja",
                 href: "/admin/users",
                 icon: Shield,
+                children: [
+                  { name: "Użytkownicy", href: "/admin/users", icon: Users },
+                  { name: "Asystent AI", href: "/admin/asystent", icon: Sparkles },
+                ],
               })}
             </>
           )}

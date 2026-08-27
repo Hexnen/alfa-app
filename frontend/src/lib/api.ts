@@ -2568,3 +2568,369 @@ export const activityApi = {
     );
   },
 };
+
+// ---------------------------------------------------------------------------
+// Asystent kalendarza (admin-only) — kontrakt: scratchpad/ASSISTANT_CONTRACT.md
+// ---------------------------------------------------------------------------
+
+export interface AssistantStatus {
+  configured: boolean;
+  model: string;
+  keySource: "env" | "file" | "db" | null;
+  /** Czy asystent jest włączony w ustawieniach administracyjnych. */
+  enabled?: boolean;
+  /** Czy bieżący użytkownik ma dostęp do asystenta (admin lub edytor kalendarza wg `access`). */
+  allowed?: boolean;
+  /** Czytelny powód, gdy `configured === false` lub `enabled === false`. */
+  reason?: string;
+  persona?: { name: string; greeting: string; suggestions: string[] };
+  access?: "admins" | "calendar_editors";
+  /** Limit kroków narzędzi w jednej turze (do wiersza „Krok n/max”); brak → front zakłada 6. */
+  maxSteps?: number;
+  /** Maksymalna długość wiadomości użytkownika (znaki); brak → 4000. */
+  messageMaxChars?: number;
+  turnTimeoutMs?: number;
+}
+
+export interface AssistantChat {
+  id: number;
+  title: string | null;
+  updatedAt: string;
+}
+
+/** Wynik `propose_event` (output tool-parta) — NIE zapisany event, tylko propozycja. */
+export interface AssistantProposal extends CalendarEventInput {
+  objectName?: string | null;
+  technicianNames?: string[];
+}
+
+export interface AssistantProposalOutput {
+  proposal?: AssistantProposal;
+  needsConfirmation?: boolean;
+  error?: string;
+}
+
+/** Opcja pytania `ask_choice` — przycisk w karcie wyboru. */
+export interface AssistantChoiceOption {
+  label: string;
+  /** Tekst wysyłany jako odpowiedź (domyślnie label). */
+  value?: string;
+  /** Drobny opis pod etykietą (dla obiektów: adres, miasto). */
+  hint?: string;
+  /** Id obiektu z find_object — podgląd karty obiektu. */
+  objectId?: number;
+  /** Id technika (opcja „wybierz technika”). */
+  technicianId?: number;
+  /** Zakres slotu (opcje z find_free_slots) — front podświetla termin na siatce. */
+  startAt?: string;
+  endAt?: string;
+}
+
+/** Wynik `ask_choice` — karta pytania z przyciskami. */
+export interface AssistantChoiceOutput {
+  awaitingUserChoice?: boolean;
+  question: string;
+  options: AssistantChoiceOption[];
+  allowCustom?: boolean;
+  multi?: boolean;
+}
+
+/** Wynik `check_conflicts` — ostrzeżenia przy karcie propozycji. */
+export interface AssistantConflict {
+  id: number;
+  title: string;
+  type: string;
+  startAt: string;
+  endAt: string;
+  kind: "event" | "urlop";
+  technicians?: string[] | { id: number; name: string }[];
+}
+
+/** Decyzja użytkownika wobec karty propozycji (POST /assistant/chats/:id/system). */
+export interface AssistantSystemNote {
+  kind: "saved" | "rejected" | "edited";
+  eventId?: number;
+  title?: string;
+  /** toolCallId karty propozycji — jednoznaczne dopasowanie decyzji do karty. */
+  toolCallId?: string;
+  /** Gotowy tekst (fallback dla starszego backendu; nowy buduje go sam). */
+  text?: string;
+}
+
+/** Tekst notatki systemowej w formacie, który rozumie także starszy backend/front. */
+export function systemNoteText(n: AssistantSystemNote): string {
+  const t = n.title?.trim() ?? "";
+  if (n.kind === "rejected") return `Użytkownik odrzucił propozycję${t ? `: ${t}` : ""}`;
+  const ev = n.eventId != null ? `#${n.eventId} ` : "";
+  return `Wydarzenie ${ev}zapisane${n.kind === "edited" ? " po edycji" : ""}${t ? `: ${t}` : ""}`;
+}
+
+/**
+ * Tolerancyjny request: backend asystenta może zwracać `{ success, data }`
+ * (konwencja alfa) albo goły obiekt/tablicę (konwencja AI SDK). Obsługujemy oba.
+ */
+async function assistantRequest<T>(endpoint: string, options?: RequestInit): Promise<T> {
+  const response = await fetch(`${API_BASE}${endpoint}`, {
+    ...options,
+    headers: { "Content-Type": "application/json", ...options?.headers },
+  });
+  const body = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(
+      (body && typeof body === "object" && (body.error || body.message)) || `Request failed (${response.status})`
+    );
+  }
+  if (body && typeof body === "object" && !Array.isArray(body) && "success" in body) {
+    if (!body.success) throw new Error(body.error || "Request failed");
+    return body.data as T;
+  }
+  return body as T;
+}
+
+export const assistantApi = {
+  /** Ścieżka streamu dla `DefaultChatTransport` (useChat). */
+  messageUrl(chatId: number) {
+    return `${API_BASE}/assistant/chats/${chatId}/message`;
+  },
+  async status() {
+    return assistantRequest<AssistantStatus>("/assistant/status");
+  },
+  async listChats() {
+    const r = await assistantRequest<AssistantChat[] | { chats: AssistantChat[] }>("/assistant/chats");
+    return Array.isArray(r) ? r : r.chats ?? [];
+  },
+  async createChat(title?: string) {
+    return assistantRequest<AssistantChat>("/assistant/chats", {
+      method: "POST",
+      body: JSON.stringify(title ? { title } : {}),
+    });
+  },
+  async deleteChat(id: number) {
+    return assistantRequest<unknown>(`/assistant/chats/${id}`, { method: "DELETE" });
+  },
+  /** Przerwanie tury po stronie serwera (obok `stop()` z useChat, który tylko zrywa stream). */
+  async stop(chatId: number) {
+    return assistantRequest<unknown>(`/assistant/chats/${chatId}/stop`, { method: "POST", body: "{}" }).catch(() => undefined);
+  },
+  /** UIMessage[] (z parts) — typ luźny, bo `ai` definiuje go generycznie. */
+  async messages(chatId: number) {
+    const r = await assistantRequest<unknown[] | { messages: unknown[] }>(`/assistant/chats/${chatId}/messages`);
+    return Array.isArray(r) ? r : r.messages ?? [];
+  },
+  /**
+   * Dopisuje notatkę systemową o decyzji użytkownika (Zatwierdź / Edytuj→Zapisz / Odrzuć).
+   * Nowy kontrakt: `{ kind, eventId?, title? }` — serwer sam buduje tekst i part `data-system`.
+   * Dla zgodności ze starszym backendem wysyłamy też gotowy `text`.
+   */
+  async system(chatId: number, note: AssistantSystemNote) {
+    return assistantRequest<unknown>(`/assistant/chats/${chatId}/system`, {
+      method: "POST",
+      body: JSON.stringify({ ...note, text: note.text ?? systemNoteText(note) }),
+    });
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Administracja asystenta AI (admin-only) — kontrakt v2:
+// scratchpad/ADMIN_ASSISTANT_CONTRACT.md. Precedencja: DB → env → domyślne.
+// ---------------------------------------------------------------------------
+
+export type AssistantSettingSource = "db" | "env" | "default";
+export type AssistantProviderSort = "latency" | "price" | "throughput" | "";
+export type AssistantReasoningEffort = "" | "low" | "medium" | "high";
+export type AssistantAccess = "admins" | "calendar_editors";
+
+/** Wszystkie konfigurowalne pola (bez klucza API). */
+export interface AssistantSettingsValues {
+  // Dostawca i model
+  enabled: boolean;
+  baseUrl: string;
+  providerLabel: string;
+  model: string;
+  providerSort: AssistantProviderSort;
+  // Generowanie
+  temperature: number;
+  maxOutputTokens: number;
+  maxSteps: number;
+  historyTokenBudget: number;
+  reasoningEffort: AssistantReasoningEffort;
+  // Prompt i osobowość
+  customInstructions: string;
+  personaName: string;
+  greeting: string;
+  suggestions: string[];
+  // Reguły kalendarza
+  workStart: string;
+  workEnd: string;
+  defaultDurationHours: number;
+  allDayTypes: string[];
+  defaultStatus: "planned" | "confirmed";
+  allowRecurrence: boolean;
+  maxHorizonDays: number;
+  // Narzędzia
+  disabledTools: string[];
+  // Dostęp i limity
+  access: AssistantAccess;
+  retentionDays: number;
+  dailyTurnLimit: number;
+}
+
+export type AssistantSettingsField = keyof AssistantSettingsValues;
+
+export interface AdminAssistantToolMeta {
+  name: string;
+  label: string;
+  description: string;
+  required: boolean;
+}
+
+export interface AdminAssistantSettings {
+  values: AssistantSettingsValues;
+  sources: Record<AssistantSettingsField, AssistantSettingSource>;
+  defaults: AssistantSettingsValues;
+  apiKey: { set: boolean; source: "db" | "env" | "file" | null; masked: string | null };
+  isOpenRouter: boolean;
+  env: {
+    OPENROUTER_API_KEY: boolean;
+    OPENROUTER_KEY_FILE: string | null;
+    keyFileExists: boolean;
+    OPENROUTER_MODEL: string | null;
+    OPENROUTER_PROVIDER_SORT: string | null;
+    OPENROUTER_BASE_URL: string | null;
+  };
+  meta: {
+    eventTypes: string[];
+    statuses: string[];
+    tools: AdminAssistantToolMeta[];
+    reasoningEfforts: AssistantReasoningEffort[];
+    providerSorts: AssistantProviderSort[];
+  };
+}
+
+/**
+ * PUT: dowolny podzbiór `values` + `apiKey`. Pole pominięte = bez zmian;
+ * `null` = usuń z bazy (powrót do env/domyślnego); apiKey "" = bez zmian.
+ */
+export type AdminAssistantSettingsUpdate = {
+  [K in AssistantSettingsField]?: AssistantSettingsValues[K] | null;
+} & { apiKey?: string | null };
+
+export interface AdminAssistantModel {
+  id: string;
+  name: string;
+  contextLength: number | null;
+  promptPer1M: number | null;
+  completionPer1M: number | null;
+}
+
+export interface AdminAssistantModels {
+  models: AdminAssistantModel[];
+  fetchedAt: string;
+  error: string | null;
+  source?: "openrouter" | "custom";
+}
+
+export interface AdminAssistantTestResult {
+  ok: boolean;
+  latencyMs: number;
+  reply?: string;
+  model: string;
+  error?: string;
+  /** Kod błędu z classifyError (np. "auth", "timeout") — tylko gdy ok=false. */
+  code?: string;
+}
+
+export interface AdminAssistantPromptPreview {
+  prompt: string;
+  tokensEstimate: number;
+  tools: string[];
+}
+
+export interface AdminAssistantUsage {
+  days: number;
+  turns: number;
+  promptTokens: number;
+  completionTokens: number;
+  reasoningTokens: number;
+  toolCalls: number;
+  avgMs: number;
+  estimatedCostUsd: number | null;
+  /** Udział tur z policzonym kosztem (0..1). */
+  costCoverage: number;
+  byModel: { model: string; turns: number; promptTokens: number; completionTokens: number; costUsd: number | null }[];
+  topUsers: { userId: number; label: string; turns: number; promptTokens: number; completionTokens: number }[];
+  daily: { date: string; turns: number; promptTokens: number; completionTokens: number }[];
+}
+
+export interface AdminAssistantTurn {
+  id: number;
+  createdAt: string;
+  userId: number;
+  userLabel: string;
+  chatId: number | null;
+  chatTitle: string | null;
+  model: string;
+  promptTokens: number;
+  completionTokens: number;
+  reasoningTokens: number;
+  costUsd: number | null;
+  ms: number;
+  steps: number;
+  toolCalls: number;
+  finishReason: string | null;
+}
+
+export interface AdminAssistantTurns {
+  items: AdminAssistantTurn[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+export const adminAssistantApi = {
+  async settings() {
+    const r = await request<ApiResponse<AdminAssistantSettings>>("/admin/assistant/settings");
+    return r.data as AdminAssistantSettings;
+  },
+  async updateSettings(body: AdminAssistantSettingsUpdate) {
+    const r = await request<ApiResponse<AdminAssistantSettings>>("/admin/assistant/settings", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
+    return r.data as AdminAssistantSettings;
+  },
+  async models(refresh?: boolean) {
+    const r = await request<ApiResponse<AdminAssistantModels>>(
+      `/admin/assistant/models${refresh ? "?refresh=1" : ""}`
+    );
+    return r.data as AdminAssistantModels;
+  },
+  async test(body: { model?: string; apiKey?: string; baseUrl?: string }) {
+    const r = await request<ApiResponse<AdminAssistantTestResult>>("/admin/assistant/test", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    return r.data as AdminAssistantTestResult;
+  },
+  async promptPreview() {
+    const r = await request<ApiResponse<AdminAssistantPromptPreview>>("/admin/assistant/prompt-preview");
+    return r.data as AdminAssistantPromptPreview;
+  },
+  async usage(days: 7 | 30 | 90) {
+    const r = await request<ApiResponse<AdminAssistantUsage>>(`/admin/assistant/usage?days=${days}`);
+    return r.data as AdminAssistantUsage;
+  },
+  async turns(params: { days: number; page: number; pageSize: number }) {
+    const q = new URLSearchParams({
+      days: String(params.days),
+      page: String(params.page),
+      pageSize: String(params.pageSize),
+    });
+    const r = await request<ApiResponse<AdminAssistantTurns>>(`/admin/assistant/turns?${q}`);
+    return r.data as AdminAssistantTurns;
+  },
+  async deleteAllChats() {
+    const r = await request<ApiResponse<{ deleted: number }>>("/admin/assistant/chats", { method: "DELETE" });
+    return r.data as { deleted: number };
+  },
+};
