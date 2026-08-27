@@ -127,6 +127,12 @@ export function assembleSystemPrompt(ctx: PromptContext): string {
   );
   rules.push("11. Tytuł maks. 80 znaków, np. „Serwis — Magazyn Centralny”, „Urlop — Wojtek Brodzicki”.");
   rules.push(
+    "11a. ROZLICZENIE (`billing`): „gwarancja/gwarancyjny/na gwarancji” → warranty, „bezpłatnie/gratis/darmowy/za darmo” → free, „płatny/płatne/faktura/na fakturę” → paid. NIE zgaduj — gdy użytkownik nie podał, pomiń pole (zostaje puste). Nie dotyczy urlopu, biura, przygotowania."
+  );
+  rules.push(
+    "11b. PROTOKÓŁ: wydarzenia mają `protocol` (numer, status draft/final, signed) tylko do odczytu — protokoły powstają w module Protokoły, NIE z czatu. Wzmianka o protokole („podpisany protokół”, „bez protokołu”, „klient nie podpisał”) → tylko informacyjnie w notatce (`note`), nigdy jako pole wydarzenia. Pytanie „czy jest protokół” → odpowiedz z `protocol` (null = brak)."
+  );
+  rules.push(
     listEvents
       ? `12. PRZEGLĄD („co na dziś / jutro / w tym tygodniu / na teraz i przyszły tydzień”, „co do zrobienia”, „grafik Wojtka”) → DOKŁADNIE JEDNO \`list_events\` na CAŁY zakres (od teraz do końca zakresu; „na teraz i przyszły tydzień” = od ${today} do niedzieli przyszłego tygodnia włącznie; filtr technika/obiektu gdy o kogoś/coś pytano)${showEvents ? " → `show_events` z WSZYSTKIMI id, `groupBy` (\"day\" dla zakresów, \"technician\" gdy pytanie „kto co robi”, \"object\"/\"type\" na życzenie) i `range` {from, to} jak w list_events" : " i zwięzła lista (data, godziny, typ, tytuł, obiekt)"}. Zakres maks. ${r.maxHorizonDays} dni — dłuższy jest przycinany (\`truncatedRange\`), NIE ponawiaj z krótszym.${freeSlots ? " „Kto jest wolny?” / wolne terminy → `find_free_slots` (technicianIds: []), nie `list_events` per osoba." : ""}`
       : "12. Brak narzędzia grafiku — na pytania o grafik odpowiedz, że podgląd jest w kalendarzu."
@@ -190,7 +196,7 @@ export function assembleSystemPrompt(ctx: PromptContext): string {
       `M3. RELACJA Z PRZESZŁOŚCI o jednym wydarzeniu („na X odbyła się wizyta, ale…”, „Wojtek pojechał do Z i…”) → ${search ? "`search_events` {query: obiekt} BEZ type" : "`list_events`"} → JEDNA paczka: minęło (endAt przed ${today}) i nie done → \`status\` done + \`note\` z relacji; trwa/przyszłe/już done → tylko \`note\`. 1 zdanie, bez pytań. Np. „na magazynie centralnym odbyła się wizyta, naprawiono jedną kamerę” → \`search_events\` {query:"magazyn centralny"} → serwis #17 (11–13.08) → [{kind:"status", eventId:17, status:"done"}, {kind:"note", eventId:17, text:"Wg relacji użytkownika: naprawiono tylko jedną kamerę."}].`
     );
     modRules.push(
-      `M4. Pozycje: \`update\` (patch = zmieniane pola; sam startAt = przesunięcie z zachowaniem długości; technicianIds = PEŁNA lista), \`status\` (confirmed/done/cancelled; done: actualStartAt/actualEndAt, \`note\` = przebieg → notatka), \`cancel\` (reason), \`delete\`, \`restore\`, \`create\`, \`note\` {eventId, text}. Przesunięcie = update, nie cancel + nowe. „Odwołaj/anuluj” = cancel; „usuń” = delete. Wydarzenie z serii: tylko to wystąpienie (powiedz). NIGDY \`done\` dla przyszłych (po ${today}). Tekst maks. 1 zdanie. Pozycja z \`error\` → popraw tylko ją albo zapytaj. Zapis po Zatwierdź („[SYSTEM] Zastosowano zmianę…”) — bez tego nie twierdź, że zmieniono.`
+      `M4. Pozycje: \`update\` (patch = zmieniane pola; sam startAt = przesunięcie z zachowaniem długości; technicianIds = PEŁNA lista; \`billing\` warranty/free/paid tylko gdy użytkownik podał rozliczenie), \`status\` (confirmed/done/cancelled; done: actualStartAt/actualEndAt, \`note\` = przebieg → notatka), \`cancel\` (reason), \`delete\`, \`restore\`, \`create\`, \`note\` {eventId, text}. Przesunięcie = update, nie cancel + nowe. „Odwołaj/anuluj” = cancel; „usuń” = delete. Wydarzenie z serii: tylko to wystąpienie (powiedz). NIGDY \`done\` dla przyszłych (po ${today}). Tekst maks. 1 zdanie. Pozycja z \`error\` → popraw tylko ją albo zapytaj. Zapis po Zatwierdź („[SYSTEM] Zastosowano zmianę…”) — bez tego nie twierdź, że zmieniono.`
     );
     modRules.push(
       `M5. PODSUMOWANIE DNIA (czas przeszły: „skończył”, „nie wpuścili”, „przełożone”, „dodatkowo”, albo „Podsumowanie dnia: …”) → \`list_events\` tego dnia (domyślnie ${today}; wymienieni technicy albo wszyscy), dopasuj KAŻDY fragment, JEDNA paczka: wykonane → \`status\` done + faktyczne godziny + \`note\`; przełożone → \`update\` z nowym terminem (+ reason; ten sam technik i godziny, „na piątek” = najbliższy piątek po ${today}); odwołane / z winy klienta → \`cancel\` z powodem; dodatkowe → \`create\` (status ${r.daySummaryDefaultStatus}, typ wg słowa; miejsce spoza bazy → \`location\`). „Skończył o 13” = actualEndAt 13:00 (początek = planowany). Nie dopytuj o rzeczy z sensownym domyślnym; paczkę wystaw OD RAZU (użytkownik poprawi w karcie). Bez \`get_event\` i \`check_conflicts\` (\`propose_changes\` zwraca \`warnings\`); zero tekstu między krokami. Fragmenty nie do dopasowania → ${askChoice ? "jedno `ask_choice` (kandydaci z `eventId` + „Żadne z nich — nowe wydarzenie”)" : "jedno pytanie tekstem"} PRZED paczką, gdy dotyczy większości; inaczej paczka + jedno pytanie o resztę.`
@@ -230,6 +236,7 @@ export function assembleSystemPrompt(ctx: PromptContext): string {
     "## Słowniki",
     `Typy: ${types}.`,
     `Statusy: ${(ctx.statuses ?? CALENDAR_EVENT_STATUSES).join(", ")}.`,
+    "Rozliczenie (billing): warranty = Gwarancyjny, free = Darmowy, paid = Płatny, null = nie dotyczy.",
     ...(r.allowRecurrence ? ["Częstotliwości serii: weekly, monthly, quarterly, semiannual, yearly."] : []),
     "",
     "## Technicy (technicianId:imię nazwisko; tylko aktywni)",

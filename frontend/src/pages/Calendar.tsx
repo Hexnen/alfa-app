@@ -31,6 +31,7 @@ import {
   Activity,
   AlertCircle,
   AlertTriangle,
+  Banknote,
   Building2,
   CalendarDays,
   CalendarPlus,
@@ -40,10 +41,14 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  CircleDashed,
   Copy,
   CopyPlus,
   ExternalLink,
   Eye,
+  FileCheck2,
+  FileText,
+  FileX,
   Filter,
   FilterX,
   HelpCircle,
@@ -84,6 +89,7 @@ import {
   getTechnicians,
   type ActivityEntry,
   type AssistantStatus,
+  type CalendarBilling,
   type CalendarEvent,
   type CalendarNote,
   type CalendarEventInput,
@@ -95,11 +101,16 @@ import {
 import {
   ACTIVITY_ACTION_META,
   ACTIVITY_FILTER_OPTIONS,
+  BILLING_META,
+  BILLING_ORDER,
   EVENT_STATUS_META,
   EVENT_STATUS_ORDER,
   EVENT_TYPE_META,
   EVENT_TYPE_ORDER,
   activityParts,
+  billingApplies,
+  protocolBadgeKind,
+  protocolHref,
   fmtDayHeading,
   fmtRange,
   fmtRelative,
@@ -119,6 +130,7 @@ import {
   type CalendarEventPrefill,
 } from "@/components/CalendarEventDialog";
 import { CalendarBoard, isOverdue, type BoardGroupBy } from "@/components/CalendarBoard";
+import { BillingBadge, BillingMark, ProtocolBadge, ProtocolMark } from "@/components/CalendarEventBadges";
 import { NotesBadge } from "@/components/CalendarEventNotes";
 import { AssistantDrawer, type AssistantEventChangeKind, type AssistantPreview } from "@/components/assistant/AssistantDrawer";
 import { cn } from "@/lib/utils";
@@ -168,38 +180,52 @@ function readStoredBoardGroup(): BoardGroupBy {
 }
 
 const FILTERS_STORAGE_KEY = "alfa.calendar.filters";
+/** Wartość chipa rozliczenia: konkretne rozliczenie albo „bez rozliczenia”. */
+type BillingFilterValue = CalendarBilling | "none";
+/** Filtr protokołu: „” = wszystkie. */
+type ProtocolFilterValue = "" | "with" | "without";
+
 interface StoredFilters {
   types: CalendarEventType[];
   technicianIds: number[];
   statuses: CalendarEventStatus[];
+  billings: BillingFilterValue[];
+  protocol: ProtocolFilterValue;
 }
 const isType = (v: unknown): v is CalendarEventType =>
   typeof v === "string" && v in EVENT_TYPE_META;
 const isStatus = (v: unknown): v is CalendarEventStatus =>
   typeof v === "string" && v in EVENT_STATUS_META;
+const isBilling = (v: unknown): v is BillingFilterValue =>
+  v === "none" || (typeof v === "string" && v in BILLING_META);
+const isProtocolFilter = (v: unknown): v is ProtocolFilterValue =>
+  v === "with" || v === "without" || v === "";
+
+const EMPTY_FILTERS: StoredFilters = { types: [], technicianIds: [], statuses: [], billings: [], protocol: "" };
 
 /** Filtry z localStorage (walidowane — nieznane wartości pomijamy). */
 function readStoredFilters(): StoredFilters {
-  const empty: StoredFilters = { types: [], technicianIds: [], statuses: [] };
   try {
     const raw = window.localStorage.getItem(FILTERS_STORAGE_KEY);
-    if (!raw) return empty;
-    const j = JSON.parse(raw) as Partial<Record<keyof StoredFilters, unknown[]>>;
+    if (!raw) return EMPTY_FILTERS;
+    const j = JSON.parse(raw) as Partial<Record<keyof StoredFilters, unknown>>;
     return {
       types: Array.isArray(j.types) ? j.types.filter(isType) : [],
       technicianIds: Array.isArray(j.technicianIds)
         ? j.technicianIds.filter((x): x is number => Number.isInteger(x) && (x as number) > 0)
         : [],
       statuses: Array.isArray(j.statuses) ? j.statuses.filter(isStatus) : [],
+      billings: Array.isArray(j.billings) ? j.billings.filter(isBilling) : [],
+      protocol: isProtocolFilter(j.protocol) ? j.protocol : "",
     };
   } catch {
-    return empty;
+    return EMPTY_FILTERS;
   }
 }
 
 function storeFilters(f: StoredFilters) {
   try {
-    if (!f.types.length && !f.technicianIds.length && !f.statuses.length) {
+    if (!f.types.length && !f.technicianIds.length && !f.statuses.length && !f.billings.length && !f.protocol) {
       window.localStorage.removeItem(FILTERS_STORAGE_KEY);
     } else {
       window.localStorage.setItem(FILTERS_STORAGE_KEY, JSON.stringify(f));
@@ -208,6 +234,10 @@ function storeFilters(f: StoredFilters) {
     /* ignoruj */
   }
 }
+
+/** Wartość chipa rozliczenia dla wydarzenia; null = typ bez rozliczenia (urlop/biuro/przygotowanie). */
+const billingFilterValue = (e: CalendarEvent): BillingFilterValue | null =>
+  e.billing ? e.billing : billingApplies(e.type) ? "none" : null;
 
 /** Pierwszy dzień miesiąca (lokalnie). */
 const startOfMonth = (d: Date) => new Date(d.getFullYear(), d.getMonth(), 1);
@@ -307,14 +337,35 @@ function renderEventContent(arg: EventContentArg) {
     .filter(Boolean)
     .join(" · ");
 
+  // Rozliczenie / protokół: w liście pełne pigułki, w siatce sama ikona z tooltipem
+  // (kafelki bywają wąskie — tekst by się nie zmieścił).
+  const protoKind = ev ? protocolBadgeKind(ev) : null;
+  /** Atrybuty pod stylowanie i testy E2E — na wrapperze treści (odświeżane z danymi). */
+  const dataAttrs = {
+    ...(ev?.billing ? { "data-billing": ev.billing } : {}),
+    ...(protoKind ? { "data-protocol": protoKind } : {}),
+  };
+  const marks = ev ? (
+    <>
+      <BillingMark billing={ev.billing} className="cal-ev-mark" />
+      <ProtocolMark event={ev} className="cal-ev-mark" />
+    </>
+  ) : null;
+
   if (isList) {
     const status = ev ? EVENT_STATUS_META[ev.status] : null;
     return (
-      <div className="cal-list-item">
+      <div className="cal-list-item" {...dataAttrs}>
         <Icon className="cal-ev-icon" aria-label={meta?.label} />
         <span className="cal-ev-title">{arg.event.title}</span>
         {ev?.seriesId && <Repeat className="cal-ev-series" aria-label="Seria" />}
         {sub && <span className="cal-list-sub">{sub}</span>}
+        {ev && (
+          <span className="cal-list-badges">
+            <BillingBadge billing={ev.billing} compact />
+            <ProtocolBadge event={ev} compact />
+          </span>
+        )}
         {status && (
           <span className={cn("cal-list-status rounded-full px-2 py-0.5 text-[10px] font-semibold", status.badge)}>
             {status.label}
@@ -325,12 +376,13 @@ function renderEventContent(arg: EventContentArg) {
   }
   if (isTimeGrid) {
     return (
-      <div className="cal-ev">
+      <div className="cal-ev" {...dataAttrs}>
         <div className="cal-ev-head">
           <Icon className="cal-ev-icon" aria-label={meta?.label} />
           {arg.timeText && <span className="cal-ev-time">{arg.timeText}</span>}
           {overdue && <AlertTriangle className="cal-ev-overdue" aria-label="Po terminie" />}
           {done && <Check className="cal-ev-check" aria-label="Wykonane" />}
+          {marks}
           <span className="cal-ev-title">{arg.event.title}</span>
         </div>
         {sub && <div className="cal-ev-sub">{sub}</div>}
@@ -338,12 +390,13 @@ function renderEventContent(arg: EventContentArg) {
     );
   }
   return (
-    <div className="cal-ev">
+    <div className="cal-ev" {...dataAttrs}>
       <Icon className="cal-ev-icon" aria-label={meta?.label} />
       {arg.timeText && <span className="cal-ev-time">{arg.timeText}</span>}
       <span className="cal-ev-title">{arg.event.title}</span>
       {overdue && <AlertTriangle className="cal-ev-overdue" aria-label="Po terminie" />}
       {done && <Check className="cal-ev-check" aria-label="Wykonane" />}
+      {marks}
     </div>
   );
 }
@@ -426,22 +479,32 @@ export function Calendar() {
   const [typeFilter, setTypeFilter] = useState<Set<CalendarEventType>>(() => new Set(stored.types));
   const [technicianFilter, setTechnicianFilter] = useState<Set<number>>(() => new Set(stored.technicianIds));
   const [statusFilter, setStatusFilter] = useState<Set<CalendarEventStatus>>(() => new Set(stored.statuses));
+  const [billingFilter, setBillingFilter] = useState<Set<BillingFilterValue>>(() => new Set(stored.billings));
+  const [protocolFilter, setProtocolFilter] = useState<ProtocolFilterValue>(() => stored.protocol);
   const [technicians, setTechnicians] = useState<Technician[]>([]);
   const [filtersOpen, setFiltersOpen] = useState(false); // arkusz na mobile
   const activeFilterCount =
-    (typeFilter.size > 0 ? 1 : 0) + (technicianFilter.size > 0 ? 1 : 0) + (statusFilter.size > 0 ? 1 : 0);
+    (typeFilter.size > 0 ? 1 : 0) +
+    (technicianFilter.size > 0 ? 1 : 0) +
+    (statusFilter.size > 0 ? 1 : 0) +
+    (billingFilter.size > 0 ? 1 : 0) +
+    (protocolFilter ? 1 : 0);
   const clearFilters = () => {
     setTypeFilter(new Set());
     setTechnicianFilter(new Set());
     setStatusFilter(new Set());
+    setBillingFilter(new Set());
+    setProtocolFilter("");
   };
   useEffect(() => {
     storeFilters({
       types: Array.from(typeFilter),
       technicianIds: Array.from(technicianFilter),
       statuses: Array.from(statusFilter),
+      billings: Array.from(billingFilter),
+      protocol: protocolFilter,
     });
-  }, [typeFilter, technicianFilter, statusFilter]);
+  }, [typeFilter, technicianFilter, statusFilter, billingFilter, protocolFilter]);
 
   useEffect(() => {
     getTechnicians(true)
@@ -494,14 +557,43 @@ export function Calendar() {
     }
   }, [range, typeFilter, technicianFilter]);
 
-  const events = useMemo(
-    () => (statusFilter.size ? allEvents.filter((e) => statusFilter.has(e.status)) : allEvents),
-    [allEvents, statusFilter]
-  );
+  const events = useMemo(() => {
+    if (!statusFilter.size && !billingFilter.size && !protocolFilter) return allEvents;
+    return allEvents.filter((e) => {
+      if (statusFilter.size && !statusFilter.has(e.status)) return false;
+      if (billingFilter.size) {
+        const b = billingFilterValue(e);
+        if (b == null || !billingFilter.has(b)) return false;
+      }
+      if (protocolFilter === "with" && !e.protocol) return false;
+      // „bez protokołu” = wykonane prace na obiekcie bez protokołu (badge „missing”).
+      if (protocolFilter === "without" && protocolBadgeKind(e) !== "missing") return false;
+      return true;
+    });
+  }, [allEvents, statusFilter, billingFilter, protocolFilter]);
   const statusCounts = useMemo(() => {
     const m: Record<CalendarEventStatus, number> = { planned: 0, confirmed: 0, done: 0, cancelled: 0 };
     for (const e of allEvents) if (!e.deletedAt) m[e.status] = (m[e.status] ?? 0) + 1;
     return m;
+  }, [allEvents]);
+  const billingCounts = useMemo(() => {
+    const m: Record<BillingFilterValue, number> = { warranty: 0, free: 0, paid: 0, none: 0 };
+    for (const e of allEvents) {
+      if (e.deletedAt) continue;
+      const b = billingFilterValue(e);
+      if (b) m[b] += 1;
+    }
+    return m;
+  }, [allEvents]);
+  const protocolCounts = useMemo(() => {
+    let withP = 0;
+    let without = 0;
+    for (const e of allEvents) {
+      if (e.deletedAt) continue;
+      if (e.protocol) withP += 1;
+      else if (protocolBadgeKind(e) === "missing") without += 1;
+    }
+    return { with: withP, without };
   }, [allEvents]);
 
   useEffect(() => {
@@ -668,6 +760,18 @@ export function Calendar() {
   const closeCtxMenu = useCallback(() => setCtxMenu(null), []);
   const [deleteTarget, setDeleteTarget] = useState<CalendarEvent | null>(null);
 
+  /**
+   * Najświeższe wydarzenia po id. FullCalendar recyklinguje elementy DOM (eventDidMount
+   * nie powtarza się po zapisie), więc listenery i handlery muszą sięgać po aktualny
+   * obiekt zamiast po ten domknięty w `extendedProps` przy montowaniu.
+   */
+  const eventsByIdRef = useRef<Map<number, CalendarEvent>>(new Map());
+  eventsByIdRef.current = useMemo(() => new Map(allEvents.map((e) => [e.id, e])), [allEvents]);
+  const freshEvent = useCallback((fcEvent: { id: string; extendedProps: Record<string, unknown> }) => {
+    const fallback = fcEvent.extendedProps.ev as CalendarEvent | undefined;
+    return eventsByIdRef.current.get(Number(fcEvent.id)) ?? fallback;
+  }, []);
+
   /** Prawy klik / dwuklik na wydarzeniu — listenery natywne podpinane w eventDidMount. */
   const eventCtxRef = useRef<(ev: CalendarEvent, e: MouseEvent) => void>(() => {});
   eventCtxRef.current = (ev, e) => {
@@ -689,11 +793,13 @@ export function Calendar() {
     const el = arg.el as ElWithHandlers;
     const ev = arg.event.extendedProps.ev as CalendarEvent | undefined;
     const ctx = (e: MouseEvent) => {
-      if (ev) eventCtxRef.current(ev, e);
+      const cur = freshEvent(arg.event);
+      if (cur) eventCtxRef.current(cur, e);
     };
     const dbl = (e: MouseEvent) => {
       e.preventDefault();
-      if (ev) eventDblRef.current(ev);
+      const cur = freshEvent(arg.event);
+      if (cur) eventDblRef.current(cur);
     };
     el._alfaCtx = ctx;
     el._alfaDbl = dbl;
@@ -701,17 +807,24 @@ export function Calendar() {
     el.addEventListener("dblclick", dbl);
     // Tooltip natywny — pełny tytuł, zakres, obiekt (obcięty tekst w komórce).
     if (ev) {
+      const protoKind = protocolBadgeKind(ev);
       const bits = [
         ev.title,
         fmtRange(ev.startAt, ev.endAt, ev.allDay),
         ev.objectName ?? "",
         ev.technicians?.length ? ev.technicians.map(techShort).join(", ") : "",
         `${EVENT_TYPE_META[ev.type]?.label ?? ev.type} · ${EVENT_STATUS_META[ev.status]?.label ?? ev.status}`,
+        ev.billing ? `Rozliczenie: ${BILLING_META[ev.billing].label}` : "",
+        ev.protocol
+          ? `Protokół: ${ev.protocol.number}`
+          : protoKind === "missing"
+            ? "Brak protokołu"
+            : "",
       ].filter(Boolean);
       el.title = bits.join("\n");
       el.setAttribute("aria-label", bits.join(", "));
     }
-  }, []);
+  }, [freshEvent]);
   const handleEventWillUnmount = useCallback((arg: EventMountArg) => {
     const el = arg.el as ElWithHandlers;
     if (el._alfaCtx) el.removeEventListener("contextmenu", el._alfaCtx);
@@ -848,6 +961,16 @@ export function Calendar() {
         onSelect: () => navigate(`/objects/${ev.objectId}`),
       });
     }
+    const proto = ev.protocol;
+    if (proto) {
+      items.push({
+        key: "protocol",
+        label: "Otwórz protokół",
+        hint: proto.number,
+        icon: FileText,
+        onSelect: () => navigate(protocolHref(proto.id)),
+      });
+    }
     if (canMutate) {
       items.push({ key: "sep1", label: null, separator: true });
       if (ev.status === "planned") {
@@ -951,7 +1074,7 @@ export function Calendar() {
 
   const handleEventClick = (arg: EventClickArg) => {
     arg.jsEvent.preventDefault();
-    const ev = arg.event.extendedProps.ev as CalendarEvent | undefined;
+    const ev = freshEvent(arg.event);
     if (!ev) return;
     // Na mobile od razu dialog (arkusz); na desktopie lekki podgląd przy evencie.
     if (mobile) {
@@ -969,7 +1092,7 @@ export function Calendar() {
 
   /** Drag&drop / resize → PATCH move. Przy błędzie cofamy zmianę w siatce. */
   const handleMove = async (arg: EventDropArg | EventResizeDoneArg) => {
-    const ev = arg.event.extendedProps.ev as CalendarEvent | undefined;
+    const ev = freshEvent(arg.event);
     if (!ev || !editable) {
       arg.revert();
       return;
@@ -1306,6 +1429,10 @@ export function Calendar() {
       </div>
       <span className="hidden h-5 w-px bg-border md:block" aria-hidden />
       <StatusFilter value={statusFilter} counts={statusCounts} onChange={setStatusFilter} />
+      <span className="hidden h-5 w-px bg-border md:block" aria-hidden />
+      <BillingFilter value={billingFilter} counts={billingCounts} onChange={setBillingFilter} />
+      <span className="hidden h-5 w-px bg-border md:block" aria-hidden />
+      <ProtocolFilter value={protocolFilter} counts={protocolCounts} onChange={setProtocolFilter} />
       <span className="hidden h-5 w-px bg-border md:block" aria-hidden />
       <TechnicianFilter
         technicians={technicians}
@@ -2147,6 +2274,10 @@ function EventPreview({
             {ev.deletedAt && <span className="text-[10px] font-semibold text-red-600">usunięte</span>}
             <NotesBadge count={notesCount} />
           </div>
+          <div className="mt-1 flex flex-wrap items-center gap-1.5 empty:mt-0">
+            <BillingBadge billing={ev.billing} />
+            <ProtocolBadge event={ev} link />
+          </div>
         </div>
         <Button variant="ghost" size="icon" className="-mr-1 -mt-1 h-7 w-7" onClick={onClose} aria-label="Zamknij podgląd">
           <X className="h-4 w-4" />
@@ -2386,6 +2517,152 @@ function StatusFilter({
             >
               {count}
             </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** Chipy rozliczenia (multi) z licznikami — jak StatusFilter; „Bez rozliczenia” = NULL. */
+function BillingFilter({
+  value,
+  counts,
+  onChange,
+}: {
+  value: Set<BillingFilterValue>;
+  counts: Record<BillingFilterValue, number>;
+  onChange: (next: Set<BillingFilterValue>) => void;
+}) {
+  const toggle = (b: BillingFilterValue, only: boolean) => {
+    if (only) {
+      onChange(value.size === 1 && value.has(b) ? new Set() : new Set([b]));
+      return;
+    }
+    const n = new Set(value);
+    if (n.has(b)) n.delete(b);
+    else n.add(b);
+    onChange(n);
+  };
+  const chips: { key: BillingFilterValue; label: string; icon: typeof Banknote; badge: string; hint: string }[] = [
+    ...BILLING_ORDER.map((b) => ({
+      key: b as BillingFilterValue,
+      label: BILLING_META[b].label,
+      icon: BILLING_META[b].icon,
+      badge: BILLING_META[b].badge,
+      hint: BILLING_META[b].hint,
+    })),
+    {
+      key: "none",
+      label: "Bez rozliczenia",
+      icon: CircleDashed,
+      badge: "bg-muted text-foreground",
+      hint: "nieuzupełnione (bez urlopów, biura i przygotowania)",
+    },
+  ];
+  return (
+    <div className="flex flex-wrap gap-1.5" role="group" aria-label="Rozliczenie">
+      {chips.map((c) => {
+        const active = value.has(c.key);
+        const dimmed = value.size > 0 && !active;
+        const count = counts[c.key] ?? 0;
+        const Icon = c.icon;
+        return (
+          <button
+            key={c.key}
+            type="button"
+            data-testid={`billing-filter-${c.key}`}
+            aria-pressed={active}
+            onClick={(e) => toggle(c.key, e.altKey)}
+            onDoubleClick={(e) => {
+              e.preventDefault();
+              toggle(c.key, true);
+            }}
+            title={`${c.label}: ${count} w tym okresie — ${c.hint}`}
+            className={cn(
+              "inline-flex h-8 items-center gap-1.5 rounded-full border px-2.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:h-7",
+              active
+                ? cn("border-transparent shadow-sm", c.badge)
+                : cn(
+                    "border-border bg-background text-muted-foreground hover:border-foreground/30 hover:text-foreground",
+                    dimmed && "opacity-60"
+                  )
+            )}
+          >
+            <Icon className="h-3.5 w-3.5" aria-hidden />
+            {c.label}
+            <span
+              className={cn(
+                "rounded-full px-1.5 py-px text-[10px] font-semibold tabular-nums",
+                active ? "bg-background/70 text-foreground" : "bg-muted text-muted-foreground"
+              )}
+            >
+              {count}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** Filtr protokołu: wszystkie / z protokołem / bez protokołu (tylko wykonane prace). */
+function ProtocolFilter({
+  value,
+  counts,
+  onChange,
+}: {
+  value: ProtocolFilterValue;
+  counts: { with: number; without: number };
+  onChange: (next: ProtocolFilterValue) => void;
+}) {
+  const opts: { key: ProtocolFilterValue; label: string; icon?: typeof FileCheck2; count?: number; hint: string }[] = [
+    { key: "", label: "Wszystkie", hint: "bez filtra protokołu" },
+    {
+      key: "with",
+      label: "Z protokołem",
+      icon: FileCheck2,
+      count: counts.with,
+      hint: "wydarzenia z przypiętym protokołem",
+    },
+    {
+      key: "without",
+      label: "Bez protokołu",
+      icon: FileX,
+      count: counts.without,
+      hint: "wykonane serwisy/montaże/demontaże/konserwacje/wizje bez protokołu",
+    },
+  ];
+  return (
+    <div className="inline-flex rounded-full border bg-background p-0.5" role="group" aria-label="Protokół">
+      {opts.map((o) => {
+        const active = value === o.key;
+        const Icon = o.icon;
+        return (
+          <button
+            key={o.key || "all"}
+            type="button"
+            data-testid={`protocol-filter-${o.key || "all"}`}
+            aria-pressed={active}
+            onClick={() => onChange(active && o.key ? "" : o.key)}
+            title={`Protokół — ${o.hint}`}
+            className={cn(
+              "inline-flex h-7 items-center gap-1.5 rounded-full px-2.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:h-6",
+              active ? "bg-primary text-primary-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+            )}
+          >
+            {Icon && <Icon className="h-3.5 w-3.5" aria-hidden />}
+            {o.label}
+            {o.count != null && (
+              <span
+                className={cn(
+                  "rounded-full px-1.5 py-px text-[10px] font-semibold tabular-nums",
+                  active ? "bg-background/25" : "bg-muted text-muted-foreground"
+                )}
+              >
+                {o.count}
+              </span>
+            )}
           </button>
         );
       })}

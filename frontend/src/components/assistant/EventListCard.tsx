@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { CalendarRange, CalendarSearch, Check, ExternalLink, Loader2, MessageSquareText, MoveRight, Sparkles, UserPlus, UserX, XCircle, type LucideIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { AssistantBriefEvent, AssistantQuickChangeKind, AssistantShowEventsGroupBy, AssistantShowEventsOutput, CalendarEventStatus, CalendarEventType } from "@/lib/api";
-import { EVENT_STATUS_META, EVENT_TYPE_META, EVENT_TYPE_UI, eventStatusLabel, eventTypeLabel, fmtRange, initials, notesLabel, parseLocal, statusBadgeClass } from "@/lib/calendar-labels";
+import { BILLING_META, EVENT_STATUS_META, EVENT_TYPE_META, EVENT_TYPE_UI, PROTOCOL_BADGE_META, eventStatusLabel, eventTypeLabel, fmtRange, initials, notesLabel, parseLocal, protocolBadgeKind, statusBadgeClass } from "@/lib/calendar-labels";
+import type { CalendarBilling } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { ObjectPeek } from "./ObjectPeek";
 import type { PreviewRange } from "./parts";
@@ -44,6 +45,32 @@ export interface EventListRowsProps {
 const TYPE_META = EVENT_TYPE_META as Record<string, (typeof EVENT_TYPE_META)[CalendarEventType] | undefined>;
 const TYPE_UI = EVENT_TYPE_UI as Record<string, (typeof EVENT_TYPE_UI)[CalendarEventType] | undefined>;
 const STATUS_META = EVENT_STATUS_META as Record<string, (typeof EVENT_STATUS_META)[CalendarEventStatus] | undefined>;
+
+/** Ikonka rozliczenia (tylko ikona + title) — kompaktowo do wiersza listy. */
+function BillingIcon({ billing }: { billing: CalendarBilling | null | undefined }) {
+  const m = billing ? BILLING_META[billing] : undefined;
+  if (!m) return null;
+  return (
+    <span className={cn("inline-flex items-center rounded-full p-0.5", m.badge)} title={`Rozliczenie: ${m.label}`} aria-label={`Rozliczenie: ${m.label}`} data-testid="billing-badge" data-kind={billing}>
+      <m.icon className="h-3 w-3" aria-hidden />
+    </span>
+  );
+}
+
+/** Ikonka protokołu (podpisany / szkic / brak) — tylko ikona + title. */
+function ProtocolIcon({ event }: { event: AssistantBriefEvent }) {
+  if (!event.type || !event.status) return null;
+  const kind = protocolBadgeKind({ type: event.type, status: event.status, protocol: event.protocol ?? null });
+  if (!kind) return null;
+  const m = PROTOCOL_BADGE_META[kind];
+  const label = m.label(event.protocol?.number);
+  const title = kind === "missing" ? "Wykonane, ale bez protokołu" : `${label} (${kind === "final" ? "zatwierdzony" : "szkic"})`;
+  return (
+    <span className={cn("inline-flex items-center rounded-full p-0.5", m.badge)} title={title} aria-label={title} data-testid="protocol-badge" data-kind={kind}>
+      <m.icon className="h-3 w-3" aria-hidden />
+    </span>
+  );
+}
 
 /** Klasy koloru tekstu typu (z `EVENT_TYPE_UI.soft`, bez tła) — do ikony typu. */
 const typeTextClass = (type: string): string =>
@@ -220,6 +247,8 @@ export function EventListRows({ events, source, onOpenEvent, onPreview, actions,
                       {eventStatusLabel(status)}
                     </span>
                   )}
+                  <BillingIcon billing={e.billing} />
+                  <ProtocolIcon event={e} />
                   {overdue && (
                     <span className="inline-flex items-center rounded-full bg-amber-100 px-1.5 py-0 text-[10px] font-medium text-amber-800 dark:bg-amber-500/20 dark:text-amber-200" data-testid="assistant-event-overdue">
                       po terminie

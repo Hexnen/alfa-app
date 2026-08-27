@@ -190,6 +190,23 @@ try {
   applyChange({ kind: "update", eventId: evSer1, patch: { startAt: "2026-09-11T08:00" } }, 0, { cfg, today: TODAY }, { user });
   const sib = db.select({ startAt: schema.calendarEvents.startAt }).from(schema.calendarEvents).where(like(schema.calendarEvents.title, `${PREFIX} Seria 2`)).get();
   ok("seria: sibling nietknięty (scope this)", sib?.startAt === "2026-10-10T08:00", sib);
+  // Rozliczenie (billing): propose_changes patch → diff „Rozliczenie”, apply → activity_log field billing; brief zwraca billing/protocol
+  const b0 = resolveChange(db, { kind: "update", eventId: evFuture, patch: { billing: "paid" } }, 0, { cfg, today: TODAY });
+  ok("billing: patch paid → diff Rozliczenie — → Płatny, after.billing=paid, before.protocol null", b0.resolved.after?.billing === "paid" && diffOf(b0.resolved, "Rozliczenie")?.from === null && diffOf(b0.resolved, "Rozliczenie")?.to === "Płatny" && b0.resolved.before?.billing === null && b0.resolved.before?.protocol === null, b0.resolved);
+  const b1 = applyChange({ kind: "update", eventId: evFuture, patch: { billing: "paid" } }, 0, { cfg, today: TODAY }, { user });
+  ok("billing apply: event.billing=paid + activity_log field=billing „Zmieniono rozliczenie: — → Płatny (przez asystenta)”", b1.event.billing === "paid" && logs(evFuture).some((l) => l.field === "billing" && l.newValue === "paid" && /Zmieniono rozliczenie: — → Płatny \(przez asystenta\)$/.test(l.summary ?? "")), logs(evFuture).map((l) => l.summary));
+  const b2 = resolveChange(db, { kind: "update", eventId: evFuture, patch: { billing: null } }, 0, { cfg, today: TODAY });
+  ok("billing: patch null → diff Płatny → —", diffOf(b2.resolved, "Rozliczenie")?.from === "Płatny" && diffOf(b2.resolved, "Rozliczenie")?.to === null && b2.resolved.after?.billing === null, b2.resolved.diff);
+  const b3 = resolveChange(db, { kind: "update", eventId: evUrlop, patch: { billing: "paid" } }, 0, { cfg, today: TODAY });
+  ok("billing: urlop ignoruje billing → error „nie zmienia”", typeof b3.resolved.error === "string" && /nie zmienia/.test(b3.resolved.error), b3.resolved);
+  const b4 = resolveChange(db, { kind: "create", event: { type: "serwis", title: "Gwarancja", startAt: "2026-09-22T10:00", technicianIds: [t1], billing: "warranty" } }, 0, { cfg, today: TODAY });
+  ok("billing: create z billing warranty → after.billing", b4.resolved.after?.billing === "warranty", b4.resolved.after);
+  const gb = (await exec(tools.get_event, { eventId: evFuture })) as { event?: { billing?: string | null; protocol?: unknown } };
+  ok("get_event: zwraca billing i protocol", gb.event?.billing === "paid" && gb.event?.protocol === null, gb.event);
+  const lb = (await exec(tools.list_events, { from: "2026-09-20", to: "2026-09-21", technicianId: t1 })) as { events: { id: number; billing?: string | null; protocol?: unknown }[] };
+  ok("list_events: pozycje mają billing/protocol", lb.events.some((e) => e.id === evFuture && e.billing === "paid" && e.protocol === null), lb.events);
+  ok("prompt: reguła rozliczenia 11a + protokół 11b + słownik", /11a\. ROZLICZENIE/.test(promptOn) && /11b\. PROTOKÓŁ/.test(promptOn) && /Rozliczenie \(billing\)/.test(promptOn));
+
   // Trasy kalendarza (bez asystenta) — bez dopisku
   const l0 = db.select().from(schema.activityLog).where(and(eq(schema.activityLog.entityType, "calendar_event"), eq(schema.activityLog.entityId, evBusy))).all();
   ok("event bez mutacji asystenta: brak wpisów", l0.length === 0, l0);

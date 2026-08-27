@@ -10,6 +10,7 @@ import {
   fmtDuration,
   fmtRange,
   fmtShort,
+  billingApplies,
   seriesShortLabel,
   statusBadgeClass,
 } from "@/lib/calendar-labels";
@@ -17,6 +18,7 @@ import { cn } from "@/lib/utils";
 import type { PreviewRange, ProposalDecision } from "./parts";
 import { ObjectPeek } from "./ObjectPeek";
 import { NotesBadge } from "@/components/CalendarEventNotes";
+import { BillingBadge } from "@/components/CalendarEventBadges";
 
 export interface ProposalCardProps {
   toolCallId: string;
@@ -118,6 +120,7 @@ export function ProposalCard({
             <Icon className="h-3.5 w-3.5" aria-hidden /> {eventTypeLabel(p.type)}
           </span>
           <span className={statusBadgeClass(status)}>{statusMeta?.label ?? status}</span>
+          {billingApplies(p.type) && <BillingBadge billing={p.billing} />}
           {p.recurrence && (
             <span className="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs text-muted-foreground">
               <Repeat className="h-3 w-3" aria-hidden /> {seriesShortLabel(p.recurrence.freq, p.recurrence.interval ?? 1)}

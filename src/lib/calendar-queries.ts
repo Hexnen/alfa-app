@@ -8,7 +8,7 @@ import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, sql } from "drizzle-or
 import { alias } from "drizzle-orm/sqlite-core";
 import { db, schema } from "../db/index.js";
 import type { DbOrTx } from "./activity-log.js";
-import type { CalendarEventNote, CalendarEventStatus, CalendarEventType, CalendarNoteSource, CalendarSeriesFreq } from "../db/schema.js";
+import type { CalendarBilling, CalendarEventNote, CalendarEventStatus, CalendarEventType, CalendarNoteSource, CalendarSeriesFreq } from "../db/schema.js";
 
 /**
  * Id wydarzeń kolidujących z zakresem [startAt, endAt) dla podanych techników
@@ -123,6 +123,15 @@ export interface SeriesRef {
   count: number | null;
 }
 
+/** Skrót protokołu wydarzenia (jawnie przypięty `protocolId` albo protokół realizacji). */
+export interface ProtocolRef {
+  id: number;
+  number: string;
+  status: "draft" | "final";
+  signedAt: string | null;
+  workDate: string;
+}
+
 export interface CalendarEventJson {
   id: number;
   type: CalendarEventType;
@@ -138,6 +147,12 @@ export interface CalendarEventJson {
   objectName: string | null;
   orderId: number | null;
   realizationId: number | null;
+  /** Rozliczenie: warranty | free | paid | null (nie dotyczy). */
+  billing: CalendarBilling | null;
+  /** Jawnie przypięty protokół (NULL → protokół realizacji, jeśli jest). */
+  protocolId: number | null;
+  /** Wyliczone: protokół z `protocolId`, a gdy brak — protokół realizacji (`realizationId`). */
+  protocol: ProtocolRef | null;
   seriesId: number | null;
   series: SeriesRef | null;
   technicians: TechnicianRef[];
@@ -244,6 +259,27 @@ export function loadEvents(dbx: DbOrTx, ids: number[]): CalendarEventJson[] {
     }
   }
 
+  // Protokoły: jawne (protocol_id) + z realizacji (realization_id → protocols.realization_id), jedno zapytanie.
+  const protoIds = [...new Set(rows.map((r) => r.ev.protocolId).filter((x): x is number => x != null))];
+  const realIds = [...new Set(rows.map((r) => r.ev.realizationId).filter((x): x is number => x != null))];
+  const protoById = new Map<number, ProtocolRef>();
+  const protoByReal = new Map<number, ProtocolRef>();
+  if (protoIds.length > 0 || realIds.length > 0) {
+    const pConds = [];
+    if (protoIds.length) pConds.push(inArray(schema.protocols.id, protoIds));
+    if (realIds.length) pConds.push(inArray(schema.protocols.realizationId, realIds));
+    const pRows = dbx
+      .select({ id: schema.protocols.id, realizationId: schema.protocols.realizationId, number: schema.protocols.number, status: schema.protocols.status, signedAt: schema.protocols.signedAt, workDate: schema.protocols.workDate })
+      .from(schema.protocols)
+      .where(pConds.length === 1 ? pConds[0] : sql`${pConds[0]} OR ${pConds[1]}`)
+      .all();
+    for (const p of pRows) {
+      const ref: ProtocolRef = { id: p.id, number: p.number, status: p.status, signedAt: p.signedAt, workDate: p.workDate };
+      protoById.set(p.id, ref);
+      protoByReal.set(p.realizationId, ref);
+    }
+  }
+
   const notesCount = notesCountByEvent(dbx, ids);
   const label = (email: string | null, name: string | null) => (email == null ? null : (name || "").trim() || email);
 
@@ -265,6 +301,9 @@ export function loadEvents(dbx: DbOrTx, ids: number[]): CalendarEventJson[] {
       objectName: r.objectName ?? null,
       orderId: e.orderId,
       realizationId: e.realizationId,
+      billing: e.billing,
+      protocolId: e.protocolId,
+      protocol: (e.protocolId != null ? protoById.get(e.protocolId) : null) ?? (e.realizationId != null ? protoByReal.get(e.realizationId) : null) ?? null,
       seriesId: e.seriesId,
       series: e.seriesId != null ? (seriesById.get(e.seriesId) ?? null) : null,
       technicians: techByEvent.get(e.id) ?? [],

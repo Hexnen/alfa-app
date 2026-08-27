@@ -7,7 +7,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import {
   AlertTriangle,
   ArrowRight,
@@ -18,6 +18,7 @@ import {
   CircleCheck,
   Clock,
   ExternalLink,
+  FileCheck2,
   FileText,
   History,
   Loader2,
@@ -28,7 +29,9 @@ import {
   StickyNote,
   Trash2,
   TreePalm,
+  Unlink,
   Users,
+  Wallet,
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -55,22 +58,28 @@ import {
 import {
   calendarApi,
   getObjects,
+  getProtocols,
   getTechnicians,
   type ActivityEntry,
+  type CalendarBilling,
   type CalendarConflict,
   type CalendarEvent,
   type CalendarEventInput,
+  type CalendarEventProtocol,
   type CalendarEventStatus,
   type CalendarEventType,
   type CalendarNote,
   type CalendarSeriesFreq,
   type CalendarSeriesScope,
   type ObjectWithContractor,
+  type Protocol,
   type Technician,
   type TechnicianAvailability,
 } from "@/lib/api";
 import {
   ACTIVITY_FIELD_LABELS,
+  BILLING_META,
+  BILLING_ORDER,
   EVENT_STATUS_META,
   EVENT_TYPE_UI,
   activityIcon,
@@ -81,7 +90,10 @@ import {
   EVENT_STATUS_ORDER,
   EVENT_TYPE_META,
   EVENT_TYPE_ORDER,
+  PROTOCOL_BADGE_META,
   SERIES_FREQ_META,
+  billingApplies,
+  billingBadgeClass,
   describeActivity,
   eventStatusLabel,
   eventTypeLabel,
@@ -91,6 +103,9 @@ import {
   fmtTimestamp,
   notesLabel,
   parseLocal,
+  protocolBadgeClass,
+  protocolBadgeKind,
+  protocolHref,
   seriesShortLabel,
   toDateStr,
   toDateTimeStr,
@@ -164,6 +179,10 @@ interface FormState {
   location: string;
   description: string;
   technicianIds: number[];
+  /** Rozliczenie (null = nie dotyczy); ukryte dla urlop/biuro/przygotowanie. */
+  billing: CalendarBilling | null;
+  /** Jawnie przypięty protokół (null = brak / protokół realizacji wyliczany przez backend). */
+  protocolId: number | null;
   // Powtarzanie (tylko create)
   recFreq: "" | CalendarSeriesFreq;
   recInterval: string;
@@ -214,6 +233,8 @@ function buildInitial(
       location: event.location ?? "",
       description: event.description ?? "",
       technicianIds: event.technicians.map((t) => t.id),
+      billing: event.billing ?? null,
+      protocolId: event.protocolId ?? null,
       recFreq: "",
       recInterval: "1",
       recMode: "until",
@@ -245,6 +266,8 @@ function buildInitial(
     location: prefill?.location ?? "",
     description: prefill?.description ?? "",
     technicianIds: prefill?.technicianIds ? [...prefill.technicianIds] : [],
+    billing: null,
+    protocolId: null,
     recFreq: isKons ? "quarterly" : "",
     recInterval: "1",
     recMode: "until",
@@ -269,6 +292,8 @@ function toInput(f: FormState): CalendarEventInput {
     status: f.status,
     objectId: !isUrlop && f.objectId ? Number(f.objectId) : null,
     technicianIds: f.technicianIds,
+    billing: billingApplies(f.type) ? f.billing : null,
+    protocolId: billingApplies(f.type) ? f.protocolId : null,
   };
   if (f.recFreq && !isUrlop) {
     input.recurrence = {
@@ -532,8 +557,160 @@ function ObjectPicker({
   );
 }
 
+/** Skrót protokołu z pełnego rekordu (lista /protocols) → podgląd w dialogu. */
+function toEventProtocol(p: Protocol): CalendarEventProtocol {
+  return { id: p.id, number: p.number, status: p.status, signedAt: p.signedAt ?? null, workDate: p.workDate };
+}
+
+/** Wybór protokołu z listy (szukajka z debounce ~250 ms; bez filtra — ostatnie 50). */
+function ProtocolPicker({ onPick, disabled }: { onPick: (p: Protocol) => void; disabled?: boolean }) {
+  const [openList, setOpenList] = useState(false);
+  const [q, setQ] = useState("");
+  const [items, setItems] = useState<Protocol[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [active, setActive] = useState(0);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!openList) return;
+    let cancelled = false;
+    setLoading(true);
+    const t = window.setTimeout(() => {
+      getProtocols(undefined, undefined, { q: q.trim() || undefined, limit: 50 })
+        .then((res) => {
+          if (cancelled) return;
+          setItems(res.data || []);
+          setActive(0);
+        })
+        .catch(() => {
+          if (!cancelled) setItems([]);
+        })
+        .finally(() => {
+          if (!cancelled) setLoading(false);
+        });
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(t);
+    };
+  }, [openList, q]);
+
+  useEffect(() => {
+    if (!openList) return;
+    const onDoc = (e: MouseEvent) => {
+      if (!wrapRef.current?.contains(e.target as Node)) setOpenList(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    window.setTimeout(() => inputRef.current?.focus(), 0);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [openList]);
+
+  const pick = (p: Protocol) => {
+    onPick(p);
+    setOpenList(false);
+    setQ("");
+  };
+
+  return (
+    <div ref={wrapRef} className="relative">
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        disabled={disabled}
+        aria-expanded={openList}
+        aria-controls="cal-protocol-list"
+        data-testid="protocol-pick"
+        onClick={() => setOpenList((v) => !v)}
+      >
+        <FileCheck2 className="mr-1 h-4 w-4" /> Wybierz protokół…
+      </Button>
+      {openList && (
+        <div className="absolute left-0 z-20 mt-1 w-full min-w-[20rem] max-w-[28rem] rounded-md border bg-popover p-1.5 text-sm shadow-md sm:w-[26rem]">
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              ref={inputRef}
+              role="combobox"
+              aria-expanded={openList}
+              aria-controls="cal-protocol-list"
+              aria-autocomplete="list"
+              aria-label="Szukaj protokołu"
+              data-testid="protocol-search"
+              value={q}
+              placeholder="Numer, klient, obiekt…"
+              className="h-9 pl-8"
+              onChange={(e) => setQ(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "ArrowDown") {
+                  e.preventDefault();
+                  setActive((a) => Math.min(a + 1, items.length - 1));
+                } else if (e.key === "ArrowUp") {
+                  e.preventDefault();
+                  setActive((a) => Math.max(a - 1, 0));
+                } else if (e.key === "Enter" && items[active]) {
+                  e.preventDefault();
+                  pick(items[active]);
+                } else if (e.key === "Escape") {
+                  e.stopPropagation();
+                  setOpenList(false);
+                }
+              }}
+            />
+          </div>
+          <ul id="cal-protocol-list" role="listbox" className="mt-1 max-h-64 overflow-y-auto">
+            {loading && items.length === 0 ? (
+              <li className="flex items-center gap-2 px-2 py-1.5 text-xs text-muted-foreground">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" /> Szukam…
+              </li>
+            ) : items.length === 0 ? (
+              <li className="px-2 py-1.5 text-xs text-muted-foreground">Brak protokołów.</li>
+            ) : (
+              items.map((p, i) => {
+                const kind = p.status === "final" || p.signedAt ? "final" : "draft";
+                return (
+                  <li
+                    key={p.id}
+                    role="option"
+                    aria-selected={i === active}
+                    data-testid={`protocol-option-${p.id}`}
+                    onMouseEnter={() => setActive(i)}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      pick(p);
+                    }}
+                    className={cn(
+                      "flex cursor-pointer items-center gap-2 rounded px-2 py-1.5",
+                      i === active && "bg-accent text-accent-foreground"
+                    )}
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="truncate font-medium tabular-nums">{p.number}</span>
+                        <span className="text-xs text-muted-foreground">{fmtLong(p.workDate, true)}</span>
+                      </div>
+                      <div className="truncate text-xs text-muted-foreground">
+                        {[p.clientName, p.site ?? p.clientCity].filter(Boolean).join(" · ") || "—"}
+                      </div>
+                    </div>
+                    <span className={cn(protocolBadgeClass(kind), "shrink-0")}>
+                      {kind === "final" ? "podpisany" : "szkic"}
+                    </span>
+                  </li>
+                );
+              })
+            )}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
-// Historia (oś czasu) — agregacja wpisów z jednej operacji, grupowanie po dniu
+// Historia (oś czasu)
+// — agregacja wpisów z jednej operacji, grupowanie po dniu
 // ---------------------------------------------------------------------------
 
 interface HistoryGroup {
@@ -1075,6 +1252,8 @@ export function CalendarEventDialog({
 
   const initialRef = useRef<FormState>(buildInitial(event, prefill));
   const [form, setForm] = useState<FormState>(initialRef.current);
+  /** Protokół wybrany z listy w tej sesji edycji (podgląd przed zapisem). */
+  const [pickedProtocol, setPickedProtocol] = useState<CalendarEventProtocol | null>(null);
   const [technicians, setTechnicians] = useState<Technician[]>([]);
   const [objects, setObjects] = useState<ObjectWithContractor[]>([]);
   const [history, setHistory] = useState<ActivityEntry[]>([]);
@@ -1091,6 +1270,7 @@ export function CalendarEventDialog({
     where: mode !== "create" || !!init.objectId || !!init.location,
     repeat: mode === "create" && !!init.recFreq,
     notes: mode !== "create" || !!init.description,
+    protocol: mode !== "create" && !!(init.protocolId || event?.protocol),
     journal: true,
     firstNote: false,
     history: false,
@@ -1211,6 +1391,21 @@ export function CalendarEventDialog({
   }, [draftRange]);
 
   const isUrlop = form.type === "urlop";
+  const showBilling = billingApplies(form.type);
+  /** Protokół widoczny w formularzu: wybrany z listy / przypięty / z realizacji (gdy nic nie przypięto). */
+  const formProtocol: CalendarEventProtocol | null =
+    form.protocolId != null
+      ? pickedProtocol?.id === form.protocolId
+        ? pickedProtocol
+        : event?.protocol?.id === form.protocolId
+          ? event.protocol
+          : null
+      : event && event.protocolId == null
+        ? (event.protocol ?? null)
+        : null;
+  const protocolFromRealization = !!formProtocol && form.protocolId == null;
+  /** Odpięto protokół przypięty jawnie — po zapisie backend wróci do protokołu realizacji lub braku. */
+  const protocolUnpinned = !!event && event.protocolId != null && form.protocolId == null;
 
   const onLeave = useMemo(() => {
     const m = new Map<number, TechnicianAvailability>();
@@ -1274,6 +1469,10 @@ export function CalendarEventDialog({
   const changeType = (type: CalendarEventType) => {
     setForm((f) => {
       const next = { ...f, type };
+      if (!billingApplies(type)) {
+        next.billing = null;
+        next.protocolId = null;
+      }
       if (type === "urlop") {
         next.allDay = true;
         next.start = f.start.slice(0, 10);
@@ -1726,6 +1925,57 @@ export function CalendarEventDialog({
             <dd>{event.location || <span className="text-muted-foreground">—</span>}</dd>
           </>
         )}
+        {billingApplies(event.type) && (
+          <>
+            <dt className="flex items-center gap-1.5 text-muted-foreground">
+              <Wallet className="h-3.5 w-3.5" /> Rozliczenie
+            </dt>
+            <dd>
+              {event.billing ? (
+                <span className={billingBadgeClass(event.billing)}>
+                  {(() => {
+                    const I = BILLING_META[event.billing].icon;
+                    return <I className="h-3.5 w-3.5" />;
+                  })()}
+                  {BILLING_META[event.billing].label}
+                </span>
+              ) : (
+                <span className="text-muted-foreground">nie dotyczy</span>
+              )}
+            </dd>
+            <dt className="flex items-center gap-1.5 text-muted-foreground">
+              <FileCheck2 className="h-3.5 w-3.5" /> Protokół
+            </dt>
+            <dd>
+              {(() => {
+                const kind = protocolBadgeKind(event);
+                if (!kind) return <span className="text-muted-foreground">—</span>;
+                const meta = PROTOCOL_BADGE_META[kind];
+                const I = meta.icon;
+                const badge = (
+                  <span className={protocolBadgeClass(kind)}>
+                    <I className="h-3.5 w-3.5" />
+                    {meta.label(event.protocol?.number)}
+                  </span>
+                );
+                return event.protocol ? (
+                  <span className="inline-flex flex-wrap items-center gap-2">
+                    <Link to={protocolHref(event.protocol.id)} className="hover:underline">
+                      {badge}
+                    </Link>
+                    <span className="text-xs text-muted-foreground">
+                      {kind === "final" ? "podpisany" : "szkic"}
+                      {event.protocolId == null ? " · z realizacji" : ""}
+                    </span>
+                  </span>
+                ) : (
+                  badge
+                );
+              })()}
+            </dd>
+          </>
+        )}
+
         <dt className="flex items-center gap-1.5 text-muted-foreground">
           <Users className="h-3.5 w-3.5" /> Technicy
         </dt>
@@ -1825,7 +2075,57 @@ export function CalendarEventDialog({
         </div>
       </div>
 
+      {/* Rozliczenie — gwarancyjny / darmowy / płatny (nie dla urlop/biuro/przygotowanie) */}
+      {showBilling && (
+        <div className="space-y-1">
+          <Label className="flex items-center gap-1">
+            <Wallet className="h-3.5 w-3.5" /> Rozliczenie
+          </Label>
+          <div role="radiogroup" aria-label="Rozliczenie" className="flex flex-wrap gap-1.5">
+            {BILLING_ORDER.map((b) => {
+              const m = BILLING_META[b];
+              const I = m.icon;
+              const active = form.billing === b;
+              return (
+                <button
+                  key={b}
+                  type="button"
+                  role="radio"
+                  aria-checked={active}
+                  title={m.hint}
+                  data-testid={`billing-chip-${b}`}
+                  onClick={() => set("billing", b)}
+                  className={cn(
+                    "inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none",
+                    active ? m.chipActive : cn(m.chip, "bg-background hover:bg-muted")
+                  )}
+                >
+                  <I className="h-4 w-4 shrink-0" />
+                  {m.label}
+                </button>
+              );
+            })}
+            <button
+              type="button"
+              role="radio"
+              aria-checked={form.billing == null}
+              data-testid="billing-chip-none"
+              onClick={() => set("billing", null)}
+              className={cn(
+                "inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none",
+                form.billing == null
+                  ? "border-slate-500 bg-slate-500 text-white"
+                  : "border-slate-400/60 bg-background text-muted-foreground hover:bg-muted"
+              )}
+            >
+              Nie dotyczy
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Kiedy — jeden wiersz: Data · od → do · czas trwania */}
+
       <Section id="sec-when" icon={Clock} title="Kiedy">
         <div className="flex flex-wrap items-center gap-x-2 gap-y-2">
           <Input
@@ -2131,7 +2431,94 @@ export function CalendarEventDialog({
         </Section>
       )}
 
+      {/* Protokół — przypięty jawnie albo wyliczony z realizacji */}
+      {showBilling && (
+        <Section
+          id="sec-protocol"
+          icon={FileCheck2}
+          title="Protokół"
+          open={openSec.protocol}
+          onToggle={() => toggleSec("protocol")}
+          summary={
+            formProtocol
+              ? `${formProtocol.number}${protocolFromRealization ? " (z realizacji)" : ""}`
+              : protocolUnpinned
+                ? "odpięto"
+                : "brak"
+          }
+        >
+          {(() => {
+            const kind = protocolBadgeKind({ type: form.type, status: form.status, protocol: formProtocol });
+            const meta = kind ? PROTOCOL_BADGE_META[kind] : null;
+            const KindIcon = meta?.icon ?? FileCheck2;
+            return (
+              <div className="space-y-2">
+                {formProtocol ? (
+                  <div className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/40 px-2.5 py-1.5 text-sm">
+                    <span className={protocolBadgeClass(kind ?? "draft")}>
+                      <KindIcon className="h-3.5 w-3.5" />
+                      {formProtocol.number}
+                    </span>
+                    <span className="text-xs text-muted-foreground">
+                      {kind === "final" ? "podpisany" : "szkic"}
+                      {formProtocol.workDate ? ` · ${fmtLong(formProtocol.workDate, true)}` : ""}
+                      {protocolFromRealization ? " · z realizacji" : ""}
+                    </span>
+                    <span className="ml-auto flex items-center gap-2">
+                      <Link
+                        to={protocolHref(formProtocol.id)}
+                        className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                      >
+                        <ExternalLink className="h-3.5 w-3.5" /> Otwórz protokół
+                      </Link>
+                      {!protocolFromRealization && (
+                        <button
+                          type="button"
+                          data-testid="protocol-unpin"
+                          onClick={() => {
+                            set("protocolId", null);
+                            setPickedProtocol(null);
+                          }}
+                          className="inline-flex items-center gap-1 rounded px-1 py-0.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        >
+                          <Unlink className="h-3.5 w-3.5" /> Odepnij
+                        </button>
+                      )}
+                    </span>
+                  </div>
+                ) : kind === "missing" ? (
+                  <div className="flex flex-wrap items-center gap-2 text-xs">
+                    <span className={protocolBadgeClass("missing")}>
+                      <KindIcon className="h-3.5 w-3.5" />
+                      {meta?.label()}
+                    </span>
+                    <span className="text-muted-foreground">
+                      {protocolUnpinned
+                        ? "Odpięto — po zapisie wróci protokół realizacji (jeśli istnieje) albo pozostanie brak."
+                        : "Wykonane prace bez protokołu — wybierz z listy."}
+                    </span>
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    {protocolUnpinned
+                      ? "Odpięto. Po zapisie wydarzenie dostanie protokół realizacji (jeśli istnieje) albo pozostanie bez protokołu."
+                      : "Brak przypiętego protokołu. Jeśli wydarzenie ma realizację, jej protokół pojawi się tu automatycznie."}
+                  </p>
+                )}
+                <ProtocolPicker
+                  onPick={(p) => {
+                    setPickedProtocol(toEventProtocol(p));
+                    set("protocolId", p.id);
+                  }}
+                />
+              </div>
+            );
+          })()}
+        </Section>
+      )}
+
       {/* Powtarzanie — tylko przy tworzeniu (nie dla urlopu) */}
+
       {mode === "create" && !isUrlop && (
         <Section
           id="sec-repeat"

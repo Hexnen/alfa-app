@@ -118,10 +118,21 @@ app.get("/", async (c) => {
     ) as typeof query;
   }
 
-  const rows = await query.orderBy(
+  let rows = await query.orderBy(
     desc(schema.protocols.workDate),
     desc(schema.protocols.id)
   );
+
+  // ?q= — szukajka (numer / zleceniodawca / obiekt / miejscowość / data), ?limit= — np. lista w dialogu kalendarza
+  const q = (c.req.query("q") || "").trim().toLowerCase();
+  if (q) {
+    rows = rows.filter((row) =>
+      [row.protocol.number, row.protocol.clientName, row.site, row.protocol.clientCity, row.protocol.workDate, row.protocol.installationAddress]
+        .some((v) => v != null && String(v).toLowerCase().includes(q))
+    );
+  }
+  const limit = Number(c.req.query("limit"));
+  if (Number.isInteger(limit) && limit > 0) rows = rows.slice(0, limit);
 
   return c.json({
     success: true,

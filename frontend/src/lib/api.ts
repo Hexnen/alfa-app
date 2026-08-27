@@ -1217,10 +1217,12 @@ export interface ProtocolInput {
   status: "draft" | "final";
 }
 
-export async function getProtocols(year?: number, month?: number) {
+export async function getProtocols(year?: number, month?: number, opts?: { q?: string; limit?: number }) {
   const params = new URLSearchParams();
   if (year) params.set("year", String(year));
   if (month) params.set("month", String(month));
+  if (opts?.q) params.set("q", opts.q);
+  if (opts?.limit) params.set("limit", String(opts.limit));
   const query = params.toString();
   return request<ApiResponse<Protocol[]>>(
     `/protocols${query ? `?${query}` : ""}`
@@ -2287,6 +2289,18 @@ export type CalendarEventType =
 
 export type CalendarEventStatus = "planned" | "confirmed" | "done" | "cancelled";
 
+/** Rozliczenie wydarzenia (null = nie dotyczy). */
+export type CalendarBilling = "warranty" | "free" | "paid";
+
+/** Skrót protokołu przypiętego do wydarzenia (jawnie `protocolId` albo protokół realizacji). */
+export interface CalendarEventProtocol {
+  id: number;
+  number: string;
+  status: "draft" | "final";
+  signedAt: string | null;
+  workDate?: string;
+}
+
 export type CalendarSeriesFreq =
   | "weekly"
   | "monthly"
@@ -2332,6 +2346,12 @@ export interface CalendarEvent {
   objectName: string | null;
   orderId: number | null;
   realizationId: number | null;
+  /** Rozliczenie: warranty | free | paid | null. Brak = null (starszy backend). */
+  billing?: CalendarBilling | null;
+  /** Jawnie przypięty protokół (null → protokół realizacji, jeśli jest). */
+  protocolId?: number | null;
+  /** Wyliczone przez backend: protokół z `protocolId` albo z realizacji. */
+  protocol?: CalendarEventProtocol | null;
   technicians: CalendarEventTechnician[];
   createdBy: number | null;
   createdByLabel: string | null;
@@ -2383,6 +2403,10 @@ export interface CalendarEventInput {
   objectId?: number | null;
   orderId?: number | null;
   realizationId?: number | null;
+  /** Rozliczenie (null = nie dotyczy; ignorowane dla urlop/biuro/przygotowanie). */
+  billing?: CalendarBilling | null;
+  /** Jawnie przypięty protokół (null = odepnij → protokół realizacji / brak). */
+  protocolId?: number | null;
   technicianIds: number[];
   recurrence?: CalendarRecurrenceInput | null;
 }
@@ -2444,6 +2468,10 @@ export interface CalendarEventsQuery {
   technicianId?: number | number[];
   objectId?: number;
   status?: CalendarEventStatus | CalendarEventStatus[];
+  /** Rozliczenie; "none" = bez rozliczenia (NULL). */
+  billing?: (CalendarBilling | "none")[];
+  /** "with" = z protokołem, "without" = wykonane prace bez protokołu. */
+  protocol?: "with" | "without";
   includeDeleted?: boolean;
 }
 
@@ -2490,6 +2518,8 @@ export const calendarApi = {
     if (params.objectId) sp.set("objectId", String(params.objectId));
     const statuses = Array.isArray(params.status) ? params.status : params.status ? [params.status] : [];
     if (statuses.length) sp.set("status", statuses.join(","));
+    if (params.billing?.length) sp.set("billing", params.billing.join(","));
+    if (params.protocol) sp.set("protocol", params.protocol);
     if (params.includeDeleted) sp.set("includeDeleted", "1");
     return request<ApiResponse<CalendarEvent[]>>(
       `/calendar/events?${sp.toString()}`
@@ -2792,6 +2822,10 @@ export interface AssistantBriefEvent {
   deletedAt?: string | null;
   /** Liczba notatek (brak = 0). */
   notesCount?: number;
+  /** Rozliczenie (warranty | free | paid | null). */
+  billing?: CalendarBilling | null;
+  /** Skrót protokołu (list_events/get_event: `signed` boolean; propose_changes: `signedAt`). */
+  protocol?: { id: number; number: string; status: "draft" | "final"; signedAt?: string | null; signed?: boolean } | null;
 }
 
 export type AssistantChangeKind = "update" | "status" | "cancel" | "delete" | "restore" | "create" | "note";
@@ -2807,6 +2841,7 @@ export interface AssistantChangePatch {
   description?: string | null;
   technicianIds?: number[];
   status?: string;
+  billing?: CalendarBilling | null;
 }
 
 /** Surowa zmiana (wejście narzędzia `propose_changes`; po edycji — override do apply-changes). */

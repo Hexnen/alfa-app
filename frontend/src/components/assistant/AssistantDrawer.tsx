@@ -25,6 +25,7 @@ import {
 } from "@/lib/api";
 import type { CalendarEventPrefill } from "@/components/CalendarEventDialog";
 import { cn } from "@/lib/utils";
+import { billingApplies } from "@/lib/calendar-labels";
 import { ChatHistory } from "./ChatHistory";
 import { MessageList } from "./MessageList";
 import { classifyChatError, optionValue, textOf, type ChatMessage, type PreviewRange } from "./parts";
@@ -578,6 +579,7 @@ function ChatSession({
     realizationId: p.realizationId ?? null,
     technicianIds: p.technicianIds ?? [],
     recurrence: p.recurrence ?? null,
+    billing: billingApplies(p.type) ? p.billing ?? null : null,
   });
 
   const afterSaved = useCallback(

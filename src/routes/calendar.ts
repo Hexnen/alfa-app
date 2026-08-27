@@ -17,7 +17,7 @@ import { Hono, type Context } from "hono";
 import { randomBytes } from "crypto";
 import { db, schema } from "../db/index.js";
 import { eq, and, desc, asc, isNull, inArray, sql, lt, gt, gte, ne } from "drizzle-orm";
-import { type CalendarEventType, type CalendarEventStatus } from "../db/schema.js";
+import { type CalendarEventType, type CalendarEventStatus, type CalendarBilling } from "../db/schema.js";
 import { getUser } from "../middleware/auth.js";
 import { describeRule } from "../lib/calendar-recurrence.js";
 import { conflictEventIds, loadEvent, loadEvents, loadNotes, type CalendarEventJson, type Note } from "../lib/calendar-queries.js";
@@ -38,7 +38,7 @@ import {
   updateNote,
   type ParsedInput,
 } from "../lib/calendar-mutations.js";
-import { ApiError, STATUS_LABELS, TYPE_LABELS } from "../lib/calendar-labels.js";
+import { ApiError, BILLING_LABELS, PROTOCOL_TYPES, STATUS_LABELS, TYPE_LABELS } from "../lib/calendar-labels.js";
 
 // Re-eksporty dla dotychczasowych importów (asystent, testy).
 export { ApiError, STATUS_LABELS, TYPE_LABELS, loadEvents, parseInput };
@@ -76,6 +76,9 @@ app.get("/events", (c) => {
     const technicianIds = parseIdList(c.req.query("technicianId"));
     const objectId = c.req.query("objectId") ? Number(c.req.query("objectId")) : null;
     const includeDeleted = c.req.query("includeDeleted") === "1" || c.req.query("includeDeleted") === "true";
+    // billing=warranty,free,paid,none (none = NULL); protocol=with | without (without = wykonane prace bez protokołu)
+    const billings = (c.req.query("billing") || "").split(",").map((s) => s.trim()).filter(Boolean);
+    const protocolFilter = c.req.query("protocol") || "";
 
     const conds = [];
     if (!includeDeleted) conds.push(isNull(schema.calendarEvents.deletedAt));
@@ -85,6 +88,19 @@ app.get("/events", (c) => {
     if (to) conds.push(lt(schema.calendarEvents.startAt, to));
     if (types.length) conds.push(inArray(schema.calendarEvents.type, types));
     if (statuses.length) conds.push(inArray(schema.calendarEvents.status, statuses));
+    if (billings.length) {
+      const vals = billings.filter((b): b is CalendarBilling => b !== "none") ;
+      const withNull = billings.includes("none");
+      const parts = [];
+      if (vals.length) parts.push(inArray(schema.calendarEvents.billing, vals));
+      if (withNull) parts.push(isNull(schema.calendarEvents.billing));
+      conds.push(parts.length === 1 ? parts[0] : sql`(${parts[0]} OR ${parts[1]})`);
+    }
+    if (protocolFilter === "with" || protocolFilter === "without") {
+      const hasProto = sql`(${schema.calendarEvents.protocolId} IS NOT NULL OR EXISTS (SELECT 1 FROM protocols p WHERE p.realization_id = ${schema.calendarEvents.realizationId}))`;
+      if (protocolFilter === "with") conds.push(hasProto);
+      else conds.push(and(sql`NOT ${hasProto}`, eq(schema.calendarEvents.status, "done"), inArray(schema.calendarEvents.type, [...PROTOCOL_TYPES]))!);
+    }
     if (objectId != null && Number.isInteger(objectId)) conds.push(eq(schema.calendarEvents.objectId, objectId));
     if (technicianIds.length) {
       conds.push(
@@ -459,6 +475,9 @@ export function buildIcs(events: CalendarEventJson[], host: string): string {
     if (e.description) descParts.push(e.description);
     if (e.technicians.length) descParts.push(`Technicy: ${e.technicians.map((t) => `${t.firstName} ${t.lastName}`.trim()).join(", ")}`);
     descParts.push(`Status: ${STATUS_LABELS[e.status]}`);
+    if (e.billing) descParts.push(`Rozliczenie: ${BILLING_LABELS[e.billing]}`);
+    if (e.protocol) descParts.push(`Protokół: ${e.protocol.number}${e.protocol.status === "final" || e.protocol.signedAt ? " (podpisany)" : " (szkic)"}`);
+    else if (e.status === "done" && PROTOCOL_TYPES.includes(e.type)) descParts.push("Protokół: brak");
     if (e.series) descParts.push(`Seria #${e.series.id}: ${describeRule(e.series)}`);
     lines.push(icsLine("DESCRIPTION", icsEscape(descParts.join("\n"))));
     if (e.location) lines.push(icsLine("LOCATION", icsEscape(e.location)));

@@ -13,6 +13,8 @@ import {
   CALENDAR_EVENT_TYPES,
   CALENDAR_EVENT_STATUSES,
   CALENDAR_SERIES_FREQS,
+  CALENDAR_BILLINGS,
+  type CalendarBilling,
   type CalendarEvent as CalendarEventRow,
   type CalendarEventType,
   type CalendarEventStatus,
@@ -24,7 +26,7 @@ import {
 import { logActivity, logFieldDiffs, userLabelOf, type ActivityUser, type DbOrTx, type Tx } from "./activity-log.js";
 import { noteOfRow, type Note } from "./calendar-queries.js";
 import { expandOccurrences, describeRule, shiftLocal, diffMinutes, type RecurrenceRule } from "./calendar-recurrence.js";
-import { ApiError, STATUS_LABELS, TYPE_LABELS } from "./calendar-labels.js";
+import { ApiError, BILLING_HIDDEN_TYPES, BILLING_LABELS, STATUS_LABELS, TYPE_LABELS } from "./calendar-labels.js";
 
 export const CALENDAR_ENTITY = "calendar_event";
 
@@ -59,6 +61,10 @@ export interface ParsedInput {
   objectId: number | null;
   orderId: number | null;
   realizationId: number | null;
+  /** Rozliczenie (null = nie dotyczy); zawsze null dla typów z BILLING_HIDDEN_TYPES. */
+  billing: CalendarBilling | null;
+  /** Jawnie przypięty protokół (null = protokół realizacji / brak). */
+  protocolId: number | null;
   technicianIds: number[];
   recurrence: RecurrenceRule | null;
 }
@@ -185,6 +191,14 @@ export function parseInput(body: unknown): ParsedInput {
   }
   if (isUrlop && technicianIds.length === 0) throw new ApiError(400, "Urlop wymaga wskazania technika");
 
+  let billing: CalendarBilling | null = null;
+  if (b.billing != null && b.billing !== "" && !BILLING_HIDDEN_TYPES.includes(type)) {
+    if (!CALENDAR_BILLINGS.includes(b.billing as CalendarBilling)) {
+      throw new ApiError(400, `Pole billing: dozwolone ${CALENDAR_BILLINGS.join(", ")} albo null`);
+    }
+    billing = b.billing as CalendarBilling;
+  }
+
   return {
     type,
     title,
@@ -198,6 +212,8 @@ export function parseInput(body: unknown): ParsedInput {
     objectId: isUrlop ? null : optInt(b.objectId, "objectId"),
     orderId: isUrlop ? null : optInt(b.orderId, "orderId"),
     realizationId: isUrlop ? null : optInt(b.realizationId, "realizationId"),
+    billing,
+    protocolId: isUrlop ? null : optInt(b.protocolId, "protocolId"),
     technicianIds,
     recurrence: parseRecurrence(b.recurrence),
   };
@@ -216,6 +232,10 @@ export function assertRefs(tx: DbOrTx, input: ParsedInput) {
   if (input.realizationId != null) {
     const r = tx.select({ id: schema.realizations.id }).from(schema.realizations).where(eq(schema.realizations.id, input.realizationId)).get();
     if (!r) throw new ApiError(400, `Realizacja #${input.realizationId} nie istnieje`);
+  }
+  if (input.protocolId != null) {
+    const p = tx.select({ id: schema.protocols.id }).from(schema.protocols).where(eq(schema.protocols.id, input.protocolId)).get();
+    if (!p) throw new ApiError(400, `Protokół #${input.protocolId} nie istnieje`);
   }
   if (input.technicianIds.length > 0) {
     const found = tx
@@ -252,6 +272,12 @@ function objectNameById(dbx: DbOrTx, id: number | null): string {
   if (id == null) return "—";
   const o = dbx.select({ name: schema.objects.name }).from(schema.objects).where(eq(schema.objects.id, id)).get();
   return o ? o.name : `#${id}`;
+}
+
+function protocolNumberById(dbx: DbOrTx, id: number | null): string {
+  if (id == null) return "—";
+  const p = dbx.select({ number: schema.protocols.number }).from(schema.protocols).where(eq(schema.protocols.id, id)).get();
+  return p ? p.number : `#${id}`;
 }
 
 export function currentAssignees(dbx: DbOrTx, eventId: number): number[] {
@@ -320,6 +346,8 @@ function logEventDiff(tx: Tx, before: CalendarEventRow, after: CalendarEventRow,
       { key: "objectId", label: "obiekt", format: (v) => objectNameById(tx, (v as number | null) ?? null) },
       { key: "orderId", label: "zlecenie", format: (v) => (v == null ? "—" : `#${v}`) },
       { key: "realizationId", label: "realizację", format: (v) => (v == null ? "—" : `#${v}`) },
+      { key: "billing", label: "rozliczenie", format: (v) => (v == null ? "—" : (BILLING_LABELS[v as CalendarBilling] ?? String(v))) },
+      { key: "protocolId", label: "protokół", format: (v) => protocolNumberById(tx, (v as number | null) ?? null) },
     ],
   });
 }
@@ -368,6 +396,8 @@ function applyUpdate(
       objectId: input.objectId,
       orderId: input.orderId,
       realizationId: input.realizationId,
+      billing: input.billing,
+      protocolId: input.protocolId,
       updatedBy: ctx.user.id,
       updatedAt: sql`(datetime('now'))`,
     })
@@ -438,6 +468,8 @@ export function createEvent(tx: Tx, input: ParsedInput, ctx: MutationCtx): { fir
         objectId: input.objectId,
         orderId: input.orderId,
         realizationId: input.realizationId,
+        billing: input.billing,
+        protocolId: input.protocolId,
         seriesId,
         createdBy: ctx.user.id,
         updatedBy: ctx.user.id,

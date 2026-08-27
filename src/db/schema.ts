@@ -1132,6 +1132,10 @@ export const CALENDAR_EVENT_STATUSES = [
 ] as const;
 export type CalendarEventStatus = (typeof CALENDAR_EVENT_STATUSES)[number];
 
+/** Rozliczenie wydarzenia (NULL = nie dotyczy / nie ustalono). */
+export const CALENDAR_BILLINGS = ["warranty", "free", "paid"] as const;
+export type CalendarBilling = (typeof CALENDAR_BILLINGS)[number];
+
 export const CALENDAR_SERIES_FREQS = [
   "weekly",
   "monthly",
@@ -1194,6 +1198,12 @@ export const calendarEvents = sqliteTable(
       { onDelete: "set null" }
     ),
     seriesId: integer("series_id").references(() => calendarSeries.id, {
+      onDelete: "set null",
+    }),
+    // Rozliczenie: warranty | free | paid | NULL (nie dotyczy). Ukryte dla urlop/biuro/przygotowanie.
+    billing: text("billing", { enum: CALENDAR_BILLINGS }),
+    // Jawnie przypięty protokół; gdy NULL — protokół realizacji (realization_id → protocols.realization_id).
+    protocolId: integer("protocol_id").references(() => protocols.id, {
       onDelete: "set null",
     }),
     createdBy: integer("created_by").references(() => users.id, {

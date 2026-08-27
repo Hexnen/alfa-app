@@ -369,6 +369,12 @@
   height: 10px;
   color: hsl(var(--muted-foreground));
 }
+/* Znaczniki rozliczenia / protokołu — sama ikona (kolor z klasy Tailwind) */
+.alfa-calendar .cal-ev-mark {
+  flex: 0 0 auto;
+  width: 11px;
+  height: 11px;
+}
 
 /* ---- „+N więcej” i popover ---- */
 .alfa-calendar .fc .fc-daygrid-more-link {
@@ -485,9 +491,23 @@
   text-overflow: ellipsis;
   max-width: 28rem;
 }
+/* Pigułki rozliczenia / protokołu w widoku listy — przed statusem */
+.alfa-calendar .cal-list-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+.alfa-calendar .cal-list-badges:empty {
+  display: none;
+}
 .alfa-calendar .cal-list-status {
   margin-left: auto;
   flex: 0 0 auto;
+}
+.alfa-calendar .cal-list-badges + .cal-list-status {
+  margin-left: 0;
 }
 
 /* ---- Skeleton pierwszego ładowania (nakładka — bez skoków layoutu) ---- */

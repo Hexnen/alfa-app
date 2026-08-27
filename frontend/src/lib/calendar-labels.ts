@@ -1,6 +1,11 @@
 import {
   ArrowRightLeft,
+  Banknote,
   Building2,
+  FileCheck2,
+  FileX,
+  Gift,
+  ShieldCheck,
   CalendarCheck,
   CalendarClock,
   ClipboardList,
@@ -20,6 +25,7 @@ import {
 } from "lucide-react";
 import type {
   ActivityEntry,
+  CalendarBilling,
   CalendarEventStatus,
   CalendarEventType,
   CalendarSeriesFreq,
@@ -438,6 +444,9 @@ export const ACTIVITY_FIELD_LABELS: Record<string, string> = {
   orderId: "zlecenie",
   realization_id: "realizację",
   realizationId: "realizację",
+  billing: "rozliczenie",
+  protocol_id: "protokół",
+  protocolId: "protokół",
 };
 
 const quote = (v: string | null) => (v == null || v === "" ? "(puste)" : `„${v}”`);
@@ -450,6 +459,8 @@ function fieldValue(field: string | null, v: string | null): string {
       return eventTypeLabel(v);
     case "status":
       return eventStatusLabel(v);
+    case "billing":
+      return billingLabel(v);
     case "start_at":
     case "startAt":
     case "end_at":
@@ -596,3 +607,117 @@ export function initials(name: string | null | undefined): string {
 /** „Wojtek B.” — krótka forma nazwiska technika. */
 export const techShort = (t: { firstName: string; lastName: string }) =>
   `${t.firstName} ${t.lastName ? `${t.lastName[0]}.` : ""}`.trim();
+
+// ---------------------------------------------------------------------------
+// Rozliczenie (billing) i protokół — badge'e wydarzeń
+// ---------------------------------------------------------------------------
+
+export const BILLING_ORDER: CalendarBilling[] = ["warranty", "free", "paid"];
+
+export const BILLING_META: Record<
+  CalendarBilling,
+  {
+    label: string;
+    icon: LucideIcon;
+    /** Pigułka (badge). */
+    badge: string;
+    /** Chip filtra / segment w dialogu. */
+    chip: string;
+    chipActive: string;
+    /** Kolor samej ikony — kompaktowy znacznik w siatce / na kartach. */
+    tone: string;
+    hint: string;
+  }
+> = {
+  warranty: {
+    label: "Gwarancyjny",
+    icon: ShieldCheck,
+    badge: "bg-indigo-100 text-indigo-800 dark:bg-indigo-500/20 dark:text-indigo-200",
+    chip: "border-indigo-500/50 text-indigo-700 dark:text-indigo-300",
+    chipActive: "bg-indigo-500 border-indigo-500 text-white",
+    tone: "text-indigo-600 dark:text-indigo-300",
+    hint: "w ramach gwarancji",
+  },
+  free: {
+    label: "Darmowy",
+    icon: Gift,
+    badge: "bg-emerald-100 text-emerald-800 dark:bg-emerald-500/20 dark:text-emerald-200",
+    chip: "border-emerald-500/50 text-emerald-700 dark:text-emerald-300",
+    chipActive: "bg-emerald-500 border-emerald-500 text-white",
+    tone: "text-emerald-600 dark:text-emerald-300",
+    hint: "bez opłat (gest / serwis wewnętrzny)",
+  },
+  paid: {
+    label: "Płatny",
+    icon: Banknote,
+    badge: "bg-amber-100 text-amber-800 dark:bg-amber-500/20 dark:text-amber-200",
+    chip: "border-amber-500/50 text-amber-700 dark:text-amber-300",
+    chipActive: "bg-amber-500 border-amber-500 text-white",
+    tone: "text-amber-600 dark:text-amber-400",
+    hint: "do zafakturowania",
+  },
+};
+
+export const billingLabel = (b: string | null | undefined): string =>
+  b ? ((BILLING_META as Record<string, { label: string }>)[b]?.label ?? b) : "—";
+
+/** Pełna klasa badge'a rozliczenia (pigułka + kolory jasne/ciemne). */
+export function billingBadgeClass(b: CalendarBilling): string {
+  return cn("inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium", BILLING_META[b]?.badge);
+}
+
+/** Typy, dla których rozliczenie nie ma sensu (pole ukryte, zawsze null). */
+export const BILLING_HIDDEN_TYPES: readonly CalendarEventType[] = ["urlop", "biuro", "przygotowanie"];
+export const billingApplies = (type: CalendarEventType | string): boolean => !BILLING_HIDDEN_TYPES.includes(type as CalendarEventType);
+
+/** Typy „prac na obiekcie” — wykonane wydarzenie bez protokołu dostaje badge „Brak protokołu”. */
+export const PROTOCOL_TYPES: readonly CalendarEventType[] = ["serwis", "montaz", "demontaz", "konserwacja", "wizja"];
+
+export type ProtocolBadgeKind = "final" | "draft" | "missing";
+
+/**
+ * Stan protokołu dla badge'a: `final` (podpisany/zatwierdzony, zielony), `draft` (szkic, szary),
+ * `missing` (bursztynowy „Brak protokołu” — TYLKO wykonane prace typu serwis/montaż/demontaż/konserwacja/wizja),
+ * null = nic nie pokazuj.
+ */
+export function protocolBadgeKind(e: {
+  type: CalendarEventType | string;
+  status: CalendarEventStatus | string;
+  protocol?: { status: "draft" | "final"; signedAt?: string | null; signed?: boolean } | null;
+}): ProtocolBadgeKind | null {
+  if (e.protocol) return e.protocol.status === "final" || e.protocol.signedAt || e.protocol.signed ? "final" : "draft";
+  if (e.status === "done" && PROTOCOL_TYPES.includes(e.type as CalendarEventType)) return "missing";
+  return null;
+}
+
+export const PROTOCOL_BADGE_META: Record<
+  ProtocolBadgeKind,
+  { icon: LucideIcon; badge: string; /** Kolor samej ikony — kompaktowy znacznik. */ tone: string; label: (num?: string) => string }
+> = {
+  final: {
+    icon: FileCheck2,
+    badge: "bg-emerald-100 text-emerald-800 dark:bg-emerald-500/20 dark:text-emerald-200",
+    tone: "text-emerald-600 dark:text-emerald-300",
+    label: (num) => `Protokół ${num ?? ""}`.trim(),
+  },
+  draft: {
+    icon: FileCheck2,
+    badge: "bg-slate-200 text-slate-700 dark:bg-slate-500/25 dark:text-slate-200",
+    tone: "text-slate-500 dark:text-slate-300",
+    label: (num) => `Protokół ${num ?? ""}`.trim(),
+  },
+  missing: {
+    icon: FileX,
+    badge: "bg-amber-100 text-amber-800 dark:bg-amber-500/20 dark:text-amber-200",
+    tone: "text-amber-600 dark:text-amber-400",
+    label: () => "Brak protokołu",
+  },
+};
+
+/** Pełna klasa badge'a protokołu. */
+export function protocolBadgeClass(kind: ProtocolBadgeKind): string {
+  return cn("inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium", PROTOCOL_BADGE_META[kind].badge);
+}
+
+/** Deep-link do protokołu w module Protokoły (Technical.tsx obsługuje ?protocol=ID). */
+export const protocolHref = (id: number): string => `/technical/protokoly?protocol=${id}`;

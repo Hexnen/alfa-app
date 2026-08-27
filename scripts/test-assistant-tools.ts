@@ -112,6 +112,15 @@ try {
   const p5 = (await exec(tools.propose_event, { type: "serwis", title: "T", startAt: "2099-01-05T10:00", objectId: a1, technicianIds: [] })) as { proposal?: { title: string; objectName: string | null; endAt: string } };
   ok("propose_event: objectId → objectName z bazy, endAt = +2h", p5.proposal?.objectName === `${PREFIX} Magazyn` && p5.proposal?.endAt === "2099-01-05T12:00", p5);
   void p1;
+  // billing w propose_event
+  const p6 = (await exec(tools.propose_event, { type: "serwis", title: "T", startAt: "2099-01-05T10:00", technicianIds: [], billing: "warranty" })) as { proposal?: { billing: string | null } };
+  ok("propose_event: billing warranty → proposal.billing", p6.proposal?.billing === "warranty", p6);
+  const p7 = (await exec(tools.propose_event, { type: "serwis", title: "T", startAt: "2099-01-05T10:00", technicianIds: [] })) as { proposal?: { billing: string | null } };
+  ok("propose_event: bez billing → null (nie zgadujemy)", p7.proposal?.billing === null, p7);
+  const p8 = (await exec(tools.propose_event, { type: "biuro", title: "T", startAt: "2099-01-05T10:00", technicianIds: [], billing: "paid" })) as { proposal?: { billing: string | null } };
+  ok("propose_event: biuro ignoruje billing → null", p8.proposal?.billing === null, p8);
+  const p9 = (await exec(tools.propose_event, { type: "serwis", title: "T", startAt: "2099-01-05T10:00", technicianIds: [], billing: "xxx" })) as { error?: string };
+  ok("propose_event: billing spoza enum → error", typeof p9.error === "string", p9);
 
   // find_free_slots technicianIds: []
   const f1 = (await exec(tools.find_free_slots, { technicianIds: [], durationHours: 2, limit: 2 })) as { slots: { technicianIds: number[]; freeTechnicians: { name: string }[] }[]; mode?: string };

@@ -34,6 +34,7 @@ import {
   Send,
 } from "lucide-react";
 import { CalendarEventDialog, type CalendarDialogMode } from "@/components/CalendarEventDialog";
+import { BillingBadge, ProtocolBadge } from "@/components/CalendarEventBadges";
 import {
   EVENT_STATUS_META,
   EVENT_TYPE_META,
@@ -901,6 +902,8 @@ function ObjectEventList({
                         <ClockAlert className="h-3 w-3" /> po terminie
                       </span>
                     )}
+                    <BillingBadge billing={ev.billing} compact />
+                    <ProtocolBadge event={ev} compact link />
                   </div>
                   <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
                     <span className="whitespace-nowrap">

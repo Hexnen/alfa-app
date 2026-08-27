@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
-import { Navigate, useParams } from "react-router-dom";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Navigate, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -111,6 +111,8 @@ const TECH_TABS = [
 
 export function Technical() {
   const { tab } = useParams<{ tab: string }>();
+  const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { canEdit } = usePerms();
   const editable = canEdit(`technical/${tab}`);
   const now = new Date();
@@ -408,6 +410,50 @@ export function Technical() {
   useEffect(() => {
     loadProtocols();
   }, [loadProtocols]);
+
+  // Deep-link `?protocol=ID` (np. z kalendarza): otwórz formularz protokołu i przewiń do wiersza.
+  const deepLinkBusy = useRef(false);
+  useEffect(() => {
+    const raw = searchParams.get("protocol");
+    const id = raw ? Number(raw) : NaN;
+    if (!Number.isFinite(id)) return;
+    if (tab !== "protokoly") {
+      navigate(`/technical/protokoly?protocol=${id}`, { replace: true });
+      return;
+    }
+    if (protoLoading || deepLinkBusy.current) return;
+    const clearParam = () => {
+      const next = new URLSearchParams(searchParams);
+      next.delete("protocol");
+      setSearchParams(next, { replace: true });
+    };
+    const openProto = (proto: Protocol) => {
+      setEditingProto(proto);
+      window.setTimeout(() => {
+        document
+          .querySelector(`[data-protocol-id="${proto.id}"]`)
+          ?.scrollIntoView({ block: "center", behavior: "smooth" });
+      }, 0);
+      clearParam();
+    };
+    const local = protocols.find((x) => x.id === id);
+    if (local) {
+      openProto(local);
+      return;
+    }
+    // Protokół z innego miesiąca/roku — pobierz bez filtra i odszukaj po id.
+    deepLinkBusy.current = true;
+    getProtocols()
+      .then((res) => {
+        const found = (res.data || []).find((x) => x.id === id);
+        if (found) openProto(found);
+        else clearParam();
+      })
+      .catch(() => clearParam())
+      .finally(() => {
+        deepLinkBusy.current = false;
+      });
+  }, [searchParams, setSearchParams, tab, navigate, protoLoading, protocols]);
 
   // --- Wyceny ---
   const loadQuotes = useCallback(async () => {
@@ -893,6 +939,7 @@ export function Technical() {
                       {protocols.map((proto) => (
                         <tr
                           key={proto.id}
+                          data-protocol-id={proto.id}
                           className="cursor-pointer border-b last:border-0 hover:bg-accent/50"
                           onClick={() => setEditingProto(proto)}
                         >

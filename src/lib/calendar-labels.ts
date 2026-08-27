@@ -3,7 +3,7 @@
  * w activity_log, ICS) i asystenta (src/lib/ai/calendarPrompt.ts, calendarTools.ts).
  * Wydzielone z routes/calendar.ts, żeby lib/ nie importowało z routes/ (calendar.ts re-eksportuje).
  */
-import type { CalendarEventStatus, CalendarEventType } from "../db/schema.js";
+import type { CalendarBilling, CalendarEventStatus, CalendarEventType } from "../db/schema.js";
 
 /**
  * Błąd walidacji/biznesowy rzucany wewnątrz synchronicznej transakcji better-sqlite3
@@ -34,3 +34,15 @@ export const STATUS_LABELS: Record<CalendarEventStatus, string> = {
   done: "Wykonane",
   cancelled: "Anulowane",
 };
+
+export const BILLING_LABELS: Record<CalendarBilling, string> = {
+  warranty: "Gwarancyjny",
+  free: "Darmowy",
+  paid: "Płatny",
+};
+
+/** Typy, dla których rozliczenie nie ma sensu (pole ukryte, zawsze NULL). */
+export const BILLING_HIDDEN_TYPES: readonly CalendarEventType[] = ["urlop", "biuro", "przygotowanie"];
+
+/** Typy „prac na obiekcie” — wykonane wydarzenie bez protokołu dostaje badge „Brak protokołu”. */
+export const PROTOCOL_TYPES: readonly CalendarEventType[] = ["serwis", "montaz", "demontaz", "konserwacja", "wizja"];

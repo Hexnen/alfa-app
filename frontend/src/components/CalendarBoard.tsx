@@ -8,8 +8,10 @@ import {
   EVENT_TYPE_ORDER,
   fmtRange,
   parseLocal,
+  protocolBadgeKind,
   seriesShortLabel,
 } from "@/lib/calendar-labels";
+import { BillingBadge, ProtocolBadge } from "@/components/CalendarEventBadges";
 import { cn } from "@/lib/utils";
 
 /** Grupowanie kolumn tablicy: wg statusu (domyślnie) albo wg typu. */
@@ -360,7 +362,7 @@ function BoardCard({
         </div>
       </div>
 
-      {(ev.objectName || techs.length > 0 || ev.seriesId || overdue) && (
+      {(ev.objectName || techs.length > 0 || ev.seriesId || overdue || ev.billing || protocolBadgeKind(ev)) && (
         <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
           {ev.objectName && (
             <span className="inline-flex min-w-0 max-w-full items-center gap-1">
@@ -403,6 +405,8 @@ function BoardCard({
               <AlertTriangle className="h-3 w-3" aria-hidden /> po terminie
             </span>
           )}
+          <BillingBadge billing={ev.billing} compact />
+          <ProtocolBadge event={ev} compact />
         </div>
       )}
     </div>

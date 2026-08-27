@@ -227,6 +227,8 @@ function briefEvent(e: ReturnType<typeof loadEvents>[number]) {
     location: clip(e.location),
     technicians: e.technicians.map((t) => ({ id: t.id, name: techName(t) })),
     notesCount: e.notesCount,
+    billing: e.billing,
+    protocol: e.protocol ? { id: e.protocol.id, number: e.protocol.number, status: e.protocol.status, signed: e.protocol.signedAt != null } : null,
     ...(e.seriesId != null ? { seriesId: e.seriesId } : {}),
   };
 }

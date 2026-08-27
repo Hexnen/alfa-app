@@ -21,7 +21,8 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { AssistantApplyResult, AssistantBriefEvent, AssistantChangeDiff, AssistantChangeKind, AssistantResolvedChange, CalendarEventStatus } from "@/lib/api";
-import { EVENT_STATUS_META, eventTypeLabel, fmtRange } from "@/lib/calendar-labels";
+import { EVENT_STATUS_META, billingLabel, eventTypeLabel, fmtRange } from "@/lib/calendar-labels";
+import { BillingBadge, ProtocolBadge } from "@/components/CalendarEventBadges";
 import { cn } from "@/lib/utils";
 import { changeKey, type ChangeDecision, type PreviewRange } from "./parts";
 import { NotesBadge } from "@/components/CalendarEventNotes";
@@ -75,6 +76,7 @@ function diffRows(c: AssistantResolvedChange): AssistantChangeDiff[] {
   if ((b?.objectName ?? "") !== (a.objectName ?? "")) rows.push({ field: "Obiekt", from: b?.objectName ?? null, to: a.objectName ?? "—" });
   if ((b?.location ?? "") !== (a.location ?? "")) rows.push({ field: "Lokalizacja", from: b?.location ?? null, to: a.location ?? "—" });
   if ((b?.type ?? "") !== (a.type ?? "") && a.type) rows.push({ field: "Typ", from: b?.type ? eventTypeLabel(b.type) : null, to: eventTypeLabel(a.type) });
+  if (a.billing !== undefined && (b?.billing ?? null) !== (a.billing ?? null)) rows.push({ field: "Rozliczenie", from: b?.billing ? billingLabel(b.billing) : null, to: billingLabel(a.billing) });
   return rows;
 }
 
@@ -256,6 +258,11 @@ export function ChangeCard({ toolCallId, changes, note, decisions, busy = false,
           const isShown = shownIdx === c.index;
           const canEdit = c.kind === "update" || c.kind === "status" || c.kind === "create";
           const createRange = c.kind === "create" ? rangeOf(c.after) : "";
+          // Stan docelowy (after nadpisuje before) — badge rozliczenia i protokołu.
+          const stType = c.after?.type ?? c.before?.type;
+          const stStatus = c.after?.status ?? c.before?.status;
+          const billing = c.after?.billing !== undefined ? c.after.billing : c.before?.billing ?? null;
+          const protoEvent = stType && stStatus ? { type: stType, status: stStatus, protocol: c.after?.protocol !== undefined ? c.after.protocol : c.before?.protocol ?? null } : null;
           return (
             <li
               key={c.index}
@@ -291,9 +298,11 @@ export function ChangeCard({ toolCallId, changes, note, decisions, busy = false,
                       <span className="min-w-0 max-w-full truncate font-semibold leading-snug">{title}</span>
                     )}
                   </div>
-                  {(obj || createRange || notesCount > 0) && (
+                  {(obj || createRange || notesCount > 0 || billing || protoEvent) && (
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
                       {createRange && <span>{createRange}</span>}
+                      <BillingBadge billing={billing} compact />
+                      {protoEvent && <ProtocolBadge event={protoEvent} compact />}
                       {notesCount > 0 && <NotesBadge count={notesCount} />}
                       {obj && (
                         <span className="inline-flex items-center gap-1">

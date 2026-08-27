@@ -13,9 +13,9 @@
 import { z } from "zod";
 import { eq, inArray } from "drizzle-orm";
 import { db, schema } from "../../db/index.js";
-import { CALENDAR_EVENT_STATUSES, CALENDAR_EVENT_TYPES, type CalendarEventStatus } from "../../db/schema.js";
+import { CALENDAR_BILLINGS, CALENDAR_EVENT_STATUSES, CALENDAR_EVENT_TYPES, type CalendarBilling, type CalendarEventStatus } from "../../db/schema.js";
 import type { DbOrTx, Tx } from "../activity-log.js";
-import { ApiError, STATUS_LABELS, TYPE_LABELS } from "../calendar-labels.js";
+import { ApiError, BILLING_LABELS, STATUS_LABELS, TYPE_LABELS } from "../calendar-labels.js";
 import {
   addNote,
   createEvent,
@@ -66,6 +66,7 @@ export const zEventInput = z.object({
   description: z.string().trim().max(2000).optional(),
   technicianIds: zIds.default([]),
   status: z.enum(CALENDAR_EVENT_STATUSES).optional(),
+  billing: z.enum(CALENDAR_BILLINGS).nullable().optional().describe("rozliczenie: gwarancja → warranty, bezpłatnie/gratis → free, płatny/faktura → paid; nie zgaduj — brak w treści → pomiń"),
 });
 export type EventInput = z.infer<typeof zEventInput>;
 
@@ -81,6 +82,7 @@ export const zPatch = z
     description: z.string().trim().max(2000).nullable().optional().describe("zastępuje opis (przebieg → kind note)"),
     technicianIds: zIds.optional().describe("pełna nowa lista"),
     status: z.enum(CALENDAR_EVENT_STATUSES).optional(),
+    billing: z.enum(CALENDAR_BILLINGS).nullable().optional().describe("rozliczenie: warranty | free | paid | null (nie dotyczy); tylko gdy użytkownik podał"),
   })
   .describe("tylko zmieniane pola");
 
@@ -138,6 +140,10 @@ export interface BriefEvent {
   description: string | null;
   technicianIds: number[];
   technicians: { id: number; name: string }[];
+  /** Rozliczenie (warranty | free | paid | null). */
+  billing: CalendarBilling | null;
+  /** Skrót protokołu (jawny albo z realizacji) — tylko informacyjnie, nie do edycji z czatu. */
+  protocol: { id: number; number: string; status: "draft" | "final"; signedAt: string | null } | null;
   seriesId: number | null;
   deleted: boolean;
 }
@@ -235,6 +241,8 @@ export function briefOfEvent(e: CalendarEventJson): BriefEvent {
     description: clip(e.description),
     technicianIds: e.technicians.map((t) => t.id),
     technicians: e.technicians.map((t) => ({ id: t.id, name: techName(t) })),
+    billing: e.billing,
+    protocol: e.protocol ? { id: e.protocol.id, number: e.protocol.number, status: e.protocol.status, signedAt: e.protocol.signedAt } : null,
     seriesId: e.seriesId,
     deleted: e.deletedAt != null,
   };
@@ -261,7 +269,7 @@ function objectNameOf(dbx: DbOrTx, id: number | null): string | null {
 }
 
 /** Brief scalonego stanu (po parseInput) — bez zapisu. */
-function briefOfInput(dbx: DbOrTx, input: ParsedInput, base: { id: number | null; seriesId: number | null }): BriefEvent {
+function briefOfInput(dbx: DbOrTx, input: ParsedInput, base: { id: number | null; seriesId: number | null; protocol?: BriefEvent["protocol"] }): BriefEvent {
   const techs = technicianNames(dbx, input.technicianIds);
   const objectName = objectNameOf(dbx, input.objectId);
   const title = input.title || (input.type === "urlop" ? `Urlop — ${techs.map((t) => t.name).join(", ")}` : input.title);
@@ -279,6 +287,8 @@ function briefOfInput(dbx: DbOrTx, input: ParsedInput, base: { id: number | null
     description: clip(input.description),
     technicianIds: input.technicianIds,
     technicians: techs,
+    billing: input.billing,
+    protocol: base.protocol ?? null,
     seriesId: base.seriesId,
     deleted: false,
   };
@@ -307,6 +317,7 @@ export function diffBriefs(a: BriefEvent, b: BriefEvent): ChangeDiff[] {
   push("Obiekt", a.objectName ?? (a.objectId != null ? `#${a.objectId}` : null), b.objectName ?? (b.objectId != null ? `#${b.objectId}` : null));
   push("Lokalizacja", a.location, b.location);
   push("Opis", clip(a.description, 80), clip(b.description, 80));
+  push("Rozliczenie", a.billing ? BILLING_LABELS[a.billing] : null, b.billing ? BILLING_LABELS[b.billing] : null);
   const names = (e: BriefEvent) => (e.technicians.length ? e.technicians.map((t) => t.name).join(", ") : null);
   if (a.technicianIds.slice().sort().join(",") !== b.technicianIds.slice().sort().join(",")) out.push({ field: "Technicy", from: names(a), to: names(b) });
   return out;
@@ -351,6 +362,8 @@ function inputBodyOf(e: CalendarEventJson): Record<string, unknown> {
     objectId: e.objectId,
     orderId: e.orderId,
     realizationId: e.realizationId,
+    billing: e.billing,
+    protocolId: e.protocolId,
     technicianIds: e.technicians.map((t) => t.id),
     recurrence: null,
   };
@@ -475,6 +488,7 @@ export function resolveChange(dbx: DbOrTx, change: Change, index: number, opts: 
           if (p.description !== undefined) body.description = p.description;
           if (p.technicianIds !== undefined) body.technicianIds = p.technicianIds;
           if (p.status !== undefined) body.status = p.status;
+          if (p.billing !== undefined) body.billing = p.billing;
           if (p.startAt !== undefined) {
             body.startAt = p.startAt;
             // Sam startAt = przesunięcie z zachowaniem długości (jak PATCH /move).
@@ -511,7 +525,7 @@ export function resolveChange(dbx: DbOrTx, change: Change, index: number, opts: 
           if (change.reason) headline += ` — ${change.reason}`;
         }
         const input = parseInput(body);
-        const after = briefOfInput(dbx, input, { id: ev.id, seriesId: ev.seriesId });
+        const after = briefOfInput(dbx, input, { id: ev.id, seriesId: ev.seriesId, protocol: before.protocol });
         const diff = diffBriefs(before, after);
         if (note) diff.push({ field: "Notatka", from: "", to: note });
         if (diff.length === 0) throw new ApiError(400, `Wydarzenie #${ev.id}: zmiana nie zmienia żadnego pola`);
