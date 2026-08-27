@@ -3,584 +3,45 @@
  * serie cykliczne (konserwacje), przypisania techników, historia zmian
  * (activity_log) i publiczny feed ICS po tokenie użytkownika.
  *
+ * Logika mutacji (walidacja parseInput, create/update/move/delete/restore + activity_log) żyje
+ * w src/lib/calendar-mutations.ts — trasy tylko parsują żądanie, otwierają transakcję i mapują
+ * ApiError → HTTP. Te same funkcje woła asystent AI (POST /assistant/apply-changes).
+ * Serializacja (loadEvents) i zapytania wspólne: src/lib/calendar-queries.ts.
+ *
  * Eksporty:
  *  - default: trasy chronione sesją (montowane pod /calendar po requireAuth)
  *  - calendarPublicRoutes: GET /feed.ics?token=... (montowane PRZED requireAuth)
+ *  - re-eksporty (ApiError, etykiety, loadEvents, parseInput) dla dotychczasowych importów
  */
 import { Hono, type Context } from "hono";
 import { randomBytes } from "crypto";
 import { db, schema } from "../db/index.js";
 import { eq, and, desc, asc, isNull, inArray, sql, lt, gt, gte, ne } from "drizzle-orm";
-import { alias } from "drizzle-orm/sqlite-core";
-import {
-  CALENDAR_EVENT_TYPES,
-  CALENDAR_EVENT_STATUSES,
-  CALENDAR_SERIES_FREQS,
-  type CalendarEvent as CalendarEventRow,
-  type CalendarEventType,
-  type CalendarEventStatus,
-  type CalendarSeriesFreq,
-  type User,
-} from "../db/schema.js";
+import { type CalendarEventType, type CalendarEventStatus } from "../db/schema.js";
 import { getUser } from "../middleware/auth.js";
+import { describeRule } from "../lib/calendar-recurrence.js";
+import { conflictEventIds, loadEvent, loadEvents, type CalendarEventJson } from "../lib/calendar-queries.js";
 import {
-  logActivity,
-  logFieldDiffs,
-  type DbOrTx,
-  type Tx,
-} from "../lib/activity-log.js";
-import {
-  expandOccurrences,
-  describeRule,
-  shiftLocal,
-  diffMinutes,
-  type RecurrenceRule,
-} from "../lib/calendar-recurrence.js";
-import { conflictEventIds } from "../lib/calendar-queries.js";
+  CALENDAR_ENTITY as ENTITY,
+  DATE_RE,
+  createEvent,
+  deleteEvent,
+  isValidCalendarDate,
+  moveEvent,
+  parseInput,
+  parseScope,
+  restoreEvent,
+  updateEvent,
+  type ParsedInput,
+} from "../lib/calendar-mutations.js";
+import { ApiError, STATUS_LABELS, TYPE_LABELS } from "../lib/calendar-labels.js";
+
+// Re-eksporty dla dotychczasowych importów (asystent, testy).
+export { ApiError, STATUS_LABELS, TYPE_LABELS, loadEvents, parseInput };
+export type { CalendarEventJson, ParsedInput };
 
 const app = new Hono();
 export const calendarPublicRoutes = new Hono();
-
-const ENTITY = "calendar_event";
-
-// better-sqlite3 jest synchroniczny — callback db.transaction MUSI być
-// synchroniczny. Błędy walidacji w transakcji rzucamy jako ApiError.
-// ApiError i etykiety PL (summary w activity_log, ICS) żyją w src/lib/calendar-labels.ts;
-// re-eksport dla dotychczasowych importów (asystent, testy).
-import { ApiError, STATUS_LABELS, TYPE_LABELS } from "../lib/calendar-labels.js";
-export { ApiError, STATUS_LABELS, TYPE_LABELS };
-
-/** "2026-09-12T08:00" → "12.09.2026 08:00"; "2026-09-12" → "12.09.2026". */
-function fmtDate(s: string | null | undefined): string {
-  if (!s) return "—";
-  const m = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}))?/.exec(s);
-  if (!m) return s;
-  const d = `${m[3]}.${m[2]}.${m[1]}`;
-  return m[4] ? `${d} ${m[4]}:${m[5]}` : d;
-}
-
-// ---------------------------------------------------------------------------
-// Typy JSON (kontrakt z frontendem, camelCase)
-// ---------------------------------------------------------------------------
-
-interface TechnicianRef {
-  id: number;
-  firstName: string;
-  lastName: string;
-}
-
-interface SeriesRef {
-  id: number;
-  freq: CalendarSeriesFreq;
-  interval: number;
-  until: string | null;
-  count: number | null;
-}
-
-export interface CalendarEventJson {
-  id: number;
-  type: CalendarEventType;
-  title: string;
-  description: string | null;
-  location: string | null;
-  startAt: string;
-  endAt: string;
-  allDay: boolean;
-  status: CalendarEventStatus;
-  department: string;
-  objectId: number | null;
-  objectName: string | null;
-  orderId: number | null;
-  realizationId: number | null;
-  seriesId: number | null;
-  series: SeriesRef | null;
-  technicians: TechnicianRef[];
-  createdBy: number | null;
-  createdByLabel: string | null;
-  updatedBy: number | null;
-  updatedByLabel: string | null;
-  createdAt: string;
-  updatedAt: string;
-  deletedAt: string | null;
-}
-
-// ---------------------------------------------------------------------------
-// Serializacja: wiersze → CalendarEventJson (batch, 4 zapytania)
-// ---------------------------------------------------------------------------
-
-const createdUsers = alias(schema.users, "cu");
-const updatedUsers = alias(schema.users, "uu");
-
-/** Pobiera i serializuje wydarzenia po id (kolejność wg `ids`). */
-export function loadEvents(dbx: DbOrTx, ids: number[]): CalendarEventJson[] {
-  if (ids.length === 0) return [];
-  const rows = dbx
-    .select({
-      ev: schema.calendarEvents,
-      objectName: schema.objects.name,
-      createdByEmail: createdUsers.email,
-      createdByName: createdUsers.displayName,
-      updatedByEmail: updatedUsers.email,
-      updatedByName: updatedUsers.displayName,
-    })
-    .from(schema.calendarEvents)
-    .leftJoin(schema.objects, eq(schema.calendarEvents.objectId, schema.objects.id))
-    .leftJoin(createdUsers, eq(schema.calendarEvents.createdBy, createdUsers.id))
-    .leftJoin(updatedUsers, eq(schema.calendarEvents.updatedBy, updatedUsers.id))
-    .where(inArray(schema.calendarEvents.id, ids))
-    .all();
-
-  const techRows = dbx
-    .select({
-      eventId: schema.calendarEventAssignees.eventId,
-      id: schema.technicians.id,
-      firstName: schema.technicians.firstName,
-      lastName: schema.technicians.lastName,
-    })
-    .from(schema.calendarEventAssignees)
-    .innerJoin(
-      schema.technicians,
-      eq(schema.calendarEventAssignees.technicianId, schema.technicians.id)
-    )
-    .where(inArray(schema.calendarEventAssignees.eventId, ids))
-    .orderBy(asc(schema.technicians.lastName), asc(schema.technicians.firstName))
-    .all();
-  const techByEvent = new Map<number, TechnicianRef[]>();
-  for (const t of techRows) {
-    const list = techByEvent.get(t.eventId) ?? [];
-    list.push({ id: t.id, firstName: t.firstName, lastName: t.lastName });
-    techByEvent.set(t.eventId, list);
-  }
-
-  const seriesIds = [...new Set(rows.map((r) => r.ev.seriesId).filter((x): x is number => x != null))];
-  const seriesById = new Map<number, SeriesRef>();
-  if (seriesIds.length > 0) {
-    const sRows = dbx
-      .select()
-      .from(schema.calendarSeries)
-      .where(inArray(schema.calendarSeries.id, seriesIds))
-      .all();
-    for (const s of sRows) {
-      seriesById.set(s.id, {
-        id: s.id,
-        freq: s.freq,
-        interval: s.interval,
-        until: s.until,
-        count: s.count,
-      });
-    }
-  }
-
-  const label = (email: string | null, name: string | null) =>
-    email == null ? null : (name || "").trim() || email;
-
-  const byId = new Map<number, CalendarEventJson>();
-  for (const r of rows) {
-    const e = r.ev;
-    byId.set(e.id, {
-      id: e.id,
-      type: e.type,
-      title: e.title,
-      description: e.description,
-      location: e.location,
-      startAt: e.startAt,
-      endAt: e.endAt,
-      allDay: e.allDay,
-      status: e.status,
-      department: e.department,
-      objectId: e.objectId,
-      objectName: r.objectName ?? null,
-      orderId: e.orderId,
-      realizationId: e.realizationId,
-      seriesId: e.seriesId,
-      series: e.seriesId != null ? (seriesById.get(e.seriesId) ?? null) : null,
-      technicians: techByEvent.get(e.id) ?? [],
-      createdBy: e.createdBy,
-      createdByLabel: label(r.createdByEmail, r.createdByName),
-      updatedBy: e.updatedBy,
-      updatedByLabel: label(r.updatedByEmail, r.updatedByName),
-      createdAt: e.createdAt,
-      updatedAt: e.updatedAt,
-      deletedAt: e.deletedAt,
-    });
-  }
-  return ids.map((id) => byId.get(id)).filter((x): x is CalendarEventJson => !!x);
-}
-
-function loadEvent(dbx: DbOrTx, id: number): CalendarEventJson | null {
-  return loadEvents(dbx, [id])[0] ?? null;
-}
-
-// ---------------------------------------------------------------------------
-// Walidacja wejścia
-// ---------------------------------------------------------------------------
-
-export interface ParsedInput {
-  type: CalendarEventType;
-  title: string;
-  description: string | null;
-  location: string | null;
-  startAt: string;
-  endAt: string;
-  allDay: boolean;
-  status: CalendarEventStatus;
-  objectId: number | null;
-  orderId: number | null;
-  realizationId: number | null;
-  technicianIds: number[];
-  recurrence: RecurrenceRule | null;
-}
-
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-const DATETIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
-
-function isValidCalendarDate(s: string): boolean {
-  const m = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}))?$/.exec(s);
-  if (!m) return false;
-  const y = +m[1], mo = +m[2], d = +m[3];
-  if (mo < 1 || mo > 12 || d < 1) return false;
-  if (d > new Date(Date.UTC(y, mo, 0)).getUTCDate()) return false;
-  if (m[4] && (+m[4] > 23 || +m[5] > 59)) return false;
-  return true;
-}
-
-/** Normalizuje datę do formatu kontraktu (all-day: YYYY-MM-DD, inaczej YYYY-MM-DDTHH:MM). */
-function normDate(raw: unknown, allDay: boolean, field: string): string {
-  if (typeof raw !== "string" || raw.trim() === "") {
-    throw new ApiError(400, `Pole ${field} jest wymagane`);
-  }
-  let s = raw.trim();
-  if (allDay) {
-    s = s.slice(0, 10);
-    if (!DATE_RE.test(s) || !isValidCalendarDate(s)) {
-      throw new ApiError(400, `Pole ${field}: oczekiwano daty YYYY-MM-DD`);
-    }
-  } else {
-    // Akceptujemy też "YYYY-MM-DDTHH:MM:SS" i "YYYY-MM-DD HH:MM" — ucinamy do minut.
-    s = s.replace(" ", "T").slice(0, 16);
-    if (DATE_RE.test(s)) s = `${s}T00:00`;
-    if (!DATETIME_RE.test(s) || !isValidCalendarDate(s)) {
-      throw new ApiError(400, `Pole ${field}: oczekiwano daty YYYY-MM-DDTHH:MM`);
-    }
-  }
-  return s;
-}
-
-function optInt(raw: unknown, field: string): number | null {
-  if (raw === null || raw === undefined || raw === "") return null;
-  const n = typeof raw === "number" ? raw : Number(raw);
-  if (!Number.isInteger(n) || n <= 0) throw new ApiError(400, `Pole ${field}: nieprawidłowy identyfikator`);
-  return n;
-}
-
-function optText(raw: unknown): string | null {
-  if (raw === null || raw === undefined) return null;
-  const s = String(raw).trim();
-  return s === "" ? null : s;
-}
-
-function parseRecurrence(raw: unknown): RecurrenceRule | null {
-  if (raw === null || raw === undefined) return null;
-  if (typeof raw !== "object") throw new ApiError(400, "Pole recurrence: nieprawidłowy format");
-  const r = raw as Record<string, unknown>;
-  if (!CALENDAR_SERIES_FREQS.includes(r.freq as CalendarSeriesFreq)) {
-    throw new ApiError(400, `Pole recurrence.freq: dozwolone ${CALENDAR_SERIES_FREQS.join(", ")}`);
-  }
-  const interval = r.interval == null || r.interval === "" ? 1 : Number(r.interval);
-  if (!Number.isInteger(interval) || interval < 1 || interval > 52) {
-    throw new ApiError(400, "Pole recurrence.interval: liczba całkowita 1–52");
-  }
-  let until: string | null = null;
-  if (r.until != null && r.until !== "") {
-    until = String(r.until).slice(0, 10);
-    if (!DATE_RE.test(until) || !isValidCalendarDate(until)) {
-      throw new ApiError(400, "Pole recurrence.until: oczekiwano daty YYYY-MM-DD");
-    }
-  }
-  let count: number | null = null;
-  if (r.count != null && r.count !== "") {
-    count = Number(r.count);
-    if (!Number.isInteger(count) || count < 1 || count > 200) {
-      throw new ApiError(400, "Pole recurrence.count: liczba całkowita 1–200");
-    }
-  }
-  if (until && count) throw new ApiError(400, "Pole recurrence: podaj until albo count, nie oba");
-  return { freq: r.freq as CalendarSeriesFreq, interval, until, count };
-}
-
-/** Walidacja CalendarEventInput (bez sprawdzania istnienia referencji — to w transakcji).
- *  Eksportowana: reużywana 1:1 przez narzędzie propose_event asystenta AI (src/lib/ai/calendarTools.ts). */
-export function parseInput(body: unknown): ParsedInput {
-  if (!body || typeof body !== "object") throw new ApiError(400, "Nieprawidłowe dane wejściowe");
-  const b = body as Record<string, unknown>;
-
-  if (!CALENDAR_EVENT_TYPES.includes(b.type as CalendarEventType)) {
-    throw new ApiError(400, `Pole type: dozwolone ${CALENDAR_EVENT_TYPES.join(", ")}`);
-  }
-  const type = b.type as CalendarEventType;
-  const isUrlop = type === "urlop";
-  const title = typeof b.title === "string" ? b.title.trim() : "";
-  // Urlop: tytuł opcjonalny (generowany z nazwiska technika w transakcji)
-  if (!title && !isUrlop) throw new ApiError(400, "Tytuł jest wymagany");
-  if (title.length > 300) throw new ApiError(400, "Tytuł jest za długi (max 300 znaków)");
-
-  // Urlop: domyślnie cały dzień (chyba że klient jawnie poda allDay=false)
-  const allDay = isUrlop
-    ? !(b.allDay === false || b.allDay === 0 || b.allDay === "0" || b.allDay === "false")
-    : b.allDay === true || b.allDay === 1 || b.allDay === "1" || b.allDay === "true";
-  const startAt = normDate(b.startAt, allDay, "startAt");
-  let endAt = normDate(b.endAt ?? b.startAt, allDay, "endAt");
-  if (allDay) {
-    // end EXCLUSIVE: 1-dniowy event = start 12.09, end 13.09
-    if (endAt === startAt) endAt = shiftLocal(startAt, 24 * 60, true);
-    if (endAt < startAt) throw new ApiError(400, "Data końca nie może być wcześniejsza niż początek");
-  } else if (endAt <= startAt) {
-    throw new ApiError(400, "Koniec musi być późniejszy niż początek");
-  }
-
-  let status: CalendarEventStatus = "planned";
-  if (b.status != null && b.status !== "") {
-    if (!CALENDAR_EVENT_STATUSES.includes(b.status as CalendarEventStatus)) {
-      throw new ApiError(400, `Pole status: dozwolone ${CALENDAR_EVENT_STATUSES.join(", ")}`);
-    }
-    status = b.status as CalendarEventStatus;
-  }
-
-  let technicianIds: number[] = [];
-  if (b.technicianIds != null) {
-    if (!Array.isArray(b.technicianIds)) throw new ApiError(400, "Pole technicianIds: oczekiwano tablicy");
-    technicianIds = [...new Set(b.technicianIds.map((x) => optInt(x, "technicianIds")!))];
-  }
-  if (isUrlop && technicianIds.length === 0) throw new ApiError(400, "Urlop wymaga wskazania technika");
-
-  return {
-    type,
-    title,
-    description: optText(b.description),
-    // Urlop nie dotyczy obiektu ani lokalizacji — ignorujemy te pola
-    location: isUrlop ? null : optText(b.location),
-    startAt,
-    endAt,
-    allDay,
-    status,
-    objectId: isUrlop ? null : optInt(b.objectId, "objectId"),
-    orderId: isUrlop ? null : optInt(b.orderId, "orderId"),
-    realizationId: isUrlop ? null : optInt(b.realizationId, "realizationId"),
-    technicianIds,
-    recurrence: parseRecurrence(b.recurrence),
-  };
-}
-
-/** Sprawdza istnienie referencji (obiekt, zlecenie, realizacja, technicy). Rzuca ApiError. */
-function assertRefs(tx: DbOrTx, input: ParsedInput) {
-  if (input.objectId != null) {
-    const o = tx.select({ id: schema.objects.id }).from(schema.objects).where(eq(schema.objects.id, input.objectId)).get();
-    if (!o) throw new ApiError(400, `Obiekt #${input.objectId} nie istnieje`);
-  }
-  if (input.orderId != null) {
-    const o = tx.select({ id: schema.orders.id }).from(schema.orders).where(eq(schema.orders.id, input.orderId)).get();
-    if (!o) throw new ApiError(400, `Zlecenie #${input.orderId} nie istnieje`);
-  }
-  if (input.realizationId != null) {
-    const r = tx.select({ id: schema.realizations.id }).from(schema.realizations).where(eq(schema.realizations.id, input.realizationId)).get();
-    if (!r) throw new ApiError(400, `Realizacja #${input.realizationId} nie istnieje`);
-  }
-  if (input.technicianIds.length > 0) {
-    const found = tx
-      .select({ id: schema.technicians.id })
-      .from(schema.technicians)
-      .where(inArray(schema.technicians.id, input.technicianIds))
-      .all()
-      .map((t) => t.id);
-    const missing = input.technicianIds.filter((id) => !found.includes(id));
-    if (missing.length > 0) throw new ApiError(400, `Technik #${missing.join(", #")} nie istnieje`);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Helpery domenowe (w transakcji)
-// ---------------------------------------------------------------------------
-
-/** Dla urlopu bez tytułu generuje „Urlop — Jan Kowalski” (kilku techników: po przecinku). */
-function resolveTitle(dbx: DbOrTx, input: ParsedInput): string {
-  if (input.title || input.type !== "urlop") return input.title;
-  return `Urlop — ${input.technicianIds.map((id) => techName(dbx, id)).join(", ")}`.slice(0, 300);
-}
-
-function techName(dbx: DbOrTx, id: number): string {
-  const t = dbx
-    .select({ firstName: schema.technicians.firstName, lastName: schema.technicians.lastName })
-    .from(schema.technicians)
-    .where(eq(schema.technicians.id, id))
-    .get();
-  return t ? `${t.firstName} ${t.lastName}`.trim() : `#${id}`;
-}
-
-function objectName(dbx: DbOrTx, id: number | null): string {
-  if (id == null) return "—";
-  const o = dbx.select({ name: schema.objects.name }).from(schema.objects).where(eq(schema.objects.id, id)).get();
-  return o ? o.name : `#${id}`;
-}
-
-function currentAssignees(dbx: DbOrTx, eventId: number): number[] {
-  return dbx
-    .select({ id: schema.calendarEventAssignees.technicianId })
-    .from(schema.calendarEventAssignees)
-    .where(eq(schema.calendarEventAssignees.eventId, eventId))
-    .all()
-    .map((r) => r.id);
-}
-
-/** Ustawia zbiór techników wydarzenia; loguje assigned/unassigned per technik. */
-function syncAssignees(tx: Tx, ev: CalendarEventRow, technicianIds: number[], user: User) {
-  const before = currentAssignees(tx, ev.id);
-  const toAdd = technicianIds.filter((id) => !before.includes(id));
-  const toRemove = before.filter((id) => !technicianIds.includes(id));
-  for (const id of toRemove) {
-    tx.delete(schema.calendarEventAssignees)
-      .where(and(eq(schema.calendarEventAssignees.eventId, ev.id), eq(schema.calendarEventAssignees.technicianId, id)))
-      .run();
-    logActivity(tx, {
-      entityType: ENTITY, entityId: ev.id, objectId: ev.objectId, user,
-      action: "unassigned", field: "technician", oldValue: id, newValue: null,
-      summary: `Odpisano technika: ${techName(tx, id)}`,
-    });
-  }
-  for (const id of toAdd) {
-    tx.insert(schema.calendarEventAssignees).values({ eventId: ev.id, technicianId: id }).run();
-    logActivity(tx, {
-      entityType: ENTITY, entityId: ev.id, objectId: ev.objectId, user,
-      action: "assigned", field: "technician", oldValue: null, newValue: id,
-      summary: `Przypisano technika: ${techName(tx, id)}`,
-    });
-  }
-  return { added: toAdd.length, removed: toRemove.length };
-}
-
-/** Loguje diff pól (bez dat i bez statusu — te mają własne akcje) + moved + status_changed. */
-function logEventDiff(tx: Tx, before: CalendarEventRow, after: CalendarEventRow, user: User) {
-  const ctx = { entityType: ENTITY, entityId: after.id, objectId: after.objectId, user };
-  // Przesunięcie / zmiana czasu
-  if (before.startAt !== after.startAt || before.endAt !== after.endAt || before.allDay !== after.allDay) {
-    const fromS = before.allDay ? `${fmtDate(before.startAt)} (cały dzień)` : `${fmtDate(before.startAt)}–${fmtDate(before.endAt)}`;
-    const toS = after.allDay ? `${fmtDate(after.startAt)} (cały dzień)` : `${fmtDate(after.startAt)}–${fmtDate(after.endAt)}`;
-    if (before.startAt !== after.startAt) {
-      // Przesunięcie (drag&drop / zmiana daty) — jeden wpis z pełnym opisem
-      logActivity(tx, {
-        ...ctx, action: "moved", field: "start_at",
-        oldValue: before.startAt, newValue: after.startAt,
-        summary: `Przesunięto z ${fromS} na ${toS}`,
-      });
-    } else {
-      // Sam koniec (resize) — osobny wpis z czytelnym opisem
-      logActivity(tx, {
-        ...ctx, action: "moved", field: "end_at",
-        oldValue: before.endAt, newValue: after.endAt,
-        summary: `Zmieniono koniec z ${fmtDate(before.endAt)} na ${fmtDate(after.endAt)}`,
-      });
-    }
-    if (before.allDay !== after.allDay) {
-      logActivity(tx, { ...ctx, action: "updated", field: "all_day", oldValue: before.allDay, newValue: after.allDay, summary: after.allDay ? "Ustawiono: cały dzień" : "Wyłączono: cały dzień" });
-    }
-  }
-  // Status
-  if (before.status !== after.status) {
-    logActivity(tx, {
-      ...ctx, action: "status_changed", field: "status",
-      oldValue: before.status, newValue: after.status,
-      summary: `Zmieniono status: ${STATUS_LABELS[before.status]} → ${STATUS_LABELS[after.status]}`,
-    });
-  }
-  // Pozostałe pola
-  logFieldDiffs(tx, {
-    ...ctx,
-    before: before as unknown as Record<string, unknown>,
-    after: after as unknown as Record<string, unknown>,
-    fields: [
-      { key: "title", label: "tytuł" },
-      { key: "type", label: "typ", format: (v) => TYPE_LABELS[v as CalendarEventType] ?? String(v) },
-      { key: "location", label: "lokalizację" },
-      { key: "description", label: "opis", format: (v) => (v ? String(v).slice(0, 60) + (String(v).length > 60 ? "…" : "") : "—") },
-      { key: "objectId", label: "obiekt", format: (v) => objectName(tx, (v as number | null) ?? null) },
-      { key: "orderId", label: "zlecenie", format: (v) => (v == null ? "—" : `#${v}`) },
-      { key: "realizationId", label: "realizację", format: (v) => (v == null ? "—" : `#${v}`) },
-    ],
-  });
-}
-
-function getEventRow(dbx: DbOrTx, id: number): CalendarEventRow | undefined {
-  return dbx.select().from(schema.calendarEvents).where(eq(schema.calendarEvents.id, id)).get();
-}
-
-type Scope = "this" | "future" | "all";
-function parseScope(raw: string | undefined): Scope {
-  if (raw === "future" || raw === "all") return raw;
-  return "this";
-}
-
-/** Rodzeństwo z serii wg scope (bez samego eventu; nie usunięte). */
-function seriesSiblings(dbx: DbOrTx, ev: CalendarEventRow, scope: Scope): CalendarEventRow[] {
-  if (scope === "this" || ev.seriesId == null) return [];
-  const conds = [
-    eq(schema.calendarEvents.seriesId, ev.seriesId),
-    ne(schema.calendarEvents.id, ev.id),
-    isNull(schema.calendarEvents.deletedAt),
-  ];
-  if (scope === "future") conds.push(gt(schema.calendarEvents.startAt, ev.startAt));
-  return dbx.select().from(schema.calendarEvents).where(and(...conds)).orderBy(asc(schema.calendarEvents.startAt)).all();
-}
-
-/** Zastosowanie zmian z PUT do jednego wiersza (target lub sibling z deltą dat). */
-function applyUpdate(
-  tx: Tx,
-  row: CalendarEventRow,
-  input: ParsedInput,
-  dates: { startAt: string; endAt: string; allDay: boolean },
-  user: User
-): CalendarEventRow {
-  const after = tx
-    .update(schema.calendarEvents)
-    .set({
-      type: input.type,
-      title: resolveTitle(tx, input),
-      description: input.description,
-      location: input.location,
-      startAt: dates.startAt,
-      endAt: dates.endAt,
-      allDay: dates.allDay,
-      status: input.status,
-      objectId: input.objectId,
-      orderId: input.orderId,
-      realizationId: input.realizationId,
-      updatedBy: user.id,
-      updatedAt: sql`(datetime('now'))`,
-    })
-    .where(eq(schema.calendarEvents.id, row.id))
-    .returning()
-    .get();
-  logEventDiff(tx, row, after, user);
-  syncAssignees(tx, after, input.technicianIds, user);
-  return after;
-}
-
-/** Daty siblinga po zastosowaniu delty (start/end osobno) i ewentualnej zmiany allDay. */
-function shiftedDates(
-  sib: CalendarEventRow,
-  deltaStart: number,
-  deltaEnd: number,
-  allDay: boolean
-): { startAt: string; endAt: string; allDay: boolean } {
-  let startAt = shiftLocal(sib.startAt, deltaStart, allDay);
-  let endAt = shiftLocal(sib.endAt, deltaEnd, allDay);
-  if (allDay) {
-    if (endAt <= startAt) endAt = shiftLocal(startAt, 24 * 60, true);
-  } else if (endAt <= startAt) {
-    // zabezpieczenie: zachowaj dotychczasowe trwanie siblinga
-    const dur = Math.max(30, diffMinutes(sib.startAt, sib.endAt));
-    endAt = shiftLocal(startAt, dur, false);
-  }
-  return { startAt, endAt, allDay };
-}
 
 function handleError(c: Context, error: unknown, what: string) {
   if (error instanceof ApiError) {
@@ -670,68 +131,7 @@ app.post("/events", async (c) => {
   try {
     const body = await c.req.json().catch(() => null);
     const input = parseInput(body);
-
-    const result = db.transaction((tx) => {
-      assertRefs(tx, input);
-
-      let seriesId: number | null = null;
-      let occurrences = [{ startAt: input.startAt, endAt: input.endAt }];
-      let seriesLabel = "";
-      if (input.recurrence) {
-        occurrences = expandOccurrences(input.startAt, input.endAt, input.allDay, input.recurrence);
-        const series = tx
-          .insert(schema.calendarSeries)
-          .values({
-            freq: input.recurrence.freq,
-            interval: input.recurrence.interval ?? 1,
-            until: input.recurrence.until ?? null,
-            count: input.recurrence.count ?? null,
-            createdBy: user.id,
-          })
-          .returning()
-          .get();
-        seriesId = series.id;
-        seriesLabel = describeRule(input.recurrence);
-      }
-
-      const ids: number[] = [];
-      for (const occ of occurrences) {
-        const ev = tx
-          .insert(schema.calendarEvents)
-          .values({
-            type: input.type,
-            title: resolveTitle(tx, input),
-            description: input.description,
-            location: input.location,
-            startAt: occ.startAt,
-            endAt: occ.endAt,
-            allDay: input.allDay,
-            status: input.status,
-            department: "technical",
-            objectId: input.objectId,
-            orderId: input.orderId,
-            realizationId: input.realizationId,
-            seriesId,
-            createdBy: user.id,
-            updatedBy: user.id,
-          })
-          .returning()
-          .get();
-        for (const tid of input.technicianIds) {
-          tx.insert(schema.calendarEventAssignees).values({ eventId: ev.id, technicianId: tid }).run();
-        }
-        logActivity(tx, {
-          entityType: ENTITY, entityId: ev.id, objectId: ev.objectId, user,
-          action: "created",
-          summary: seriesId != null
-            ? `Utworzono w ramach serii #${seriesId} (${seriesLabel})`
-            : `Utworzono wydarzenie „${ev.title}” (${TYPE_LABELS[ev.type]}, ${fmtDate(ev.startAt)})`,
-        });
-        ids.push(ev.id);
-      }
-      return { firstId: ids[0], seriesId, occurrencesCount: ids.length };
-    });
-
+    const result = db.transaction((tx) => createEvent(tx, input, { user }));
     const first = loadEvent(db, result.firstId)!;
     return c.json(
       { success: true, data: { ...first, seriesId: result.seriesId, occurrencesCount: result.occurrencesCount } },
@@ -754,26 +154,7 @@ app.put("/events/:id", async (c) => {
   try {
     const body = await c.req.json().catch(() => null);
     const input = parseInput(body);
-
-    const affected = db.transaction((tx) => {
-      const row = getEventRow(tx, id);
-      if (!row) throw new ApiError(404, "Wydarzenie nie istnieje");
-      if (row.deletedAt) throw new ApiError(409, "Wydarzenie jest usunięte — najpierw je przywróć");
-      assertRefs(tx, input);
-
-      const updatedIds = [id];
-      applyUpdate(tx, row, input, { startAt: input.startAt, endAt: input.endAt, allDay: input.allDay }, user);
-
-      // Delta dat do propagacji na rodzeństwo (zachowują własne daty + ta sama delta)
-      const deltaStart = diffMinutes(row.startAt, input.startAt);
-      const deltaEnd = diffMinutes(row.endAt, input.endAt);
-      for (const sib of seriesSiblings(tx, row, scope)) {
-        applyUpdate(tx, sib, input, shiftedDates(sib, deltaStart, deltaEnd, input.allDay), user);
-        updatedIds.push(sib.id);
-      }
-      return updatedIds;
-    });
-
+    const affected = db.transaction((tx) => updateEvent(tx, id, input, scope, { user }));
     const ev = loadEvent(db, id)!;
     return c.json({ success: true, data: { ...ev, affectedCount: affected.length, affectedIds: affected } });
   } catch (error) {
@@ -792,30 +173,7 @@ app.patch("/events/:id/move", async (c) => {
   try {
     const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
     if (!body) throw new ApiError(400, "Nieprawidłowe dane wejściowe");
-
-    db.transaction((tx) => {
-      const row = getEventRow(tx, id);
-      if (!row) throw new ApiError(404, "Wydarzenie nie istnieje");
-      if (row.deletedAt) throw new ApiError(409, "Wydarzenie jest usunięte");
-
-      const allDay = body.allDay == null ? row.allDay : body.allDay === true || body.allDay === 1 || body.allDay === "true";
-      const startAt = normDate(body.startAt ?? row.startAt, allDay, "startAt");
-      let endAt = normDate(body.endAt ?? (allDay ? startAt : shiftLocal(startAt, Math.max(30, diffMinutes(row.startAt, row.endAt)), false)), allDay, "endAt");
-      if (allDay) {
-        if (endAt <= startAt) endAt = shiftLocal(startAt, 24 * 60, true);
-      } else if (endAt <= startAt) {
-        throw new ApiError(400, "Koniec musi być późniejszy niż początek");
-      }
-
-      const after = tx
-        .update(schema.calendarEvents)
-        .set({ startAt, endAt, allDay, updatedBy: user.id, updatedAt: sql`(datetime('now'))` })
-        .where(eq(schema.calendarEvents.id, id))
-        .returning()
-        .get();
-      logEventDiff(tx, row, after, user);
-    });
-
+    db.transaction((tx) => moveEvent(tx, id, body, { user }));
     return c.json({ success: true, data: loadEvent(db, id) });
   } catch (error) {
     return handleError(c, error, "przesuwania wydarzenia");
@@ -832,23 +190,7 @@ app.delete("/events/:id", (c) => {
   if (!Number.isInteger(id)) return c.json({ success: false, error: "Nieprawidłowe id" }, 400);
   const scope = parseScope(c.req.query("scope"));
   try {
-    const deletedIds = db.transaction((tx) => {
-      const row = getEventRow(tx, id);
-      if (!row) throw new ApiError(404, "Wydarzenie nie istnieje");
-      if (row.deletedAt) throw new ApiError(409, "Wydarzenie jest już usunięte");
-      const targets = [row, ...seriesSiblings(tx, row, scope)];
-      for (const t of targets) {
-        tx.update(schema.calendarEvents)
-          .set({ deletedAt: sql`(datetime('now'))`, updatedBy: user.id, updatedAt: sql`(datetime('now'))` })
-          .where(eq(schema.calendarEvents.id, t.id))
-          .run();
-        logActivity(tx, {
-          entityType: ENTITY, entityId: t.id, objectId: t.objectId, user, action: "deleted",
-          summary: `Usunięto wydarzenie „${t.title}” (${fmtDate(t.startAt)})${scope !== "this" ? ` — zakres: ${scope === "all" ? "cała seria" : "to i kolejne"}` : ""}`,
-        });
-      }
-      return targets.map((t) => t.id);
-    });
+    const deletedIds = db.transaction((tx) => deleteEvent(tx, id, scope, { user }));
     return c.json({ success: true, data: { id, deletedIds, deletedCount: deletedIds.length } });
   } catch (error) {
     return handleError(c, error, "usuwania wydarzenia");
@@ -860,19 +202,7 @@ app.post("/events/:id/restore", (c) => {
   const id = Number(c.req.param("id"));
   if (!Number.isInteger(id)) return c.json({ success: false, error: "Nieprawidłowe id" }, 400);
   try {
-    db.transaction((tx) => {
-      const row = getEventRow(tx, id);
-      if (!row) throw new ApiError(404, "Wydarzenie nie istnieje");
-      if (!row.deletedAt) throw new ApiError(409, "Wydarzenie nie jest usunięte");
-      tx.update(schema.calendarEvents)
-        .set({ deletedAt: null, updatedBy: user.id, updatedAt: sql`(datetime('now'))` })
-        .where(eq(schema.calendarEvents.id, id))
-        .run();
-      logActivity(tx, {
-        entityType: ENTITY, entityId: id, objectId: row.objectId, user, action: "restored",
-        summary: `Przywrócono wydarzenie „${row.title}” (${fmtDate(row.startAt)})`,
-      });
-    });
+    db.transaction((tx) => restoreEvent(tx, id, { user }));
     return c.json({ success: true, data: loadEvent(db, id) });
   } catch (error) {
     return handleError(c, error, "przywracania wydarzenia");

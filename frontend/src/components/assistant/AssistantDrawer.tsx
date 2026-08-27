@@ -9,8 +9,13 @@ import {
   assistantApi,
   calendarApi,
   systemNoteText,
+  type AssistantApplyResult,
+  type AssistantChangeKind,
   type AssistantChat,
   type AssistantProposal,
+  type AssistantResolvedChange,
+  type CalendarEventStatus,
+  type CalendarEventType,
   type AssistantStatus,
   type AssistantSystemNote,
   type CalendarEvent,
@@ -21,17 +26,26 @@ import { cn } from "@/lib/utils";
 import { ChatHistory } from "./ChatHistory";
 import { MessageList } from "./MessageList";
 import { classifyChatError, textOf, type ChatMessage, type PreviewRange } from "./parts";
+import type { ChangeCardProps } from "./ChangeCard";
 import "./assistant.css";
 
 /** Zakres podświetlany na siatce (karta propozycji / opcja ze slotem); `focus` = „Pokaż w kalendarzu”. */
 export type AssistantPreview = (PreviewRange & { focus?: boolean }) | null;
 
+/** Rodzaj zmiany zgłaszany rodzicowi po zapisie ("created" = propozycja nowego wydarzenia). */
+export type AssistantEventChangeKind = "created" | AssistantChangeKind;
+
 export interface AssistantDrawerProps {
   onClose: () => void;
-  /** Po zapisie wydarzenia (Zatwierdź / Edytuj→Zapisz) — rodzic odświeża kalendarz i pokazuje toast. */
-  onEventCreated: (ev: CalendarEvent) => void;
+  /**
+   * Po zapisie/zmianie wydarzenia (Zatwierdź / Edytuj→Zapisz / zastosowana zmiana) — rodzic
+   * odświeża kalendarz i pokazuje toast. `ev` może być null (np. usunięcie bez zwróconego eventu).
+   */
+  onEventsChanged: (ev: CalendarEvent | null, kind: AssistantEventChangeKind, title?: string) => void;
   /** Edytuj → rodzic otwiera CalendarEventDialog (create + prefill) i woła `onSaved` po zapisie. */
   onEditProposal: (prefill: CalendarEventPrefill, onSaved: (ev: CalendarEvent) => void) => void;
+  /** Edytuj zmianę istniejącego wydarzenia → dialog w trybie edit (event scalony z patchem). */
+  onEditEvent: (event: CalendarEvent, onSaved: (ev: CalendarEvent) => void) => void;
   onOpenEvent: (id: number) => void;
   /** Sprzężenie z siatką: „widmowy” event dla propozycji / slotu; null zdejmuje. */
   onPreviewRange?: (range: AssistantPreview) => void;
@@ -60,7 +74,7 @@ const storeChat = (id: number | null) => {
 const isDesktop = () => window.matchMedia("(min-width: 1024px)").matches;
 
 /** Prawy drawer „Asystent” — na desktopie kolumna obok kalendarza, na mobile pełny ekran. */
-export function AssistantDrawer({ onClose, onEventCreated, onEditProposal, onOpenEvent, onPreviewRange }: AssistantDrawerProps) {
+export function AssistantDrawer({ onClose, onEventsChanged, onEditProposal, onEditEvent, onOpenEvent, onPreviewRange }: AssistantDrawerProps) {
   const { isAdmin } = usePerms();
   const [searchParams, setSearchParams] = useSearchParams();
   const [status, setStatus] = useState<AssistantStatus | null>(null);
@@ -295,8 +309,9 @@ export function AssistantDrawer({ onClose, onEventCreated, onEditProposal, onOpe
           maxChars={status?.messageMaxChars && status.messageMaxChars > 0 ? status.messageMaxChars : DEFAULT_MAX_CHARS}
           escRef={escRef}
           onChatCreated={onChatCreated}
-          onEventCreated={onEventCreated}
+          onEventsChanged={onEventsChanged}
           onEditProposal={onEditProposal}
+          onEditEvent={onEditEvent}
           onOpenEvent={onOpenEvent}
           onPreviewRange={onPreviewRange}
           onTitleMaybeChanged={refreshChats}
@@ -323,8 +338,9 @@ function ChatSession({
   maxChars,
   escRef,
   onChatCreated,
-  onEventCreated,
+  onEventsChanged,
   onEditProposal,
+  onEditEvent,
   onOpenEvent,
   onPreviewRange,
   onTitleMaybeChanged,
@@ -336,8 +352,9 @@ function ChatSession({
   maxChars: number;
   escRef: React.MutableRefObject<(() => boolean) | null>;
   onChatCreated: (c: AssistantChat) => void;
-  onEventCreated: (ev: CalendarEvent) => void;
+  onEventsChanged: AssistantDrawerProps["onEventsChanged"];
   onEditProposal: AssistantDrawerProps["onEditProposal"];
+  onEditEvent: AssistantDrawerProps["onEditEvent"];
   onOpenEvent: (id: number) => void;
   onPreviewRange?: (range: AssistantPreview) => void;
   onTitleMaybeChanged: () => void;
@@ -478,23 +495,34 @@ function ChatSession({
     if (!loading && configured && finePointer) inputRef.current?.focus({ preventScroll: true });
   }, [loading, configured, finePointer]);
 
-  const appendSystem = useCallback(
-    async (note: AssistantSystemNote) => {
-      const id = chatIdRef.current;
-      if (id == null) return;
-      const text = systemNoteText(note);
-      await assistantApi.system(id, note);
+  /** Lokalna notatka systemowa (bez zapisu — gdy backend już ją zapisał, np. apply-changes). */
+  const pushSystemLocal = useCallback(
+    (note: AssistantSystemNote) => {
+      const text = note.text ?? systemNoteText(note);
       const msg: UIMessage = {
         id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
         role: "system",
         parts: [
-          { type: "data-system", data: { kind: note.kind, eventId: note.eventId ?? null, title: note.title ?? null, text, toolCallId: note.toolCallId ?? null } },
+          {
+            type: "data-system",
+            data: { kind: note.kind, eventId: note.eventId ?? null, title: note.title ?? null, text, toolCallId: note.toolCallId ?? null, changeIndex: note.changeIndex ?? null },
+          },
           { type: "text", text },
         ] as UIMessage["parts"],
       };
       setMessages((ms) => [...ms, msg]);
     },
     [setMessages]
+  );
+
+  const appendSystem = useCallback(
+    async (note: AssistantSystemNote) => {
+      const id = chatIdRef.current;
+      if (id == null) return;
+      await assistantApi.system(id, note);
+      pushSystemLocal(note);
+    },
+    [pushSystemLocal]
   );
 
   const toInput = (p: AssistantProposal): CalendarEventInput => ({
@@ -515,11 +543,11 @@ function ChatSession({
 
   const afterSaved = useCallback(
     async (ev: CalendarEvent, proposalTitle: string, kind: "saved" | "edited", toolCallId: string) => {
-      onEventCreated(ev);
+      onEventsChanged(ev, "created");
       // toolCallId karty (+ tytuł propozycji jako fallback) — po nim front dopasowuje decyzję do karty.
       await appendSystem({ kind, eventId: ev.id, title: proposalTitle, toolCallId });
     },
-    [onEventCreated, appendSystem]
+    [onEventsChanged, appendSystem]
   );
 
   const onApprove = useCallback(
@@ -563,6 +591,114 @@ function ChatSession({
       inputRef.current?.focus();
     },
     [appendSystem]
+  );
+
+  // --- Karta zmian (propose_changes) ---------------------------------------------------------
+  const changeTitle = (c: AssistantResolvedChange) => c.after?.title || c.before?.title || c.summary || undefined;
+
+  /** Zatwierdź pozycje → backend wykonuje i zapisuje notatki `applied`; my dokładamy je lokalnie + toast. */
+  const onApplyChanges = useCallback<ChangeCardProps["onApply"]>(
+    async (toolCallId, indexes) => {
+      const id = chatIdRef.current;
+      if (id == null) throw new Error("Brak czatu.");
+      // Pozycje z listy wiadomości — potrzebne do tytułów/kind w toastach.
+      const byIndex = new Map<number, AssistantResolvedChange>();
+      for (const m of messages as unknown as ChatMessage[]) {
+        for (const p of m.parts || []) {
+          if (p.type === "tool-propose_changes" && "toolCallId" in p && p.toolCallId === toolCallId && "output" in p) {
+            const out = p.output as { changes?: AssistantResolvedChange[] } | undefined;
+            (out?.changes ?? []).forEach((c, i) => byIndex.set(typeof c.index === "number" ? c.index : i, c));
+          }
+        }
+      }
+      setSaving(true);
+      try {
+        const results: AssistantApplyResult[] = await assistantApi.applyChanges(id, toolCallId, indexes);
+        for (const r of results) {
+          if (!r.ok) continue;
+          const c = byIndex.get(r.index);
+          const title = r.event?.title ?? (c ? changeTitle(c) : undefined);
+          pushSystemLocal({ kind: "applied", eventId: r.event?.id ?? (c?.eventId ?? undefined), title, toolCallId, changeIndex: r.index });
+          onEventsChanged(r.event ?? null, c?.kind ?? "update", title);
+        }
+        return results;
+      } finally {
+        setSaving(false);
+      }
+    },
+    [messages, pushSystemLocal, onEventsChanged]
+  );
+
+  const onRejectChange = useCallback<ChangeCardProps["onReject"]>(
+    async (toolCallId, c) => {
+      await appendSystem({ kind: "rejected", title: changeTitle(c), toolCallId, changeIndex: c.index, eventId: c.eventId ?? undefined });
+      inputRef.current?.focus();
+    },
+    [appendSystem]
+  );
+
+  /**
+   * Edytuj: create → dialog tworzenia z prefill (jak propozycja); update/status → pełny event z API
+   * scalony z `after` (patch) i dialog edycji. Po zapisie w dialogu notatka `edited` z changeIndex.
+   */
+  const onEditChange = useCallback<ChangeCardProps["onEdit"]>(
+    (toolCallId, c) => {
+      const afterEdit = (ev: CalendarEvent) => {
+        onEventsChanged(ev, c.kind === "create" ? "created" : c.kind, ev.title);
+        void appendSystem({ kind: "edited", eventId: ev.id, title: ev.title, toolCallId, changeIndex: c.index });
+      };
+      const a = c.after ?? {};
+      if (c.kind === "create") {
+        const raw = c.change && c.change.kind === "create" ? c.change.event : undefined;
+        onEditProposal(
+          {
+            type: (a.type ?? raw?.type) as CalendarEventType | undefined,
+            title: a.title ?? raw?.title,
+            startAt: a.startAt ?? raw?.startAt,
+            endAt: a.endAt ?? raw?.endAt,
+            allDay: Boolean(a.allDay ?? raw?.allDay),
+            objectId: a.objectId ?? raw?.objectId ?? null,
+            location: a.location ?? raw?.location ?? null,
+            description: a.description ?? raw?.description ?? null,
+            technicianIds: a.technicianIds ?? raw?.technicianIds ?? [],
+            status: (a.status ?? raw?.status) as CalendarEventStatus | undefined,
+          },
+          afterEdit
+        );
+        return;
+      }
+      const evId = c.eventId ?? c.before?.id ?? a.id;
+      if (evId == null) return;
+      void calendarApi
+        .getEvent(evId)
+        .then((res) => {
+          const ev = res.data;
+          if (!ev) throw new Error("Nie znaleziono wydarzenia.");
+          const techIds = a.technicianIds;
+          const merged: CalendarEvent = {
+            ...ev,
+            type: (a.type as CalendarEventType | undefined) ?? ev.type,
+            title: a.title ?? ev.title,
+            startAt: a.startAt ?? ev.startAt,
+            endAt: a.endAt ?? ev.endAt,
+            allDay: a.allDay ?? ev.allDay,
+            status: (a.status as CalendarEventStatus | undefined) ?? ev.status,
+            objectId: a.objectId !== undefined ? a.objectId : ev.objectId,
+            objectName: a.objectName !== undefined ? a.objectName : ev.objectName,
+            location: a.location !== undefined ? a.location : ev.location,
+            description: a.description !== undefined ? a.description : ev.description,
+            technicians: techIds
+              ? techIds.map((tid, i) => ev.technicians.find((t) => t.id === tid) ?? { id: tid, firstName: a.technicians?.find((t) => t.id === tid)?.name ?? a.technicianNames?.[i] ?? `#${tid}`, lastName: "" })
+              : ev.technicians,
+          };
+          onEditEvent(merged, afterEdit);
+        })
+        .catch((e: unknown) => {
+          // Brak dostępu do karty — sygnalizujemy przez toast rodzica (kind update, bez eventu).
+          onEventsChanged(null, "update", e instanceof Error ? e.message : "Nie udało się wczytać wydarzenia.");
+        });
+    },
+    [onEditProposal, onEditEvent, onEventsChanged, appendSystem]
   );
 
   // Karta ask_choice: klik opcji = zwykła wiadomość użytkownika; „Inne…” = fokus w composerze.
@@ -653,6 +789,9 @@ function ChatSession({
           onApprove={onApprove}
           onEdit={onEdit}
           onReject={onReject}
+          onApplyChanges={onApplyChanges}
+          onEditChange={onEditChange}
+          onRejectChange={onRejectChange}
           onOpenEvent={onOpenEvent}
           onPreview={onPreviewRange ? onPreview : undefined}
           onChoose={onChoose}

@@ -1,4 +1,4 @@
-import type { AssistantChoiceOption, AssistantChoiceOutput, AssistantConflict, AssistantProposalOutput } from "@/lib/api";
+import type { AssistantChangesOutput, AssistantChoiceOption, AssistantChoiceOutput, AssistantConflict, AssistantProposalOutput, AssistantResolvedChange } from "@/lib/api";
 
 /**
  * Luźne typy partów UIMessage (ai@7). `ai` typuje je generycznie po narzędziach,
@@ -33,10 +33,12 @@ export interface DataErrorPart {
   type: "data-error";
   data?: { code?: string; message?: string } | string;
 }
-export type SystemKind = "saved" | "rejected" | "edited";
+export type SystemKind = "saved" | "rejected" | "edited" | "applied";
 export interface DataSystemPart {
   type: "data-system";
-  data?: { kind?: SystemKind; eventId?: number | null; title?: string | null; text?: string; toolCallId?: string | null } | string;
+  data?:
+    | { kind?: SystemKind; eventId?: number | null; title?: string | null; text?: string; toolCallId?: string | null; changeIndex?: number | null }
+    | string;
 }
 export interface DataAbortedPart {
   type: "data-aborted";
@@ -141,6 +143,25 @@ export function proposalOf(p: ToolPart): AssistantProposalOutput | null {
   return out;
 }
 
+/**
+ * Wynik `propose_changes` (albo null). Pozycje normalizujemy: `index` z backendu albo pozycja
+ * w tablicy, `diff`/`warnings` zawsze tablice — dalej nie trzeba sprawdzać kształtu.
+ */
+export function changesOf(p: ToolPart): (AssistantChangesOutput & { changes: AssistantResolvedChange[] }) | null {
+  if (toolName(p) !== "propose_changes" || p.state !== "output-available") return null;
+  const out = p.output as AssistantChangesOutput | undefined;
+  if (!out || typeof out !== "object" || !Array.isArray(out.changes) || out.changes.length === 0) return null;
+  const changes = out.changes.map((c, i) => ({
+    ...c,
+    index: typeof c?.index === "number" ? c.index : i,
+    kind: (c?.kind ?? "update") as AssistantResolvedChange["kind"],
+    diff: Array.isArray(c?.diff) ? c.diff.filter((d) => d && typeof d.field === "string") : [],
+    warnings: Array.isArray(c?.warnings) ? c.warnings.filter((w): w is string => typeof w === "string" && w.trim() !== "") : [],
+    error: typeof c?.error === "string" && c.error.trim() ? c.error : null,
+  }));
+  return { ...out, changes };
+}
+
 /** Wynik pytania z tool-parta `ask_choice` (albo null). */
 export function choiceOf(p: ToolPart): AssistantChoiceOutput | null {
   if (toolName(p) !== "ask_choice" || p.state !== "output-available") return null;
@@ -219,6 +240,7 @@ export interface SystemNote {
   title: string | null;
   text: string;
   toolCallId?: string | null;
+  changeIndex?: number | null;
 }
 
 export const SAVED_RE = /^Wydarzenie(?:\s+#(\d+))?\s+zapisane(?:\s+po edycji)?(?::\s*(.*))?$/s;
@@ -246,6 +268,7 @@ export function systemNoteOf(m: ChatMessage): SystemNote | null {
       title: d.title?.trim() || titleFromText(parsed?.[2] ?? REJECTED_RE.exec(t)?.[1]),
       text: t,
       toolCallId: d.toolCallId ?? null,
+      changeIndex: typeof d.changeIndex === "number" ? d.changeIndex : null,
     };
   }
   if (!text) return null;
@@ -288,6 +311,8 @@ export function decideProposals(messages: ChatMessage[]): ProposalDecisions {
     if (m.role === "system") {
       const note = systemNoteOf(m);
       if (!note || pending.length === 0) continue;
+      // Notatki kart zmian (changeIndex / applied) rozstrzyga decideChanges — nie „zjadamy” ich tutaj.
+      if (note.changeIndex != null || note.kind === "applied") continue;
       const nt = normTitle(note.title);
       let idx = note.toolCallId ? pending.findIndex((c) => c.id === note.toolCallId) : -1;
       if (idx < 0 && nt) {
@@ -316,6 +341,63 @@ export function decideProposals(messages: ChatMessage[]): ProposalDecisions {
   return { byCard, consumedSystemIds };
 }
 
+// ---------------------------------------------------------------------------
+// Karty zmian (`propose_changes`) — decyzje per pozycja (toolCallId + changeIndex)
+// ---------------------------------------------------------------------------
+
+/** Decyzja użytkownika dla JEDNEJ pozycji karty zmian. */
+export type ChangeDecision = { status: "applied"; eventId: number | null; edited?: boolean } | { status: "rejected" };
+
+export interface ChangeDecisions {
+  /** `${toolCallId}:${changeIndex}` → decyzja. */
+  byItem: Map<string, ChangeDecision>;
+  /** Id wiadomości systemowych „skonsumowanych” przez kartę (chip ukryty). */
+  consumedSystemIds: Set<string>;
+}
+
+export const changeKey = (toolCallId: string, index: number) => `${toolCallId}:${index}`;
+
+/**
+ * Mapuje pozycje kart `propose_changes` → decyzja. Dopasowanie WYŁĄCZNIE po toolCallId +
+ * changeIndex (notatki `applied` / `rejected` / `edited` z changeIndex). Gdy notatka `applied`
+ * nie ma toolCallId (starszy backend) — trafia do ostatniej karty, która ma pozycję o tym indeksie
+ * bez decyzji.
+ */
+export function decideChanges(messages: ChatMessage[]): ChangeDecisions {
+  const byItem = new Map<string, ChangeDecision>();
+  const consumedSystemIds = new Set<string>();
+  const cards: { id: string; indexes: number[] }[] = [];
+  for (const m of messages) {
+    if (m.role === "system") {
+      const note = systemNoteOf(m);
+      if (!note || note.changeIndex == null || cards.length === 0) continue;
+      let cardId = note.toolCallId && cards.some((c) => c.id === note.toolCallId) ? note.toolCallId : null;
+      if (!cardId) {
+        for (let i = cards.length - 1; i >= 0; i--) {
+          const c = cards[i];
+          if (c.indexes.includes(note.changeIndex) && !byItem.has(changeKey(c.id, note.changeIndex))) {
+            cardId = c.id;
+            break;
+          }
+        }
+      }
+      if (!cardId) continue;
+      const key = changeKey(cardId, note.changeIndex);
+      if (note.kind === "rejected") byItem.set(key, { status: "rejected" });
+      else byItem.set(key, { status: "applied", eventId: note.eventId, edited: note.kind === "edited" });
+      consumedSystemIds.add(m.id);
+      continue;
+    }
+    if (m.role !== "assistant") continue;
+    for (const p of m.parts || []) {
+      if (!isToolPart(p)) continue;
+      const out = changesOf(p);
+      if (out) cards.push({ id: p.toolCallId, indexes: out.changes.map((c) => c.index) });
+    }
+  }
+  return { byItem, consumedSystemIds };
+}
+
 /** Zakres do podświetlenia na siatce kalendarza (karta propozycji / opcja ze slotem). */
 export interface PreviewRange {
   startAt: string;
@@ -326,6 +408,10 @@ export interface PreviewRange {
   /** Tytuł „widmowego” wydarzenia (domyślnie „Propozycja”). */
   title?: string;
   type?: string;
+  /** Karta zmian: poprzedni termin (rysowany szaro, „skąd”); `startAt/endAt` to termin docelowy. */
+  before?: { startAt: string; endAt: string; allDay?: boolean; eventId?: number | null };
+  /** Karta zmian: id modyfikowanego wydarzenia (siatka wycisza jego oryginał). */
+  eventId?: number | null;
 }
 
 /** Chip z luką do uzupełnienia („[technik]”, „…”) → wstaw do composera zamiast wysyłać. */

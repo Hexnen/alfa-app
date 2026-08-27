@@ -622,3 +622,13 @@
     transform: none;
   }
 }
+
+/* Widok Lista na wąskich ekranach: tabela nie może rozpychać strony w poziomie */
+.alfa-calendar .fc-list-table {
+  table-layout: fixed;
+  width: 100%;
+}
+.alfa-calendar .fc-list-event-title,
+.alfa-calendar .fc-list-event-time {
+  overflow-wrap: anywhere;
+}

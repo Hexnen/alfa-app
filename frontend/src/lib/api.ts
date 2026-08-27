@@ -2646,13 +2646,100 @@ export interface AssistantConflict {
   technicians?: string[] | { id: number; name: string }[];
 }
 
+// --- Modyfikacje istniejących wydarzeń (`propose_changes`) — kontrakt: ASSISTANT_UPDATES_CONTRACT.md ---
+
+/** Skrót wydarzenia w wyniku `propose_changes` (before/after). Pola opcjonalne — kodujemy defensywnie. */
+export interface AssistantBriefEvent {
+  id?: number;
+  title?: string;
+  type?: string;
+  startAt?: string;
+  endAt?: string;
+  allDay?: boolean;
+  status?: string;
+  objectId?: number | null;
+  objectName?: string | null;
+  location?: string | null;
+  description?: string | null;
+  technicianIds?: number[];
+  /** Backend: `technicians: {id,name}[]`; starsze kształty: `technicianNames`. */
+  technicians?: { id: number; name: string }[];
+  technicianNames?: string[];
+  seriesId?: number | null;
+  deleted?: boolean;
+  deletedAt?: string | null;
+}
+
+export type AssistantChangeKind = "update" | "status" | "cancel" | "delete" | "restore" | "create";
+
+export interface AssistantChangePatch {
+  title?: string;
+  type?: string;
+  startAt?: string;
+  endAt?: string;
+  allDay?: boolean;
+  objectId?: number | null;
+  location?: string | null;
+  description?: string | null;
+  technicianIds?: number[];
+  status?: string;
+}
+
+/** Surowa zmiana (wejście narzędzia `propose_changes`; po edycji — override do apply-changes). */
+export type AssistantChange =
+  | { kind: "update"; eventId: number; patch: AssistantChangePatch; reason?: string }
+  | { kind: "status"; eventId: number; status: "confirmed" | "done" | "cancelled"; actualStartAt?: string; actualEndAt?: string; note?: string; reason?: string }
+  | { kind: "cancel"; eventId: number; reason?: string }
+  | { kind: "delete"; eventId: number; reason?: string }
+  | { kind: "restore"; eventId: number }
+  | { kind: "create"; event: CalendarEventInput & { objectName?: string | null; technicianNames?: string[] }; reason?: string };
+
+export interface AssistantChangeDiff {
+  field: string;
+  from?: string | number | boolean | null;
+  to?: string | number | boolean | null;
+}
+
+/** Zmiana po walidacji backendu (output `propose_changes.changes[]`). */
+export interface AssistantResolvedChange {
+  index: number;
+  kind: AssistantChangeKind;
+  eventId?: number | null;
+  before?: AssistantBriefEvent | null;
+  after?: AssistantBriefEvent | null;
+  diff?: AssistantChangeDiff[];
+  summary?: string;
+  warnings?: string[];
+  error?: string | null;
+  /** Surowa zmiana (jeśli backend ją odsyła — do „Edytuj”/override). */
+  change?: AssistantChange;
+  reason?: string;
+  note?: string;
+}
+
+export interface AssistantChangesOutput {
+  needsConfirmation?: boolean;
+  changes?: AssistantResolvedChange[];
+  note?: string;
+  error?: string;
+}
+
+export interface AssistantApplyResult {
+  index: number;
+  ok: boolean;
+  event?: CalendarEvent;
+  error?: string;
+}
+
 /** Decyzja użytkownika wobec karty propozycji (POST /assistant/chats/:id/system). */
 export interface AssistantSystemNote {
-  kind: "saved" | "rejected" | "edited";
+  kind: "saved" | "rejected" | "edited" | "applied";
   eventId?: number;
   title?: string;
   /** toolCallId karty propozycji — jednoznaczne dopasowanie decyzji do karty. */
   toolCallId?: string;
+  /** Indeks pozycji w karcie zmian (`propose_changes`). */
+  changeIndex?: number;
   /** Gotowy tekst (fallback dla starszego backendu; nowy buduje go sam). */
   text?: string;
 }
@@ -2660,7 +2747,9 @@ export interface AssistantSystemNote {
 /** Tekst notatki systemowej w formacie, który rozumie także starszy backend/front. */
 export function systemNoteText(n: AssistantSystemNote): string {
   const t = n.title?.trim() ?? "";
-  if (n.kind === "rejected") return `Użytkownik odrzucił propozycję${t ? `: ${t}` : ""}`;
+  if (n.kind === "rejected") return n.changeIndex != null ? `Użytkownik odrzucił zmianę${t ? `: ${t}` : ""}` : `Użytkownik odrzucił propozycję${t ? `: ${t}` : ""}`;
+  if (n.kind === "applied") return `Zmiana zastosowana${n.eventId != null ? ` (#${n.eventId})` : ""}${t ? `: ${t}` : ""}`;
+  if (n.kind === "edited" && n.changeIndex != null) return `Wydarzenie ${n.eventId != null ? `#${n.eventId} ` : ""}zmienione po edycji${t ? `: ${t}` : ""}`;
   const ev = n.eventId != null ? `#${n.eventId} ` : "";
   return `Wydarzenie ${ev}zapisane${n.kind === "edited" ? " po edycji" : ""}${t ? `: ${t}` : ""}`;
 }
@@ -2728,6 +2817,18 @@ export const assistantApi = {
       body: JSON.stringify({ ...note, text: note.text ?? systemNoteText(note) }),
     });
   },
+  /**
+   * Zatwierdzenie pozycji z karty `propose_changes` — backend wykonuje zmiany przez logikę
+   * kalendarza (każda w osobnej transakcji) i dopisuje notatki `data-system {kind:"applied"}`.
+   */
+  async applyChanges(chatId: number, toolCallId: string, indexes: number[], overrides?: Record<number, AssistantChange>): Promise<AssistantApplyResult[]> {
+    const r = await assistantRequest<{ results?: AssistantApplyResult[] } | AssistantApplyResult[]>(`/assistant/apply-changes`, {
+      method: "POST",
+      body: JSON.stringify({ chatId, toolCallId, indexes, ...(overrides && Object.keys(overrides).length ? { overrides } : {}) }),
+    });
+    const results = Array.isArray(r) ? r : Array.isArray(r?.results) ? r.results : [];
+    return results.map((x, i) => ({ index: typeof x?.index === "number" ? x.index : indexes[i], ok: Boolean(x?.ok), event: x?.event, error: x?.error }));
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -2769,6 +2870,10 @@ export interface AssistantSettingsValues {
   maxHorizonDays: number;
   // Narzędzia
   disabledTools: string[];
+  /** Modyfikowanie istniejących wydarzeń (`propose_changes`, `get_event`). Domyślnie true. */
+  allowModifications: boolean;
+  /** Status nadawany wydarzeniom z „Podsumowania dnia” (domyślnie done). */
+  daySummaryDefaultStatus: "done" | "confirmed";
   // Dostęp i limity
   access: AssistantAccess;
   retentionDays: number;

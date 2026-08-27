@@ -26,6 +26,15 @@ export interface LogActivityInput {
   oldValue?: string | number | boolean | null;
   newValue?: string | number | boolean | null;
   summary?: string | null;
+  /** Dopisek na końcu summary (np. „(przez asystenta)”) — czym wykonano zmianę. */
+  summarySuffix?: string | null;
+}
+
+/** summary + dopisek (pusty dopisek = bez zmian; brak summary → sam dopisek). */
+function withSuffix(summary: string | null | undefined, suffix: string | null | undefined): string | null {
+  const sfx = (suffix ?? "").trim();
+  if (!sfx) return summary ?? null;
+  return summary ? `${summary} ${sfx}` : sfx;
 }
 
 /** Etykieta użytkownika do snapshotu (odporna na późniejsze usunięcie konta). */
@@ -55,7 +64,7 @@ export function logActivity(dbx: DbOrTx, input: LogActivityInput): number {
       field: input.field ?? null,
       oldValue: toText(input.oldValue),
       newValue: toText(input.newValue),
-      summary: input.summary ?? null,
+      summary: withSuffix(input.summary, input.summarySuffix),
     })
     .returning({ id: schema.activityLog.id })
     .get();
@@ -83,6 +92,8 @@ export interface LogFieldDiffsInput<T extends Record<string, unknown>> {
   before: T;
   after: T;
   fields: (DiffField<T> | (keyof T & string))[];
+  /** Dopisek do summary każdego wpisu (patrz LogActivityInput.summarySuffix). */
+  summarySuffix?: string | null;
 }
 
 function camelToSnake(s: string): string {
@@ -129,6 +140,7 @@ export function logFieldDiffs<T extends Record<string, unknown>>(
       oldValue: oldV,
       newValue: newV,
       summary,
+      summarySuffix: input.summarySuffix,
     });
     changed.push(field);
   }

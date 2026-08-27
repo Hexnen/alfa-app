@@ -5,6 +5,8 @@ import {
   CalendarClock,
   CalendarSearch,
   Check,
+  CalendarCog,
+  FileSearch,
   ChevronDown,
   ChevronRight,
   Loader2,
@@ -23,10 +25,12 @@ import { cn } from "@/lib/utils";
 import { Prose } from "./Prose";
 import { ProposalCard, type ProposalCardProps } from "./ProposalCard";
 import { ChoiceCard, type ChoiceCardProps } from "./ChoiceCard";
+import { ChangeCard, type ChangeCardProps } from "./ChangeCard";
 import { ObjectPeek } from "./ObjectPeek";
 import { fmtRange } from "@/lib/calendar-labels";
 import {
   ERROR_HINTS,
+  changesOf,
   choiceOf,
   conflictsBefore,
   errorOf,
@@ -39,6 +43,7 @@ import {
   proposalOf,
   systemNoteOf,
   toolName,
+  type ChangeDecisions,
   type ChatMessage,
   type ChoiceState,
   type ProposalDecisions,
@@ -119,6 +124,23 @@ const TOOL_LABELS: Record<string, ToolLabel> = {
     icon: Sparkles,
     running: () => "Przygotowuję propozycję…",
     done: () => "Propozycja gotowa",
+  },
+  get_event: {
+    icon: FileSearch,
+    running: (i) => `Pobieram wydarzenie${typeof i.eventId === "number" ? ` #${i.eventId}` : ""}…`,
+    done: (o) => {
+      const ev = asRecord(o.event);
+      const t = str(ev.title) || str(o.title);
+      return t ? `Wydarzenie: ${t}` : "Pobrano wydarzenie";
+    },
+  },
+  propose_changes: {
+    icon: CalendarCog,
+    running: () => "Przygotowuję zmiany…",
+    done: (o) => {
+      const n = arrLen(o.changes);
+      return n === 0 ? "Brak zmian do zatwierdzenia" : `Zmiany gotowe: ${plural(n, "pozycja", "pozycje", "pozycji")}`;
+    },
   },
 };
 
@@ -267,6 +289,11 @@ export interface MessageBubbleProps {
   streaming?: boolean;
   /** Decyzje użytkownika per toolCallId propozycji + skonsumowane chipy systemowe. */
   decisions: ProposalDecisions;
+  /** Decyzje per pozycja kart zmian (`propose_changes`). */
+  changeDecisions: ChangeDecisions;
+  onApplyChanges: ChangeCardProps["onApply"];
+  onEditChange: ChangeCardProps["onEdit"];
+  onRejectChange: ChangeCardProps["onReject"];
   onApprove: ProposalCardProps["onApprove"];
   onEdit: ProposalCardProps["onEdit"];
   onReject: ProposalCardProps["onReject"];
@@ -290,6 +317,10 @@ export const MessageBubble = memo(function MessageBubble({
   message: m,
   streaming = false,
   decisions,
+  changeDecisions,
+  onApplyChanges,
+  onEditChange,
+  onRejectChange,
   onApprove,
   onEdit,
   onReject,
@@ -310,7 +341,7 @@ export const MessageBubble = memo(function MessageBubble({
   // Wiadomości systemowe („Wydarzenie #12 zapisane”) — dyskretny separator;
   // ukryty, gdy decyzję widać już na karcie propozycji.
   if (m.role === "system") {
-    if (decisions.consumedSystemIds.has(m.id)) return null;
+    if (decisions.consumedSystemIds.has(m.id) || changeDecisions.consumedSystemIds.has(m.id)) return null;
     const note = systemNoteOf(m);
     const t = note?.text?.trim() ?? "";
     if (!t) return null;
@@ -409,6 +440,24 @@ export const MessageBubble = memo(function MessageBubble({
                     onApprove={onApprove}
                     onEdit={onEdit}
                     onReject={onReject}
+                    onOpenEvent={onOpenEvent}
+                    onPreview={onPreview}
+                  />
+                );
+              }
+              const chg = changesOf(p);
+              if (chg && chg.needsConfirmation !== false) {
+                return (
+                  <ChangeCard
+                    key={p.toolCallId || i}
+                    toolCallId={p.toolCallId}
+                    changes={chg.changes}
+                    note={chg.note}
+                    decisions={changeDecisions.byItem}
+                    busy={busy || bulk === "running"}
+                    onApply={onApplyChanges}
+                    onEdit={onEditChange}
+                    onReject={onRejectChange}
                     onOpenEvent={onOpenEvent}
                     onPreview={onPreview}
                   />

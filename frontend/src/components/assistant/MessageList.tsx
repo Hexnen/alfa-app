@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Loader2, Sparkles } from "lucide-react";
+import { ClipboardList, Loader2, Sparkles } from "lucide-react";
 import { MessageBubble, type MessageBubbleProps } from "./MessageBubble";
-import { decideChoices, decideProposals, isTemplateSuggestion, textOf, toolCallCount, type ChatMessage } from "./parts";
+import { decideChanges, decideChoices, decideProposals, isTemplateSuggestion, textOf, toolCallCount, type ChatMessage } from "./parts";
 
 /** Fallback, gdy backend nie zwróci persony (starsza wersja / błąd statusu). */
 const DEFAULT_SUGGESTIONS = [
@@ -9,6 +9,11 @@ const DEFAULT_SUGGESTIONS = [
   "Co ma Wojtek w przyszłym tygodniu?",
   "Dodaj urlop Dominika od poniedziałku do piątku",
 ];
+/** Chip trybu „Podsumowanie dnia” — szablon do composera (luka zaznaczana do nadpisania). */
+export const DAY_SUMMARY_LABEL = "Podsumuj dzisiejszy dzień";
+export const DAY_SUMMARY_TEMPLATE = "Podsumowanie dnia: [co się dziś wydarzyło — kto co skończył, co przełożone, co dodatkowo]";
+const isDaySummary = (s: string) => /podsumowanie dnia|podsumuj dzisiejszy/i.test(s);
+
 const DEFAULT_INTRO =
   "Opisz wydarzenie po polsku — sprawdzę obiekt, techników i konflikty, a potem zaproponuję wpis do zatwierdzenia.";
 
@@ -19,7 +24,7 @@ export interface AssistantPersona {
   suggestions: string[];
 }
 
-export interface MessageListProps extends Omit<MessageBubbleProps, "message" | "streaming" | "decisions" | "choices" | "isLast"> {
+export interface MessageListProps extends Omit<MessageBubbleProps, "message" | "streaming" | "decisions" | "changeDecisions" | "choices" | "isLast"> {
   messages: ChatMessage[];
   /** Status useChat: ready | submitted | streaming | error. */
   status: string;
@@ -61,6 +66,9 @@ export function MessageList({ messages, status, onSuggestion, onInsertSuggestion
   const greeting = persona?.greeting?.trim() || DEFAULT_INTRO;
   const suggestions = persona?.suggestions?.length ? persona.suggestions : DEFAULT_SUGGESTIONS;
   const decisions = useMemo(() => decideProposals(messages), [messages]);
+  const changeDecisions = useMemo(() => decideChanges(messages), [messages]);
+  // Chip „Podsumuj dzisiejszy dzień” zawsze obecny — chyba że persona ma już własny wariant.
+  const hasDaySummary = suggestions.some(isDaySummary);
   const choices = useMemo(() => decideChoices(messages), [messages]);
   const streaming = status === "streaming";
   const submitted = status === "submitted";
@@ -86,8 +94,9 @@ export function MessageList({ messages, status, onSuggestion, onInsertSuggestion
     if ((was === "streaming" || was === "submitted") && status === "ready" && lastAssistant) {
       const t = textOf(lastAssistant.parts).trim();
       const cards = (lastAssistant.parts || []).filter((p) => p.type === "tool-propose_event").length;
+      const changes = (lastAssistant.parts || []).filter((p) => p.type === "tool-propose_changes").length;
       const q = (lastAssistant.parts || []).filter((p) => p.type === "tool-ask_choice").length;
-      const extra = [cards ? `${cards === 1 ? "propozycja do zatwierdzenia" : `${cards} propozycje do zatwierdzenia`}` : "", q ? "pytanie z opcjami" : ""].filter(Boolean).join(", ");
+      const extra = [cards ? `${cards === 1 ? "propozycja do zatwierdzenia" : `${cards} propozycje do zatwierdzenia`}` : "", changes ? "zmiany do zatwierdzenia" : "", q ? "pytanie z opcjami" : ""].filter(Boolean).join(", ");
       setAnnounce([t.slice(0, 400), extra].filter(Boolean).join(". ") || "Asystent odpowiedział.");
     } else if (status === "error") {
       setAnnounce("Błąd odpowiedzi asystenta.");
@@ -122,20 +131,37 @@ export function MessageList({ messages, status, onSuggestion, onInsertSuggestion
           <div className="flex w-full flex-col gap-1.5" aria-label="Sugestie">
             {suggestions.map((s) => {
               const tpl = isTemplateSuggestion(s);
+              const day = isDaySummary(s);
               return (
                 <button
                   key={s}
                   type="button"
                   disabled={!configured}
-                  onClick={() => (tpl ? onInsertSuggestion(s) : onSuggestion(s))}
-                  title={tpl ? "Wstawia szablon do pola wiadomości" : undefined}
+                  onClick={() => (day ? onInsertSuggestion(tpl ? s : DAY_SUMMARY_TEMPLATE) : tpl ? onInsertSuggestion(s) : onSuggestion(s))}
+                  title={tpl || day ? "Wstawia szablon do pola wiadomości" : undefined}
                   className="min-h-10 rounded-full border bg-card px-3 py-1.5 text-left text-xs transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50 lg:min-h-0"
+                  data-testid={day ? "suggestion-day-summary" : undefined}
                 >
+                  {day && <ClipboardList className="mr-1 inline h-3.5 w-3.5 align-[-2px] text-primary" aria-hidden />}
                   {s}
-                  {tpl && <span className="ml-1 text-muted-foreground">(uzupełnij)</span>}
+                  {(tpl || day) && <span className="ml-1 text-muted-foreground">(uzupełnij)</span>}
                 </button>
               );
             })}
+            {!hasDaySummary && (
+              <button
+                type="button"
+                disabled={!configured}
+                onClick={() => onInsertSuggestion(DAY_SUMMARY_TEMPLATE)}
+                title="Wstawia szablon do pola wiadomości — opisz, co się dziś wydarzyło, a asystent przygotuje zmiany w kalendarzu"
+                className="min-h-10 rounded-full border border-dashed border-primary/50 bg-primary/5 px-3 py-1.5 text-left text-xs transition-colors hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-50 lg:min-h-0"
+                data-testid="suggestion-day-summary"
+              >
+                <ClipboardList className="mr-1 inline h-3.5 w-3.5 align-[-2px] text-primary" aria-hidden />
+                {DAY_SUMMARY_LABEL}
+                <span className="ml-1 text-muted-foreground">(uzupełnij)</span>
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -145,6 +171,7 @@ export function MessageList({ messages, status, onSuggestion, onInsertSuggestion
           message={m}
           streaming={streaming && m === last && m.role === "assistant"}
           decisions={decisions}
+          changeDecisions={changeDecisions}
           choices={choices}
           busy={busy || streaming || submitted}
           isLast={m === last}

@@ -58,7 +58,7 @@ export const SECTION_FIELDS: Record<string, AssistantSettingsField[]> = {
   generowanie: ["temperature", "maxOutputTokens", "maxSteps", "historyTokenBudget", "reasoningEffort"],
   prompt: ["customInstructions", "personaName", "greeting", "suggestions"],
   reguly: ["workStart", "workEnd", "defaultDurationHours", "allDayTypes", "defaultStatus", "allowRecurrence", "maxHorizonDays"],
-  narzedzia: ["disabledTools"],
+  narzedzia: ["disabledTools", "allowModifications", "daySummaryDefaultStatus"],
   dostep: ["access", "retentionDays", "dailyTurnLimit"],
 };
 

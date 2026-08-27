@@ -117,7 +117,7 @@ import {
   type CalendarEventPrefill,
 } from "@/components/CalendarEventDialog";
 import { CalendarBoard, isOverdue, type BoardGroupBy } from "@/components/CalendarBoard";
-import { AssistantDrawer, type AssistantPreview } from "@/components/assistant/AssistantDrawer";
+import { AssistantDrawer, type AssistantEventChangeKind, type AssistantPreview } from "@/components/assistant/AssistantDrawer";
 import { cn } from "@/lib/utils";
 import "./Calendar.css";
 
@@ -533,12 +533,34 @@ export function Calendar() {
         if (conflict.has(Number(ev.id))) ev.classNames = [...(ev.classNames as string[]), "fc-event-conflict"];
       }
     }
+    // Karta zmian: oryginał modyfikowanego wydarzenia wyciszony, poprzedni termin jako szare widmo.
+    if (g.eventId != null) {
+      for (const ev of base) {
+        if (Number(ev.id) === g.eventId) ev.classNames = [...(ev.classNames as string[]), "fc-event-changing"];
+      }
+    }
     // Siatka godzinowa: event tła rozciągnięty na slot; miesiąc/lista: zwykły (nieedytowalny)
     // wpis z ramką przerywaną — FullCalendar nie rysuje timed background-eventów w dayGrid.
     const timeGrid = view.startsWith("timeGrid");
+    if (g.before) {
+      base.push({
+        id: "assistant-ghost-before",
+        title: `Było: ${g.title ?? ""}`.trim(),
+        start: g.before.startAt,
+        end: g.before.endAt,
+        allDay: Boolean(g.before.allDay),
+        display: timeGrid ? "background" : "block",
+        classNames: ["fc-event-ghost-before"],
+        editable: false,
+        startEditable: false,
+        durationEditable: false,
+        overlap: true,
+        extendedProps: { ghost: true },
+      });
+    }
     base.push({
       id: "assistant-ghost",
-      title: g.type === "slot" ? "Wolny termin" : `Propozycja: ${g.title ?? ""}`.trim(),
+      title: g.type === "slot" ? "Wolny termin" : `${g.before ? "Nowy termin" : "Propozycja"}: ${g.title ?? ""}`.trim(),
       start: g.startAt,
       end: g.endAt,
       allDay: Boolean(g.allDay),
@@ -1041,17 +1063,35 @@ export function Calendar() {
   /** Callback z karty propozycji „Edytuj” — wołany po zapisie z dialogu (zamiast Zatwierdź). */
   const assistantSavedRef = useRef<((ev: CalendarEvent) => void) | null>(null);
   const closeAssistant = useCallback(() => setAssistantOpen(false), []);
-  const onAssistantEventCreated = useCallback(
-    (ev: CalendarEvent) => {
-      announce(`Zapisano „${ev.title}”`);
+  /** Zapis/zmiana z asystenta (propozycja, karta zmian, dialog) → toast + odświeżenie siatki. */
+  const onAssistantEventsChanged = useCallback(
+    (ev: CalendarEvent | null, kind: AssistantEventChangeKind, title?: string) => {
+      const VERB: Record<AssistantEventChangeKind, string> = {
+        created: "Zapisano",
+        create: "Dodano",
+        update: "Zmieniono",
+        status: "Zmieniono status",
+        cancel: "Anulowano",
+        delete: "Usunięto",
+        restore: "Przywrócono",
+      };
+      const name = ev?.title ?? title ?? "wydarzenie";
+      if (!ev && kind === "update" && title && !ev) {
+        // Sygnał błędu z drawera (np. nie udało się wczytać wydarzenia do edycji).
+        notify({ kind: "error", message: title });
+        return;
+      }
+      announce(`${VERB[kind] ?? "Zmieniono"} „${name}”`);
       notify({
         kind: "info",
         message: (
           <span>
-            Zapisano <strong>{ev.title}</strong> — {fmtRange(ev.startAt, ev.endAt, ev.allDay)}
+            {VERB[kind] ?? "Zmieniono"} <strong>{name}</strong>
+            {ev && kind !== "delete" ? <> — {fmtRange(ev.startAt, ev.endAt, ev.allDay)}</> : null}
+            {kind !== "created" && <span className="text-muted-foreground"> (przez asystenta)</span>}
           </span>
         ),
-        action: { label: "Otwórz", icon: ExternalLink, onClick: () => void openEventById(ev.id) },
+        action: ev && kind !== "delete" ? { label: "Otwórz", icon: ExternalLink, onClick: () => void openEventById(ev.id) } : undefined,
         duration: 8000,
       });
       void loadEvents();
@@ -1079,6 +1119,14 @@ export function Calendar() {
       openCreate(prefill);
     },
     [openCreate]
+  );
+  /** Karta zmian „Edytuj” → dialog edycji istniejącego wydarzenia (scalonego z patchem asystenta). */
+  const onAssistantEditEvent = useCallback(
+    (ev: CalendarEvent, onSaved: (saved: CalendarEvent) => void) => {
+      assistantSavedRef.current = onSaved;
+      openEvent(ev);
+    },
+    [openEvent]
   );
   const [activity, setActivity] = useState<ActivityEntry[]>([]);
   const [activityLoading, setActivityLoading] = useState(false);
@@ -1620,8 +1668,9 @@ export function Calendar() {
           <AssistantDrawer
             onClose={closeAssistant}
             onPreviewRange={onAssistantPreview}
-            onEventCreated={onAssistantEventCreated}
+            onEventsChanged={onAssistantEventsChanged}
             onEditProposal={onAssistantEditProposal}
+            onEditEvent={onAssistantEditEvent}
             onOpenEvent={(id) => void openEventById(id)}
           />
         )}

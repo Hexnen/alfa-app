@@ -2,48 +2,60 @@
  * Narzędzia asystenta kalendarza (Vercel AI SDK `tool`). Wzorzec: roleplay/src/lib/roleplay/tools.ts.
  * Każde `execute` zwraca obiekt albo `{ error }` — nigdy nie rzuca (model dostaje
  * czytelny komunikat i może poprawić wywołanie). ŻADNE narzędzie nie zapisuje do bazy:
- * propose_event tylko waliduje i zwraca kartę do zatwierdzenia na froncie.
+ * propose_event / propose_changes tylko walidują i zwracają karty do zatwierdzenia na froncie.
  * Opisy narzędzi są krótkie — reguły użycia są w prompcie (calendarPrompt.ts).
  * Pola tekstowe z bazy są przycinane (`clip`) — wynik narzędzia to dane, nie instrukcje.
+ * Schematy zmian (Change) i ich rozwiązywanie: src/lib/ai/calendarChanges.ts (wspólne z apply-changes).
  */
 import { tool } from "ai";
 import { z } from "zod";
-import { and, asc, gt, inArray, isNull, like, lt, or, sql } from "drizzle-orm";
+import { and, asc, gt, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { db, schema } from "../../db/index.js";
-import {
-  CALENDAR_EVENT_STATUSES,
-  CALENDAR_EVENT_TYPES,
-  CALENDAR_SERIES_FREQS,
-  type User,
-} from "../../db/schema.js";
-import { ApiError, loadEvents, parseInput, type ParsedInput } from "../../routes/calendar.js";
-import { conflictEventIds, listActiveTechnicians, techName } from "../calendar-queries.js";
+import { CALENDAR_SERIES_FREQS, type User } from "../../db/schema.js";
+import { ApiError } from "../calendar-labels.js";
+import { parseInput, type ParsedInput } from "../calendar-mutations.js";
+import { conflictEventIds, listActiveTechnicians, loadEvent, loadEvents, techName } from "../calendar-queries.js";
 import { ASSISTANT_DEFAULTS, type AssistantSettingsValues } from "./assistantConfig.js";
+import {
+  CHANGES_MAX,
+  DATE_OR_DATETIME,
+  PROPOSAL_TITLE_MAX,
+  briefOfEvent,
+  fillEventDefaults,
+  resolveChange,
+  zChange,
+  zDate,
+  zDateOrDt,
+  zEventInput,
+  zId,
+  zIds,
+  type ResolvedChange,
+} from "./calendarChanges.js";
 import { addDays, computeFreeSlots, loadBusyIntervals, localNow } from "./freeSlots.js";
+
+export { PROPOSAL_TITLE_MAX };
 
 /** Podzbiór konfiguracji admina używany przez narzędzia (wyłączone narzędzia, defaults propozycji, horyzont). */
 export type ToolsConfig = Pick<
   AssistantSettingsValues,
-  "disabledTools" | "workStart" | "workEnd" | "defaultDurationHours" | "allDayTypes" | "defaultStatus" | "allowRecurrence" | "maxHorizonDays"
+  | "disabledTools"
+  | "workStart"
+  | "workEnd"
+  | "defaultDurationHours"
+  | "allDayTypes"
+  | "defaultStatus"
+  | "allowRecurrence"
+  | "maxHorizonDays"
+  | "allowModifications"
+  | "daySummaryDefaultStatus"
 >;
 
 const DAY_MS = 86_400_000;
 /** Maks. znaków pola tekstowego z bazy w wyniku narzędzia. */
 const CLIP = 120;
-/** Maks. długość tytułu propozycji (karta + kalendarz; parseInput dopuszcza 300). */
-export const PROPOSAL_TITLE_MAX = 80;
 /** Limit wyników list_events (+ flaga truncated). */
 const LIST_EVENTS_LIMIT = 40;
-
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-const DATE_OR_DT_RE = /^\d{4}-\d{2}-\d{2}(T([01]\d|2[0-3]):[0-5]\d)?$/;
 const HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
-const DATE_OR_DATETIME = "YYYY-MM-DD lub YYYY-MM-DDTHH:MM";
-
-const zDate = z.string().regex(DATE_RE, "oczekiwano YYYY-MM-DD");
-const zDateOrDt = z.string().regex(DATE_OR_DT_RE, `oczekiwano ${DATE_OR_DATETIME}`);
-const zId = z.number().int().positive();
-const zIds = z.array(zId).max(20);
 
 /** Przycina tekst z bazy do CLIP znaków (dane, nie instrukcje; oszczędność kontekstu). */
 function clip(s: string | null | undefined, max = CLIP): string | null {
@@ -75,17 +87,6 @@ function spanDays(from: string, to: string): number {
   return Math.ceil((b - a) / DAY_MS);
 }
 
-/** Dodaje godziny do lokalnego YYYY-MM-DDTHH:MM (bez stref — czas lokalny kalendarza). */
-function addHours(dt: string, hours: number): string {
-  const [d, t] = dt.split("T");
-  const [h, m] = t.split(":").map(Number);
-  const total = h * 60 + m + Math.round(hours * 60);
-  const dayShift = Math.floor(total / (24 * 60));
-  const mins = ((total % (24 * 60)) + 24 * 60) % (24 * 60);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${addDays(d, dayShift)}T${pad(Math.floor(mins / 60))}:${pad(mins % 60)}`;
-}
-
 /** Skrócony event dla modelu (bez metadanych audytu — oszczędność kontekstu). */
 function briefEvent(e: ReturnType<typeof loadEvents>[number]) {
   return {
@@ -100,6 +101,7 @@ function briefEvent(e: ReturnType<typeof loadEvents>[number]) {
     objectName: clip(e.objectName),
     location: clip(e.location),
     technicians: e.technicians.map((t) => ({ id: t.id, name: techName(t) })),
+    ...(e.seriesId != null ? { seriesId: e.seriesId } : {}),
   };
 }
 
@@ -121,6 +123,8 @@ export interface ChoiceOption {
   /** Termin slotu (YYYY-MM-DD[THH:MM]) — front podświetla na siatce. */
   startAt?: string;
   endAt?: string;
+  /** Opcja = istniejące wydarzenie (doprecyzowanie przy zmianach) — front pokaże podgląd. */
+  eventId?: number;
 }
 
 /** Propozycja wydarzenia zwracana przez propose_event — kształt wejścia POST /calendar/events + etykiety do karty. */
@@ -128,7 +132,8 @@ export type EventProposal = ParsedInput & { objectName: string | null; technicia
 
 /**
  * Buduje narzędzia wg konfiguracji: wyłączone (disabledTools) nie trafiają do wyniku;
- * propose_event zawsze jest (wymagane). Reguły kalendarza działają jako defaults.
+ * propose_event zawsze jest (wymagane); propose_changes tylko przy allowModifications.
+ * Reguły kalendarza działają jako defaults.
  */
 export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {}) {
   const cfg: ToolsConfig = { ...ASSISTANT_DEFAULTS, ...config };
@@ -142,18 +147,18 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
       execute: async ({ query }) => {
         const q = likePattern(query);
         if (q === "%%") return { error: "Pusty fragment nazwy" };
-        const rows = db
-          .select({
-            id: schema.objects.id,
-            name: schema.objects.name,
-            address: schema.objects.address,
-            city: schema.objects.city,
-          })
-          .from(schema.objects)
+        const sel = () => db.select({ id: schema.objects.id, name: schema.objects.name, address: schema.objects.address, city: schema.objects.city }).from(schema.objects);
+        let rows = sel()
           .where(or(likeEsc(schema.objects.name, q), likeEsc(schema.objects.address, q), likeEsc(schema.objects.city, q)))
           .orderBy(asc(schema.objects.name), asc(schema.objects.id))
           .limit(60)
           .all();
+        // Fallback dla odmiany („u Testowego 42” vs „Obiekt Testowy 42”): każdy token po rdzeniu (bez końcówki ≤3 znaki) w nazwie+adresie+mieście.
+        if (rows.length === 0) {
+          const stems = query.trim().split(/\s+/).filter(Boolean).map((t) => (t.length >= 5 ? t.slice(0, Math.max(4, t.length - 3)) : t));
+          const hay = sql`coalesce(${schema.objects.name}, '') || ' ' || coalesce(${schema.objects.address}, '') || ' ' || coalesce(${schema.objects.city}, '')`;
+          if (stems.length) rows = sel().where(and(...stems.map((t) => likeEsc(hay, likePattern(t))))).orderBy(asc(schema.objects.name), asc(schema.objects.id)).limit(60).all();
+        }
         // Dedup po (name, address, city): duplikaty w bazie to jeden wybór; id = najstarszy, reszta w duplicateIds.
         const norm = (s: string | null) => (s ?? "").trim().toLowerCase();
         const groups = new Map<string, { id: number; name: string; address: string | null; city: string | null; duplicateIds: number[] }>();
@@ -239,18 +244,39 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
       },
     }),
 
+    get_event: tool({
+      description: "Pełne dane jednego wydarzenia po id (opis, technicy, seria, czy usunięte) — do precyzyjnego dopasowania przed propose_changes.",
+      inputSchema: z.object({ eventId: zId.describe("Id z list_events") }),
+      execute: async ({ eventId }) => {
+        const e = loadEvent(db, eventId);
+        if (!e) return { error: `Wydarzenie #${eventId} nie istnieje — użyj list_events` };
+        const b = briefOfEvent(e);
+        return {
+          event: {
+            ...b,
+            description: clip(e.description, 600),
+            objectName: clip(e.objectName),
+            createdByLabel: e.createdByLabel,
+            updatedAt: e.updatedAt,
+            ...(e.series ? { series: { id: e.series.id, freq: e.series.freq, interval: e.series.interval } } : {}),
+          },
+        };
+      },
+    }),
+
     check_conflicts: tool({
       description: "Kolizje wskazanych techników z innymi wydarzeniami i urlopami w [startAt, endAt).",
       inputSchema: z.object({
         startAt: zDateOrDt.describe(DATE_OR_DATETIME),
         endAt: zDateOrDt.describe(`${DATE_OR_DATETIME} (exclusive)`),
         technicianIds: zIds.min(1),
+        excludeEventId: zId.optional().describe("Pomiń to wydarzenie (przy przesuwaniu istniejącego)"),
       }),
-      execute: async ({ startAt, endAt, technicianIds }) => {
+      execute: async ({ startAt, endAt, technicianIds, excludeEventId }) => {
         if (endAt <= startAt) return { error: "endAt musi być późniejszy niż startAt" };
         const missing = missingTechnicians(technicianIds);
         if (missing) return { error: missing };
-        const ids = conflictEventIds(db, { technicianIds, startAt, endAt });
+        const ids = conflictEventIds(db, { technicianIds, startAt, endAt, excludeId: excludeEventId ?? null });
         const conflicts = loadEvents(db, ids).map((e) => ({
           id: e.id,
           title: clip(e.title),
@@ -323,7 +349,7 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
 
     ask_choice: tool({
       description:
-        "JEDNO pytanie z 2–8 opcjami do kliknięcia (obiekt, technik, termin, typ). UI pokaże przyciski; odpowiedź przyjdzie jako wiadomość użytkownika. Kończy turę.",
+        "JEDNO pytanie z 2–8 opcjami do kliknięcia (obiekt, technik, termin, typ, wydarzenie). UI pokaże przyciski; odpowiedź przyjdzie jako wiadomość użytkownika. Kończy turę.",
       inputSchema: z.object({
         question: z.string().trim().min(1).max(300).describe("Krótkie pytanie, np. 'Który obiekt wybierasz?'"),
         options: z
@@ -336,6 +362,7 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
               technicianId: zId.optional().describe("Id technika, gdy opcja = technik"),
               startAt: zDateOrDt.optional().describe("Początek slotu, gdy opcja = termin — UI podświetli na siatce"),
               endAt: zDateOrDt.optional().describe("Koniec slotu (exclusive), gdy opcja = termin"),
+              eventId: zId.optional().describe("Id wydarzenia z list_events, gdy opcja = istniejące wydarzenie (doprecyzowanie zmian)"),
             })
           )
           .min(2)
@@ -354,18 +381,25 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
         const techIds = [...new Set(options.map((o) => o.technicianId).filter((x): x is number => x != null))];
         const missingTech = missingTechnicians(techIds);
         if (missingTech) return { error: missingTech };
+        const eventIds = [...new Set(options.map((o) => o.eventId).filter((x): x is number => x != null))];
+        if (eventIds.length) {
+          const known = db.select({ id: schema.calendarEvents.id }).from(schema.calendarEvents).where(inArray(schema.calendarEvents.id, eventIds)).all().map((r) => r.id);
+          const missing = eventIds.filter((id) => !known.includes(id));
+          if (missing.length) return { error: `Wydarzenie #${missing.join(", #")} nie istnieje — użyj id z wyniku list_events` };
+        }
         for (const o of options) {
           if ((o.startAt && !o.endAt) || (!o.startAt && o.endAt)) return { error: `Opcja „${o.label}”: podaj oba pola startAt i endAt` };
           if (o.startAt && o.endAt && o.endAt <= o.startAt) return { error: `Opcja „${o.label}”: endAt musi być późniejszy niż startAt` };
         }
         // Opcja „Inny termin / Inny technik / Inne…” ⇒ zawsze wolna odpowiedź.
-        const hasOther = options.some((o) => /^inn[aey]\b|^inne\b/i.test(o.label.trim()));
+        const hasOther = options.some((o) => /^inn[aey]\b|^inne\b|^żadn/i.test(o.label.trim()));
         const cleaned: ChoiceOption[] = options.map((o) => {
           const out: ChoiceOption = { label: o.label };
           if (o.value) out.value = o.value;
           if (o.hint) out.hint = o.hint;
           if (o.objectId != null) out.objectId = o.objectId;
           if (o.technicianId != null) out.technicianId = o.technicianId;
+          if (o.eventId != null) out.eventId = o.eventId;
           if (o.startAt && o.endAt) {
             out.startAt = o.startAt;
             out.endAt = o.endAt;
@@ -384,19 +418,8 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
 
     propose_event: tool({
       description:
-        "Karta propozycji wydarzenia do ZATWIERDZENIA przez użytkownika. NIE zapisuje. Jedno wywołanie = jedna karta; kilka wydarzeń = kilka wywołań w tym samym kroku. Przy {error} popraw i wywołaj ponownie.",
-      inputSchema: z.object({
-        type: z.enum(CALENDAR_EVENT_TYPES),
-        title: z.string().trim().max(PROPOSAL_TITLE_MAX).describe(`Krótki tytuł (maks. ${PROPOSAL_TITLE_MAX} znaków), np. 'Serwis — Magazyn Centralny'; urlop: może być pusty`),
-        startAt: zDateOrDt.describe(DATE_OR_DATETIME),
-        endAt: zDateOrDt.optional().describe(`${DATE_OR_DATETIME}; all-day: EXCLUSIVE (dzień po ostatnim). Brak → domyślny czas trwania z reguł.`),
-        allDay: z.boolean().optional().describe("Brak → wg reguł typów całodniowych"),
-        objectId: zId.optional().describe("Id z find_object"),
-        objectName: z.string().trim().max(200).optional().describe("Nazwa obiektu (do karty; gdy brak objectId)"),
-        location: z.string().trim().max(200).optional().describe("Lokalizacja tekstowa, gdy nie ma obiektu w bazie"),
-        description: z.string().trim().max(2000).optional(),
-        technicianIds: zIds.default([]),
-        status: z.enum(CALENDAR_EVENT_STATUSES).optional(),
+        "Karta propozycji NOWEGO wydarzenia do ZATWIERDZENIA przez użytkownika. NIE zapisuje. Jedno wywołanie = jedna karta; kilka wydarzeń = kilka wywołań w tym samym kroku. Przy {error} popraw i wywołaj ponownie.",
+      inputSchema: zEventInput.extend({
         allowPast: z.boolean().optional().describe("true TYLKO gdy użytkownik jawnie potwierdził termin w przeszłości"),
         recurrence: z
           .object({
@@ -408,17 +431,8 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
           .optional(),
       }),
       execute: async (input) => {
-        // Defaults z reguł kalendarza (admin): allDay wg typu, koniec = start + domyślny czas trwania
-        // (albo koniec dnia pracy, gdy start = początek dnia pracy), status domyślny, serie wg zgody.
-        const allDay = input.allDay ?? cfg.allDayTypes.includes(input.type);
-        let startAt = input.startAt;
-        let endAt = input.endAt;
-        if (!allDay && DATE_RE.test(startAt)) startAt = `${startAt}T${cfg.workStart}`;
-        if (!endAt) {
-          if (allDay) endAt = startAt.slice(0, 10);
-          else if (startAt.slice(11) === cfg.workStart) endAt = `${startAt.slice(0, 10)}T${cfg.workEnd}`;
-          else endAt = addHours(startAt, cfg.defaultDurationHours);
-        }
+        // Defaults z reguł kalendarza (admin): allDay wg typu, koniec = start + domyślny czas trwania, status domyślny, serie wg zgody.
+        const { allDay, startAt, endAt } = fillEventDefaults(input, cfg);
         if (input.recurrence && !cfg.allowRecurrence) {
           return { error: "Serie cykliczne są wyłączone w konfiguracji asystenta — zaproponuj pojedyncze wydarzenie" };
         }
@@ -476,8 +490,31 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
         return { proposal, needsConfirmation: true as const };
       },
     }),
+
+    propose_changes: tool({
+      description:
+        "Paczka zmian ISTNIEJĄCYCH wydarzeń (update/status/cancel/delete/restore) i nieplanowanych, które się odbyły (create) — karty do ZATWIERDZENIA, NIE zapisuje. Jedno wywołanie = jedna paczka (1–20 pozycji). Pozycja z błędem nie blokuje pozostałych.",
+      inputSchema: z.object({
+        changes: z.array(zChange).min(1).max(CHANGES_MAX),
+        note: z.string().trim().max(300).optional().describe("Krótki kontekst paczki (np. „Podsumowanie dnia 27.08”)"),
+      }),
+      execute: async ({ changes, note }) => {
+        const today = localNow().slice(0, 10);
+        const resolved: ResolvedChange[] = changes.map((ch, index) => resolveChange(db, ch, index, { cfg, today }).resolved);
+        const errors = resolved.filter((r) => r.error).length;
+        return {
+          needsConfirmation: true as const,
+          changes: resolved,
+          count: resolved.length,
+          errors,
+          ...(note ? { note } : {}),
+        };
+      },
+    }),
   };
-  const entries = Object.entries(all as Record<string, unknown>).filter(([name]) => name === "propose_event" || !disabled.has(name));
+  const entries = Object.entries(all as Record<string, unknown>).filter(
+    ([name]) => name === "propose_event" || (!disabled.has(name) && (cfg.allowModifications || name !== "propose_changes"))
+  );
   return Object.fromEntries(entries) as typeof all;
 }
 

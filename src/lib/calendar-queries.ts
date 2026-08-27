@@ -1,11 +1,14 @@
 /**
- * Wspólne zapytania kalendarza — używane przez trasy (src/routes/calendar.ts)
+ * Wspólne zapytania kalendarza (kolizje, technicy, serializacja wydarzeń) — używane przez trasy
+ * (src/routes/calendar.ts), mutacje (calendar-mutations.ts)
  * i narzędzia asystenta AI (src/lib/ai/calendarTools.ts). Zachowanie 1:1 z
  * dotychczasowym GET /calendar/conflicts.
  */
-import { and, asc, desc, gt, isNull, lt, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/sqlite-core";
 import { db, schema } from "../db/index.js";
 import type { DbOrTx } from "./activity-log.js";
+import type { CalendarEventStatus, CalendarEventType, CalendarSeriesFreq } from "../db/schema.js";
 
 /**
  * Id wydarzeń kolidujących z zakresem [startAt, endAt) dla podanych techników
@@ -68,4 +71,139 @@ export function listActiveTechnicians(dbx: DbOrTx = db): TechnicianBrief[] {
     .orderBy(desc(schema.technicians.active), asc(schema.technicians.lastName), asc(schema.technicians.firstName))
     .all()
     .map((t) => ({ id: t.id, name: techName(t), active: t.active }));
+}
+
+// ---------------------------------------------------------------------------
+// Serializacja wydarzeń: wiersze → CalendarEventJson (batch, 4 zapytania).
+// Wspólne dla tras kalendarza, narzędzi asystenta i mutacji (calendar-mutations.ts).
+// ---------------------------------------------------------------------------
+
+export interface TechnicianRef {
+  id: number;
+  firstName: string;
+  lastName: string;
+}
+
+export interface SeriesRef {
+  id: number;
+  freq: CalendarSeriesFreq;
+  interval: number;
+  until: string | null;
+  count: number | null;
+}
+
+export interface CalendarEventJson {
+  id: number;
+  type: CalendarEventType;
+  title: string;
+  description: string | null;
+  location: string | null;
+  startAt: string;
+  endAt: string;
+  allDay: boolean;
+  status: CalendarEventStatus;
+  department: string;
+  objectId: number | null;
+  objectName: string | null;
+  orderId: number | null;
+  realizationId: number | null;
+  seriesId: number | null;
+  series: SeriesRef | null;
+  technicians: TechnicianRef[];
+  createdBy: number | null;
+  createdByLabel: string | null;
+  updatedBy: number | null;
+  updatedByLabel: string | null;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt: string | null;
+}
+
+const createdUsers = alias(schema.users, "cu");
+const updatedUsers = alias(schema.users, "uu");
+
+/** Pobiera i serializuje wydarzenia po id (kolejność wg `ids`; usunięte też — filtr robi wołający). */
+export function loadEvents(dbx: DbOrTx, ids: number[]): CalendarEventJson[] {
+  if (ids.length === 0) return [];
+  const rows = dbx
+    .select({
+      ev: schema.calendarEvents,
+      objectName: schema.objects.name,
+      createdByEmail: createdUsers.email,
+      createdByName: createdUsers.displayName,
+      updatedByEmail: updatedUsers.email,
+      updatedByName: updatedUsers.displayName,
+    })
+    .from(schema.calendarEvents)
+    .leftJoin(schema.objects, eq(schema.calendarEvents.objectId, schema.objects.id))
+    .leftJoin(createdUsers, eq(schema.calendarEvents.createdBy, createdUsers.id))
+    .leftJoin(updatedUsers, eq(schema.calendarEvents.updatedBy, updatedUsers.id))
+    .where(inArray(schema.calendarEvents.id, ids))
+    .all();
+
+  const techRows = dbx
+    .select({
+      eventId: schema.calendarEventAssignees.eventId,
+      id: schema.technicians.id,
+      firstName: schema.technicians.firstName,
+      lastName: schema.technicians.lastName,
+    })
+    .from(schema.calendarEventAssignees)
+    .innerJoin(schema.technicians, eq(schema.calendarEventAssignees.technicianId, schema.technicians.id))
+    .where(inArray(schema.calendarEventAssignees.eventId, ids))
+    .orderBy(asc(schema.technicians.lastName), asc(schema.technicians.firstName))
+    .all();
+  const techByEvent = new Map<number, TechnicianRef[]>();
+  for (const t of techRows) {
+    const list = techByEvent.get(t.eventId) ?? [];
+    list.push({ id: t.id, firstName: t.firstName, lastName: t.lastName });
+    techByEvent.set(t.eventId, list);
+  }
+
+  const seriesIds = [...new Set(rows.map((r) => r.ev.seriesId).filter((x): x is number => x != null))];
+  const seriesById = new Map<number, SeriesRef>();
+  if (seriesIds.length > 0) {
+    const sRows = dbx.select().from(schema.calendarSeries).where(inArray(schema.calendarSeries.id, seriesIds)).all();
+    for (const s of sRows) {
+      seriesById.set(s.id, { id: s.id, freq: s.freq, interval: s.interval, until: s.until, count: s.count });
+    }
+  }
+
+  const label = (email: string | null, name: string | null) => (email == null ? null : (name || "").trim() || email);
+
+  const byId = new Map<number, CalendarEventJson>();
+  for (const r of rows) {
+    const e = r.ev;
+    byId.set(e.id, {
+      id: e.id,
+      type: e.type,
+      title: e.title,
+      description: e.description,
+      location: e.location,
+      startAt: e.startAt,
+      endAt: e.endAt,
+      allDay: e.allDay,
+      status: e.status,
+      department: e.department,
+      objectId: e.objectId,
+      objectName: r.objectName ?? null,
+      orderId: e.orderId,
+      realizationId: e.realizationId,
+      seriesId: e.seriesId,
+      series: e.seriesId != null ? (seriesById.get(e.seriesId) ?? null) : null,
+      technicians: techByEvent.get(e.id) ?? [],
+      createdBy: e.createdBy,
+      createdByLabel: label(r.createdByEmail, r.createdByName),
+      updatedBy: e.updatedBy,
+      updatedByLabel: label(r.updatedByEmail, r.updatedByName),
+      createdAt: e.createdAt,
+      updatedAt: e.updatedAt,
+      deletedAt: e.deletedAt,
+    });
+  }
+  return ids.map((id) => byId.get(id)).filter((x): x is CalendarEventJson => !!x);
+}
+
+export function loadEvent(dbx: DbOrTx, id: number): CalendarEventJson | null {
+  return loadEvents(dbx, [id])[0] ?? null;
 }

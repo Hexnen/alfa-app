@@ -18,6 +18,8 @@ export type ProviderSort = (typeof PROVIDER_SORTS)[number];
 export const ACCESS_MODES = ["admins", "calendar_editors"] as const;
 export type AccessMode = (typeof ACCESS_MODES)[number];
 export const DEFAULT_STATUSES = ["planned", "confirmed"] as const;
+export const DAY_SUMMARY_STATUSES = ["done", "confirmed", "planned"] as const;
+export type DaySummaryStatus = (typeof DAY_SUMMARY_STATUSES)[number];
 
 /** Narzędzia, które admin może wyłączyć (propose_event jest obowiązkowe). */
 export const TOOL_META = [
@@ -28,6 +30,13 @@ export const TOOL_META = [
   { name: "find_free_slots", label: "Wolne terminy", description: "Najbliższe wolne okna dla wskazanych techników (godziny pracy, pon–pt, bez kolizji i urlopów).", required: false },
   { name: "ask_choice", label: "Pytania z przyciskami", description: "Doprecyzowanie wyboru (obiekt, technik, termin) kartą z przyciskami zamiast pytania tekstowego.", required: false },
   { name: "propose_event", label: "Zaproponuj wydarzenie", description: "Karta propozycji do zatwierdzenia — nie da się wyłączyć.", required: true },
+  { name: "get_event", label: "Szczegóły wydarzenia", description: "Pełne dane jednego wydarzenia (opis, technicy, seria) — do precyzyjnego dopasowania przy zmianach.", required: false },
+  {
+    name: "propose_changes",
+    label: "Zmiany w wydarzeniach",
+    description: "Paczka kart zmian istniejących wydarzeń (termin, technicy, status, anulowanie, usunięcie, przywrócenie, nieplanowane) do zatwierdzenia. Wymaga włączonego „Modyfikowanie wydarzeń”.",
+    required: false,
+  },
 ] as const;
 export type ToolName = (typeof TOOL_META)[number]["name"];
 export const OPTIONAL_TOOLS: string[] = TOOL_META.filter((t) => !t.required).map((t) => t.name);
@@ -55,6 +64,10 @@ export interface AssistantSettingsValues {
   allowRecurrence: boolean;
   maxHorizonDays: number;
   disabledTools: string[];
+  /** Asystent może proponować zmiany istniejących wydarzeń (propose_changes + apply-changes). */
+  allowModifications: boolean;
+  /** Status nadawany wydarzeniom z „Podsumowania dnia” (wykonane / nieplanowane w przeszłości). */
+  daySummaryDefaultStatus: DaySummaryStatus;
   access: AccessMode;
   retentionDays: number;
   dailyTurnLimit: number;
@@ -81,6 +94,7 @@ export const ASSISTANT_DEFAULTS: AssistantSettingsValues = {
     "Zaplanuj serwis w Magazynie Centralnym w przyszły wtorek 9–12",
     "Co ma Wojtek w przyszłym tygodniu?",
     "Dodaj urlop technika od poniedziałku do piątku",
+    "Podsumowanie dnia: [co się dziś wydarzyło — kto co skończył, co przełożone, co dodatkowo]",
   ],
   workStart: "08:00",
   workEnd: "16:00",
@@ -90,6 +104,8 @@ export const ASSISTANT_DEFAULTS: AssistantSettingsValues = {
   allowRecurrence: true,
   maxHorizonDays: 90,
   disabledTools: [],
+  allowModifications: true,
+  daySummaryDefaultStatus: "done",
   access: "admins",
   retentionDays: 0,
   dailyTurnLimit: 0,
@@ -280,6 +296,8 @@ export const ASSISTANT_FIELDS: { [K in AssistantField]: FieldDef<AssistantSettin
   allowRecurrence: booleanField({ dbKey: "assistant.rules.allow_recurrence", label: "Serie wydarzeń" }),
   maxHorizonDays: numberField({ dbKey: "assistant.rules.max_horizon_days", label: "Maks. horyzont (dni)", min: 7, max: 730, integer: true }),
   disabledTools: stringArrayField({ dbKey: "assistant.tools.disabled", label: "Wyłączone narzędzia", maxLen: OPTIONAL_TOOLS.length, allowed: OPTIONAL_TOOLS }),
+  allowModifications: booleanField({ dbKey: "assistant.allow_modifications", label: "Modyfikowanie wydarzeń przez asystenta" }),
+  daySummaryDefaultStatus: enumField({ dbKey: "assistant.day_summary_default_status", label: "Status dla podsumowania dnia", values: DAY_SUMMARY_STATUSES }),
   access: enumField({ dbKey: "assistant.access", label: "Dostęp", values: ACCESS_MODES }),
   retentionDays: numberField({ dbKey: "assistant.retention_days", label: "Retencja czatów (dni)", min: 0, max: 3650, integer: true }),
   dailyTurnLimit: numberField({ dbKey: "assistant.daily_turn_limit", label: "Dzienny limit tur", min: 0, max: 10000, integer: true }),
@@ -333,8 +351,13 @@ export function getAssistantConfig(): AssistantConfig {
     values,
     sources,
     isOpenRouter: isOpenRouterUrl(values.baseUrl),
-    enabledTools: TOOL_META.map((t) => t.name).filter((t) => !values.disabledTools.includes(t)),
+    enabledTools: effectiveTools(values),
   };
+}
+
+/** Narzędzia efektywnie dostępne: bez wyłączonych; propose_changes tylko przy allowModifications. */
+export function effectiveTools(values: Pick<AssistantSettingsValues, "disabledTools" | "allowModifications">): string[] {
+  return TOOL_META.map((t) => t.name).filter((t) => !values.disabledTools.includes(t) && (values.allowModifications || t !== "propose_changes"));
 }
 
 /** Słowniki dla panelu admina (meta w GET /settings). */
@@ -347,5 +370,6 @@ export function assistantMeta() {
     providerSorts: [...PROVIDER_SORTS],
     accessModes: [...ACCESS_MODES],
     defaultStatuses: [...DEFAULT_STATUSES],
+    daySummaryStatuses: [...DAY_SUMMARY_STATUSES],
   };
 }

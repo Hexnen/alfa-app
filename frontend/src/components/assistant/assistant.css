@@ -68,6 +68,28 @@
   background: hsl(var(--primary) / 0.08);
   box-shadow: inset 0 0 0 2px hsl(var(--primary) / 0.6);
 }
+/* Karta zmian: poprzedni termin (skąd) — szare, przekreślone widmo; oryginał wydarzenia wyciszony. */
+.alfa-calendar .fc .fc-event.fc-event-ghost-before,
+.alfa-calendar .fc .fc-bg-event.fc-event-ghost-before {
+  background: repeating-linear-gradient(135deg, hsl(var(--muted-foreground) / 0.22) 0 6px, hsl(var(--muted-foreground) / 0.06) 6px 12px);
+  border: 2px dashed hsl(var(--muted-foreground) / 0.7);
+  border-radius: 4px;
+  opacity: 1;
+  animation: asst-ghost-in 240ms ease-out;
+}
+.alfa-calendar .fc .fc-event.fc-event-ghost-before { cursor: default; }
+/* Gdy „było” i „nowy termin” zaczynają się o tej samej godzinie — etykieta „było” na dole, żeby się nie nakładały. */
+.alfa-calendar .fc .fc-bg-event.fc-event-ghost-before { display: flex; align-items: flex-end; }
+.alfa-calendar .fc .fc-event.fc-event-ghost-before .fc-event-title,
+.alfa-calendar .fc .fc-bg-event.fc-event-ghost-before .fc-event-title {
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: hsl(var(--muted-foreground));
+  text-decoration: line-through;
+  padding: 1px 4px;
+  font-style: normal;
+}
+.alfa-calendar .fc .fc-event.fc-event-changing { opacity: 0.45; filter: saturate(0.4); }
 /* Wydarzenia kolidujące z propozycją */
 .alfa-calendar .fc .fc-event.fc-event-conflict {
   box-shadow: 0 0 0 2px hsl(var(--cal-overdue) / 0.8);

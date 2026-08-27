@@ -1,10 +1,14 @@
 import { Badge } from "@/components/ui/badge";
-import { SectionCard, SourceBadge, Switch } from "./shared";
-import type { FormApi } from "./helpers";
+import { Field, SectionCard, SourceBadge, Switch } from "./shared";
+import { selectClass, type FormApi } from "./helpers";
+import { eventStatusLabel } from "@/lib/calendar-labels";
 
 export function ToolsSection({ form, onReset }: { form: FormApi; onReset: () => void }) {
   const { settings, sources, saving, val, setField, isDirty } = form;
   const disabledTools = val("disabledTools") || [];
+  // Kodujemy defensywnie: starszy backend może nie zwracać tych pól → domyślnie włączone / done.
+  const allowMod = val("allowModifications") ?? true;
+  const dayStatus = val("daySummaryDefaultStatus") ?? "done";
 
   return (
     <SectionCard id="narzedzia" title="Narzędzia" description="Do czego asystent ma dostęp. Wyłączone narzędzie znika dla modelu — o takie rzeczy asystent nie będzie mógł zapytać ani ich zrobić." onReset={onReset} resetDisabled={saving}>
@@ -37,6 +41,32 @@ export function ToolsSection({ form, onReset }: { form: FormApi; onReset: () => 
           );
         })}
         {settings.meta.tools.length === 0 && <p className="px-3 py-2 text-sm text-muted-foreground">Brak metadanych narzędzi.</p>}
+      </div>
+      <div className="space-y-4 rounded-md border px-3 py-3" data-testid="tools-modifications">
+        <Field
+          id="f-allowModifications"
+          label="Modyfikowanie wydarzeń przez asystenta"
+          source={sources.allowModifications}
+          dirty={isDirty("allowModifications")}
+          inline
+          description="Asystent może proponować zmiany w istniejących wydarzeniach (termin, technicy, status, anulowanie, usunięcie, przywrócenie) oraz tryb „Podsumowanie dnia”. Każda zmiana to karta do zatwierdzenia — nic nie zapisuje się samo. Po wyłączeniu narzędzia propose_changes i get_event znikają dla modelu."
+        >
+          <Switch id="f-allowModifications" label="Modyfikowanie wydarzeń przez asystenta" checked={!!allowMod} disabled={saving} onChange={(v) => setField("allowModifications", v)} />
+        </Field>
+        {allowMod && (
+          <Field
+            id="f-daySummaryDefaultStatus"
+            label="Status dla podsumowania dnia"
+            source={sources.daySummaryDefaultStatus}
+            dirty={isDirty("daySummaryDefaultStatus")}
+            description="Status nadawany wydarzeniom, które użytkownik relacjonuje jako odbyte („Wojtek skończył serwis o 13”). Wydarzenia z przyszłości nigdy nie są oznaczane jako wykonane."
+          >
+            <select id="f-daySummaryDefaultStatus" className={selectClass} value={dayStatus} disabled={saving} onChange={(e) => setField("daySummaryDefaultStatus", e.target.value as "done" | "confirmed")}>
+              <option value="done">{eventStatusLabel("done")}</option>
+              <option value="confirmed">{eventStatusLabel("confirmed")}</option>
+            </select>
+          </Field>
+        )}
       </div>
       <div className="flex items-center gap-2 text-xs text-muted-foreground">
         <span>Źródło ustawienia:</span>
