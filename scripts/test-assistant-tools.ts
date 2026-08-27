@@ -187,6 +187,14 @@ try {
     ok("search_events: bez filtra → error (użyj list_events)", typeof s7.error === "string", s7);
     const s8 = (await exec(tools.search_events, { query: "100%_x" })) as { events: unknown[]; count: number };
     ok("search_events: escape LIKE (bez wildcard)", s8.count === 0, s8);
+    // type=wizja daje 0 → narzędzie samo zdejmuje filtr i oznacza relaxed: ["type"] + note
+    const s9 = (await exec(tools.search_events, { query: `${PREFIX} Magazynie`, type: "wizja" })) as { events: { id: number }[]; relaxed?: string[]; note?: string };
+    ok("search_events: 0 dla type=wizja → fallback bez typu, relaxed: [\"type\"] + note", s9.events.some((e) => e.id === evServ) && s9.relaxed?.length === 1 && s9.relaxed[0] === "type" && /wizja lokalna|typu/i.test(s9.note ?? ""), s9);
+    // filtr z trafieniami → bez relaxed; filtr bez innych kryteriów (sam type) nie jest zdejmowany
+    const s10 = (await exec(tools.search_events, { query: PREFIX, type: "serwis" })) as { events: { id: number }[]; relaxed?: string[] };
+    ok("search_events: type z trafieniami → bez relaxed", s10.events.some((e) => e.id === evServ) && !s10.events.some((e) => e.id === evUrlop) && s10.relaxed === undefined, s10);
+    const s11 = (await exec(tools.search_events, { query: `${PREFIX} nie-ma-takiego`, type: "wizja" })) as { count: number; relaxed?: string[] };
+    ok("search_events: 0 także bez typu → count 0, bez relaxed", s11.count === 0 && s11.relaxed === undefined, s11);
   } finally {
     db.delete(schema.calendarEventAssignees).where(eq(schema.calendarEventAssignees.eventId, evUrlop)).run();
     db.delete(schema.calendarEvents).where(like(schema.calendarEvents.title, `${PREFIX}%`)).run();

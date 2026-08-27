@@ -12,7 +12,7 @@ import { z } from "zod";
 import { and, asc, gt, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
 import { db, schema } from "../../db/index.js";
 import { CALENDAR_EVENT_STATUSES, CALENDAR_EVENT_TYPES, CALENDAR_SERIES_FREQS, type User } from "../../db/schema.js";
-import { ApiError } from "../calendar-labels.js";
+import { ApiError, STATUS_LABELS, TYPE_LABELS } from "../calendar-labels.js";
 import { parseInput, type ParsedInput } from "../calendar-mutations.js";
 import { conflictEventIds, listActiveTechnicians, loadEvent, loadEvents, loadNotes, techName } from "../calendar-queries.js";
 import { ASSISTANT_DEFAULTS, type AssistantSettingsValues } from "./assistantConfig.js";
@@ -343,13 +343,14 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
         if (to <= from) return { error: "Parametr to musi być późniejszy niż from" };
         const hasFilter = Boolean(input.query?.trim() || input.technicianId != null || input.technicianName?.trim() || input.type || input.status);
         if (!hasFilter) return { error: "Podaj przynajmniej jeden filtr: query, technicianId/technicianName, type lub status (do grafiku w zakresie dat użyj list_events)" };
-        const base = () => [
+        // `strict` = false → bez filtrów type/status (fallback, gdy filtr daje 0 wyników).
+        const base = (strict: boolean) => [
           isNull(schema.calendarEvents.deletedAt),
           gt(schema.calendarEvents.endAt, from),
           lt(schema.calendarEvents.startAt, to),
           ...(input.includeCancelled ? [] : [ne(schema.calendarEvents.status, "cancelled")]),
-          ...(input.type ? [sql`${schema.calendarEvents.type} = ${input.type}` ] : []),
-          ...(input.status ? [sql`${schema.calendarEvents.status} = ${input.status}`] : []),
+          ...(strict && input.type ? [sql`${schema.calendarEvents.type} = ${input.type}`] : []),
+          ...(strict && input.status ? [sql`${schema.calendarEvents.status} = ${input.status}`] : []),
           ...(input.technicianId != null
             ? [sql`${schema.calendarEvents.id} IN (SELECT event_id FROM calendar_event_assignees WHERE technician_id = ${input.technicianId})`]
             : []),
@@ -362,28 +363,46 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
         // Odległość od dziś (dni) — najbliższe wydarzenia pierwsze; remis: wcześniejsze startAt.
         const distance = sql`abs(julianday(substr(${schema.calendarEvents.startAt}, 1, 10)) - julianday(${today}))`;
         const hay = sql`coalesce(${schema.calendarEvents.title}, '') || ' ' || coalesce(${schema.objects.name}, '') || ' ' || coalesce(${schema.calendarEvents.location}, '')`;
-        const run = (textConds: unknown[]) =>
+        const run = (textConds: unknown[], strict: boolean) =>
           db
             .select({ id: schema.calendarEvents.id })
             .from(schema.calendarEvents)
             .leftJoin(schema.objects, sql`${schema.objects.id} = ${schema.calendarEvents.objectId}`)
-            .where(and(...base(), ...(textConds as ReturnType<typeof sql>[])))
+            .where(and(...base(strict), ...(textConds as ReturnType<typeof sql>[])))
             .orderBy(distance, asc(schema.calendarEvents.startAt), asc(schema.calendarEvents.id))
             .limit(SEARCH_EVENTS_LIMIT + 1)
             .all()
             .map((r) => r.id);
         const q = input.query?.trim() ?? "";
-        let ids = run(q ? [likeEsc(hay, likePattern(q))] : []);
         // Fallback dla odmiany („Magazynie” vs „Magazyn”): każdy token po rdzeniu (jak find_object).
-        if (ids.length === 0 && q) {
-          const stems = q.split(/\s+/).filter(Boolean).map((t) => (t.length >= 5 ? t.slice(0, Math.max(4, t.length - 3)) : t));
-          if (stems.length) ids = run(stems.map((t) => likeEsc(hay, likePattern(t))));
+        const stems = q ? q.split(/\s+/).filter(Boolean).map((t) => (t.length >= 5 ? t.slice(0, Math.max(4, t.length - 3)) : t)) : [];
+        const search = (strict: boolean) => {
+          let ids = run(q ? [likeEsc(hay, likePattern(q))] : [], strict);
+          if (ids.length === 0 && stems.length) ids = run(stems.map((t) => likeEsc(hay, likePattern(t))), strict);
+          return ids;
+        };
+        let ids = search(true);
+        // 0 wyników z filtrem type/status → powtórz bez tych filtrów (model zgaduje typ z potocznych słów: „wizyta” ≠ wizja).
+        const relaxed: ("type" | "status")[] = [];
+        const otherFilters = Boolean(q || input.technicianId != null || input.technicianName?.trim());
+        if (ids.length === 0 && (input.type || input.status) && otherFilters) {
+          ids = search(false);
+          if (ids.length > 0) {
+            if (input.type) relaxed.push("type");
+            if (input.status) relaxed.push("status");
+          }
         }
         const truncated = ids.length > SEARCH_EVENTS_LIMIT;
         const kept = ids.slice(0, SEARCH_EVENTS_LIMIT);
         const byId = new Map(loadEvents(db, kept).map((e) => [e.id, e]));
         const events = kept.map((id) => byId.get(id)).filter((e): e is NonNullable<typeof e> => !!e).map(briefEvent);
-        return { events, count: events.length, truncated, from, to, today };
+        const relaxedInfo = relaxed.length
+          ? {
+              relaxed,
+              note: `Brak wydarzeń ${[input.type ? `typu ${TYPE_LABELS[input.type] ?? input.type}` : "", input.status ? `o statusie ${STATUS_LABELS[input.status] ?? input.status}` : ""].filter(Boolean).join(" i ")} — pokazano wydarzenia WSZYSTKICH ${relaxed.includes("type") ? "typów" : "statusów"} pasujące do pozostałych filtrów. Nie szukaj ponownie z innym typem — użyj tych wyników.`,
+            }
+          : {};
+        return { events, count: events.length, truncated, from, to, today, ...relaxedInfo };
       },
     }),
 
