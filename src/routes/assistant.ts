@@ -22,6 +22,9 @@
  *                   toolCallId?: string|null, changeIndex?: number|null }
  *                                                                   (rola system; decyzja usera o karcie —
  *                                                                    changeIndex = pozycja w paczce propose_changes)
+ *  - data-local   { source: "choice", toolCallId, optionIndex, label }  (asystent; wiadomość wygenerowana LOKALNIE
+ *                   przez POST /chats/:id/choose — bez modelu; jej tool-part ma toolCallId `local_*` i do modelu
+ *                   idzie ZAWSZE jako streszczenie tekstowe, nigdy jako tool-call)
  *
  * Zmiany istniejących wydarzeń (propose_changes): zatwierdzenie idzie przez POST /apply-changes
  * (serwer wykonuje przez src/lib/calendar-mutations.ts w transakcji per zmiana, activity_log
@@ -50,7 +53,8 @@ import { buildProviderOptions, makeChatClient, OPENROUTER, resolveApiKey } from 
 import { getAssistantConfig, type AssistantConfig } from "../lib/ai/assistantConfig.js";
 import { classifyError, describeError, type TurnErrorInfo } from "../lib/ai/errors.js";
 import { assembleSystemPrompt, localToday, PROPOSAL_INTENT_RE } from "../lib/ai/calendarPrompt.js";
-import { buildCalendarTools } from "../lib/ai/calendarTools.js";
+import { randomBytes } from "node:crypto";
+import { buildCalendarActions, buildCalendarTools, zChoiceAction, type ChoiceAction, type ChoiceOption } from "../lib/ai/calendarTools.js";
 import { estimateTokens, trimHistoryToBudget } from "../lib/ai/context.js";
 import { listActiveTechnicians, type CalendarEventJson } from "../lib/calendar-queries.js";
 import { ApiError } from "../lib/calendar-labels.js";
@@ -210,6 +214,22 @@ function summarizeToolPart(p: StoredPart): string {
   return `[narzędzie ${name}: ok]`;
 }
 
+/** Part data-local: wiadomość asystenta wygenerowana przez POST /chats/:id/choose (bez modelu). */
+export type LocalNoteData = { source: "choice"; toolCallId: string; optionIndex: number; label: string };
+
+/** Streszczenie karty z wiadomości lokalnej — model widzi wybór użytkownika, nie tool-call `local_*`. */
+function summarizeLocalToolPart(p: StoredPart, local: LocalNoteData): string {
+  const name = p.toolName || p.type.replace(/^tool-/, "");
+  const out = p.output as Record<string, unknown> | undefined;
+  const label = local?.label ?? "";
+  if (name === "propose_changes") {
+    const first = (Array.isArray(out?.changes) ? out!.changes[0] : undefined) as { eventId?: number } | undefined;
+    return `[wybór użytkownika: ${label} → propozycja zmiany${first?.eventId != null ? ` #${first.eventId}` : ""} pokazana do zatwierdzenia]`;
+  }
+  const title = (out?.proposal as { title?: string } | undefined)?.title ?? "";
+  return `[wybór użytkownika: ${label} → propozycja wydarzenia „${title}” pokazana do zatwierdzenia]`;
+}
+
 /**
  * Wiadomość UI → wiadomości modelu.
  *  - system (notatki po zatwierdzeniu/odrzuceniu karty) → user z prefiksem [SYSTEM]
@@ -219,17 +239,21 @@ function summarizeToolPart(p: StoredPart): string {
  *    jednozdaniowe streszczenie tekstowe — wyniki list_events/find_object potrafią mieć tysiące
  *    tokenów i jechałyby w każdej turze do końca czatu (wzór: roleplay stripToolTurnParts).
  */
-async function toModelMessages(m: UIMessage, row: Pick<MessageRow, "parts" | "content"> | null, keepTools: boolean): Promise<ModelMessage[]> {
+export async function toModelMessages(m: UIMessage, row: Pick<MessageRow, "parts" | "content"> | null, keepTools: boolean): Promise<ModelMessage[]> {
   if (m.role === "system") {
     const text = row ? systemText(row) : uiText(m);
     return text ? [{ role: "user", content: `[SYSTEM] ${text}` }] : [];
   }
   const all = partsOf(m);
-  if (m.role === "assistant" && !keepTools) {
+  // Wiadomość lokalna (/choose): tool-call `local_*` nie istnieje po stronie modelu — ZAWSZE streszczenie, nawet jako ostatnia.
+  const local = all.find((p) => p.type === "data-local");
+  if (m.role === "assistant" && (!keepTools || local)) {
     const lines: string[] = [];
     for (const p of all) {
       if (p.type === "text" && p.text?.trim()) lines.push(p.text.trim());
-      else if (p.type.startsWith("tool-") && (p.state === "output-available" || p.state === "output-error")) lines.push(summarizeToolPart(p));
+      else if (p.type.startsWith("tool-") && (p.state === "output-available" || p.state === "output-error")) {
+        lines.push(local ? summarizeLocalToolPart(p, local.data as LocalNoteData) : summarizeToolPart(p));
+      }
     }
     const text = lines.join("\n");
     return text ? [{ role: "assistant", content: text }] : [];
@@ -469,6 +493,111 @@ app.post("/chats/:id/system", async (c) => {
           : `Użytkownik odrzucił propozycję${quoted}.`;
   const row = insertSystemNote(chat.id, { kind, eventId, title, text, toolCallId, changeIndex });
   return c.json({ success: true, data: uiMessageOf(row) });
+});
+
+// ---------------------------------------------------------------------------
+// Wybór opcji ask_choice z `action` — karta bez tury modelu (POST /chats/:id/choose)
+// ---------------------------------------------------------------------------
+
+/** Prefiks toolCallId kart wystawionych lokalnie (bez modelu) — `local_` + 12 znaków hex (≤ 64, jak w apply-changes). */
+const LOCAL_CALL_PREFIX = "local_";
+function localCallId(): string {
+  return `${LOCAL_CALL_PREFIX}${randomBytes(6).toString("hex")}`;
+}
+
+/**
+ * Aktywna karta ask_choice o danym toolCallId: part `tool-ask_choice` (output-available) w wiadomości asystenta,
+ * po której NIE ma już żadnej wiadomości usera (inaczej karta jest odpowiedziana → null → fallback).
+ * Zwraca też `answered`, żeby odróżnić „brak karty” (404) od „karta nieaktywna” (fallback).
+ */
+function findActiveChoice(chatId: number, toolCallId: string): { options: ChoiceOption[]; answered: boolean } | null {
+  const msgs = loadMessages(chatId);
+  for (let i = 0; i < msgs.length; i++) {
+    const m = msgs[i];
+    if (m.role !== "assistant") continue;
+    const p = partsOf(m).find((x) => x.type === "tool-ask_choice" && x.toolCallId === toolCallId && x.state === "output-available");
+    if (!p) continue;
+    const out = p.output as { options?: unknown } | undefined;
+    const options = Array.isArray(out?.options) ? (out!.options as ChoiceOption[]) : [];
+    const answered = msgs.slice(i + 1).some((x) => x.role === "user");
+    return { options, answered };
+  }
+  return null;
+}
+
+/**
+ * POST /chats/:id/choose { toolCallId, optionIndex, optionLabel? }
+ * Klik opcji ask_choice z `action`: bez modelu, od razu zapis pary wiadomości (user: wybór; asystent: tekst
+ * „Wybrano: …” + karta tool-propose_changes / tool-propose_event z toolCallId `local_*` + part data-local).
+ * Akcja jest przeliczana ŚWIEŻO tymi samymi funkcjami co narzędzia (buildCalendarActions z aktualną cfg).
+ * Każdy przypadek, w którym karty nie da się wystawić (opcja bez action, karta już odpowiedziana, akcja
+ * niepoprawna na aktualnym stanie bazy, propose_changes wyłączone) → { fallback: true } — front wysyła zwykłą
+ * wiadomość (tura modelu). 404 tylko gdy nie ma takiej karty/opcji w czacie; 409 busy gdy trwa tura.
+ * BEZ wiersza assistant_usage — usage liczy tury modelu, a tu modelu nie ma (decyzja z kontraktu).
+ * Działa także przy assistant.enabled=false (nie ma modelu; uprawnienia jak /message — router requireAssistantAccess).
+ */
+app.post("/chats/:id/choose", async (c) => {
+  const user = getCtxUser(c);
+  const chat = getOwnedChat(Number(c.req.param("id")), user);
+  if (!chat) return c.json({ success: false, error: "Nie znaleziono czatu" }, 404);
+  const body = (await c.req.json().catch(() => ({}))) as { toolCallId?: unknown; optionIndex?: unknown; optionLabel?: unknown };
+  const toolCallId = typeof body.toolCallId === "string" ? body.toolCallId.trim().slice(0, 64) : "";
+  if (!toolCallId) return c.json({ success: false, error: "Pole toolCallId jest wymagane" }, 400);
+  const optionIndex = Number(body.optionIndex);
+  if (!Number.isInteger(optionIndex) || optionIndex < 0) return c.json({ success: false, error: "Pole optionIndex jest wymagane" }, 400);
+
+  const turn = reserveTurn(chat.id);
+  if (!turn) return c.json({ success: false, code: "busy", error: BUSY_MESSAGE }, 409);
+  try {
+    const fallback = () => c.json({ success: true, data: { fallback: true as const } });
+    const found = findActiveChoice(chat.id, toolCallId);
+    if (!found) return c.json({ success: false, error: "Nie znaleziono karty ask_choice o podanym toolCallId w tym czacie" }, 404);
+    const option = found.options[optionIndex];
+    if (!option) return c.json({ success: false, error: `Opcja ${optionIndex} poza kartą (0–${found.options.length - 1})` }, 404);
+    if (found.answered || !option.action) return fallback();
+    const parsedAction = zChoiceAction.safeParse(option.action);
+    if (!parsedAction.success) return fallback();
+    const action: ChoiceAction = parsedAction.data;
+
+    const conf = getAssistantConfig().values;
+    const actions = buildCalendarActions(conf);
+    let toolPart: StoredPart;
+    if (action.kind === "change") {
+      if (!conf.allowModifications || conf.disabledTools.includes("propose_changes")) return fallback();
+      const output = actions.resolveChangesPreview([action.change]);
+      if (output.changes[0]?.error) return fallback();
+      toolPart = { type: "tool-propose_changes", toolCallId: localCallId(), state: "output-available", input: { changes: [action.change] }, output };
+    } else {
+      const output = actions.buildEventProposal(action.event);
+      if ("error" in output) return fallback();
+      toolPart = { type: "tool-propose_event", toolCallId: localCallId(), state: "output-available", input: action.event, output };
+    }
+
+    const label = option.label;
+    const optionValue = (option.value ?? option.label).trim().slice(0, MESSAGE_MAX_CHARS);
+    const assistantText = `Wybrano: ${label}.`;
+    const localData: LocalNoteData = { source: "choice", toolCallId, optionIndex, label };
+    const assistantParts: StoredPart[] = [{ type: "text", text: assistantText }, toolPart, { type: "data-local", data: localData }];
+    const isFirst = !loadMessages(chat.id).some((m) => m.role === "user");
+    const { userRow, assistantRow } = db.transaction((tx) => {
+      const userRow = tx
+        .insert(schema.assistantMessages)
+        .values({ chatId: chat.id, role: "user", content: optionValue, parts: [{ type: "text", text: optionValue }] })
+        .returning()
+        .get();
+      const assistantRow = tx
+        .insert(schema.assistantMessages)
+        .values({ chatId: chat.id, role: "assistant", content: assistantText, parts: assistantParts })
+        .returning()
+        .get();
+      return { userRow, assistantRow };
+    });
+    touchChat(chat.id, isFirst && chat.title === "Nowy czat" ? optionValue.slice(0, 60) : undefined);
+    console.log(`[assistant] czat ${chat.id} (${user.email}): wybór lokalny „${label}” → ${toolPart.type} ${toolPart.toolCallId}`);
+    return c.json({ success: true, data: { userMessage: uiMessageOf(userRow), assistantMessage: uiMessageOf(assistantRow) } });
+  } finally {
+    releaseTurn(chat.id, turn);
+  }
 });
 
 // ---------------------------------------------------------------------------

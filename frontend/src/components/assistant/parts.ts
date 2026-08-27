@@ -44,7 +44,12 @@ export interface DataAbortedPart {
   type: "data-aborted";
   data?: { at?: string; reason?: string } | string;
 }
-export type AnyPart = TextPart | ReasoningPart | ToolPart | DataErrorPart | DataSystemPart | DataAbortedPart | { type: string };
+/** Znacznik wiadomości dopisanej lokalnie przez POST /choose (bez modelu) — nie renderujemy go. */
+export interface DataLocalPart {
+  type: "data-local";
+  data?: { source?: string; toolCallId?: string; optionIndex?: number } | string;
+}
+export type AnyPart = TextPart | ReasoningPart | ToolPart | DataErrorPart | DataSystemPart | DataAbortedPart | DataLocalPart | { type: string };
 
 export interface ChatMessage {
   id: string;
@@ -58,6 +63,7 @@ export const isToolPart = (p: AnyPart): p is ToolPart => typeof p.type === "stri
 export const isErrorPart = (p: AnyPart): p is DataErrorPart => p.type === "data-error";
 export const isSystemPart = (p: AnyPart): p is DataSystemPart => p.type === "data-system";
 export const isAbortedPart = (p: AnyPart): p is DataAbortedPart => p.type === "data-aborted";
+export const isLocalPart = (p: AnyPart): p is DataLocalPart => p.type === "data-local";
 
 export const toolName = (p: ToolPart): string => p.type.slice("tool-".length);
 
@@ -172,6 +178,65 @@ export function choiceOf(p: ToolPart): AssistantChoiceOutput | null {
 
 /** Tekst wysyłany po kliknięciu opcji ask_choice (value ma pierwszeństwo nad label). */
 export const optionValue = (o: AssistantChoiceOption): string => (o.value?.trim() ? o.value.trim() : o.label);
+
+/** Opcja z gotową akcją (klik → POST /choose, karta bez pytania modelu). */
+export const hasAction = (o: AssistantChoiceOption): boolean => Boolean(o.action && typeof o.action === "object" && "kind" in o.action);
+
+const pad2 = (n: number) => String(n).padStart(2, "0");
+/** „2025-08-31T08:00” / ISO → lokalne pola bez błędów strefy dla samych dat. */
+const parseLoose = (s: string): Date | null => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}))?/.exec(s);
+  if (m) return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4] ?? 0), Number(m[5] ?? 0));
+  const d = new Date(s);
+  return Number.isNaN(d.getTime()) ? null : d;
+};
+
+/**
+ * Krótki zakres do hintu opcji: „10.08–14.08” (całodniowe, koniec exclusive), „31.08 08:00–10:00”
+ * (ten sam dzień), „31.08 08:00–01.09 10:00” (różne dni).
+ */
+export function fmtShortRange(startAt: string, endAt: string, allDay?: boolean): string {
+  const s = parseLoose(startAt);
+  const e = parseLoose(endAt);
+  if (!s || !e) return "";
+  const dm = (d: Date) => `${pad2(d.getDate())}.${pad2(d.getMonth() + 1)}`;
+  const hm = (d: Date) => `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  if (allDay) {
+    const last = new Date(e);
+    last.setDate(last.getDate() - 1);
+    if (last < s) last.setTime(s.getTime());
+    return dm(s) === dm(last) ? dm(s) : `${dm(s)}–${dm(last)}`;
+  }
+  return dm(s) === dm(e) ? `${dm(s)} ${hm(s)}–${hm(e)}` : `${dm(s)} ${hm(s)}–${dm(e)} ${hm(e)}`;
+}
+
+/** Skrót wyniku akcji („→ 10.08–14.08”) z `actionPreview`; pusty string, gdy nie da się nic pokazać. */
+export function actionPreviewHint(o: AssistantChoiceOption): string {
+  const p = o.actionPreview;
+  if (!p || typeof p !== "object") return "";
+  let range: { startAt?: string; endAt?: string; allDay?: boolean } | null = null;
+  if ("after" in p || "before" in p || "diff" in p) {
+    const r = p as AssistantResolvedChange;
+    range = r.after ?? null;
+  } else {
+    range = p as { startAt?: string; endAt?: string; allDay?: boolean };
+  }
+  if (!range?.startAt || !range?.endAt) return "";
+  const s = fmtShortRange(range.startAt, range.endAt, Boolean(range.allDay));
+  return s ? `→ ${s}` : "";
+}
+
+/**
+ * Hint wyświetlany pod etykietą: własny `hint`; bez niego skrót akcji; oba, gdy łącznie mieści się w 160 znakach.
+ */
+export function optionHint(o: AssistantChoiceOption): string {
+  const hint = o.hint?.trim() ?? "";
+  const short = hasAction(o) ? actionPreviewHint(o) : "";
+  if (!hint) return short;
+  if (!short) return hint;
+  const both = `${hint} · ${short}`;
+  return both.length <= 160 ? both : hint;
+}
 
 /**
  * Etykieta opcji bez identyfikatorów z bazy („Magazyn (#12)”, „Wojtek [id 3]”, „Obiekt, id: 7”)

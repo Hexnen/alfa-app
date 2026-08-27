@@ -29,6 +29,7 @@ import {
   zEventInput,
   zId,
   zIds,
+  type Change,
   type ResolvedChange,
 } from "./calendarChanges.js";
 import { addDays, computeFreeSlots, loadBusyIntervals, localNow } from "./freeSlots.js";
@@ -183,6 +184,20 @@ function missingTechnicians(ids: number[]): string | null {
   return missing.length ? `Technik #${missing.join(", #")} nie istnieje — użyj id z listy techników w prompcie` : null;
 }
 
+/**
+ * Akcja dołączona do opcji ask_choice: klik opcji wystawia kartę zmiany / propozycji OD RAZU
+ * (POST /assistant/chats/:id/choose), bez drugiej tury modelu.
+ */
+export const zChoiceAction = z
+  .discriminatedUnion("kind", [
+    z.object({ kind: z.literal("change"), change: zChange.describe("Gotowa pozycja jak w propose_changes (np. update {eventId, patch:{startAt,endAt}})") }),
+    z.object({ kind: z.literal("event"), event: zEventInput.describe("Komplet danych nowego wydarzenia jak w propose_event (bez recurrence)") }),
+  ])
+  .describe(
+    "Gotowy wynik wyboru tej opcji — UI wystawi kartę zmiany/propozycji od razu po kliknięciu, bez kolejnej tury. Dołącz TYLKO gdy po wyborze nie trzeba już nic sprawdzać ani dopytywać (np. wybór terminu dla znanego wydarzenia, slot dla nowego wydarzenia ze znanym obiektem i technikami). Opcje „Inny…/Inne…” bez action."
+  );
+export type ChoiceAction = z.infer<typeof zChoiceAction>;
+
 /** Jedna opcja ask_choice po walidacji (kształt dla frontu: ChoiceCard). */
 export interface ChoiceOption {
   label: string;
@@ -195,10 +210,146 @@ export interface ChoiceOption {
   endAt?: string;
   /** Opcja = istniejące wydarzenie (doprecyzowanie przy zmianach) — front pokaże podgląd. */
   eventId?: number;
+  /** Akcja natychmiastowa (tylko gdy poprawna na aktualnym stanie bazy). */
+  action?: ChoiceAction;
+  /** Podgląd akcji: change → ResolvedChange (before/after/diff); event → EventProposal. */
+  actionPreview?: ResolvedChange | EventProposal;
+  /** Akcja odrzucona przy walidacji — opcja zostaje (bez action), model widzi powód. */
+  actionError?: string;
 }
 
 /** Propozycja wydarzenia zwracana przez propose_event — kształt wejścia POST /calendar/events + etykiety do karty. */
 export type EventProposal = ParsedInput & { objectName: string | null; technicianNames: string[] };
+
+/** Wynik propose_changes (i podglądu akcji change w ask_choice / route /choose). */
+export interface ChangesPreview {
+  needsConfirmation: true;
+  changes: ResolvedChange[];
+  count: number;
+  errors: number;
+  note?: string;
+}
+/** Wynik propose_event (i podglądu akcji event w ask_choice / route /choose). */
+export type EventProposalResult = { proposal: EventProposal; needsConfirmation: true } | { error: string };
+
+/** Wejście propose_event: dane wydarzenia + allowPast + opcjonalna seria. */
+export const zProposeEventInput = zEventInput.extend({
+  allowPast: z.boolean().optional().describe("true TYLKO gdy użytkownik jawnie potwierdził termin w przeszłości"),
+  recurrence: z
+    .object({
+      freq: z.enum(CALENDAR_SERIES_FREQS),
+      interval: z.number().int().min(1).max(52).default(1),
+      until: zDate.optional().describe("YYYY-MM-DD (włącznie)"),
+      count: z.number().int().min(1).max(200).optional(),
+    })
+    .optional(),
+});
+export type ProposeEventInput = z.output<typeof zProposeEventInput>;
+
+/** Opcja otwarta („Inny termin / Inne… / Żadne z nich”) — zawsze wolna odpowiedź, nigdy action. */
+export const OTHER_OPTION_RE = /^inn[aey]\b|^inne\b|^żadn/i;
+
+/**
+ * Wspólna logika „kart” (bez zapisu) dla propose_changes / propose_event / ask_choice(action) / POST /choose —
+ * jedno źródło prawdy: te same funkcje z tą samą cfg dają dokładnie ten sam output narzędzia.
+ */
+export function buildCalendarActions(config: Partial<ToolsConfig> = {}) {
+  const cfg: ToolsConfig = { ...ASSISTANT_DEFAULTS, ...config };
+
+  /** Dokładnie wynik `propose_changes.execute`. */
+  function resolveChangesPreview(changes: Change[], note?: string): ChangesPreview {
+    const today = localNow().slice(0, 10);
+    const resolved: ResolvedChange[] = changes.map((ch, index) => resolveChange(db, ch, index, { cfg, today }).resolved);
+    const errors = resolved.filter((r) => r.error).length;
+    return {
+      needsConfirmation: true as const,
+      changes: resolved,
+      count: resolved.length,
+      errors,
+      ...(note ? { note } : {}),
+    };
+  }
+
+  /** Dokładnie wynik `propose_event.execute`. */
+  function buildEventProposal(input: ProposeEventInput): EventProposalResult {
+    // Defaults z reguł kalendarza (admin): allDay wg typu, koniec = start + domyślny czas trwania, status domyślny, serie wg zgody.
+    const { allDay, startAt, endAt } = fillEventDefaults(input, cfg);
+    if (input.recurrence && !cfg.allowRecurrence) {
+      return { error: "Serie cykliczne są wyłączone w konfiguracji asystenta — zaproponuj pojedyncze wydarzenie" };
+    }
+    let parsed: ParsedInput;
+    try {
+      parsed = parseInput({
+        ...input,
+        allDay,
+        startAt,
+        endAt,
+        status: input.status ?? cfg.defaultStatus,
+        objectId: input.objectId ?? null,
+        location: input.location ?? null,
+        description: input.description ?? null,
+        recurrence: input.recurrence ?? null,
+      });
+    } catch (e) {
+      return { error: e instanceof ApiError ? e.message : String((e as Error)?.message || e) };
+    }
+    const today = localNow().slice(0, 10);
+    if (parsed.startAt.slice(0, 10) < today && !input.allowPast) {
+      return { error: `Termin ${parsed.startAt} jest w przeszłości (dziś ${today}) — zapytaj użytkownika o właściwą datę; jeśli potwierdzi przeszłość, powtórz z allowPast: true` };
+    }
+    // Referencje: obiekt i technicy muszą istnieć (model mógł zmyślić id).
+    let objectName: string | null = input.objectName?.trim() || null;
+    if (parsed.objectId != null) {
+      const o = db
+        .select({ name: schema.objects.name })
+        .from(schema.objects)
+        .where(sql`${schema.objects.id} = ${parsed.objectId}`)
+        .get();
+      if (!o) return { error: `Obiekt #${parsed.objectId} nie istnieje — użyj find_object` };
+      objectName = o.name;
+    }
+    let technicianNames: string[] = [];
+    if (parsed.technicianIds.length > 0) {
+      const rows = db
+        .select({
+          id: schema.technicians.id,
+          firstName: schema.technicians.firstName,
+          lastName: schema.technicians.lastName,
+        })
+        .from(schema.technicians)
+        .where(inArray(schema.technicians.id, parsed.technicianIds))
+        .all();
+      const missing = parsed.technicianIds.filter((id) => !rows.some((r) => r.id === id));
+      if (missing.length) return { error: `Technik #${missing.join(", #")} nie istnieje — użyj id z listy techników w prompcie` };
+      technicianNames = parsed.technicianIds.map((id) => techName(rows.find((r) => r.id === id)!));
+    }
+    // Urlop bez tytułu: ten sam tytuł, który wygeneruje POST /calendar/events.
+    const title = (
+      parsed.title || (parsed.type === "urlop" ? `Urlop — ${technicianNames.join(", ")}` : parsed.title)
+    ).slice(0, PROPOSAL_TITLE_MAX);
+    const proposal: EventProposal = { ...parsed, title, objectName, technicianNames };
+    return { proposal, needsConfirmation: true as const };
+  }
+
+  /**
+   * Walidacja akcji opcji ask_choice (bez zapisu): poprawna → { action, actionPreview }; błędna → { actionError }.
+   * Wspólna dla narzędzia i route /choose (tam actionError ⇒ fallback do zwykłej tury).
+   */
+  function previewChoiceAction(action: ChoiceAction): { action: ChoiceAction; actionPreview: ResolvedChange | EventProposal } | { actionError: string } {
+    if (action.kind === "change") {
+      if (!cfg.allowModifications) return { actionError: "modyfikacje wydarzeń są wyłączone w konfiguracji asystenta (propose_changes)" };
+      const r = resolveChangesPreview([action.change]).changes[0];
+      if (r.error) return { actionError: r.error };
+      return { action, actionPreview: r };
+    }
+    const r = buildEventProposal(action.event);
+    if ("error" in r) return { actionError: r.error };
+    return { action, actionPreview: r.proposal };
+  }
+
+  return { cfg, resolveChangesPreview, buildEventProposal, previewChoiceAction };
+}
+export type CalendarActions = ReturnType<typeof buildCalendarActions>;
 
 /**
  * Buduje narzędzia wg konfiguracji: wyłączone (disabledTools) nie trafiają do wyniku;
@@ -206,7 +357,8 @@ export type EventProposal = ParsedInput & { objectName: string | null; technicia
  * Reguły kalendarza działają jako defaults.
  */
 export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {}) {
-  const cfg: ToolsConfig = { ...ASSISTANT_DEFAULTS, ...config };
+  const actions = buildCalendarActions(config);
+  const { cfg } = actions;
   const disabled = new Set(cfg.disabledTools);
   const all = {
     find_object: lenientTool("find_object", {
@@ -514,7 +666,7 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
 
     ask_choice: lenientTool("ask_choice", {
       description:
-        "JEDNO pytanie z 2–8 opcjami do kliknięcia (obiekt, technik, termin, typ, wydarzenie). UI pokaże przyciski; odpowiedź przyjdzie jako wiadomość użytkownika. Kończy turę.",
+        "JEDNO pytanie z 2–8 opcjami do kliknięcia (obiekt, technik, termin, typ, wydarzenie). UI pokaże przyciski; odpowiedź przyjdzie jako wiadomość użytkownika. Opcja z `action` wystawia kartę zmiany/propozycji od razu po kliknięciu. Kończy turę.",
       inputSchema: z.object({
         question: z.string().trim().min(1).max(300).describe("Krótkie pytanie, np. 'Który obiekt wybierasz?'"),
         options: z
@@ -528,6 +680,7 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
               startAt: zDateOrDt.optional().describe("Początek slotu, gdy opcja = termin — UI podświetli na siatce"),
               endAt: zDateOrDt.optional().describe("Koniec slotu (exclusive), gdy opcja = termin"),
               eventId: zId.optional().describe("Id wydarzenia z list_events, gdy opcja = istniejące wydarzenie (doprecyzowanie zmian)"),
+              action: zChoiceAction.optional(),
             })
           )
           .min(2)
@@ -557,7 +710,8 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
           if (o.startAt && o.endAt && o.endAt <= o.startAt) return { error: `Opcja „${o.label}”: endAt musi być późniejszy niż startAt` };
         }
         // Opcja „Inny termin / Inny technik / Inne…” ⇒ zawsze wolna odpowiedź.
-        const hasOther = options.some((o) => /^inn[aey]\b|^inne\b|^żadn/i.test(o.label.trim()));
+        const isOther = (o: { label: string }) => OTHER_OPTION_RE.test(o.label.trim());
+        const hasOther = options.some(isOther);
         const cleaned: ChoiceOption[] = options.map((o) => {
           const out: ChoiceOption = { label: o.label };
           if (o.value) out.value = o.value;
@@ -568,6 +722,11 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
           if (o.startAt && o.endAt) {
             out.startAt = o.startAt;
             out.endAt = o.endAt;
+          }
+          // Akcja natychmiastowa: walidacja jak propose_changes/propose_event (BEZ zapisu); błąd nie przerywa narzędzia.
+          if (o.action) {
+            if (isOther(o)) out.actionError = "opcja otwarta („Inny…/Inne…/Żadne”) nie może mieć action";
+            else Object.assign(out, actions.previewChoiceAction(o.action));
           }
           return out;
         });
@@ -584,76 +743,9 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
     propose_event: lenientTool("propose_event", {
       description:
         "Karta propozycji NOWEGO wydarzenia do ZATWIERDZENIA przez użytkownika. NIE zapisuje. Jedno wywołanie = jedna karta; kilka wydarzeń = kilka wywołań w tym samym kroku. Przy {error} popraw i wywołaj ponownie.",
-      inputSchema: zEventInput.extend({
-        allowPast: z.boolean().optional().describe("true TYLKO gdy użytkownik jawnie potwierdził termin w przeszłości"),
-        recurrence: z
-          .object({
-            freq: z.enum(CALENDAR_SERIES_FREQS),
-            interval: z.number().int().min(1).max(52).default(1),
-            until: zDate.optional().describe("YYYY-MM-DD (włącznie)"),
-            count: z.number().int().min(1).max(200).optional(),
-          })
-          .optional(),
-      }),
-      execute: async (input) => {
-        // Defaults z reguł kalendarza (admin): allDay wg typu, koniec = start + domyślny czas trwania, status domyślny, serie wg zgody.
-        const { allDay, startAt, endAt } = fillEventDefaults(input, cfg);
-        if (input.recurrence && !cfg.allowRecurrence) {
-          return { error: "Serie cykliczne są wyłączone w konfiguracji asystenta — zaproponuj pojedyncze wydarzenie" };
-        }
-        let parsed: ParsedInput;
-        try {
-          parsed = parseInput({
-            ...input,
-            allDay,
-            startAt,
-            endAt,
-            status: input.status ?? cfg.defaultStatus,
-            objectId: input.objectId ?? null,
-            location: input.location ?? null,
-            description: input.description ?? null,
-            recurrence: input.recurrence ?? null,
-          });
-        } catch (e) {
-          return { error: e instanceof ApiError ? e.message : String((e as Error)?.message || e) };
-        }
-        const today = localNow().slice(0, 10);
-        if (parsed.startAt.slice(0, 10) < today && !input.allowPast) {
-          return { error: `Termin ${parsed.startAt} jest w przeszłości (dziś ${today}) — zapytaj użytkownika o właściwą datę; jeśli potwierdzi przeszłość, powtórz z allowPast: true` };
-        }
-        // Referencje: obiekt i technicy muszą istnieć (model mógł zmyślić id).
-        let objectName: string | null = input.objectName?.trim() || null;
-        if (parsed.objectId != null) {
-          const o = db
-            .select({ name: schema.objects.name })
-            .from(schema.objects)
-            .where(sql`${schema.objects.id} = ${parsed.objectId}`)
-            .get();
-          if (!o) return { error: `Obiekt #${parsed.objectId} nie istnieje — użyj find_object` };
-          objectName = o.name;
-        }
-        let technicianNames: string[] = [];
-        if (parsed.technicianIds.length > 0) {
-          const rows = db
-            .select({
-              id: schema.technicians.id,
-              firstName: schema.technicians.firstName,
-              lastName: schema.technicians.lastName,
-            })
-            .from(schema.technicians)
-            .where(inArray(schema.technicians.id, parsed.technicianIds))
-            .all();
-          const missing = parsed.technicianIds.filter((id) => !rows.some((r) => r.id === id));
-          if (missing.length) return { error: `Technik #${missing.join(", #")} nie istnieje — użyj id z listy techników w prompcie` };
-          technicianNames = parsed.technicianIds.map((id) => techName(rows.find((r) => r.id === id)!));
-        }
-        // Urlop bez tytułu: ten sam tytuł, który wygeneruje POST /calendar/events.
-        const title = (
-          parsed.title || (parsed.type === "urlop" ? `Urlop — ${technicianNames.join(", ")}` : parsed.title)
-        ).slice(0, PROPOSAL_TITLE_MAX);
-        const proposal: EventProposal = { ...parsed, title, objectName, technicianNames };
-        return { proposal, needsConfirmation: true as const };
-      },
+      inputSchema: zProposeEventInput,
+      // Logika w buildCalendarActions.buildEventProposal (wspólna z ask_choice.action i POST /choose).
+      execute: async (input) => actions.buildEventProposal(input),
     }),
 
     propose_changes: lenientTool("propose_changes", {
@@ -663,18 +755,8 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
         changes: z.array(zChange).min(1).max(CHANGES_MAX),
         note: z.string().trim().max(300).optional().describe("Krótki kontekst paczki (np. „Podsumowanie dnia 27.08”)"),
       }),
-      execute: async ({ changes, note }) => {
-        const today = localNow().slice(0, 10);
-        const resolved: ResolvedChange[] = changes.map((ch, index) => resolveChange(db, ch, index, { cfg, today }).resolved);
-        const errors = resolved.filter((r) => r.error).length;
-        return {
-          needsConfirmation: true as const,
-          changes: resolved,
-          count: resolved.length,
-          errors,
-          ...(note ? { note } : {}),
-        };
-      },
+      // Logika w buildCalendarActions.resolveChangesPreview (wspólna z ask_choice.action i POST /choose).
+      execute: async ({ changes, note }) => actions.resolveChangesPreview(changes, note),
     }),
   };
   const entries = Object.entries(all as Record<string, unknown>).filter(

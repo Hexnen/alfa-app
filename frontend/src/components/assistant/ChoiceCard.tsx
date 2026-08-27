@@ -1,10 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
-import { Check, CircleHelp, Eye, PenLine } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Check, CircleHelp, Eye, Loader2, PenLine, Zap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { AssistantChoiceOption, AssistantChoiceOutput } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { ObjectPeek } from "./ObjectPeek";
-import { optionValue, stripIdFromLabel, type ChoiceState, type PreviewRange } from "./parts";
+import { hasAction, optionHint, optionValue, stripIdFromLabel, type ChoiceState, type PreviewRange } from "./parts";
 
 export interface ChoiceCardProps {
   toolCallId: string;
@@ -14,6 +14,11 @@ export interface ChoiceCardProps {
   busy?: boolean;
   /** Klik opcji → tekst wysyłany jako zwykła wiadomość użytkownika. */
   onChoose: (text: string) => void;
+  /**
+   * Klik opcji z gotową `action` (nie-multi) → karta od razu przez POST /choose,
+   * bez pytania modelu. Brak propa → zwykłe `onChoose`.
+   */
+  onChooseAction?: (optionIndex: number, option: AssistantChoiceOption) => void | Promise<void>;
   /** „Inne…” → fokus w composerze. */
   onCustom: () => void;
   /** Hover/fokus opcji ze `startAt/endAt` → podświetlenie slotu na siatce (null = zdjęcie). */
@@ -58,10 +63,19 @@ const slotOf = (o: AssistantChoiceOption): PreviewRange | null =>
     : null;
 
 /** Karta pytania `ask_choice`: przyciski-opcje (label + hint), „Inne…”, multi → checkboxy + Dalej. */
-export function ChoiceCard({ toolCallId, choice, state, busy = false, onChoose, onCustom, onPreview }: ChoiceCardProps) {
+export function ChoiceCard({ toolCallId, choice, state, busy = false, onChoose, onChooseAction, onCustom, onPreview }: ChoiceCardProps) {
   const answered = state?.answer != null;
-  const active = Boolean(state?.active) && !busy;
   const multi = Boolean(choice.multi);
+  /** Indeks opcji, której akcja (POST /choose) właśnie trwa — karta zablokowana, spinner na opcji. */
+  const [acting, setActing] = useState<number | null>(null);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  const active = Boolean(state?.active) && !busy && acting == null;
   const [picked, setPicked] = useState<Set<number>>(() => new Set());
   const answer = state?.answer ?? "";
   const selected = useMemo(() => (answered ? selectedIndices(answer, choice.options, multi) : new Set<number>()), [answered, answer, choice.options, multi]);
@@ -75,9 +89,26 @@ export function ChoiceCard({ toolCallId, choice, state, busy = false, onChoose, 
       else next.add(i);
       return next;
     });
+  /** Wybór pojedynczej opcji: z akcją → onChooseAction (karta od razu), inaczej zwykła wiadomość. */
+  const choose = (i: number) => {
+    const o = choice.options[i];
+    if (!o) return;
+    if (!multi && onChooseAction && hasAction(o)) {
+      if (acting != null) return;
+      setActing(i);
+      Promise.resolve()
+        .then(() => onChooseAction(i, o))
+        .catch(() => undefined)
+        .finally(() => {
+          if (mounted.current) setActing(null);
+        });
+      return;
+    }
+    onChoose(optionValue(o));
+  };
   const pick = (i: number) => {
     if (multi) togglePick(i);
-    else onChoose(optionValue(choice.options[i]));
+    else choose(i);
   };
 
   // Klawiatura 1–9 wybiera opcję (gdy fokus poza polem tekstowym) — tylko aktywna karta.
@@ -94,8 +125,8 @@ export function ChoiceCard({ toolCallId, choice, state, busy = false, onChoose, 
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- pick zależy tylko od multi/options/onChoose
-  }, [active, multi, choice.options, onChoose]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- pick zależy tylko od multi/options/onChoose/onChooseAction/acting
+  }, [active, multi, choice.options, onChoose, onChooseAction, acting]);
 
   const submitMulti = () => {
     const vals = [...picked].sort((a, b) => a - b).map((i) => optionValue(choice.options[i]));
@@ -138,10 +169,12 @@ export function ChoiceCard({ toolCallId, choice, state, busy = false, onChoose, 
         {choice.options.map((o, i) => {
           const sel = chosen(i);
           const disabled = !active;
-          const hint = o.hint?.trim();
+          const hint = optionHint(o);
           const label = stripIdFromLabel(o.label);
           const idBadge = o.objectId ?? o.technicianId;
           const slot = slotOf(o);
+          const instant = !multi && hasAction(o);
+          const isActing = acting === i;
           return (
             <div key={i} className="flex items-stretch gap-1">
               <button
@@ -162,6 +195,8 @@ export function ChoiceCard({ toolCallId, choice, state, busy = false, onChoose, 
                 )}
                 data-testid="assistant-choice-option"
                 data-slot={slot ? `${slot.startAt}/${slot.endAt}` : undefined}
+                data-action={instant ? o.action?.kind : undefined}
+                aria-busy={isActing || undefined}
               >
                 <span
                   className={cn(
@@ -171,11 +206,17 @@ export function ChoiceCard({ toolCallId, choice, state, busy = false, onChoose, 
                   )}
                   aria-hidden
                 >
-                  {sel ? <Check className="h-3.5 w-3.5" /> : i + 1}
+                  {isActing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : sel ? <Check className="h-3.5 w-3.5" /> : i + 1}
                 </span>
                 <span className="min-w-0 flex-1">
                   <span className="flex items-center gap-1.5">
                     <span className="min-w-0 truncate">{label}</span>
+                    {instant && (
+                      <span className="inline-flex shrink-0" title="Karta od razu, bez pytania modelu" data-testid="assistant-choice-instant">
+                        <Zap className="h-3 w-3 text-primary" aria-hidden />
+                        <span className="sr-only">Karta od razu, bez pytania modelu</span>
+                      </span>
+                    )}
                     {idBadge != null && (
                       <span
                         className="shrink-0 rounded border px-1 font-mono text-[10px] leading-4 text-muted-foreground"
@@ -193,7 +234,7 @@ export function ChoiceCard({ toolCallId, choice, state, busy = false, onChoose, 
                   objectId={o.objectId}
                   title="Podgląd obiektu"
                   className="min-w-10 shrink-0 justify-center rounded-md border px-2 text-muted-foreground no-underline hover:bg-accent hover:text-foreground lg:min-w-0"
-                  onSelect={active ? () => onChoose(optionValue(o)) : undefined}
+                  onSelect={active ? () => choose(i) : undefined}
                   selectDisabled={!active}
                 >
                   <Eye className="h-3.5 w-3.5" aria-hidden />

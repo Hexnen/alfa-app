@@ -20,7 +20,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import type { AssistantProposal } from "@/lib/api";
+import type { AssistantChoiceOption, AssistantProposal } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Prose } from "./Prose";
 import { ProposalCard, type ProposalCardProps } from "./ProposalCard";
@@ -325,6 +325,8 @@ export interface MessageBubbleProps {
   /** Stany kart pytań (ask_choice) per toolCallId. */
   choices: Map<string, ChoiceState>;
   onChoose: ChoiceCardProps["onChoose"];
+  /** Opcja z gotową `action` → karta od razu (POST /choose); toolCallId karty `ask_choice`. */
+  onChooseAction?: (toolCallId: string, optionIndex: number, option: AssistantChoiceOption) => void | Promise<void>;
   onCustomChoice: ChoiceCardProps["onCustom"];
   /** Blokada akcji na kartach (stream w toku / trwa zapis). */
   busy?: boolean;
@@ -351,6 +353,7 @@ export const MessageBubble = memo(function MessageBubble({
   onPreview,
   choices,
   onChoose,
+  onChooseAction,
   onCustomChoice,
   busy,
   onContinue,
@@ -390,7 +393,8 @@ export const MessageBubble = memo(function MessageBubble({
 
   const err = errorOf(parts);
   const aborted = isAborted(m);
-  const hasContent = parts.some((p) => !isErrorPart(p) && (!isTextPart(p) || p.text.trim()) && p.type !== "data-aborted" && p.type !== "data-system");
+  // `data-local` = znacznik wiadomości dopisanej przez POST /choose (bez modelu) — nie liczy się jako treść i nie jest renderowany.
+  const hasContent = parts.some((p) => !isErrorPart(p) && (!isTextPart(p) || p.text.trim()) && p.type !== "data-aborted" && p.type !== "data-system" && p.type !== "data-local");
   if (!hasContent && !err && !streaming && !aborted) return null;
 
   // Ostatni tekstowy part dostaje domykanie markdownu / kursor.
@@ -507,6 +511,7 @@ export const MessageBubble = memo(function MessageBubble({
                     state={choices.get(p.toolCallId)}
                     busy={busy}
                     onChoose={onChoose}
+                    onChooseAction={onChooseAction ? (idx, o) => onChooseAction(p.toolCallId, idx, o) : undefined}
                     onCustom={onCustomChoice}
                     onPreview={onPreview}
                   />

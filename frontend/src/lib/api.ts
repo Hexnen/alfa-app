@@ -2673,7 +2673,33 @@ export interface AssistantChoiceOption {
   /** Zakres slotu (opcje z find_free_slots) — front podświetla termin na siatce. */
   startAt?: string;
   endAt?: string;
+  /**
+   * Gotowa akcja (kontrakt ASSISTANT_CHOICE_ACTION_CONTRACT.md): klik wystawia kartę
+   * zmiany/propozycji od razu przez POST /choose, bez drugiej tury modelu.
+   */
+  action?: AssistantChoiceAction;
+  /** Podgląd wyniku akcji (change → resolved[0]; event → proposal) — do skrótu pod etykietą. */
+  actionPreview?: AssistantResolvedChange | AssistantProposal;
+  /** Akcja odrzucona przez backend (opcja zachowuje się jak zwykła). */
+  actionError?: string;
 }
+
+/** Akcja przypięta do opcji `ask_choice`. */
+export type AssistantChoiceAction =
+  | { kind: "change"; change: AssistantChange }
+  | { kind: "event"; event: CalendarEventInput };
+
+/** Wiadomość UI (ai@7 UIMessage) zwracana przez backend — typ luźny, jak w `messages()`. */
+export interface AssistantUIMessage {
+  id: string;
+  role: "user" | "assistant" | "system";
+  parts: unknown[];
+}
+
+/** Odpowiedź POST /assistant/chats/:id/choose. */
+export type AssistantChooseResult =
+  | { fallback: true }
+  | { fallback?: false; userMessage: AssistantUIMessage; assistantMessage: AssistantUIMessage };
 
 /** Wynik `ask_choice` — karta pytania z przyciskami. */
 export interface AssistantChoiceOutput {
@@ -2880,6 +2906,25 @@ export const assistantApi = {
     });
     const results = Array.isArray(r) ? r : Array.isArray(r?.results) ? r.results : [];
     return results.map((x, i) => ({ index: typeof x?.index === "number" ? x.index : indexes[i], ok: Boolean(x?.ok), event: x?.event, error: x?.error }));
+  },
+  /**
+   * Wybór opcji `ask_choice` z gotową `action` — backend bez modelu dopisuje wiadomość
+   * użytkownika i asystenta z kartą (`tool-propose_changes` / `tool-propose_event`,
+   * toolCallId `local_*`). `{ fallback: true }` → wyślij wybór zwykłą ścieżką (sendMessage).
+   */
+  async choose(chatId: number, toolCallId: string, optionIndex: number, optionLabel?: string): Promise<AssistantChooseResult> {
+    const r = await assistantRequest<AssistantChooseResult | null>(`/assistant/chats/${chatId}/choose`, {
+      method: "POST",
+      body: JSON.stringify({ toolCallId, optionIndex, ...(optionLabel ? { optionLabel } : {}) }),
+    });
+    if (!r || typeof r !== "object") return { fallback: true };
+    if ("fallback" in r && r.fallback) return { fallback: true };
+    const ok = r as { userMessage?: AssistantUIMessage; assistantMessage?: AssistantUIMessage };
+    if (!ok.userMessage || !ok.assistantMessage) return { fallback: true };
+    return {
+      userMessage: { ...ok.userMessage, id: String(ok.userMessage.id) },
+      assistantMessage: { ...ok.assistantMessage, id: String(ok.assistantMessage.id) },
+    };
   },
 };
 

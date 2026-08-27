@@ -25,8 +25,9 @@ import type { CalendarEventPrefill } from "@/components/CalendarEventDialog";
 import { cn } from "@/lib/utils";
 import { ChatHistory } from "./ChatHistory";
 import { MessageList } from "./MessageList";
-import { classifyChatError, textOf, type ChatMessage, type PreviewRange } from "./parts";
+import { classifyChatError, optionValue, textOf, type ChatMessage, type PreviewRange } from "./parts";
 import type { ChangeCardProps } from "./ChangeCard";
+import type { MessageBubbleProps } from "./MessageBubble";
 import "./assistant.css";
 
 /** Zakres podświetlany na siatce (karta propozycji / opcja ze slotem); `focus` = „Pokaż w kalendarzu”. */
@@ -427,6 +428,8 @@ function ChatSession({
   const finePointer = useMemo(() => window.matchMedia("(pointer: fine)").matches, []);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [saving, setSaving] = useState(false);
+  /** Trwa POST /choose (opcja z akcją) — karty i composer zablokowane jak przy wysyłce. */
+  const [choosing, setChoosing] = useState(false);
   /** Tekst wpisany w trakcie tury — wysyłany po jej zakończeniu. */
   const [queued, setQueued] = useState<string | null>(null);
 
@@ -446,8 +449,8 @@ function ChatSession({
     (text: string) => {
       const t = text.trim();
       if (!t || !configured || loading || t.length > maxChars) return;
-      if (busy) {
-        // Nie odrzucaj po cichu — kolejkuj do końca tury.
+      if (busy || choosing) {
+        // Nie odrzucaj po cichu — kolejkuj do końca tury / żądania /choose.
         setQueued(t);
         setComposer("");
         return;
@@ -456,12 +459,12 @@ function ChatSession({
       void sendMessage({ text: t });
       setComposer("");
     },
-    [busy, configured, loading, maxChars, sendMessage, clearError, setComposer]
+    [busy, choosing, configured, loading, maxChars, sendMessage, clearError, setComposer]
   );
 
   // Kolejka: po zakończeniu tury wyślij oczekujący tekst.
   useEffect(() => {
-    if (busy || queued == null) return;
+    if (busy || choosing || queued == null) return;
     const t = queued;
     setQueued(null);
     if (status === "ready") {
@@ -470,7 +473,7 @@ function ChatSession({
     } else {
       setComposer(t);
     }
-  }, [busy, queued, status, sendMessage, clearError, setComposer]);
+  }, [busy, choosing, queued, status, sendMessage, clearError, setComposer]);
 
   /** Stop = zerwanie streamu (useChat) + przerwanie generowania po stronie serwera. */
   const stopTurn = useCallback(() => {
@@ -703,6 +706,37 @@ function ChatSession({
 
   // Karta ask_choice: klik opcji = zwykła wiadomość użytkownika; „Inne…” = fokus w composerze.
   const onChoose = useCallback((text: string) => send(text), [send]);
+  /**
+   * Opcja z gotową `action` → POST /choose: backend (bez modelu) dopisuje wiadomość użytkownika
+   * i asystenta z kartą (toolCallId `local_*`). `fallback` / błąd → zwykła ścieżka przez model.
+   */
+  const onChooseAction = useCallback<NonNullable<MessageBubbleProps["onChooseAction"]>>(
+    async (toolCallId, optionIndex, option) => {
+      const text = optionValue(option);
+      // Karta ask_choice istnieje tylko w zapisanym czacie — id jest znane.
+      const chatId = chatIdRef.current;
+      if (chatId == null || !toolCallId || busy || choosing) {
+        send(text);
+        return;
+      }
+      setChoosing(true);
+      try {
+        const r = await assistantApi.choose(chatId, toolCallId, optionIndex, option.label);
+        if ("fallback" in r && r.fallback) {
+          send(text);
+          return;
+        }
+        clearError();
+        setMessages((ms) => [...ms, r.userMessage as unknown as UIMessage, r.assistantMessage as unknown as UIMessage]);
+        onTitleMaybeChanged();
+      } catch {
+        send(text);
+      } finally {
+        setChoosing(false);
+      }
+    },
+    [busy, choosing, send, clearError, setMessages, onTitleMaybeChanged]
+  );
   const onCustomChoice = useCallback(() => inputRef.current?.focus(), []);
   const onInsertSuggestion = useCallback(
     (text: string) => {
@@ -783,7 +817,7 @@ function ChatSession({
           configured={configured}
           persona={persona}
           maxSteps={maxSteps}
-          busy={saving}
+          busy={saving || choosing}
           onSuggestion={send}
           onInsertSuggestion={onInsertSuggestion}
           onApprove={onApprove}
@@ -795,6 +829,7 @@ function ChatSession({
           onOpenEvent={onOpenEvent}
           onPreview={onPreviewRange ? onPreview : undefined}
           onChoose={onChoose}
+          onChooseAction={onChooseAction}
           onCustomChoice={onCustomChoice}
           onContinue={onContinue}
           onRetry={onRetry}
@@ -885,7 +920,7 @@ function ChatSession({
             <Square className="mr-1 h-3.5 w-3.5" aria-hidden /> Stop
           </Button>
         ) : (
-          <Button type="submit" size="sm" className="h-10 w-10 p-0" disabled={!configured || loading || tooLong} aria-label="Wyślij">
+          <Button type="submit" size="sm" className="h-10 w-10 p-0" disabled={!configured || loading || tooLong || choosing} aria-label="Wyślij">
             <SendHorizontal className="h-4 w-4" aria-hidden />
           </Button>
         )}

@@ -200,6 +200,54 @@ try {
     db.delete(schema.calendarEvents).where(like(schema.calendarEvents.title, `${PREFIX}%`)).run();
   }
 
+  // ask_choice z `action` (kontrakt: ASSISTANT_CHOICE_ACTION) — walidacja jak propose_changes/propose_event, bez zapisu
+  {
+    const evAct = db
+      .insert(schema.calendarEvents)
+      .values({ type: "serwis", title: `${PREFIX} Do przesunięcia`, startAt: `${shift(3)}T08:00`, endAt: `${shift(3)}T10:00`, allDay: false, status: "planned" })
+      .returning({ id: schema.calendarEvents.id })
+      .get().id;
+    try {
+      type ActOpt = { label: string; action?: unknown; actionPreview?: { after?: { startAt: string }; diff?: unknown[]; title?: string; startAt?: string }; actionError?: string };
+      const change = { kind: "update", eventId: evAct, patch: { startAt: `${shift(4)}T08:00`, endAt: `${shift(4)}T10:00` } };
+      const a1 = (await exec(tools.ask_choice, {
+        question: "Który termin?",
+        options: [
+          { label: "jutro", action: { kind: "change", change } },
+          { label: "błędne", action: { kind: "change", change: { kind: "update", eventId: 99999999, patch: { startAt: `${shift(4)}T08:00` } } } },
+          { label: "nowe", action: { kind: "event", event: { type: "serwis", title: "Nowe", startAt: `${shift(5)}T09:00`, technicianIds: [] } } },
+          { label: "nowe błędne", action: { kind: "event", event: { type: "serwis", title: "Nowe", startAt: `${shift(5)}T09:00`, technicianIds: [99999999] } } },
+          { label: "Inny termin", action: { kind: "change", change } },
+        ],
+      })) as { error?: string; awaitingUserChoice?: boolean; allowCustom?: boolean; options: ActOpt[] };
+      ok("ask_choice+action: narzędzie NIE zwraca error mimo błędnych akcji", !a1.error && a1.awaitingUserChoice === true, a1);
+      const [oOk, oBad, oEv, oEvBad, oOther] = a1.options;
+      ok("ask_choice+action change OK: option.action zachowane", JSON.stringify(oOk.action) === JSON.stringify({ kind: "change", change }), oOk);
+      ok("ask_choice+action change OK: actionPreview = ResolvedChange z after/diff", oOk.actionPreview?.after?.startAt === `${shift(4)}T08:00` && Array.isArray(oOk.actionPreview?.diff) && oOk.actionPreview.diff.length === 1 && oOk.actionError === undefined, oOk);
+      ok("ask_choice+action change błędna (nieistniejący eventId): brak action, actionError string", oBad.action === undefined && oBad.actionPreview === undefined && typeof oBad.actionError === "string" && /99999999/.test(oBad.actionError), oBad);
+      ok("ask_choice+action event OK: actionPreview = proposal (title/startAt)", !!oEv.action && oEv.actionPreview?.title === "Nowe" && oEv.actionPreview?.startAt === `${shift(5)}T09:00` && oEv.actionError === undefined, oEv);
+      ok("ask_choice+action event błędna (nieistniejący technik): brak action, actionError", oEvBad.action === undefined && typeof oEvBad.actionError === "string" && /Technik #99999999/.test(oEvBad.actionError), oEvBad);
+      ok("ask_choice+action: „Inny termin” → action usunięte, actionError „opcja otwarta”, allowCustom", oOther.action === undefined && /opcja otwarta/.test(oOther.actionError ?? "") && a1.allowCustom === true, oOther);
+      // Jedno źródło prawdy: propose_changes / propose_event dają dokładnie ten sam wynik co actionPreview.
+      const pc = (await exec(tools.propose_changes, { changes: [change] })) as { changes: unknown[] };
+      ok("propose_changes == actionPreview (resolveChangesPreview)", JSON.stringify(pc.changes[0]) === JSON.stringify(oOk.actionPreview), pc);
+      const pe = (await exec(tools.propose_event, { type: "serwis", title: "Nowe", startAt: `${shift(5)}T09:00`, technicianIds: [] })) as { proposal: unknown };
+      ok("propose_event == actionPreview (buildEventProposal)", JSON.stringify(pe.proposal) === JSON.stringify(oEv.actionPreview), pe);
+      // allowModifications=false → action change odrzucane (propose_changes wyłączone), event nadal działa
+      const toolsNoMod = buildCalendarTools({ id: 0 } as User, { allowModifications: false });
+      const a2 = (await exec(toolsNoMod.ask_choice, {
+        question: "?",
+        options: [
+          { label: "A", action: { kind: "change", change } },
+          { label: "B", action: { kind: "event", event: { type: "serwis", title: "Nowe", startAt: `${shift(5)}T09:00`, technicianIds: [] } } },
+        ],
+      })) as { options: ActOpt[] };
+      ok("ask_choice+action przy allowModifications=false: change → actionError, event → action", a2.options[0].action === undefined && /wyłączone/.test(a2.options[0].actionError ?? "") && !!a2.options[1].action, a2);
+    } finally {
+      db.delete(schema.calendarEvents).where(eq(schema.calendarEvents.id, evAct)).run();
+    }
+  }
+
   // check_conflicts
   const k1 = (await exec(tools.check_conflicts, { startAt: "2026-09-01T10:00", endAt: "2026-09-01T08:00", technicianIds: [tid] })) as { error?: string };
   ok("check_conflicts: endAt <= startAt → error", typeof k1.error === "string", k1);
