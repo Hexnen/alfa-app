@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { db, schema } from "../db/index.js";
 import { eq, like, asc, and, isNull, isNotNull } from "drizzle-orm";
 import type { ApiResponse } from "../types/index.js";
-import type { Realization, NewRealization } from "../db/schema.js";
+import type { Protocol, Realization, NewRealization } from "../db/schema.js";
 import { createProtocolForRealizationSync } from "./protocols.js";
 
 const app = new Hono();
@@ -22,7 +22,41 @@ const round2 = (n: number) => Math.round(n * 100) / 100;
 const monthPrefix = (year: number, month: number) =>
   `${year}-${String(month).padStart(2, "0")}-%`;
 
-function withComputed(r: Realization, calendarEventId: number | null = null) {
+/** Skrót protokołu dołączany do realizacji (badge + deep-link w tabeli). */
+export interface ProtocolBrief {
+  id: number;
+  number: string;
+  status: "draft" | "final";
+  signedAt: string | null;
+}
+
+const briefOf = (p: Protocol): ProtocolBrief => ({
+  id: p.id,
+  number: p.number,
+  status: p.status,
+  signedAt: p.signedAt ?? null,
+});
+
+/** Protokół realizacji (albo null) — odczyt poza transakcją. */
+function protocolBriefFor(realizationId: number): ProtocolBrief | null {
+  const p = db
+    .select({
+      id: schema.protocols.id,
+      number: schema.protocols.number,
+      status: schema.protocols.status,
+      signedAt: schema.protocols.signedAt,
+    })
+    .from(schema.protocols)
+    .where(eq(schema.protocols.realizationId, realizationId))
+    .get();
+  return p ? { ...p, signedAt: p.signedAt ?? null } : null;
+}
+
+function withComputed(
+  r: Realization,
+  calendarEventId: number | null = null,
+  protocol: ProtocolBrief | null = null,
+) {
   return {
     ...r,
     subtotal: round2(r.amountHours + r.amountMaterial + r.amountKm),
@@ -30,6 +64,8 @@ function withComputed(r: Realization, calendarEventId: number | null = null) {
     labourCost: round2(labourCostOf(r)),
     // Wydarzenie kalendarza, z którego powstała realizacja (null = wpis ręczny).
     calendarEventId,
+    // Protokół realizacji (LEFT JOIN po protocols.realization_id); null = brak.
+    protocol,
   };
 }
 
@@ -71,11 +107,13 @@ function parseBody(body: Record<string, unknown>): { data?: Partial<NewRealizati
   };
 }
 
-// Lista realizacji danego miesiąca (+ powiązane wydarzenie kalendarza; ?source=calendar|manual)
+// Lista realizacji danego miesiąca (+ powiązane wydarzenie kalendarza i protokół;
+// ?source=calendar|manual, ?protocol=with|without)
 app.get("/", async (c) => {
   const year = parseInt(c.req.query("year") || "");
   const month = parseInt(c.req.query("month") || "");
   const source = c.req.query("source");
+  const protocol = c.req.query("protocol");
 
   if (!year || !month || month < 1 || month > 12) {
     return c.json<ApiResponse<null>>(
@@ -89,19 +127,51 @@ app.get("/", async (c) => {
       400
     );
   }
+  if (protocol && protocol !== "with" && protocol !== "without") {
+    return c.json<ApiResponse<null>>(
+      { success: false, error: "Parametr protocol: dozwolone with, without" },
+      400
+    );
+  }
 
   const conds = [like(schema.realizations.date, monthPrefix(year, month))];
   if (source === "calendar") conds.push(isNotNull(schema.calendarEvents.id));
   if (source === "manual") conds.push(isNull(schema.calendarEvents.id));
+  if (protocol === "with") conds.push(isNotNull(schema.protocols.id));
+  if (protocol === "without") conds.push(isNull(schema.protocols.id));
 
   const rows = await db
-    .select({ r: schema.realizations, calendarEventId: schema.calendarEvents.id })
+    .select({
+      r: schema.realizations,
+      calendarEventId: schema.calendarEvents.id,
+      protocolId: schema.protocols.id,
+      protocolNumber: schema.protocols.number,
+      protocolStatus: schema.protocols.status,
+      protocolSignedAt: schema.protocols.signedAt,
+    })
     .from(schema.realizations)
     .leftJoin(schema.calendarEvents, eq(schema.calendarEvents.realizationId, schema.realizations.id))
+    .leftJoin(schema.protocols, eq(schema.protocols.realizationId, schema.realizations.id))
     .where(and(...conds))
     .orderBy(asc(schema.realizations.date), asc(schema.realizations.id));
 
-  return c.json({ success: true, data: rows.map((row) => withComputed(row.r, row.calendarEventId ?? null)) });
+  return c.json({
+    success: true,
+    data: rows.map((row) =>
+      withComputed(
+        row.r,
+        row.calendarEventId ?? null,
+        row.protocolId != null
+          ? {
+              id: row.protocolId,
+              number: row.protocolNumber ?? "",
+              status: row.protocolStatus ?? "draft",
+              signedAt: row.protocolSignedAt ?? null,
+            }
+          : null,
+      ),
+    ),
+  });
 });
 
 // Podsumowanie miesiąca + tabela roczna przychód/strata
@@ -184,18 +254,85 @@ app.post("/", async (c) => {
   // albo oba, albo żadne. Numer protokołu alokowany atomowo (bez wyścigu na
   // UNIQUE), więc równoległy POST /protocols/sync nie zostawi realizacji bez
   // protokołu ani nie wywoła 500 z kolizji UNIQUE(realizationId/number).
-  const realization = db.transaction((tx) => {
+  const { realization, protocol } = db.transaction((tx) => {
     const created = tx
       .insert(schema.realizations)
       .values(data as NewRealization)
       .returning()
       .get();
-    createProtocolForRealizationSync(tx, created);
-    return created;
+    const proto = createProtocolForRealizationSync(tx, created);
+    return { realization: created, protocol: proto ? briefOf(proto) : null };
   });
 
   return c.json(
-    { success: true, data: withComputed(realization), message: "Realizacja dodana" },
+    {
+      success: true,
+      data: withComputed(realization, null, protocol),
+      message: "Realizacja dodana",
+    },
+    201
+  );
+});
+
+/**
+ * Utworzenie protokołu dla pojedynczej realizacji (starsze/zaimportowane wpisy,
+ * którym protokół nie powstał razem z realizacją). Sprawdzenie „czy już jest”
+ * i insert w jednej synchronicznej transakcji — numer alokowany atomowo, a
+ * ON CONFLICT(realization_id) DO NOTHING zabezpiecza równoległe żądanie
+ * (drugie dostaje 409 z istniejącym protokołem, nigdy 500 z UNIQUE).
+ */
+app.post("/:id/protocol", (c) => {
+  const id = parseInt(c.req.param("id"));
+  if (!Number.isFinite(id)) {
+    return c.json<ApiResponse<null>>({ success: false, error: "Nieprawidłowy identyfikator" }, 400);
+  }
+
+  const readProtocol = (tx: Parameters<Parameters<typeof db.transaction>[0]>[0]) =>
+    tx.select().from(schema.protocols).where(eq(schema.protocols.realizationId, id)).limit(1).all()[0];
+
+  const outcome = db.transaction((tx) => {
+    const realization = tx
+      .select()
+      .from(schema.realizations)
+      .where(eq(schema.realizations.id, id))
+      .limit(1)
+      .all()[0];
+    if (!realization) return { status: 404 as const };
+
+    const existing = readProtocol(tx);
+    if (existing) return { status: 409 as const, protocol: briefOf(existing) };
+
+    const created = createProtocolForRealizationSync(tx, realization);
+    // ON CONFLICT DO NOTHING → brak zwrotki znaczy, że protokół powstał równolegle.
+    if (!created) {
+      const raced = readProtocol(tx);
+      return raced
+        ? { status: 409 as const, protocol: briefOf(raced) }
+        : { status: 409 as const, protocol: null };
+    }
+    return { status: 201 as const, protocol: briefOf(created) };
+  });
+
+  if (outcome.status === 404) {
+    return c.json<ApiResponse<null>>({ success: false, error: "Nie znaleziono realizacji" }, 404);
+  }
+  if (outcome.status === 409) {
+    return c.json(
+      {
+        success: false,
+        error: "Realizacja ma już protokół",
+        data: { protocol: outcome.protocol },
+      },
+      409
+    );
+  }
+
+  return c.json(
+    {
+      success: true,
+      data: { protocol: outcome.protocol },
+      message: `Protokół ${outcome.protocol.number} utworzony`,
+    },
     201
   );
 });
@@ -269,7 +406,7 @@ app.put("/:id", async (c) => {
 
   return c.json({
     success: true,
-    data: withComputed(result[0], link?.id ?? null),
+    data: withComputed(result[0], link?.id ?? null, protocolBriefFor(id)),
     message: "Realizacja zaktualizowana",
   });
 });

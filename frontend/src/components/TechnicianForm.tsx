@@ -10,13 +10,20 @@ import {
   DialogTitle,
   DialogFooter,
 } from "./ui/dialog";
-import type { Technician, TechnicianInput, TechnicianType } from "@/lib/api";
+import type {
+  PriceListGroup,
+  Technician,
+  TechnicianInput,
+  TechnicianType,
+} from "@/lib/api";
 
 interface TechnicianFormProps {
   open: boolean;
   onClose: () => void;
   onSubmit: (data: TechnicianInput) => Promise<void>;
   technician?: Technician | null;
+  /** Cenniki do wyboru; pusta lista = pole „Cennik" pokazuje tylko główny. */
+  priceLists?: PriceListGroup[];
 }
 
 export function TechnicianForm({
@@ -24,6 +31,7 @@ export function TechnicianForm({
   onClose,
   onSubmit,
   technician,
+  priceLists = [],
 }: TechnicianFormProps) {
   const [loading, setLoading] = useState(false);
   const [formData, setFormData] = useState<TechnicianInput>({
@@ -36,6 +44,7 @@ export function TechnicianForm({
     type: technician?.type || "internal",
     notes: technician?.notes || "",
     active: technician?.active ?? true,
+    priceListId: technician?.priceListId ?? null,
   });
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -153,6 +162,36 @@ export function TechnicianForm({
                 placeholder="np. 1234567890"
               />
             </div>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="tech-price-list">Cennik</Label>
+            <select
+              id="tech-price-list"
+              data-testid="tech-price-list"
+              value={formData.priceListId ?? ""}
+              onChange={(e) =>
+                setFormData((p) => ({
+                  ...p,
+                  priceListId: e.target.value ? Number(e.target.value) : null,
+                }))
+              }
+              className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+            >
+              <option value="">Główny (domyślny)</option>
+              {priceLists
+                .filter((l) => !l.isDefault)
+                .filter((l) => l.active || l.id === technician?.priceListId)
+                .map((l) => (
+                  <option key={l.id} value={l.id}>
+                    {l.name}
+                    {l.active ? "" : " (nieaktywny)"}
+                  </option>
+                ))}
+            </select>
+            <p className="text-xs text-muted-foreground">
+              Cennik podpowiadany przy wycenach dla tego technika.
+            </p>
           </div>
 
           <div className="space-y-2">

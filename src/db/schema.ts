@@ -500,6 +500,10 @@ export const technicians = sqliteTable("technicians", {
     .notNull(),
   notes: text("notes"),
   active: integer("active", { mode: "boolean" }).default(true).notNull(),
+  // Cennik przypisany technikowi (NULL = korzysta z cennika głównego).
+  priceListId: integer("price_list_id").references(() => priceLists.id, {
+    onDelete: "set null",
+  }),
   createdAt: text("created_at")
     .default(sql`(datetime('now'))`)
     .notNull(),
@@ -511,10 +515,38 @@ export const technicians = sqliteTable("technicians", {
 export type Technician = typeof technicians.$inferSelect;
 export type NewTechnician = typeof technicians.$inferInsert;
 
+// Cenniki (grupy pozycji). Zawsze dokładnie jeden ma isDefault=1 — to „cennik
+// główny", z którego startują wyceny bez kontekstu technika i który przejmuje
+// pozycje po usuniętym cenniku.
+export const priceLists = sqliteTable("price_lists", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull().unique(), // 1–80 znaków
+  description: text("description").default("").notNull(),
+  isDefault: integer("is_default", { mode: "boolean" })
+    .default(false)
+    .notNull(),
+  active: integer("active", { mode: "boolean" }).default(true).notNull(),
+  position: integer("position").default(0).notNull(),
+  createdAt: text("created_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+  updatedAt: text("updated_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+});
+
+export type PriceListGroup = typeof priceLists.$inferSelect;
+export type NewPriceListGroup = typeof priceLists.$inferInsert;
+
 // Cennik usług serwisowych — z załącznika do protokołu powykonawczego
 // ("CENNIK USŁUG SERWISOWYCH", wer. 20260127).
 export const priceList = sqliteTable("price_list", {
   id: integer("id").primaryKey({ autoIncrement: true }),
+  // Cennik, do którego należy pozycja. Usuwanie cennika obsługiwane w routach
+  // (przeniesienie pozycji do domyślnego), więc FK trzyma RESTRICT.
+  priceListId: integer("price_list_id")
+    .notNull()
+    .references(() => priceLists.id, { onDelete: "restrict" }),
   name: text("name").notNull(), // Nazwa usługi
   unit: text("unit").notNull(), // JM: KM / RBH / MB / SZT...
   price: real("price").default(0).notNull(), // cena netto

@@ -896,6 +896,14 @@ export interface CmaTrends {
 
 export type RealizationKind = "service" | "warranty" | "installation";
 
+/** Skrót protokołu dołączany do realizacji (badge + deep-link w tabeli). */
+export interface RealizationProtocol {
+  id: number;
+  number: string;
+  status: "draft" | "final";
+  signedAt: string | null;
+}
+
 export interface Realization {
   id: number;
   date: string; // YYYY-MM-DD
@@ -922,6 +930,11 @@ export interface Realization {
    * `calendar_events.realization_id`). Brak pola = starszy backend.
    */
   calendarEventId?: number | null;
+  /**
+   * Protokół realizacji (LEFT JOIN po `protocols.realization_id`).
+   * `null` = realizacja bez protokołu, brak pola = starszy backend.
+   */
+  protocol?: RealizationProtocol | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -957,16 +970,19 @@ export interface RealizationSummary {
   months: { month: number; revenue: number; loss: number }[];
 }
 
-/** `source` — filtr pochodzenia (opcjonalny; starszy backend go ignoruje). */
+/**
+ * `source` — filtr pochodzenia, `protocol` — filtr obecności protokołu
+ * (oba opcjonalne; starszy backend je ignoruje).
+ */
 export async function getRealizations(
   year: number,
   month: number,
-  opts?: { source?: "calendar" | "manual" }
+  opts?: { source?: "calendar" | "manual"; protocol?: "with" | "without" }
 ) {
-  const q = opts?.source ? `&source=${opts.source}` : "";
-  return request<ApiResponse<Realization[]>>(
-    `/realizations?year=${year}&month=${month}${q}`
-  );
+  const params = new URLSearchParams({ year: String(year), month: String(month) });
+  if (opts?.source) params.set("source", opts.source);
+  if (opts?.protocol) params.set("protocol", opts.protocol);
+  return request<ApiResponse<Realization[]>>(`/realizations?${params.toString()}`);
 }
 
 export async function getRealizationSummary(year: number, month: number) {
@@ -982,10 +998,16 @@ export async function createRealization(data: RealizationInput) {
   });
 }
 
-export async function updateRealization(id: number, data: RealizationInput) {
+export async function updateRealization(
+  id: number,
+  data: RealizationInput,
+  // Backend wymaga optymistycznej blokady: znacznik updatedAt wersji, którą
+  // użytkownik miał na ekranie (bez niego PUT kończy się 428).
+  expectedUpdatedAt: string
+) {
   return request<ApiResponse<Realization>>(`/realizations/${id}`, {
     method: "PUT",
-    body: JSON.stringify(data),
+    body: JSON.stringify({ ...data, expectedUpdatedAt }),
   });
 }
 
@@ -993,6 +1015,17 @@ export async function deleteRealization(id: number) {
   return request<ApiResponse<null>>(`/realizations/${id}`, {
     method: "DELETE",
   });
+}
+
+/**
+ * Tworzy protokół dla pojedynczej realizacji (starsze wpisy bez protokołu).
+ * 409 „Realizacja ma już protokół” trafia do `request` jako wyjątek.
+ */
+export async function createRealizationProtocol(id: number) {
+  return request<ApiResponse<{ protocol: RealizationProtocol }>>(
+    `/realizations/${id}/protocol`,
+    { method: "POST" }
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1012,6 +1045,8 @@ export interface Technician {
   type: TechnicianType;
   notes: string | null;
   active: boolean;
+  /** Cennik przypisany technikowi; null = korzysta z cennika głównego. */
+  priceListId: number | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -1026,6 +1061,8 @@ export interface TechnicianInput {
   type: TechnicianType;
   notes?: string;
   active?: boolean;
+  /** null / brak = cennik główny. */
+  priceListId?: number | null;
 }
 
 export async function getTechnicians(onlyActive = false) {
@@ -1060,6 +1097,8 @@ export async function deleteTechnician(id: number) {
 
 export interface PriceItem {
   id: number;
+  /** Cennik, do którego należy pozycja. */
+  priceListId: number;
   name: string;
   unit: string;
   price: number;
@@ -1075,11 +1114,90 @@ export interface PriceItemInput {
   price: number | string;
   position?: number;
   active?: boolean;
+  /** Brak = cennik główny (POST) / bez zmiany (PUT). */
+  priceListId?: number;
 }
 
-export async function getPriceList() {
-  return request<ApiResponse<PriceItem[]>>("/pricelist");
+/** Cennik (grupa pozycji) wraz z licznikami z `GET /pricelist/lists`. */
+export interface PriceListGroup {
+  id: number;
+  name: string;
+  description: string;
+  /** Cennik główny — dokładnie jeden w bazie. */
+  isDefault: boolean;
+  active: boolean;
+  position: number;
+  createdAt: string;
+  updatedAt: string;
+  itemCount: number;
+  technicianCount: number;
 }
+
+export interface PriceListGroupInput {
+  name: string;
+  description?: string;
+  active?: boolean;
+  position?: number;
+}
+
+/** Bez `listId` backend zwraca pozycje cennika głównego (zgodność wsteczna). */
+export async function getPriceList(listId?: number) {
+  return request<ApiResponse<PriceItem[]>>(
+    `/pricelist${listId ? `?listId=${listId}` : ""}`
+  );
+}
+
+/** Cenniki: CRUD grup, cennik główny, duplikacja, przypisania, kopiowanie pozycji. */
+export const priceListsApi = {
+  list: () => request<ApiResponse<PriceListGroup[]>>("/pricelist/lists"),
+
+  create: (data: PriceListGroupInput) =>
+    request<ApiResponse<PriceListGroup>>("/pricelist/lists", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  update: (id: number, data: PriceListGroupInput) =>
+    request<ApiResponse<PriceListGroup>>(`/pricelist/lists/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+
+  /** `force` przenosi pozycje do cennika głównego i zdejmuje przypisania techników. */
+  remove: (id: number, force = false) =>
+    request<ApiResponse<null>>(
+      `/pricelist/lists/${id}${force ? "?force=1" : ""}`,
+      { method: "DELETE" }
+    ),
+
+  setDefault: (id: number) =>
+    request<ApiResponse<PriceListGroup>>(`/pricelist/lists/${id}/default`, {
+      method: "POST",
+    }),
+
+  duplicate: (id: number, data?: { name?: string; description?: string }) =>
+    request<ApiResponse<PriceListGroup>>(`/pricelist/lists/${id}/duplicate`, {
+      method: "POST",
+      body: JSON.stringify(data ?? {}),
+    }),
+
+  technicians: (id: number) =>
+    request<ApiResponse<Technician[]>>(`/pricelist/lists/${id}/technicians`),
+
+  /** Ustawia dokładny zbiór techników korzystających z cennika. */
+  setTechnicians: (id: number, technicianIds: number[]) =>
+    request<ApiResponse<Technician[]>>(`/pricelist/lists/${id}/technicians`, {
+      method: "PUT",
+      body: JSON.stringify({ technicianIds }),
+    }),
+
+  /** Kopiuje pozycje (wszystkie lub wskazane) do innego cennika. */
+  copyItems: (fromListId: number, toListId: number, itemIds?: number[]) =>
+    request<ApiResponse<PriceItem[]>>("/pricelist/copy", {
+      method: "POST",
+      body: JSON.stringify({ fromListId, toListId, itemIds }),
+    }),
+};
 
 export async function createPriceItem(data: PriceItemInput) {
   return request<ApiResponse<PriceItem>>("/pricelist", {
@@ -1295,7 +1413,14 @@ export async function getQuotes(year?: number, month?: number) {
   return request<ApiResponse<Quote[]>>(`/quotes${query ? `?${query}` : ""}`);
 }
 
-export async function createQuote(data: Partial<QuoteInput> = {}) {
+/**
+ * Nowa wycena. Bez `items` backend prefilluje ją pozycjami cennika: wskazanego
+ * przez `priceListId`, cennika technika (`technicianId`) albo — domyślnie —
+ * cennika głównego.
+ */
+export async function createQuote(
+  data: Partial<QuoteInput> & { priceListId?: number; technicianId?: number } = {}
+) {
   return request<ApiResponse<Quote>>("/quotes", {
     method: "POST",
     body: JSON.stringify(data),

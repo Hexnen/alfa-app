@@ -10,6 +10,9 @@ import {
   DialogTitle,
   DialogFooter,
 } from "./ui/dialog";
+import { Link } from "react-router-dom";
+import { ProtocolBadge } from "./CalendarEventBadges";
+import { protocolHref } from "@/lib/calendar-labels";
 import type { Realization, RealizationInput, RealizationKind } from "@/lib/api";
 
 interface RealizationFormProps {
@@ -73,8 +76,20 @@ export function RealizationForm({
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle>
+          <DialogTitle className="flex flex-wrap items-center gap-2">
             {realization ? "Edytuj realizację" : "Nowa realizacja"}
+            {/* Protokół realizacji — ta sama pigułka co w tabeli i kalendarzu. */}
+            {realization?.protocol && (
+              <Link
+                to={protocolHref(realization.protocol.id)}
+                data-testid="realization-form-protocol-link"
+                className="inline-flex rounded-full font-normal hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <ProtocolBadge
+                  event={{ type: "serwis", status: "done", protocol: realization.protocol }}
+                />
+              </Link>
+            )}
           </DialogTitle>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4">

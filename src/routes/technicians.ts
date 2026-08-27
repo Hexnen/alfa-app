@@ -23,10 +23,20 @@ function parseBody(body: Record<string, unknown>): {
   const company = typeof body.company === "string" ? body.company.trim() : "";
   const nip =
     typeof body.nip === "string" ? body.nip.replace(/[\s-]/g, "") : "";
+  // Cennik technika: null / brak = korzysta z cennika głównego.
+  let priceListId: number | null = null;
+  if (body.priceListId !== undefined && body.priceListId !== null && body.priceListId !== "") {
+    const n = Number(body.priceListId);
+    if (!Number.isInteger(n) || n <= 0) {
+      return { error: "Nieprawidłowy cennik" };
+    }
+    priceListId = n;
+  }
   return {
     data: {
       firstName,
       lastName,
+      priceListId,
       phone: typeof body.phone === "string" ? body.phone : "",
       email,
       company,
@@ -36,6 +46,17 @@ function parseBody(body: Record<string, unknown>): {
       active: body.active === undefined ? true : Boolean(body.active),
     },
   };
+}
+
+/** Czy wskazany cennik istnieje (null = cennik główny, zawsze OK). */
+async function priceListOk(id: number | null | undefined): Promise<boolean> {
+  if (!id) return true;
+  const rows = await db
+    .select({ id: schema.priceLists.id })
+    .from(schema.priceLists)
+    .where(eq(schema.priceLists.id, id))
+    .limit(1);
+  return rows.length > 0;
 }
 
 // Lista techników (domyślnie wszyscy; ?active=true tylko aktywni)
@@ -58,6 +79,13 @@ app.post("/", async (c) => {
   const { data, error } = parseBody(body);
   if (error || !data) {
     return c.json<ApiResponse<null>>({ success: false, error }, 400);
+  }
+
+  if (!(await priceListOk(data.priceListId))) {
+    return c.json<ApiResponse<null>>(
+      { success: false, error: "Nie znaleziono cennika" },
+      404
+    );
   }
 
   const result = await db
@@ -91,6 +119,13 @@ app.put("/:id", async (c) => {
   const { data, error } = parseBody(body);
   if (error || !data) {
     return c.json<ApiResponse<null>>({ success: false, error }, 400);
+  }
+
+  if (!(await priceListOk(data.priceListId))) {
+    return c.json<ApiResponse<null>>(
+      { success: false, error: "Nie znaleziono cennika" },
+      404
+    );
   }
 
   const result = await db

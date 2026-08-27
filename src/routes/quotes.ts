@@ -1,6 +1,8 @@
 import { Hono } from "hono";
+import type { Context } from "hono";
 import { db, schema } from "../db/index.js";
 import { eq, and, like, desc, asc } from "drizzle-orm";
+import { ensureDefaultListId } from "./pricelist.js";
 import type { ApiResponse } from "../types/index.js";
 import type { Quote } from "../db/schema.js";
 
@@ -61,6 +63,54 @@ function parseItems(body: Record<string, unknown>): QuoteItem[] | undefined {
     }));
 }
 
+/**
+ * Cennik, z którego prefillujemy nową wycenę. Wycena nie ma w modelu technika,
+ * więc kontekst przychodzi z zewnątrz — kolejność źródeł:
+ * 1. jawny `priceListId` (body lub `?priceListId=`) — wybór cennika w UI,
+ * 2. `technicianId` (body lub query) → cennik przypisany temu technikowi,
+ * 3. cennik główny (`is_default = 1`).
+ * Nieistniejące id po cichu spada do cennika głównego — prefill to wygoda,
+ * nie ma sensu blokować tworzenia wyceny.
+ */
+async function resolvePrefillListId(
+  c: Context,
+  body: Record<string, unknown>
+): Promise<number> {
+  const pick = (v: unknown) => {
+    const n = Number(v);
+    return Number.isInteger(n) && n > 0 ? n : undefined;
+  };
+
+  const explicit = pick(body.priceListId) ?? pick(c.req.query("priceListId"));
+  if (explicit) {
+    const found = await db
+      .select({ id: schema.priceLists.id })
+      .from(schema.priceLists)
+      .where(eq(schema.priceLists.id, explicit))
+      .limit(1);
+    if (found.length > 0) return found[0].id;
+  }
+
+  const technicianId = pick(body.technicianId) ?? pick(c.req.query("technicianId"));
+  if (technicianId) {
+    const tech = await db
+      .select({ priceListId: schema.technicians.priceListId })
+      .from(schema.technicians)
+      .where(eq(schema.technicians.id, technicianId))
+      .limit(1);
+    if (tech.length > 0 && tech[0].priceListId) {
+      const found = await db
+        .select({ id: schema.priceLists.id })
+        .from(schema.priceLists)
+        .where(eq(schema.priceLists.id, tech[0].priceListId))
+        .limit(1);
+      if (found.length > 0) return found[0].id;
+    }
+  }
+
+  return ensureDefaultListId();
+}
+
 // Lista wycen (opcjonalny filtr rok/miesiąc po dacie)
 app.get("/", async (c) => {
   const year = c.req.query("year");
@@ -92,9 +142,11 @@ app.post("/", async (c) => {
 
   let items = parseItems(body);
   if (!items || items.length === 0) {
+    const listId = await resolvePrefillListId(c, body);
     const priceRows = await db
       .select()
       .from(schema.priceList)
+      .where(eq(schema.priceList.priceListId, listId))
       .orderBy(asc(schema.priceList.position), asc(schema.priceList.id));
     items = priceRows
       .filter((p) => p.active)

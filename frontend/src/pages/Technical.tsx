@@ -6,7 +6,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { RealizationForm } from "@/components/RealizationForm";
 import { TechnicianForm } from "@/components/TechnicianForm";
 import { TechnicalObjects } from "@/components/TechnicalObjects";
-import { PriceItemForm } from "@/components/PriceItemForm";
+import { PriceListTab } from "@/components/pricelist/PriceListTab";
 import { ProtocolForm } from "@/components/ProtocolForm";
 import { QuoteForm } from "@/components/QuoteForm";
 import { printProtocol } from "@/lib/protocolPrint";
@@ -18,13 +18,30 @@ import {
   CalendarDays,
   ChevronLeft,
   ChevronRight,
+  FileCheck2,
+  FilePlus,
+  FileX,
   Pencil,
   Trash2,
   Printer,
 } from "lucide-react";
 import { Link } from "react-router-dom";
-import { calendarEventHref } from "@/lib/calendar-labels";
+import { calendarEventHref, protocolHref } from "@/lib/calendar-labels";
+import { ProtocolBadge } from "@/components/CalendarEventBadges";
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { tip } from "@/components/ui/tooltip";
+import { cn } from "@/lib/utils";
+import {
+  createRealizationProtocol,
   getRealizations,
   getRealizationSummary,
   createRealization,
@@ -34,10 +51,7 @@ import {
   createTechnician,
   updateTechnician,
   deleteTechnician,
-  getPriceList,
-  createPriceItem,
-  updatePriceItem,
-  deletePriceItem,
+  priceListsApi,
   getProtocols,
   syncProtocols,
   updateProtocol,
@@ -52,8 +66,7 @@ import {
   type RealizationSummary,
   type Technician,
   type TechnicianInput,
-  type PriceItem,
-  type PriceItemInput,
+  type PriceListGroup,
   type Protocol,
   type ProtocolInput,
   type Quote,
@@ -97,6 +110,20 @@ const PROTOCOL_TYPE_META: Record<string, { label: string; badge: string }> = {
   inne: { label: "Inne", badge: "bg-muted text-muted-foreground" },
 };
 
+/** Filtr obecności protokołu w tabeli realizacji. */
+type RealizationProtocolFilter = "" | "with" | "without";
+
+/**
+ * Kształt oczekiwany przez `ProtocolBadge` (wspólny z kalendarzem). Realizacja
+ * nie ma typu/statusu wydarzenia — podstawiamy „wykonany serwis", żeby helper
+ * `protocolBadgeKind` rozstrzygnął tylko po polu `protocol`.
+ */
+const protocolBadgeEvent = (protocol: Realization["protocol"]) => ({
+  type: "serwis",
+  status: "done",
+  protocol,
+});
+
 const pln = new Intl.NumberFormat("pl-PL", {
   style: "currency",
   currency: "PLN",
@@ -129,6 +156,12 @@ export function Technical() {
   const [editing, setEditing] = useState<Realization | null>(null);
   /** Wiersz wskazany deep-linkiem `?realization=ID` — podświetlany na chwilę. */
   const [highlightRow, setHighlightRow] = useState<number | null>(null);
+  /** Filtr kolumny Protokół (wszystkie / z protokołem / bez protokołu). */
+  const [protoFilter, setProtoFilter] = useState<RealizationProtocolFilter>("");
+  /** Id realizacji, dla której trwa tworzenie protokołu (spinner w wierszu). */
+  const [creatingProtoFor, setCreatingProtoFor] = useState<number | null>(null);
+  const [syncProtoOpen, setSyncProtoOpen] = useState(false);
+  const [syncingProtos, setSyncingProtos] = useState(false);
 
   const [technicians, setTechnicians] = useState<Technician[]>([]);
   const [techLoading, setTechLoading] = useState(true);
@@ -136,10 +169,10 @@ export function Technical() {
   const [editingTech, setEditingTech] = useState<Technician | null>(null);
   const [techView, setTechView] = useState<"active" | "archived">("active");
 
-  const [priceItems, setPriceItems] = useState<PriceItem[]>([]);
-  const [priceLoading, setPriceLoading] = useState(true);
-  const [priceFormOpen, setPriceFormOpen] = useState(false);
-  const [editingPrice, setEditingPrice] = useState<PriceItem | null>(null);
+  /** Cenniki — do kolumny „Cennik" w tabeli techników i selecta w formularzu. */
+  const [priceLists, setPriceLists] = useState<PriceListGroup[]>([]);
+  /** Cennik wybrany do prefillu nowej wyceny (0 = główny). */
+  const [quotePriceListId, setQuotePriceListId] = useState(0);
 
   const [protocols, setProtocols] = useState<Protocol[]>([]);
   const [protoLoading, setProtoLoading] = useState(true);
@@ -189,6 +222,7 @@ export function Technical() {
     if (!editable) return;
     await createTechnician(data);
     loadTechnicians();
+    loadPriceLists(); // odśwież liczniki techników przy cennikach
   };
 
   const handleTechUpdate = async (data: TechnicianInput) => {
@@ -196,6 +230,7 @@ export function Technical() {
     if (editingTech) {
       await updateTechnician(editingTech.id, data);
       loadTechnicians();
+      loadPriceLists();
     }
   };
 
@@ -253,6 +288,7 @@ export function Technical() {
               <th className="px-3 py-2 font-medium">Imię</th>
               <th className="px-3 py-2 font-medium">Nazwisko</th>
               <th className="px-3 py-2 font-medium">Typ</th>
+              <th className="px-3 py-2 font-medium">Cennik</th>
               <th className="px-3 py-2 font-medium">Telefon</th>
               <th className="px-3 py-2 font-medium">E-mail</th>
               <th className="px-3 py-2 font-medium">Firma</th>
@@ -279,6 +315,15 @@ export function Technical() {
                     <span className="inline-flex rounded-md bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700">
                       Wewnętrzny
                     </span>
+                  )}
+                </td>
+                <td className="px-3 py-2">
+                  {tech.priceListId ? (
+                    <span className="inline-flex max-w-40 truncate rounded-md bg-muted px-2 py-0.5 text-xs font-medium">
+                      {priceListLabel(tech.priceListId)}
+                    </span>
+                  ) : (
+                    <span className="text-xs text-muted-foreground">Główny</span>
                   )}
                 </td>
                 <td className="whitespace-nowrap px-3 py-2 tabular-nums">
@@ -348,61 +393,35 @@ export function Technical() {
   };
 
   // --- Cennik ---
-  const loadPriceList = useCallback(async () => {
-    setPriceLoading(true);
+  // Cała zakładka „Cennik" (lista cenników + pozycje + przypisania techników)
+  // mieszka w <PriceListTab>; tutaj potrzebne są tylko same cenniki, żeby
+  // pokazać kolumnę „Cennik" w tabeli techników i wypełnić select w formularzu.
+  const loadPriceLists = useCallback(async () => {
     try {
-      const res = await getPriceList();
-      setPriceItems(res.data || []);
+      const res = await priceListsApi.list();
+      setPriceLists(res.data || []);
     } catch (error) {
-      console.error("Error loading price list:", error);
-    } finally {
-      setPriceLoading(false);
+      console.error("Error loading price lists:", error);
     }
   }, []);
 
   useEffect(() => {
-    loadPriceList();
-  }, [loadPriceList]);
+    loadPriceLists();
+  }, [loadPriceLists]);
 
-  const handlePriceCreate = async (data: PriceItemInput) => {
-    if (!editable) return;
-    await createPriceItem(data);
-    loadPriceList();
-  };
-
-  const handlePriceUpdate = async (data: PriceItemInput) => {
-    if (!editable) return;
-    if (editingPrice) {
-      await updatePriceItem(editingPrice.id, data);
-      loadPriceList();
-    }
-  };
-
-  const handlePriceDelete = async (item: PriceItem) => {
-    if (!editable) return;
-    if (window.confirm(`Usunąć pozycję "${item.name}" z cennika?`)) {
-      try {
-        await deletePriceItem(item.id);
-        loadPriceList();
-      } catch (error) {
-        alert(
-          error instanceof Error ? error.message : "Nie można usunąć pozycji"
-        );
-      }
-    }
-  };
-
-  const closePriceForm = () => {
-    setPriceFormOpen(false);
-    setEditingPrice(null);
+  /** Nazwa cennika technika („Główny" dla braku przypisania). */
+  const priceListLabel = (id: number | null) => {
+    if (!id) return "Główny";
+    return priceLists.find((l) => l.id === id)?.name ?? "—";
   };
 
   // --- Protokoły (generowane automatycznie z realizacji) ---
   const loadProtocols = useCallback(async () => {
     setProtoLoading(true);
     try {
-      // dociągnij protokoły dla realizacji, które jeszcze ich nie mają
-      await syncProtocols().catch(() => {});
+      // Bez ukrytego POST /protocols/sync przy każdym wejściu: protokół powstaje
+      // razem z realizacją (jedna transakcja), a braki w starszych wpisach
+      // uzupełnia się świadomie z tabeli realizacji („Utwórz" / „Utwórz brakujące").
       const res = await getProtocols(year, month);
       setProtocols(res.data || []);
     } catch (error) {
@@ -520,7 +539,10 @@ export function Technical() {
   const handleQuoteNew = async () => {
     if (!editable) return;
     try {
-      const res = await createQuote();
+      // Bez wyboru cennika backend prefilluje wycenę cennikiem głównym.
+      const res = await createQuote(
+        quotePriceListId ? { priceListId: quotePriceListId } : {}
+      );
       await loadQuotes();
       if (res.data) setEditingQuote(res.data);
     } catch (error) {
@@ -606,7 +628,7 @@ export function Technical() {
   const handleUpdate = async (data: RealizationInput) => {
     if (!editable) return;
     if (editing) {
-      await updateRealization(editing.id, data);
+      await updateRealization(editing.id, data, editing.updatedAt);
       load();
     }
   };
@@ -628,6 +650,49 @@ export function Technical() {
       }
     }
   };
+
+  /** Protokół dla pojedynczej realizacji (starszy wpis, który go nie dostał). */
+  const handleCreateProtocol = async (row: Realization) => {
+    if (!editable || creatingProtoFor != null) return;
+    setCreatingProtoFor(row.id);
+    try {
+      await createRealizationProtocol(row.id);
+      await Promise.all([load(), loadProtocols()]);
+    } catch (error) {
+      alert(
+        error instanceof Error ? error.message : "Nie można utworzyć protokołu"
+      );
+      // 409 „ma już protokół" — odśwież, żeby wiersz pokazał istniejący numer.
+      load();
+    } finally {
+      setCreatingProtoFor(null);
+    }
+  };
+
+  /** Masowe uzupełnienie braków (POST /protocols/sync) — po potwierdzeniu. */
+  const handleSyncProtocols = async () => {
+    if (!editable) return;
+    setSyncingProtos(true);
+    try {
+      await syncProtocols();
+      await Promise.all([load(), loadProtocols()]);
+      setSyncProtoOpen(false);
+    } catch (error) {
+      alert(
+        error instanceof Error
+          ? error.message
+          : "Nie można wygenerować brakujących protokołów"
+      );
+    } finally {
+      setSyncingProtos(false);
+    }
+  };
+
+  const missingProtocolCount = rows.filter((r) => !r.protocol).length;
+  const withProtocolCount = rows.length - missingProtocolCount;
+  const visibleRows = rows.filter((r) =>
+    protoFilter === "with" ? !!r.protocol : protoFilter === "without" ? !r.protocol : true
+  );
 
   const openEdit = (row: Realization) => {
     setEditing(row);
@@ -754,6 +819,100 @@ export function Technical() {
             ))}
           </div>
 
+          {/* Pasek protokołów: filtr + braki */}
+          {!loading && rows.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                Protokół
+              </span>
+              <div
+                className="inline-flex rounded-full border bg-background p-0.5"
+                role="group"
+                aria-label="Filtr protokołu"
+              >
+                {(
+                  [
+                    { key: "", label: "Wszystkie", icon: null, count: null, hint: "bez filtra protokołu" },
+                    {
+                      key: "with",
+                      label: "Z protokołem",
+                      icon: FileCheck2,
+                      count: withProtocolCount,
+                      hint: "realizacje, które mają już protokół",
+                    },
+                    {
+                      key: "without",
+                      label: "Bez protokołu",
+                      icon: FileX,
+                      count: missingProtocolCount,
+                      hint: "realizacje, dla których protokół nie powstał",
+                    },
+                  ] as const
+                ).map((o) => {
+                  const active = protoFilter === o.key;
+                  const Icon = o.icon;
+                  return (
+                    <button
+                      key={o.key || "all"}
+                      type="button"
+                      data-testid={`realization-protocol-filter-${o.key || "all"}`}
+                      aria-pressed={active}
+                      onClick={() => setProtoFilter(active && o.key ? "" : o.key)}
+                      {...tip(
+                        `Filtr protokołu: ${o.label.toLowerCase()}${o.count != null ? ` — ${o.count} w tym miesiącu` : ""}\n${o.hint}`
+                      )}
+                      className={cn(
+                        "inline-flex h-7 items-center gap-1.5 rounded-full px-2.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:h-6",
+                        active
+                          ? "bg-primary text-primary-foreground shadow-sm"
+                          : "text-muted-foreground hover:text-foreground"
+                      )}
+                    >
+                      {Icon && <Icon className="h-3.5 w-3.5" aria-hidden />}
+                      {o.label}
+                      {o.count != null && (
+                        <span
+                          className={cn(
+                            "rounded-full px-1.5 py-px text-[10px] font-semibold tabular-nums",
+                            active ? "bg-background/25" : "bg-muted text-muted-foreground"
+                          )}
+                        >
+                          {o.count}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+              {missingProtocolCount > 0 && (
+                <div className="ml-auto flex items-center gap-2">
+                  <span
+                    data-testid="missing-protocols-count"
+                    className="rounded-md bg-amber-100 px-2 py-1 text-xs font-medium text-amber-800 dark:bg-amber-500/20 dark:text-amber-200"
+                  >
+                    {missingProtocolCount}{" "}
+                    {missingProtocolCount === 1
+                      ? "realizacja bez protokołu"
+                      : missingProtocolCount < 5
+                        ? "realizacje bez protokołu"
+                        : "realizacji bez protokołu"}
+                  </span>
+                  {editable && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      data-testid="create-missing-protocols"
+                      onClick={() => setSyncProtoOpen(true)}
+                    >
+                      <FilePlus className="mr-2 h-4 w-4" aria-hidden />
+                      Utwórz brakujące
+                    </Button>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Tabela realizacji */}
           <Card>
             <CardContent className="p-0">
@@ -766,9 +925,15 @@ export function Technical() {
                   Brak realizacji w tym miesiącu. Kliknij „Dodaj realizację",
                   aby wpisać pierwszą.
                 </div>
+              ) : visibleRows.length === 0 ? (
+                <div className="py-10 text-center text-muted-foreground">
+                  {protoFilter === "with"
+                    ? "Żadna realizacja w tym miesiącu nie ma jeszcze protokołu."
+                    : "Wszystkie realizacje w tym miesiącu mają protokół."}
+                </div>
               ) : (
                 <div className="overflow-x-auto">
-                  <table className="w-full min-w-[1060px] text-sm">
+                  <table className="w-full min-w-[1160px] text-sm">
                     <thead>
                       <tr className="border-b text-left text-xs uppercase tracking-wide text-muted-foreground">
                         <th className="px-3 py-2 font-medium">Data</th>
@@ -790,12 +955,13 @@ export function Technical() {
                         <th className="px-3 py-2 font-medium">Adnotacja</th>
                         <th className="px-3 py-2 font-medium">Zafakt.</th>
                         <th className="px-3 py-2 font-medium">Wykonawca</th>
+                        <th className="px-3 py-2 font-medium">Protokół</th>
                         <th className="px-3 py-2 font-medium">Kalendarz</th>
                         <th className="px-3 py-2"></th>
                       </tr>
                     </thead>
                     <tbody>
-                      {rows.map((row) => (
+                      {visibleRows.map((row) => (
                         <tr
                           key={row.id}
                           data-realization-id={row.id}
@@ -849,6 +1015,53 @@ export function Technical() {
                           </td>
                           <td className="whitespace-nowrap px-3 py-2">
                             {row.contractor1 || row.caretaker || "—"}
+                          </td>
+                          <td className="whitespace-nowrap px-3 py-2">
+                            {row.protocol ? (
+                              <Link
+                                to={protocolHref(row.protocol.id)}
+                                data-testid={`realization-protocol-link-${row.id}`}
+                                onClick={(e) => e.stopPropagation()}
+                                className="inline-flex rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                              >
+                                {/* compact = sam numer, żeby kolumna nie rozpychała tabeli */}
+                                <ProtocolBadge
+                                  event={protocolBadgeEvent(row.protocol)}
+                                  compact
+                                  className="hover:underline"
+                                />
+                              </Link>
+                            ) : editable ? (
+                              <div onClick={(e) => e.stopPropagation()}>
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  className="h-7 px-2 text-xs"
+                                  data-testid={`create-protocol-${row.id}`}
+                                  disabled={creatingProtoFor != null}
+                                  onClick={() => handleCreateProtocol(row)}
+                                  {...tip(
+                                    "Utwórz protokół\nrealizacja nie ma jeszcze protokołu — numer zostanie nadany automatycznie"
+                                  )}
+                                >
+                                  {creatingProtoFor === row.id ? (
+                                    "Tworzenie…"
+                                  ) : (
+                                    <>
+                                      <FilePlus className="mr-1 h-3.5 w-3.5" aria-hidden />
+                                      Utwórz
+                                    </>
+                                  )}
+                                </Button>
+                              </div>
+                            ) : (
+                              <span
+                                className="text-xs text-muted-foreground"
+                                {...tip("Brak protokołu — realizacja nie ma jeszcze protokołu")}
+                              >
+                                brak
+                              </span>
+                            )}
                           </td>
                           <td className="px-3 py-2">
                             {row.calendarEventId ? (
@@ -1103,10 +1316,28 @@ export function Technical() {
               dopisz sprzęt. Rok {year}.
             </p>
             {editable && (
-              <Button onClick={handleQuoteNew}>
-                <Plus className="h-4 w-4 mr-2" />
-                Nowa wycena
-              </Button>
+              <div className="flex items-center gap-2">
+                <select
+                  aria-label="Cennik dla nowej wyceny"
+                  data-testid="quote-price-list"
+                  value={quotePriceListId}
+                  onChange={(e) => setQuotePriceListId(Number(e.target.value))}
+                  className="h-10 rounded-md border border-input bg-background px-3 py-2 text-sm"
+                >
+                  <option value={0}>Cennik główny</option>
+                  {priceLists
+                    .filter((l) => l.active && !l.isDefault)
+                    .map((l) => (
+                      <option key={l.id} value={l.id}>
+                        {l.name}
+                      </option>
+                    ))}
+                </select>
+                <Button onClick={handleQuoteNew}>
+                  <Plus className="h-4 w-4 mr-2" />
+                  Nowa wycena
+                </Button>
+              </div>
             )}
           </div>
 
@@ -1204,105 +1435,7 @@ export function Technical() {
         </TabsContent>
 
         <TabsContent value="cennik" className="space-y-6">
-          <div className="flex items-center justify-between">
-            <p className="text-sm text-muted-foreground">
-              Cennik usług serwisowych — załącznik do protokołu końcowego.
-            </p>
-            {editable && (
-              <Button onClick={() => setPriceFormOpen(true)}>
-                <Plus className="h-4 w-4 mr-2" />
-                Dodaj pozycję
-              </Button>
-            )}
-          </div>
-
-          <Card>
-            <CardContent className="p-0">
-              {priceLoading ? (
-                <div className="py-10 text-center text-muted-foreground">
-                  Ładowanie…
-                </div>
-              ) : priceItems.length === 0 ? (
-                <div className="py-10 text-center text-muted-foreground">
-                  Cennik jest pusty.
-                </div>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b text-left text-xs uppercase tracking-wide text-muted-foreground">
-                        <th className="w-12 px-3 py-2 font-medium">LP.</th>
-                        <th className="px-3 py-2 font-medium">
-                          Nazwa usługi serwisowej
-                        </th>
-                        <th className="px-3 py-2 font-medium">J.M.</th>
-                        <th className="px-3 py-2 text-right font-medium">
-                          Cena sprzedaży (netto)
-                        </th>
-                        <th className="px-3 py-2"></th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {priceItems.map((item, idx) => (
-                        <tr
-                          key={item.id}
-                          className={`cursor-pointer border-b last:border-0 hover:bg-accent/50 ${!item.active ? "opacity-50" : ""}`}
-                          onClick={() => {
-                            setEditingPrice(item);
-                            setPriceFormOpen(true);
-                          }}
-                        >
-                          <td className="px-3 py-2 tabular-nums">{idx + 1}</td>
-                          <td className="px-3 py-2 font-medium">
-                            {item.name}
-                            {!item.active && (
-                              <span className="ml-2 text-xs text-muted-foreground">
-                                (nieaktywna)
-                              </span>
-                            )}
-                          </td>
-                          <td className="px-3 py-2">{item.unit}</td>
-                          <td className="px-3 py-2 text-right font-semibold tabular-nums">
-                            {money(item.price)}
-                          </td>
-                          <td className="px-3 py-2">
-                            {editable && (
-                              <div
-                                className="flex justify-end gap-1"
-                                onClick={(e) => e.stopPropagation()}
-                              >
-                                <Button
-                                  variant="ghost"
-                                  size="icon"
-                                  className="h-8 w-8"
-                                  onClick={() => {
-                                    setEditingPrice(item);
-                                    setPriceFormOpen(true);
-                                  }}
-                                  title="Edytuj"
-                                >
-                                  <Pencil className="h-4 w-4" />
-                                </Button>
-                                <Button
-                                  variant="ghost"
-                                  size="icon"
-                                  className="h-8 w-8 text-destructive hover:text-destructive"
-                                  onClick={() => handlePriceDelete(item)}
-                                  title="Usuń"
-                                >
-                                  <Trash2 className="h-4 w-4" />
-                                </Button>
-                              </div>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </CardContent>
-          </Card>
+          <PriceListTab editable={editable} />
         </TabsContent>
 
         <TabsContent value="technicy" className="space-y-6">
@@ -1358,16 +1491,6 @@ export function Technical() {
         </TabsContent>
       </Tabs>
 
-      {priceFormOpen && (
-        <PriceItemForm
-          key={editingPrice?.id ?? "new"}
-          open={priceFormOpen}
-          onClose={closePriceForm}
-          onSubmit={editingPrice ? handlePriceUpdate : handlePriceCreate}
-          item={editingPrice}
-        />
-      )}
-
       {editingQuote && (
         <QuoteForm
           key={editingQuote.id}
@@ -1397,6 +1520,7 @@ export function Technical() {
           onClose={closeTechForm}
           onSubmit={editingTech ? handleTechUpdate : handleTechCreate}
           technician={editingTech}
+          priceLists={priceLists}
         />
       )}
 
@@ -1413,6 +1537,39 @@ export function Technical() {
             .map((t) => `${t.firstName} ${t.lastName}`.trim())}
         />
       )}
+
+      <AlertDialog open={syncProtoOpen} onOpenChange={setSyncProtoOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Utworzyć brakujące protokoły?</AlertDialogTitle>
+            <AlertDialogDescription>
+              W tym miesiącu {missingProtocolCount === 1 ? "jest" : "są"}{" "}
+              <strong>{missingProtocolCount}</strong>{" "}
+              {missingProtocolCount === 1
+                ? "realizacja bez protokołu"
+                : missingProtocolCount < 5
+                  ? "realizacje bez protokołu"
+                  : "realizacji bez protokołu"}
+              . Operacja utworzy protokoły (szkice) dla{" "}
+              <strong>wszystkich</strong> realizacji bez protokołu — również z
+              innych miesięcy. Numery zostaną nadane automatycznie.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={syncingProtos}>Anuluj</AlertDialogCancel>
+            <AlertDialogAction
+              data-testid="confirm-create-missing-protocols"
+              disabled={syncingProtos}
+              onClick={(e) => {
+                e.preventDefault();
+                handleSyncProtocols();
+              }}
+            >
+              {syncingProtos ? "Tworzenie…" : "Utwórz"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
