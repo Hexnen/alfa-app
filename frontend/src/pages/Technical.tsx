@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Navigate, useParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Tabs, TabsContent } from "@/components/ui/tabs";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { RealizationForm } from "@/components/RealizationForm";
 import { TechnicianForm } from "@/components/TechnicianForm";
 import { TechnicalObjects } from "@/components/TechnicalObjects";
@@ -127,6 +127,7 @@ export function Technical() {
   const [techLoading, setTechLoading] = useState(true);
   const [techFormOpen, setTechFormOpen] = useState(false);
   const [editingTech, setEditingTech] = useState<Technician | null>(null);
+  const [techView, setTechView] = useState<"active" | "archived">("active");
 
   const [priceItems, setPriceItems] = useState<PriceItem[]>([]);
   const [priceLoading, setPriceLoading] = useState(true);
@@ -212,6 +213,131 @@ export function Technical() {
   const closeTechForm = () => {
     setTechFormOpen(false);
     setEditingTech(null);
+  };
+
+  const openTechEdit = (tech: Technician) => {
+    setEditingTech(tech);
+    setTechFormOpen(true);
+  };
+
+  const activeTechnicians = technicians.filter((t) => t.active);
+  const archivedTechnicians = technicians.filter((t) => !t.active);
+
+  const renderTechTable = (list: Technician[], emptyText: string) => {
+    if (techLoading) {
+      return (
+        <div className="py-10 text-center text-muted-foreground">
+          Ładowanie…
+        </div>
+      );
+    }
+    if (list.length === 0) {
+      return (
+        <div className="py-10 text-center text-muted-foreground">
+          {emptyText}
+        </div>
+      );
+    }
+    return (
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b text-left text-xs uppercase tracking-wide text-muted-foreground">
+              <th className="px-3 py-2 font-medium">Imię</th>
+              <th className="px-3 py-2 font-medium">Nazwisko</th>
+              <th className="px-3 py-2 font-medium">Typ</th>
+              <th className="px-3 py-2 font-medium">Telefon</th>
+              <th className="px-3 py-2 font-medium">E-mail</th>
+              <th className="px-3 py-2 font-medium">Firma</th>
+              <th className="px-3 py-2 font-medium">NIP</th>
+              <th className="px-3 py-2 font-medium">Notatka</th>
+              <th className="px-3 py-2"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {list.map((tech) => (
+              <tr
+                key={tech.id}
+                className="cursor-pointer border-b last:border-0 hover:bg-accent/50"
+                onClick={() => openTechEdit(tech)}
+              >
+                <td className="px-3 py-2">{tech.firstName || "—"}</td>
+                <td className="px-3 py-2 font-medium">{tech.lastName}</td>
+                <td className="px-3 py-2">
+                  {tech.type === "external" ? (
+                    <span className="inline-flex rounded-md bg-sky-100 px-2 py-0.5 text-xs font-medium text-sky-700">
+                      Zewnętrzny
+                    </span>
+                  ) : (
+                    <span className="inline-flex rounded-md bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700">
+                      Wewnętrzny
+                    </span>
+                  )}
+                </td>
+                <td className="whitespace-nowrap px-3 py-2 tabular-nums">
+                  {tech.phone || "—"}
+                </td>
+                <td className="whitespace-nowrap px-3 py-2">
+                  {tech.email ? (
+                    <a
+                      href={`mailto:${tech.email}`}
+                      className="text-primary hover:underline"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      {tech.email}
+                    </a>
+                  ) : (
+                    "—"
+                  )}
+                </td>
+                <td
+                  className="max-w-48 truncate px-3 py-2"
+                  title={tech.company || undefined}
+                >
+                  {tech.company || "—"}
+                </td>
+                <td className="whitespace-nowrap px-3 py-2 tabular-nums">
+                  {tech.nip || "—"}
+                </td>
+                <td
+                  className="max-w-72 truncate px-3 py-2 text-muted-foreground"
+                  title={tech.notes || undefined}
+                >
+                  {tech.notes || "—"}
+                </td>
+                <td className="px-3 py-2">
+                  {editable && (
+                    <div
+                      className="flex justify-end gap-1"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8"
+                        onClick={() => openTechEdit(tech)}
+                        title="Edytuj"
+                      >
+                        <Pencil className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 text-destructive hover:text-destructive"
+                        onClick={() => handleTechDelete(tech)}
+                        title="Usuń"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    );
   };
 
   // --- Cennik ---
@@ -1078,114 +1204,39 @@ export function Technical() {
             )}
           </div>
 
-          <Card>
-            <CardContent className="p-0">
-              {techLoading ? (
-                <div className="py-10 text-center text-muted-foreground">
-                  Ładowanie…
-                </div>
-              ) : technicians.length === 0 ? (
-                <div className="py-10 text-center text-muted-foreground">
-                  Brak techników. Kliknij „Dodaj technika", aby wpisać
-                  pierwszego.
-                </div>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b text-left text-xs uppercase tracking-wide text-muted-foreground">
-                        <th className="px-3 py-2 font-medium">Imię</th>
-                        <th className="px-3 py-2 font-medium">Nazwisko</th>
-                        <th className="px-3 py-2 font-medium">Typ</th>
-                        <th className="px-3 py-2 font-medium">Telefon</th>
-                        <th className="px-3 py-2 font-medium">Notatka</th>
-                        <th className="px-3 py-2 font-medium">Status</th>
-                        <th className="px-3 py-2"></th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {technicians.map((tech) => (
-                        <tr
-                          key={tech.id}
-                          className="cursor-pointer border-b last:border-0 hover:bg-accent/50"
-                          onClick={() => {
-                            setEditingTech(tech);
-                            setTechFormOpen(true);
-                          }}
-                        >
-                          <td className="px-3 py-2">{tech.firstName || "—"}</td>
-                          <td className="px-3 py-2 font-medium">
-                            {tech.lastName}
-                          </td>
-                          <td className="px-3 py-2">
-                            {tech.type === "external" ? (
-                              <span className="inline-flex rounded-md bg-sky-100 px-2 py-0.5 text-xs font-medium text-sky-700">
-                                Zewnętrzny
-                              </span>
-                            ) : (
-                              <span className="inline-flex rounded-md bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700">
-                                Wewnętrzny
-                              </span>
-                            )}
-                          </td>
-                          <td className="whitespace-nowrap px-3 py-2 tabular-nums">
-                            {tech.phone || "—"}
-                          </td>
-                          <td
-                            className="max-w-72 truncate px-3 py-2 text-muted-foreground"
-                            title={tech.notes || undefined}
-                          >
-                            {tech.notes || "—"}
-                          </td>
-                          <td className="px-3 py-2">
-                            {tech.active ? (
-                              <span className="inline-flex rounded-md bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700">
-                                Aktywny
-                              </span>
-                            ) : (
-                              <span className="inline-flex rounded-md bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">
-                                Nieaktywny
-                              </span>
-                            )}
-                          </td>
-                          <td className="px-3 py-2">
-                            {editable && (
-                              <div
-                                className="flex justify-end gap-1"
-                                onClick={(e) => e.stopPropagation()}
-                              >
-                                <Button
-                                  variant="ghost"
-                                  size="icon"
-                                  className="h-8 w-8"
-                                  onClick={() => {
-                                    setEditingTech(tech);
-                                    setTechFormOpen(true);
-                                  }}
-                                  title="Edytuj"
-                                >
-                                  <Pencil className="h-4 w-4" />
-                                </Button>
-                                <Button
-                                  variant="ghost"
-                                  size="icon"
-                                  className="h-8 w-8 text-destructive hover:text-destructive"
-                                  onClick={() => handleTechDelete(tech)}
-                                  title="Usuń"
-                                >
-                                  <Trash2 className="h-4 w-4" />
-                                </Button>
-                              </div>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </CardContent>
-          </Card>
+          <Tabs
+            value={techView}
+            onValueChange={(v) => setTechView(v as "active" | "archived")}
+          >
+            <TabsList>
+              <TabsTrigger value="active">
+                Aktywni ({activeTechnicians.length})
+              </TabsTrigger>
+              <TabsTrigger value="archived">
+                Archiwalni ({archivedTechnicians.length})
+              </TabsTrigger>
+            </TabsList>
+            <TabsContent value="active" className="mt-4">
+              <Card>
+                <CardContent className="p-0">
+                  {renderTechTable(
+                    activeTechnicians,
+                    "Brak techników. Kliknij „Dodaj technika”, aby wpisać pierwszego."
+                  )}
+                </CardContent>
+              </Card>
+            </TabsContent>
+            <TabsContent value="archived" className="mt-4">
+              <Card>
+                <CardContent className="p-0">
+                  {renderTechTable(
+                    archivedTechnicians,
+                    "Brak archiwalnych techników."
+                  )}
+                </CardContent>
+              </Card>
+            </TabsContent>
+          </Tabs>
         </TabsContent>
 
         <TabsContent value="obiekty" className="space-y-6">

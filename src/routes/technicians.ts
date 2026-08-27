@@ -16,11 +16,21 @@ function parseBody(body: Record<string, unknown>): {
     typeof body.lastName === "string" ? body.lastName.trim() : "";
   if (!lastName) return { error: "Nazwisko jest wymagane" };
   const type = body.type === "external" ? "external" : "internal";
+  const email = typeof body.email === "string" ? body.email.trim() : "";
+  if (email && !email.includes("@")) {
+    return { error: "Nieprawidłowy adres e-mail" };
+  }
+  const company = typeof body.company === "string" ? body.company.trim() : "";
+  const nip =
+    typeof body.nip === "string" ? body.nip.replace(/[\s-]/g, "") : "";
   return {
     data: {
       firstName,
       lastName,
       phone: typeof body.phone === "string" ? body.phone : "",
+      email,
+      company,
+      nip,
       type,
       notes: typeof body.notes === "string" ? body.notes : "",
       active: body.active === undefined ? true : Boolean(body.active),

@@ -491,6 +491,9 @@ export const technicians = sqliteTable("technicians", {
   firstName: text("first_name").default("").notNull(),
   lastName: text("last_name").default("").notNull(),
   phone: text("phone"),
+  email: text("email"),
+  company: text("company"),
+  nip: text("nip"),
   type: text("type", { enum: ["internal", "external"] })
     .default("internal")
     .notNull(),

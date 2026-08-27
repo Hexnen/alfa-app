@@ -30,6 +30,9 @@ export function TechnicianForm({
     firstName: technician?.firstName || "",
     lastName: technician?.lastName || "",
     phone: technician?.phone || "",
+    email: technician?.email || "",
+    company: technician?.company || "",
+    nip: technician?.nip || "",
     type: technician?.type || "internal",
     notes: technician?.notes || "",
     active: technician?.active ?? true,
@@ -110,6 +113,44 @@ export function TechnicianForm({
                   setFormData((p) => ({ ...p, phone: e.target.value }))
                 }
                 placeholder="np. 600 100 200"
+              />
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="tech-email">E-mail</Label>
+            <Input
+              id="tech-email"
+              type="email"
+              value={formData.email || ""}
+              onChange={(e) =>
+                setFormData((p) => ({ ...p, email: e.target.value }))
+              }
+              placeholder="np. jan@firma.pl"
+            />
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <Label htmlFor="tech-company">Firma</Label>
+              <Input
+                id="tech-company"
+                value={formData.company || ""}
+                onChange={(e) =>
+                  setFormData((p) => ({ ...p, company: e.target.value }))
+                }
+                placeholder="np. Serwis-Tech sp. z o.o."
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="tech-nip">NIP</Label>
+              <Input
+                id="tech-nip"
+                value={formData.nip || ""}
+                onChange={(e) =>
+                  setFormData((p) => ({ ...p, nip: e.target.value }))
+                }
+                placeholder="np. 1234567890"
               />
             </div>
           </div>
