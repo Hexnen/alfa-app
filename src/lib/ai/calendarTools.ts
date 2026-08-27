@@ -229,6 +229,7 @@ function briefEvent(e: ReturnType<typeof loadEvents>[number]) {
     notesCount: e.notesCount,
     billing: e.billing,
     protocol: e.protocol ? { id: e.protocol.id, number: e.protocol.number, status: e.protocol.status, signed: e.protocol.signedAt != null } : null,
+    realization: e.realization ? { id: e.realization.id, invoiced: e.realization.invoiced } : null,
     ...(e.seriesId != null ? { seriesId: e.seriesId } : {}),
   };
 }

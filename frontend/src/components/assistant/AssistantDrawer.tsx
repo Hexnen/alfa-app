@@ -175,6 +175,14 @@ export function AssistantDrawer({ onClose, onEventsChanged, onEditProposal, onEd
         el.style.height = "";
         return;
       }
+      // Gdy strona sama dopasowuje siatkę do okna (Kalendarz, data-cal-fit),
+      // wysokość dyktuje komórka — nie liczymy jej drugi raz.
+      if (el.parentElement?.dataset.calFit === "true") {
+        el.style.height = "100%";
+        el.style.minHeight = "0";
+        return;
+      }
+      el.style.minHeight = "";
       const cellTop = (el.parentElement ?? el).getBoundingClientRect().top + window.scrollY;
       el.style.height = `${Math.max(320, window.innerHeight - cellTop - 16)}px`;
     };

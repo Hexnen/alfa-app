@@ -15,12 +15,15 @@ import { usePerms } from "@/auth/permissions";
 import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
 import {
   Plus,
+  CalendarDays,
   ChevronLeft,
   ChevronRight,
   Pencil,
   Trash2,
   Printer,
 } from "lucide-react";
+import { Link } from "react-router-dom";
+import { calendarEventHref } from "@/lib/calendar-labels";
 import {
   getRealizations,
   getRealizationSummary,
@@ -124,6 +127,8 @@ export function Technical() {
   const [loading, setLoading] = useState(true);
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<Realization | null>(null);
+  /** Wiersz wskazany deep-linkiem `?realization=ID` — podświetlany na chwilę. */
+  const [highlightRow, setHighlightRow] = useState<number | null>(null);
 
   const [technicians, setTechnicians] = useState<Technician[]>([]);
   const [techLoading, setTechLoading] = useState(true);
@@ -455,6 +460,46 @@ export function Technical() {
       });
   }, [searchParams, setSearchParams, tab, navigate, protoLoading, protocols]);
 
+  /**
+   * Deep-link `?realization=ID[&date=YYYY-MM-DD]` (z kalendarza): przełącz na
+   * właściwy miesiąc, przewiń do wiersza, podświetl i otwórz formularz.
+   */
+  useEffect(() => {
+    const raw = searchParams.get("realization");
+    const id = raw ? Number(raw) : NaN;
+    if (!Number.isFinite(id)) return;
+    if (tab !== "realizacje") {
+      navigate(`/technical/realizacje?${searchParams.toString()}`, { replace: true });
+      return;
+    }
+    const date = searchParams.get("date");
+    if (date && /^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      const y = Number(date.slice(0, 4));
+      const m = Number(date.slice(5, 7));
+      if (y !== year || m !== month) {
+        setYear(y);
+        setMonth(m);
+        return; // po przeładowaniu miesiąca efekt uruchomi się ponownie
+      }
+    }
+    if (loading) return;
+    const row = rows.find((r) => r.id === id);
+    const next = new URLSearchParams(searchParams);
+    next.delete("realization");
+    next.delete("date");
+    setSearchParams(next, { replace: true });
+    if (!row) return;
+    setHighlightRow(id);
+    setEditing(row);
+    setFormOpen(true);
+    window.setTimeout(() => {
+      document
+        .querySelector(`[data-realization-id="${id}"]`)
+        ?.scrollIntoView({ block: "center", behavior: "smooth" });
+    }, 0);
+    window.setTimeout(() => setHighlightRow((cur) => (cur === id ? null : cur)), 6000);
+  }, [searchParams, setSearchParams, tab, navigate, loading, rows, year, month]);
+
   // --- Wyceny ---
   const loadQuotes = useCallback(async () => {
     setQuotesLoading(true);
@@ -723,7 +768,7 @@ export function Technical() {
                 </div>
               ) : (
                 <div className="overflow-x-auto">
-                  <table className="w-full min-w-[960px] text-sm">
+                  <table className="w-full min-w-[1060px] text-sm">
                     <thead>
                       <tr className="border-b text-left text-xs uppercase tracking-wide text-muted-foreground">
                         <th className="px-3 py-2 font-medium">Data</th>
@@ -745,6 +790,7 @@ export function Technical() {
                         <th className="px-3 py-2 font-medium">Adnotacja</th>
                         <th className="px-3 py-2 font-medium">Zafakt.</th>
                         <th className="px-3 py-2 font-medium">Wykonawca</th>
+                        <th className="px-3 py-2 font-medium">Kalendarz</th>
                         <th className="px-3 py-2"></th>
                       </tr>
                     </thead>
@@ -752,7 +798,10 @@ export function Technical() {
                       {rows.map((row) => (
                         <tr
                           key={row.id}
-                          className="cursor-pointer border-b last:border-0 hover:bg-accent/50"
+                          data-realization-id={row.id}
+                          className={`cursor-pointer border-b last:border-0 hover:bg-accent/50 ${
+                            highlightRow === row.id ? "bg-primary/10 ring-1 ring-inset ring-primary/40" : ""
+                          }`}
                           onClick={() => openEdit(row)}
                         >
                           <td className="whitespace-nowrap px-3 py-2 tabular-nums">
@@ -800,6 +849,24 @@ export function Technical() {
                           </td>
                           <td className="whitespace-nowrap px-3 py-2">
                             {row.contractor1 || row.caretaker || "—"}
+                          </td>
+                          <td className="px-3 py-2">
+                            {row.calendarEventId ? (
+                              <Link
+                                to={calendarEventHref(row.calendarEventId, row.date)}
+                                data-testid={`realization-calendar-link-${row.id}`}
+                                onClick={(e) => e.stopPropagation()}
+                                title={`Z kalendarza — otwórz wydarzenie #${row.calendarEventId}`}
+                                className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
+                              >
+                                <CalendarDays className="h-3.5 w-3.5" aria-hidden />
+                                #{row.calendarEventId}
+                              </Link>
+                            ) : (
+                              <span className="text-xs text-muted-foreground" title="Wpis ręczny (spoza kalendarza)">
+                                ręczna
+                              </span>
+                            )}
                           </td>
                           <td className="px-3 py-2">
                             {editable && (

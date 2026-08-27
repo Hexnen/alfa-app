@@ -24,6 +24,7 @@ import {
   CALENDAR_NOTE_MAX,
 } from "../db/schema.js";
 import { logActivity, logFieldDiffs, userLabelOf, type ActivityUser, type DbOrTx, type Tx } from "./activity-log.js";
+import { onEventCreated, onEventDeleted, onEventRestored, onEventUpdated } from "./calendar-realizations.js";
 import { noteOfRow, type Note } from "./calendar-queries.js";
 import { expandOccurrences, describeRule, shiftLocal, diffMinutes, type RecurrenceRule } from "./calendar-recurrence.js";
 import { ApiError, BILLING_HIDDEN_TYPES, BILLING_LABELS, STATUS_LABELS, TYPE_LABELS } from "./calendar-labels.js";
@@ -60,7 +61,18 @@ export interface ParsedInput {
   status: CalendarEventStatus;
   objectId: number | null;
   orderId: number | null;
-  realizationId: number | null;
+  /**
+   * Powiązana realizacja. `undefined` = pole NIE zostało przysłane — PUT zachowuje dotychczasowe
+   * powiązanie (realizacja powstaje automatycznie po stronie serwera, więc brak pola w body nie
+   * może jej odpinać); `null` = jawne odpięcie.
+   */
+  realizationId: number | null | undefined;
+  /**
+   * Jawne przełączenie „automatyczna realizacja” (opcjonalne pole `realizationOptout` w body).
+   * `undefined` = wylicz z `realizationId`: ręczne odpięcie istniejącej realizacji ustawia opt-out,
+   * ręczne podpięcie go zdejmuje.
+   */
+  realizationOptout: boolean | undefined;
   /** Rozliczenie (null = nie dotyczy); zawsze null dla typów z BILLING_HIDDEN_TYPES. */
   billing: CalendarBilling | null;
   /** Jawnie przypięty protokół (null = protokół realizacji / brak). */
@@ -109,6 +121,14 @@ function optInt(raw: unknown, field: string): number | null {
   const n = typeof raw === "number" ? raw : Number(raw);
   if (!Number.isInteger(n) || n <= 0) throw new ApiError(400, `Pole ${field}: nieprawidłowy identyfikator`);
   return n;
+}
+
+/** Opcjonalny bool: pole nieprzysłane / null → undefined (bez zmian). */
+function optBool(raw: unknown, field: string): boolean | undefined {
+  if (raw === null || raw === undefined || raw === "") return undefined;
+  if (raw === true || raw === 1 || raw === "1" || raw === "true") return true;
+  if (raw === false || raw === 0 || raw === "0" || raw === "false") return false;
+  throw new ApiError(400, `Pole ${field}: oczekiwano true/false`);
 }
 
 function optText(raw: unknown): string | null {
@@ -211,7 +231,8 @@ export function parseInput(body: unknown): ParsedInput {
     status,
     objectId: isUrlop ? null : optInt(b.objectId, "objectId"),
     orderId: isUrlop ? null : optInt(b.orderId, "orderId"),
-    realizationId: isUrlop ? null : optInt(b.realizationId, "realizationId"),
+    realizationId: isUrlop ? null : "realizationId" in b ? optInt(b.realizationId, "realizationId") : undefined,
+    realizationOptout: optBool(b.realizationOptout, "realizationOptout"),
     billing,
     protocolId: isUrlop ? null : optInt(b.protocolId, "protocolId"),
     technicianIds,
@@ -219,8 +240,11 @@ export function parseInput(body: unknown): ParsedInput {
   };
 }
 
-/** Sprawdza istnienie referencji (obiekt, zlecenie, realizacja, technicy). Rzuca ApiError. */
-export function assertRefs(tx: DbOrTx, input: ParsedInput) {
+/**
+ * Sprawdza istnienie referencji (obiekt, zlecenie, realizacja, technicy). Rzuca ApiError.
+ * `excludeEventId` — edytowane wydarzenie (jego własna realizacja nie jest „zajęta”).
+ */
+export function assertRefs(tx: DbOrTx, input: ParsedInput, excludeEventId: number | null = null) {
   if (input.objectId != null) {
     const o = tx.select({ id: schema.objects.id }).from(schema.objects).where(eq(schema.objects.id, input.objectId)).get();
     if (!o) throw new ApiError(400, `Obiekt #${input.objectId} nie istnieje`);
@@ -232,6 +256,17 @@ export function assertRefs(tx: DbOrTx, input: ParsedInput) {
   if (input.realizationId != null) {
     const r = tx.select({ id: schema.realizations.id }).from(schema.realizations).where(eq(schema.realizations.id, input.realizationId)).get();
     if (!r) throw new ApiError(400, `Realizacja #${input.realizationId} nie istnieje`);
+    // Realizacja ↔ wydarzenie 1:1 (unikalny indeks częściowy) — czytelny 400 zamiast 500 z UNIQUE.
+    const taken = tx
+      .select({ id: schema.calendarEvents.id, title: schema.calendarEvents.title })
+      .from(schema.calendarEvents)
+      .where(
+        excludeEventId != null
+          ? and(eq(schema.calendarEvents.realizationId, input.realizationId), ne(schema.calendarEvents.id, excludeEventId))
+          : eq(schema.calendarEvents.realizationId, input.realizationId)
+      )
+      .get();
+    if (taken) throw new ApiError(400, `Realizacja #${input.realizationId} jest już podpięta do wydarzenia #${taken.id} („${taken.title}”)`);
   }
   if (input.protocolId != null) {
     const p = tx.select({ id: schema.protocols.id }).from(schema.protocols).where(eq(schema.protocols.id, input.protocolId)).get();
@@ -346,6 +381,7 @@ function logEventDiff(tx: Tx, before: CalendarEventRow, after: CalendarEventRow,
       { key: "objectId", label: "obiekt", format: (v) => objectNameById(tx, (v as number | null) ?? null) },
       { key: "orderId", label: "zlecenie", format: (v) => (v == null ? "—" : `#${v}`) },
       { key: "realizationId", label: "realizację", format: (v) => (v == null ? "—" : `#${v}`) },
+      { key: "realizationOptout", label: "automatyczną realizację", format: (v) => (v ? "wyłączona (ręcznie odpięta)" : "włączona") },
       { key: "billing", label: "rozliczenie", format: (v) => (v == null ? "—" : (BILLING_LABELS[v as CalendarBilling] ?? String(v))) },
       { key: "protocolId", label: "protokół", format: (v) => protocolNumberById(tx, (v as number | null) ?? null) },
     ],
@@ -374,14 +410,31 @@ function seriesSiblings(dbx: DbOrTx, ev: CalendarEventRow, scope: Scope): Calend
   return dbx.select().from(schema.calendarEvents).where(and(...conds)).orderBy(asc(schema.calendarEvents.startAt)).all();
 }
 
-/** Zastosowanie zmian z PUT do jednego wiersza (target lub sibling z deltą dat). */
+/**
+ * Zastosowanie zmian z PUT do jednego wiersza (target lub sibling z deltą dat).
+ * `realizationId` NIE propaguje się na rodzeństwo z serii (relacja 1:1 — każde wystąpienie
+ * ma własną realizację); sibling zachowuje swoją.
+ */
 function applyUpdate(
   tx: Tx,
   row: CalendarEventRow,
   input: ParsedInput,
   dates: { startAt: string; endAt: string; allDay: boolean },
-  ctx: MutationCtx
+  ctx: MutationCtx,
+  isTarget = true
 ): CalendarEventRow {
+  // Ręczne „Odepnij” (jawny realizationId: null przy istniejącym powiązaniu) wyłącza automat;
+  // ręczne podpięcie realizacji go włącza z powrotem. Jawne pole realizationOptout ma pierwszeństwo.
+  const optout = !isTarget
+    ? row.realizationOptout
+    : input.realizationOptout !== undefined
+      ? input.realizationOptout
+      : input.realizationId === null && row.realizationId != null
+        ? true
+        : typeof input.realizationId === "number"
+          ? false
+          : row.realizationOptout;
+
   const after = tx
     .update(schema.calendarEvents)
     .set({
@@ -395,7 +448,8 @@ function applyUpdate(
       status: input.status,
       objectId: input.objectId,
       orderId: input.orderId,
-      realizationId: input.realizationId,
+      realizationId: isTarget && input.realizationId !== undefined ? input.realizationId : row.realizationId,
+      realizationOptout: optout,
       billing: input.billing,
       protocolId: input.protocolId,
       updatedBy: ctx.user.id,
@@ -406,6 +460,8 @@ function applyUpdate(
     .get();
   logEventDiff(tx, row, after, ctx);
   syncAssignees(tx, after, input.technicianIds, ctx);
+  // Realizacje: utworzenie / synchronizacja / odpięcie wg ustawień (calendar-realizations.ts).
+  onEventUpdated(tx, after, ctx);
   return after;
 }
 
@@ -467,7 +523,8 @@ export function createEvent(tx: Tx, input: ParsedInput, ctx: MutationCtx): { fir
         department: "technical",
         objectId: input.objectId,
         orderId: input.orderId,
-        realizationId: input.realizationId,
+        realizationId: input.realizationId ?? null,
+        realizationOptout: input.realizationOptout ?? false,
         billing: input.billing,
         protocolId: input.protocolId,
         seriesId,
@@ -486,6 +543,8 @@ export function createEvent(tx: Tx, input: ParsedInput, ctx: MutationCtx): { fir
         ? `Utworzono w ramach serii #${seriesId} (${seriesLabel})`
         : `Utworzono wydarzenie „${ev.title}” (${TYPE_LABELS[ev.type]}, ${fmtDate(ev.startAt)})`,
     });
+    // Realizacja + protokół dla typów objętych (wg ustawień calendar.*).
+    onEventCreated(tx, ev, ctx);
     ids.push(ev.id);
   }
   return { firstId: ids[0], seriesId, occurrencesCount: ids.length };
@@ -496,7 +555,7 @@ export function updateEvent(tx: Tx, id: number, input: ParsedInput, scope: Scope
   const row = getEventRow(tx, id);
   if (!row) throw new ApiError(404, "Wydarzenie nie istnieje");
   if (row.deletedAt) throw new ApiError(409, "Wydarzenie jest usunięte — najpierw je przywróć");
-  assertRefs(tx, input);
+  assertRefs(tx, input, id);
 
   const updatedIds = [id];
   applyUpdate(tx, row, input, { startAt: input.startAt, endAt: input.endAt, allDay: input.allDay }, ctx);
@@ -505,7 +564,7 @@ export function updateEvent(tx: Tx, id: number, input: ParsedInput, scope: Scope
   const deltaStart = diffMinutes(row.startAt, input.startAt);
   const deltaEnd = diffMinutes(row.endAt, input.endAt);
   for (const sib of seriesSiblings(tx, row, scope)) {
-    applyUpdate(tx, sib, input, shiftedDates(sib, deltaStart, deltaEnd, input.allDay), ctx);
+    applyUpdate(tx, sib, input, shiftedDates(sib, deltaStart, deltaEnd, input.allDay), ctx, false);
     updatedIds.push(sib.id);
   }
   return updatedIds;
@@ -533,6 +592,7 @@ export function moveEvent(tx: Tx, id: number, body: Record<string, unknown>, ctx
     .returning()
     .get();
   logEventDiff(tx, row, after, ctx);
+  onEventUpdated(tx, after, ctx);
   return after;
 }
 
@@ -551,6 +611,8 @@ export function deleteEvent(tx: Tx, id: number, scope: Scope, ctx: MutationCtx):
       entityType: CALENDAR_ENTITY, entityId: t.id, objectId: t.objectId, user: ctx.user, summarySuffix: ctx.summarySuffix, action: "deleted",
       summary: `Usunięto wydarzenie „${t.title}” (${fmtDate(t.startAt)})${scope !== "this" ? ` — zakres: ${scope === "all" ? "cała seria" : "to i kolejne"}` : ""}`,
     });
+    // Realizacja „nietknięta” znika razem z wydarzeniem; z kwotami/podpisem zostaje z adnotacją.
+    onEventDeleted(tx, t, ctx);
   }
   return targets.map((t) => t.id);
 }
@@ -570,6 +632,7 @@ export function restoreEvent(tx: Tx, id: number, ctx: MutationCtx): CalendarEven
     entityType: CALENDAR_ENTITY, entityId: id, objectId: row.objectId, user: ctx.user, summarySuffix: ctx.summarySuffix, action: "restored",
     summary: `Przywrócono wydarzenie „${row.title}” (${fmtDate(row.startAt)})`,
   });
+  onEventRestored(tx, after, ctx);
   return after;
 }
 

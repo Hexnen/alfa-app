@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { db, schema } from "../db/index.js";
-import { eq, like, asc, and } from "drizzle-orm";
+import { eq, like, asc, and, isNull, isNotNull } from "drizzle-orm";
 import type { ApiResponse } from "../types/index.js";
 import type { Realization, NewRealization } from "../db/schema.js";
 import { createProtocolForRealizationSync } from "./protocols.js";
@@ -22,12 +22,14 @@ const round2 = (n: number) => Math.round(n * 100) / 100;
 const monthPrefix = (year: number, month: number) =>
   `${year}-${String(month).padStart(2, "0")}-%`;
 
-function withComputed(r: Realization) {
+function withComputed(r: Realization, calendarEventId: number | null = null) {
   return {
     ...r,
     subtotal: round2(r.amountHours + r.amountMaterial + r.amountKm),
     total: round2(totalOf(r)),
     labourCost: round2(labourCostOf(r)),
+    // Wydarzenie kalendarza, z którego powstała realizacja (null = wpis ręczny).
+    calendarEventId,
   };
 }
 
@@ -69,10 +71,11 @@ function parseBody(body: Record<string, unknown>): { data?: Partial<NewRealizati
   };
 }
 
-// Lista realizacji danego miesiąca
+// Lista realizacji danego miesiąca (+ powiązane wydarzenie kalendarza; ?source=calendar|manual)
 app.get("/", async (c) => {
   const year = parseInt(c.req.query("year") || "");
   const month = parseInt(c.req.query("month") || "");
+  const source = c.req.query("source");
 
   if (!year || !month || month < 1 || month > 12) {
     return c.json<ApiResponse<null>>(
@@ -80,14 +83,25 @@ app.get("/", async (c) => {
       400
     );
   }
+  if (source && source !== "calendar" && source !== "manual") {
+    return c.json<ApiResponse<null>>(
+      { success: false, error: "Parametr source: dozwolone calendar, manual" },
+      400
+    );
+  }
+
+  const conds = [like(schema.realizations.date, monthPrefix(year, month))];
+  if (source === "calendar") conds.push(isNotNull(schema.calendarEvents.id));
+  if (source === "manual") conds.push(isNull(schema.calendarEvents.id));
 
   const rows = await db
-    .select()
+    .select({ r: schema.realizations, calendarEventId: schema.calendarEvents.id })
     .from(schema.realizations)
-    .where(like(schema.realizations.date, monthPrefix(year, month)))
+    .leftJoin(schema.calendarEvents, eq(schema.calendarEvents.realizationId, schema.realizations.id))
+    .where(and(...conds))
     .orderBy(asc(schema.realizations.date), asc(schema.realizations.id));
 
-  return c.json({ success: true, data: rows.map(withComputed) });
+  return c.json({ success: true, data: rows.map((row) => withComputed(row.r, row.calendarEventId ?? null)) });
 });
 
 // Podsumowanie miesiąca + tabela roczna przychód/strata
@@ -247,9 +261,15 @@ app.put("/:id", async (c) => {
     );
   }
 
+  const link = db
+    .select({ id: schema.calendarEvents.id })
+    .from(schema.calendarEvents)
+    .where(eq(schema.calendarEvents.realizationId, id))
+    .get();
+
   return c.json({
     success: true,
-    data: withComputed(result[0]),
+    data: withComputed(result[0], link?.id ?? null),
     message: "Realizacja zaktualizowana",
   });
 });

@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX `calendar_events_realization_id_uidx` ON `calendar_events` (`realization_id`) WHERE realization_id IS NOT NULL;

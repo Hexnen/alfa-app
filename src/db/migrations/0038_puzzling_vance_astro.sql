@@ -1,0 +1,1 @@
+ALTER TABLE `calendar_events` ADD `realization_optout` integer DEFAULT false NOT NULL;

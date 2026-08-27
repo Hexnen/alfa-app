@@ -7,6 +7,11 @@
  * przez szarości, ikony i obramowania, tak by działało też bez koloru.
  */
 
+/*
+ * Kolory typów trzymamy też na :root — warstwa własnego tooltipa wisi w <body>,
+ * poza .alfa-calendar, a rysuje kropkę/akcent w kolorze typu wydarzenia.
+ */
+:root,
 .alfa-calendar {
   --cal-serwis: 199 89% 48%;         /* sky-500 */
   --cal-montaz: 160 84% 39%;         /* emerald-500 */
@@ -17,10 +22,13 @@
   --cal-konserwacja: 173 80% 40%;    /* teal-500 */
   --cal-urlop: 350 89% 60%;          /* rose-500 */
   --cal-overdue: 0 84% 60%;          /* red-500 */
+}
+.alfa-calendar {
   min-width: 0;
 }
 
 /* W trybie ciemnym jaśniejsze warianty — tekst i ikony na ciemnym tle. */
+.dark,
 .dark .alfa-calendar {
   --cal-serwis: 199 90% 62%;
   --cal-montaz: 160 70% 52%;
@@ -579,6 +587,52 @@
   color: hsl(var(--foreground));
 }
 
+/* ---- Tryb „pełna wysokość okna” (desktop, data-fit="true") ----
+ * Kontener siatki dostaje wyliczoną wysokość z JS; FullCalendar renderuje się
+ * z height="100%", więc wiersze rozciągają się na całą dostępną przestrzeń.
+ * Minimalna wysokość komórki miesiąca musi być mniejsza niż w trybie „auto”,
+ * inaczej siatka nie zmieściłaby się w niższych oknach (1440×900).
+ */
+.alfa-calendar[data-fit="true"] .fc {
+  height: 100%;
+}
+.alfa-calendar[data-fit="true"] .fc .fc-dayGridMonth-view .fc-daygrid-day-frame {
+  /* Wracamy do wartości FullCalendar — komórka wypełnia wiersz, dzięki czemu
+     dayMaxEvents={true} liczy limit z realnej wysokości, a nie ze sztywnych 5.75rem. */
+  min-height: 100%;
+}
+/* Ciaśniejsza komórka = więcej wydarzeń przed „+N więcej”. */
+.alfa-calendar[data-fit="true"] .fc .fc-daygrid-day-number {
+  padding: 1px 5px;
+  font-size: 0.78rem;
+}
+.alfa-calendar[data-fit="true"] .fc .fc-daygrid-day-events {
+  padding-bottom: 0;
+}
+.alfa-calendar[data-fit="true"] .fc .fc-daygrid-event {
+  font-size: 0.72rem;
+  line-height: 1.2;
+}
+.alfa-calendar[data-fit="true"] .fc .fc-day-today .fc-daygrid-day-number {
+  min-width: 1.35rem;
+  height: 1.35rem;
+  margin: 1px 3px;
+}
+.alfa-calendar[data-fit="true"] .fc .fc-daygrid-event-harness {
+  margin-top: 1px;
+}
+.alfa-calendar[data-fit="true"] .fc .fc-daygrid-event .cal-ev {
+  padding: 1px 5px 1px 4px;
+}
+.alfa-calendar[data-fit="true"] .fc .fc-daygrid-more-link {
+  margin-top: 0;
+}
+/* Tablica w trybie pełnej wysokości: kolumny same przewijają się do dołu okna. */
+.alfa-calendar[data-fit="true"] .alfa-board-col-body {
+  max-height: none;
+  min-height: 0;
+}
+
 /* ---- Tablica ---- */
 .alfa-board-col-body {
   max-height: calc(100vh - 21rem);
@@ -619,6 +673,29 @@
   .alfa-calendar .cal-list-sub {
     max-width: 12rem;
   }
+  /* Pigułki (rozliczenie/protokół/realizacja) + status nie mieszczą się obok
+     tytułu na 390 px — pozwalamy im się zawinąć, zamiast rozpychać stronę. */
+  .alfa-calendar .cal-list-item {
+    flex-wrap: wrap;
+  }
+  .alfa-calendar .cal-list-badges {
+    flex-wrap: wrap;
+    max-width: 100%;
+    min-width: 0;
+  }
+  /* Komórka tytułu w tabeli listy ma stałą szerokość — pigułki muszą się w niej
+     zmieścić, inaczej rozpychają stronę w poziomie. */
+  .alfa-calendar .fc-list-event-title {
+    max-width: 0;
+  }
+  .alfa-calendar .cal-list-item > * {
+    min-width: 0;
+  }
+  /* Po zawinięciu pigułki zaczynają wiersz od lewej (bez margin-left:auto). */
+  .alfa-calendar .cal-list-badges,
+  .alfa-calendar .cal-list-status {
+    margin-left: 0;
+  }
   .alfa-calendar .cal-skeleton {
     padding-top: 36px;
   }
@@ -645,10 +722,30 @@
 
 /* Widok Lista na wąskich ekranach: tabela nie może rozpychać strony w poziomie */
 .alfa-calendar .fc-list-table {
-  table-layout: fixed;
   width: 100%;
 }
-.alfa-calendar .fc-list-event-title,
+/* Kolumny listy: czas i ikona mają stałą szerokość, tytuł bierze resztę.
+   Bez tego (table-layout: fixed + równe kolumny) tytuł łamał się po literze. */
 .alfa-calendar .fc-list-event-time {
-  overflow-wrap: anywhere;
+  width: 9.5rem;
+  white-space: nowrap;
+}
+.alfa-calendar .fc-list-event-graphic {
+  width: 1.75rem;
+}
+.alfa-calendar .fc-list-event-title {
+  overflow-wrap: break-word;
+}
+@media (max-width: 767px) {
+  /* Na wąskich ekranach tabela nie może rozpychać strony w poziomie. */
+  .alfa-calendar .fc-list-table {
+    table-layout: fixed;
+  }
+  .alfa-calendar .fc-list-event-time {
+    width: 5.5rem;
+    white-space: normal;
+  }
+  .alfa-calendar .fc-list-event-title {
+    overflow-wrap: anywhere;
+  }
 }

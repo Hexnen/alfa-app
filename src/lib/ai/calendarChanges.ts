@@ -144,6 +144,8 @@ export interface BriefEvent {
   billing: CalendarBilling | null;
   /** Skrót protokołu (jawny albo z realizacji) — tylko informacyjnie, nie do edycji z czatu. */
   protocol: { id: number; number: string; status: "draft" | "final"; signedAt: string | null } | null;
+  /** Skrót realizacji powstałej z wydarzenia — informacyjnie (kwot asystent nie dotyka). */
+  realization: { id: number; invoiced: boolean } | null;
   seriesId: number | null;
   deleted: boolean;
 }
@@ -243,6 +245,7 @@ export function briefOfEvent(e: CalendarEventJson): BriefEvent {
     technicians: e.technicians.map((t) => ({ id: t.id, name: techName(t) })),
     billing: e.billing,
     protocol: e.protocol ? { id: e.protocol.id, number: e.protocol.number, status: e.protocol.status, signedAt: e.protocol.signedAt } : null,
+    realization: e.realization ? { id: e.realization.id, invoiced: e.realization.invoiced } : null,
     seriesId: e.seriesId,
     deleted: e.deletedAt != null,
   };
@@ -269,7 +272,7 @@ function objectNameOf(dbx: DbOrTx, id: number | null): string | null {
 }
 
 /** Brief scalonego stanu (po parseInput) — bez zapisu. */
-function briefOfInput(dbx: DbOrTx, input: ParsedInput, base: { id: number | null; seriesId: number | null; protocol?: BriefEvent["protocol"] }): BriefEvent {
+function briefOfInput(dbx: DbOrTx, input: ParsedInput, base: { id: number | null; seriesId: number | null; protocol?: BriefEvent["protocol"]; realization?: BriefEvent["realization"] }): BriefEvent {
   const techs = technicianNames(dbx, input.technicianIds);
   const objectName = objectNameOf(dbx, input.objectId);
   const title = input.title || (input.type === "urlop" ? `Urlop — ${techs.map((t) => t.name).join(", ")}` : input.title);
@@ -289,6 +292,7 @@ function briefOfInput(dbx: DbOrTx, input: ParsedInput, base: { id: number | null
     technicians: techs,
     billing: input.billing,
     protocol: base.protocol ?? null,
+    realization: base.realization ?? null,
     seriesId: base.seriesId,
     deleted: false,
   };
@@ -362,6 +366,7 @@ function inputBodyOf(e: CalendarEventJson): Record<string, unknown> {
     objectId: e.objectId,
     orderId: e.orderId,
     realizationId: e.realizationId,
+    realizationOptout: e.realizationOptout,
     billing: e.billing,
     protocolId: e.protocolId,
     technicianIds: e.technicians.map((t) => t.id),
@@ -525,7 +530,7 @@ export function resolveChange(dbx: DbOrTx, change: Change, index: number, opts: 
           if (change.reason) headline += ` — ${change.reason}`;
         }
         const input = parseInput(body);
-        const after = briefOfInput(dbx, input, { id: ev.id, seriesId: ev.seriesId, protocol: before.protocol });
+        const after = briefOfInput(dbx, input, { id: ev.id, seriesId: ev.seriesId, protocol: before.protocol, realization: before.realization });
         const diff = diffBriefs(before, after);
         if (note) diff.push({ field: "Notatka", from: "", to: note });
         if (diff.length === 0) throw new ApiError(400, `Wydarzenie #${ev.id}: zmiana nie zmienia żadnego pola`);

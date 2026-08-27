@@ -297,7 +297,8 @@ function ToolRow({ part, live, links }: { part: ToolPart; live: boolean; links: 
         <Check className="h-3.5 w-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden />
       )}
       <Icon className="h-3.5 w-3.5 shrink-0 opacity-70" aria-hidden />
-      <span className="min-w-0 truncate" title={title}>
+      {/* `title` = szczegóły błędu; w pozostałych przypadkach pełna etykieta (wiersz bywa ucięty). */}
+      <span className="min-w-0 truncate" title={title ?? label}>
         {label}
       </span>
       {details && (open ? <ChevronDown className="h-3 w-3 shrink-0" aria-hidden /> : <ChevronRight className="h-3 w-3 shrink-0" aria-hidden />)}

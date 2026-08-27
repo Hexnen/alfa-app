@@ -6,12 +6,17 @@ import {
   EVENT_STATUS_ORDER,
   EVENT_TYPE_META,
   EVENT_TYPE_ORDER,
+  eventTipAria,
+  eventTipData,
+  eventsCount,
   fmtRange,
+  overdueTip,
   parseLocal,
   protocolBadgeKind,
   seriesShortLabel,
 } from "@/lib/calendar-labels";
-import { BillingBadge, ProtocolBadge } from "@/components/CalendarEventBadges";
+import { BillingBadge, ProtocolBadge, RealizationBadge } from "@/components/CalendarEventBadges";
+import { tipAttrs } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
 /** Grupowanie kolumn tablicy: wg statusu (domyślnie) albo wg typu. */
@@ -39,6 +44,8 @@ interface BoardColumn {
   /** Kolor akcentu (CSS) dla paska kolumny. */
   accent?: string;
   icon?: typeof Building2;
+  /** Krótkie wyjaśnienie do tooltipa nagłówka („termin wstępny — czeka na potwierdzenie”). */
+  hint?: string;
 }
 
 const STATUS_ACCENT: Record<CalendarEventStatus, string> = {
@@ -84,6 +91,7 @@ export function CalendarBoard({
         label: EVENT_STATUS_META[s].label,
         headClass: EVENT_STATUS_META[s].badge,
         accent: STATUS_ACCENT[s],
+        hint: EVENT_STATUS_META[s].hint,
       }));
     }
     return EVENT_TYPE_ORDER.map((t) => ({
@@ -168,7 +176,9 @@ export function CalendarBoard({
   const dragging = dragId !== null;
 
   return (
-    <div className="space-y-2">
+    // min-h-0 + flex-1: w trybie pełnej wysokości (rodzic .alfa-calendar[data-fit])
+    // tablica wypełnia okno, a przewijają się same kolumny.
+    <div className="flex min-h-0 flex-1 flex-col gap-2">
       {grouped.total === 0 && !loading && (
         <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed px-4 py-8 text-center">
           <CalendarX2 className="h-7 w-7 text-muted-foreground/60" aria-hidden />
@@ -191,7 +201,7 @@ export function CalendarBoard({
         className={cn(
           // Mobile: poziomy pasek ze snapem. Desktop: siatka zawijająca kolumny
           // (8 typów → 2 rzędy), żeby tablica nie rozpychała strony w poziomie.
-          "alfa-board flex snap-x snap-mandatory gap-3 overflow-x-auto pb-2 md:grid md:snap-none md:overflow-visible md:[grid-template-columns:repeat(auto-fit,minmax(230px,1fr))]",
+          "alfa-board flex min-h-0 flex-1 snap-x snap-mandatory gap-3 overflow-x-auto pb-2 md:grid md:snap-none md:overflow-visible md:[grid-template-columns:repeat(auto-fit,minmax(230px,1fr))]",
           loading && "opacity-70"
         )}
         data-testid="calendar-board"
@@ -208,19 +218,28 @@ export function CalendarBoard({
             <section
               key={col.key}
               data-board-column={col.key}
-              aria-label={`${col.label}: ${items.length}`}
+              aria-label={`${col.label} — ${eventsCount(items.length)}`}
               onDragOver={handleDragOver(col)}
               onDragEnter={handleDragOver(col)}
               onDragLeave={handleDragLeave(col)}
               onDrop={handleDrop(col)}
               className={cn(
-                "flex w-[82vw] shrink-0 snap-start flex-col rounded-lg border bg-muted/30 transition-colors md:w-auto md:min-w-0",
+                "flex w-[82vw] shrink-0 snap-start flex-col rounded-lg border bg-muted/30 transition-colors md:w-auto md:min-h-0 md:min-w-0",
                 isDropTarget && !isOver && "border-dashed border-primary/40",
                 isOver && "border-primary bg-primary/5 ring-2 ring-primary/30"
               )}
               style={{ borderTopColor: col.accent, borderTopWidth: 3 }}
             >
-              <header className="sticky top-0 z-[1] flex items-center justify-between gap-2 rounded-t-md bg-muted/60 px-3 py-2 backdrop-blur-sm">
+              <header
+                className="sticky top-0 z-[1] flex items-center justify-between gap-2 rounded-t-md bg-muted/60 px-3 py-2 backdrop-blur-sm"
+                {...tipAttrs({
+                  title: `${col.label} — ${eventsCount(items.length)}`,
+                  accent: col.accent,
+                  text: col.hint,
+                  warnings: overdueCount > 0 ? [`W tym ${eventsCount(overdueCount)} po terminie`] : undefined,
+                  hint: editable ? "Przeciągnij kartę tutaj, by zmienić kolumnę" : undefined,
+                })}
+              >
                 <span
                   className={cn(
                     "inline-flex min-w-0 items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-semibold",
@@ -234,7 +253,6 @@ export function CalendarBoard({
                   {overdueCount > 0 && (
                     <span
                       className="inline-flex items-center gap-1 rounded-full bg-red-100 px-1.5 py-0.5 text-[11px] font-semibold tabular-nums text-red-700 dark:bg-red-500/20 dark:text-red-200"
-                      title={`${overdueCount} po terminie`}
                     >
                       <AlertTriangle className="h-3 w-3" aria-hidden />
                       {overdueCount}
@@ -243,7 +261,7 @@ export function CalendarBoard({
                   )}
                   <span
                     className="rounded-full bg-background px-2 py-0.5 text-xs font-medium tabular-nums text-muted-foreground"
-                    aria-label={`Liczba: ${items.length}`}
+                    aria-label={eventsCount(items.length)}
                   >
                     {items.length}
                   </span>
@@ -332,7 +350,14 @@ function BoardCard({
         }
       }}
       onContextMenu={onContextMenu}
-      title={`${ev.title}\n${fmtRange(ev.startAt, ev.endAt, ev.allDay)}${ev.objectName ? `\n${ev.objectName}` : ""}${draggable ? "\nPrzeciągnij, by zmienić kolumnę · prawy przycisk: więcej" : ""}`}
+      aria-label={eventTipAria(ev)}
+      {...tipAttrs(
+        eventTipData(ev, {
+          hint: draggable
+            ? "Przeciągnij, by zmienić kolumnę · prawy przycisk: więcej akcji"
+            : "Kliknij, by otworzyć szczegóły",
+        })
+      )}
       className={cn(
         "group relative rounded-md border bg-card py-2 pl-3 pr-2 text-left text-sm shadow-sm transition-[box-shadow,transform] hover:-translate-y-px hover:shadow-md focus:outline-none focus-visible:ring-2 focus-visible:ring-ring",
         draggable ? "cursor-grab active:cursor-grabbing" : "cursor-pointer",
@@ -373,7 +398,10 @@ function BoardCard({
           {techs.length > 0 && (
             <span
               className="inline-flex items-center gap-1"
-              title={techs.map((t) => `${t.firstName} ${t.lastName}`).join(", ")}
+              {...tipAttrs({
+                title: techs.length > 1 ? "Technicy" : "Technik",
+                text: techs.map((t) => `${t.firstName} ${t.lastName}`).join("\n"),
+              })}
             >
               <Users className="h-3 w-3 shrink-0" aria-hidden />
               <span className="flex -space-x-1">
@@ -394,19 +422,32 @@ function BoardCard({
             </span>
           )}
           {ev.seriesId && (
-            <span className="inline-flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium">
+            <span
+              className="inline-flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium"
+              {...tipAttrs({
+                title: `Seria cykliczna${ev.series ? `: ${seriesShortLabel(ev.series.freq, ev.series.interval)}` : ""}`,
+                text:
+                  ev.seriesIndex != null && ev.seriesTotal != null
+                    ? `Wystąpienie ${ev.seriesIndex} z ${ev.seriesTotal}`
+                    : undefined,
+              })}
+            >
               <Repeat className="h-3 w-3" aria-hidden />
               {ev.series ? seriesShortLabel(ev.series.freq, ev.series.interval) : "seria"}
               {ev.seriesIndex != null && ev.seriesTotal != null && ` ${ev.seriesIndex}/${ev.seriesTotal}`}
             </span>
           )}
           {overdue && (
-            <span className="inline-flex items-center gap-1 rounded bg-red-100 px-1.5 py-0.5 text-[10px] font-semibold text-red-700 dark:bg-red-500/20 dark:text-red-200">
+            <span
+              className="inline-flex items-center gap-1 rounded bg-red-100 px-1.5 py-0.5 text-[10px] font-semibold text-red-700 dark:bg-red-500/20 dark:text-red-200"
+              {...tipAttrs({ title: "Po terminie", text: overdueTip(ev) })}
+            >
               <AlertTriangle className="h-3 w-3" aria-hidden /> po terminie
             </span>
           )}
           <BillingBadge billing={ev.billing} compact />
           <ProtocolBadge event={ev} compact />
+          <RealizationBadge event={ev} compact />
         </div>
       )}
     </div>

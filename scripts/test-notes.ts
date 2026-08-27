@@ -8,7 +8,7 @@
  * Sprząta po sobie HARD (events + assignees + notes + activity_log), także przy błędzie.
  */
 import { db, schema } from "../src/db/index.js";
-import { and, eq, inArray, like } from "drizzle-orm";
+import { and, eq, inArray, like, sql } from "drizzle-orm";
 import { buildCalendarTools } from "../src/lib/ai/calendarTools.js";
 import { applyChange, resolveChange, type ResolvedChange } from "../src/lib/ai/calendarChanges.js";
 import { ASSISTANT_DEFAULTS } from "../src/lib/ai/assistantConfig.js";
@@ -26,7 +26,16 @@ const PREFIX = "__NOTES_TEST__";
 const TODAY = "2026-08-27";
 
 function cleanup() {
-  const ids = db.select({ id: schema.calendarEvents.id }).from(schema.calendarEvents).where(like(schema.calendarEvents.title, `${PREFIX}%`)).all().map((r) => r.id);
+  const rows = db.select({ id: schema.calendarEvents.id, realizationId: schema.calendarEvents.realizationId }).from(schema.calendarEvents).where(like(schema.calendarEvents.title, `${PREFIX}%`)).all();
+  const ids = rows.map((r) => r.id);
+  // Realizacje (+ protokoły) powstałe automatycznie z wydarzeń testowych — src/lib/calendar-realizations.ts
+  const realIds = rows.map((r) => r.realizationId).filter((x): x is number => x != null);
+  // Także realizacje po wydarzeniach skasowanych twardo w trakcie testu (adnotacja „[Kalendarz #id] PREFIX …”).
+  for (const r of db.select({ id: schema.realizations.id }).from(schema.realizations).where(sql`${schema.realizations.note} LIKE ${`%${PREFIX}%`}`).all()) realIds.push(r.id);
+  if (realIds.length) {
+    db.delete(schema.protocols).where(inArray(schema.protocols.realizationId, realIds)).run();
+    db.delete(schema.realizations).where(inArray(schema.realizations.id, realIds)).run();
+  }
   if (ids.length) {
     db.delete(schema.calendarEventNotes).where(inArray(schema.calendarEventNotes.eventId, ids)).run();
     db.delete(schema.calendarEventAssignees).where(inArray(schema.calendarEventAssignees.eventId, ids)).run();

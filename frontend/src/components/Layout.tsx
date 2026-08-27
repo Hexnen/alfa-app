@@ -9,15 +9,18 @@ import {
   Wrench,
   IdCard,
   FolderKanban,
+  CalendarCog,
   ChevronDown,
   Menu,
   X,
   LogOut,
   Shield,
   Sparkles,
+  PanelLeftClose,
+  PanelLeftOpen,
   type LucideIcon,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { cn } from "@/lib/utils";
 import { Button } from "./ui/button";
 import { useAuth } from "@/auth/AuthProvider";
@@ -119,12 +122,102 @@ interface LayoutProps {
   children: React.ReactNode;
 }
 
+/** Klucz trwałości zwinięcia sidebara (desktop). */
+const COLLAPSE_KEY = "alfa.sidebar.collapsed";
+
+const readCollapsed = (): boolean => {
+  try {
+    return localStorage.getItem(COLLAPSE_KEY) === "1";
+  } catch {
+    return false;
+  }
+};
+
+const isDesktopWidth = () =>
+  typeof window !== "undefined" && window.matchMedia("(min-width: 1024px)").matches;
+
+/** Czy fokus jest w polu edycyjnym (nie przechwytujemy skrótu „[”). */
+const isTypingTarget = (el: EventTarget | null): boolean => {
+  if (!(el instanceof HTMLElement)) return false;
+  if (el.isContentEditable) return true;
+  const tag = el.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+};
+
 export function Layout({ children }: LayoutProps) {
   const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
   const { user, logout } = useAuth();
   const perms = usePerms();
+
+  // --- Zwijanie sidebara (tylko desktop; mobile ma swój drawer) -------------
+  const [collapsed, setCollapsed] = useState(readCollapsed);
+  const [desktop, setDesktop] = useState(isDesktopWidth);
+  /** Flyout z podzakładkami sekcji w trybie zwiniętym (pozycja = ikona sekcji). */
+  const [flyout, setFlyout] = useState<{ item: NavItem; top: number } | null>(null);
+  /** Pasek ikon: zwinięty sidebar renderujemy tylko na desktopie. */
+  const rail = collapsed && desktop;
+
+  useEffect(() => {
+    const mq = window.matchMedia("(min-width: 1024px)");
+    const on = () => setDesktop(mq.matches);
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, []);
+
+  const toggleCollapsed = () => {
+    setFlyout(null);
+    setCollapsed((c) => {
+      const next = !c;
+      try {
+        localStorage.setItem(COLLAPSE_KEY, next ? "1" : "0");
+      } catch {
+        /* prywatny tryb przeglądarki — trudno */
+      }
+      return next;
+    });
+  };
+
+  // Skrót „[” — zwiń/rozwiń menu (poza polami tekstowymi i skrótami z modyfikatorem).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "[" || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (isTypingTarget(e.target) || !isDesktopWidth()) return;
+      e.preventDefault();
+      setFlyout(null);
+      setCollapsed((c) => {
+        const next = !c;
+        try {
+          localStorage.setItem(COLLAPSE_KEY, next ? "1" : "0");
+        } catch {
+          /* ignore */
+        }
+        return next;
+      });
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  // Flyout: zamknij klikiem obok / Esc.
+  useEffect(() => {
+    if (!flyout) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t?.closest?.("[data-sidebar-flyout]") || t?.closest?.("[data-sidebar-rail-group]")) return;
+      setFlyout(null);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setFlyout(null);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [flyout]);
 
   // Mapuje ścieżkę SPA na klucz zakładki z katalogu uprawnień. Ścieżki
   // szczegółowe bez własnego klucza (np. /orders/formularz) dziedziczą
@@ -194,9 +287,48 @@ export function Layout({ children }: LayoutProps) {
       [item.name]: !isGroupOpen(item),
     }));
 
+  // Tryb zwinięty: sama ikona + `title` jako tooltip. Sekcje z podzakładkami
+  // otwierają flyout obok paska (pozycjonowany jak menu kontekstowe).
+  const renderRailItem = (item: NavItem) => {
+    const active = isSectionActive(item);
+    const cls = cn(
+      "flex h-10 w-10 shrink-0 items-center justify-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+      active
+        ? "bg-primary text-primary-foreground"
+        : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+    );
+    if (!item.children) {
+      return (
+        <Link key={item.name} to={item.href} className={cls} title={item.name} aria-label={item.name}>
+          <item.icon className="h-5 w-5" />
+        </Link>
+      );
+    }
+    const open = flyout?.item.name === item.name;
+    return (
+      <button
+        key={item.name}
+        type="button"
+        data-sidebar-rail-group
+        className={cls}
+        title={item.name}
+        aria-label={item.name}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={(e) => {
+          const r = e.currentTarget.getBoundingClientRect();
+          setFlyout(open ? null : { item, top: r.top });
+        }}
+      >
+        <item.icon className="h-5 w-5" />
+      </button>
+    );
+  };
+
   // Unified renderer used for both the top-level entries and the main
   // sections, so any entry can carry expandable sub-tabs in the sidebar.
   const renderNavItem = (item: NavItem) => {
+    if (rail) return renderRailItem(item);
     const active = isSectionActive(item);
 
     // Entry without sub-tabs behaves like a plain link.
@@ -206,7 +338,7 @@ export function Layout({ children }: LayoutProps) {
           key={item.name}
           to={item.href}
           className={cn(
-            "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
+            "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
             active
               ? "bg-primary text-primary-foreground"
               : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
@@ -232,7 +364,7 @@ export function Layout({ children }: LayoutProps) {
         >
           <Link
             to={item.href}
-            className="flex flex-1 items-center gap-3 px-3 py-2"
+            className="flex flex-1 items-center gap-3 rounded-lg px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             onClick={() => {
               setOpenGroups((prev) => ({ ...prev, [item.name]: true }));
               setSidebarOpen(false);
@@ -243,8 +375,9 @@ export function Layout({ children }: LayoutProps) {
           </Link>
           <button
             type="button"
-            className="flex h-9 w-9 items-center justify-center rounded-lg hover:bg-accent"
+            className="flex h-9 w-9 items-center justify-center rounded-lg hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             onClick={() => toggleGroup(item)}
+            aria-expanded={open}
             aria-label={open ? `Zwiń ${item.name}` : `Rozwiń ${item.name}`}
           >
             <ChevronDown
@@ -265,7 +398,7 @@ export function Layout({ children }: LayoutProps) {
                   key={child.href}
                   to={child.href}
                   className={cn(
-                    "flex items-center gap-3 rounded-lg border-l px-3 py-1.5 text-sm transition-colors",
+                    "flex items-center gap-3 rounded-lg border-l px-3 py-1.5 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                     childActive
                       ? "border-primary bg-primary/10 font-medium text-primary"
                       : "border-transparent text-muted-foreground hover:bg-accent hover:text-accent-foreground"
@@ -296,39 +429,68 @@ export function Layout({ children }: LayoutProps) {
       {/* Sidebar */}
       <aside
         className={cn(
-          "fixed inset-y-0 left-0 z-50 flex w-64 transform flex-col bg-card border-r transition-transform duration-200 ease-in-out lg:translate-x-0",
+          "fixed inset-y-0 left-0 z-50 flex w-64 transform flex-col bg-card border-r transition-[transform,width] duration-200 ease-in-out lg:translate-x-0",
+          collapsed && "lg:w-16",
           sidebarOpen ? "translate-x-0" : "-translate-x-full"
         )}
       >
-        <div className="flex h-16 items-center justify-between px-6 border-b">
-          <Link to="/" className="text-xl font-bold text-primary">
-            Alfa Group
-          </Link>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="lg:hidden"
-            onClick={() => setSidebarOpen(false)}
-          >
-            <X className="h-5 w-5" />
-          </Button>
+        <div
+          className={cn(
+            "flex h-16 items-center border-b",
+            rail ? "justify-center px-2" : "justify-between px-6"
+          )}
+        >
+          {!rail && (
+            <Link to="/" className="text-xl font-bold text-primary">
+              Alfa Group
+            </Link>
+          )}
+          <div className="flex items-center gap-1">
+            {/* Zwijanie — tylko desktop; mobile zamyka drawer krzyżykiem */}
+            <Button
+              variant="ghost"
+              size="icon"
+              className="hidden lg:inline-flex"
+              onClick={toggleCollapsed}
+              aria-expanded={!collapsed}
+              aria-label={collapsed ? "Rozwiń menu boczne" : "Zwiń menu boczne"}
+              title={collapsed ? "Rozwiń menu ([)" : "Zwiń menu ([)"}
+            >
+              {collapsed ? <PanelLeftOpen className="h-5 w-5" /> : <PanelLeftClose className="h-5 w-5" />}
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="lg:hidden"
+              onClick={() => setSidebarOpen(false)}
+              aria-label="Zamknij menu"
+            >
+              <X className="h-5 w-5" />
+            </Button>
+          </div>
         </div>
-        <nav className="flex flex-1 flex-col gap-1 overflow-y-auto p-4">
+        <nav
+          className={cn(
+            "flex flex-1 flex-col gap-1 overflow-y-auto",
+            rail ? "items-center px-2 py-4" : "p-4"
+          )}
+        >
           {visibleTopLevel.map(renderNavItem)}
 
-          {visibleSections.length > 0 && <div className="my-2 border-t" />}
+          {visibleSections.length > 0 && <div className="my-2 w-full border-t" />}
 
           {visibleSections.map(renderNavItem)}
 
           {perms.isAdmin && (
             <>
-              <div className="my-2 border-t" />
+              <div className="my-2 w-full border-t" />
               {renderNavItem({
                 name: "Administracja",
                 href: "/admin/users",
                 icon: Shield,
                 children: [
                   { name: "Użytkownicy", href: "/admin/users", icon: Users },
+                  { name: "Kalendarz", href: "/admin/kalendarz", icon: CalendarCog },
                   { name: "Asystent AI", href: "/admin/asystent", icon: Sparkles },
                 ],
               })}
@@ -337,30 +499,88 @@ export function Layout({ children }: LayoutProps) {
         </nav>
 
         {/* Bottom bar: system name + user + logout (moved from the top bar) */}
-        <div className="border-t p-4">
-          <div className="text-sm font-semibold leading-snug">
-            System Wdrozen Obiektow Ochrony
-          </div>
-          <div className="mt-2 flex items-center justify-between gap-2 text-sm">
-            <span className="text-muted-foreground min-w-0 truncate">
-              {user ? user.displayName || user.email : ""}
-            </span>
+        {rail ? (
+          <div className="flex flex-col items-center border-t p-2">
             <Button
               variant="ghost"
-              size="sm"
-              className="shrink-0"
+              size="icon"
               onClick={() => logout()}
-              title="Wyloguj"
+              aria-label="Wyloguj"
+              title={`Wyloguj${user ? ` — ${user.displayName || user.email}` : ""}`}
             >
-              <LogOut className="h-4 w-4 mr-1" />
-              Wyloguj
+              <LogOut className="h-5 w-5" />
             </Button>
           </div>
-        </div>
+        ) : (
+          <div className="border-t p-4">
+            <div className="text-sm font-semibold leading-snug">
+              System Wdrozen Obiektow Ochrony
+            </div>
+            <div className="mt-2 flex items-center justify-between gap-2 text-sm">
+              <span className="text-muted-foreground min-w-0 truncate">
+                {user ? user.displayName || user.email : ""}
+              </span>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="shrink-0"
+                onClick={() => logout()}
+                title="Wyloguj"
+              >
+                <LogOut className="h-4 w-4 mr-1" />
+                Wyloguj
+              </Button>
+            </div>
+          </div>
+        )}
       </aside>
 
+      {/* Flyout z podzakładkami sekcji (tylko przy zwiniętym sidebarze) */}
+      {rail && flyout && (
+        <div
+          data-sidebar-flyout
+          role="menu"
+          aria-label={flyout.item.name}
+          className="fixed left-16 z-50 ml-1 w-56 rounded-lg border bg-popover p-2 text-popover-foreground shadow-xl"
+          style={{ top: Math.max(8, Math.min(flyout.top, window.innerHeight - 24 - 44 * ((flyout.item.children?.length ?? 0) + 1))) }}
+        >
+          <Link
+            to={flyout.item.href}
+            onClick={() => setFlyout(null)}
+            className="mb-1 flex items-center gap-2 rounded-md px-2 py-1.5 text-sm font-semibold hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <flyout.item.icon className="h-4 w-4" />
+            {flyout.item.name}
+          </Link>
+          <div className="flex flex-col gap-0.5">
+            {flyout.item.children?.map((child) => (
+              <Link
+                key={child.href}
+                to={child.href}
+                role="menuitem"
+                onClick={() => setFlyout(null)}
+                className={cn(
+                  "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                  isChildActive(child)
+                    ? "bg-primary/10 font-medium text-primary"
+                    : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+                )}
+              >
+                {child.icon && <child.icon className="h-4 w-4" />}
+                {child.name}
+              </Link>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Main content */}
-      <div className="lg:pl-64">
+      <div
+        className={cn(
+          "transition-[padding] duration-200 ease-in-out",
+          collapsed ? "lg:pl-16" : "lg:pl-64"
+        )}
+      >
         {/* Top bar — only the hamburger on mobile; the system/user bar lives
             at the bottom of the sidebar now */}
         <header className="sticky top-0 z-30 flex h-16 items-center gap-4 border-b bg-background px-4 lg:hidden">

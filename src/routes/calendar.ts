@@ -39,6 +39,7 @@ import {
   type ParsedInput,
 } from "../lib/calendar-mutations.js";
 import { ApiError, BILLING_LABELS, PROTOCOL_TYPES, STATUS_LABELS, TYPE_LABELS } from "../lib/calendar-labels.js";
+import calendarFilterSetsRoutes from "./calendar-filter-sets.js";
 
 // Re-eksporty dla dotychczasowych importów (asystent, testy).
 export { ApiError, STATUS_LABELS, TYPE_LABELS, loadEvents, parseInput };
@@ -46,6 +47,9 @@ export type { CalendarEventJson, Note, ParsedInput };
 
 const app = new Hono();
 export const calendarPublicRoutes = new Hono();
+
+// Zapisane zestawy filtrów (per użytkownik) — src/routes/calendar-filter-sets.ts
+app.route("/filter-sets", calendarFilterSetsRoutes);
 
 function handleError(c: Context, error: unknown, what: string) {
   if (error instanceof ApiError) {

@@ -8,7 +8,7 @@
  * Sprząta po sobie HARD (events + assignees + activity_log + series), także przy błędzie.
  */
 import { db, schema } from "../src/db/index.js";
-import { and, eq, inArray, like } from "drizzle-orm";
+import { and, eq, inArray, like, sql } from "drizzle-orm";
 import { buildCalendarTools } from "../src/lib/ai/calendarTools.js";
 import { applyChange, resolveChange, type ResolvedChange } from "../src/lib/ai/calendarChanges.js";
 import { ASSISTANT_DEFAULTS } from "../src/lib/ai/assistantConfig.js";
@@ -28,9 +28,17 @@ const YESTERDAY = "2026-08-26";
 
 /** Hard delete wydarzeń testowych (+ assignees, activity_log, serie). */
 function cleanup() {
-  const ids = db.select({ id: schema.calendarEvents.id, seriesId: schema.calendarEvents.seriesId }).from(schema.calendarEvents).where(like(schema.calendarEvents.title, `${PREFIX}%`)).all();
+  const ids = db.select({ id: schema.calendarEvents.id, seriesId: schema.calendarEvents.seriesId, realizationId: schema.calendarEvents.realizationId }).from(schema.calendarEvents).where(like(schema.calendarEvents.title, `${PREFIX}%`)).all();
   const eventIds = ids.map((r) => r.id);
   const seriesIds = [...new Set(ids.map((r) => r.seriesId).filter((x): x is number => x != null))];
+  // Realizacje (+ protokoły) powstałe automatycznie z wydarzeń testowych — src/lib/calendar-realizations.ts
+  const realIds = ids.map((r) => r.realizationId).filter((x): x is number => x != null);
+  // Także realizacje po wydarzeniach skasowanych twardo w trakcie testu (adnotacja „[Kalendarz #id] PREFIX …”).
+  for (const r of db.select({ id: schema.realizations.id }).from(schema.realizations).where(sql`${schema.realizations.note} LIKE ${`%${PREFIX}%`}`).all()) realIds.push(r.id);
+  if (realIds.length) {
+    db.delete(schema.protocols).where(inArray(schema.protocols.realizationId, realIds)).run();
+    db.delete(schema.realizations).where(inArray(schema.realizations.id, realIds)).run();
+  }
   if (eventIds.length) {
     db.delete(schema.calendarEventAssignees).where(inArray(schema.calendarEventAssignees.eventId, eventIds)).run();
     db.delete(schema.activityLog).where(and(eq(schema.activityLog.entityType, "calendar_event"), inArray(schema.activityLog.entityId, eventIds))).run();
@@ -201,11 +209,12 @@ try {
   ok("billing: urlop ignoruje billing → error „nie zmienia”", typeof b3.resolved.error === "string" && /nie zmienia/.test(b3.resolved.error), b3.resolved);
   const b4 = resolveChange(db, { kind: "create", event: { type: "serwis", title: "Gwarancja", startAt: "2026-09-22T10:00", technicianIds: [t1], billing: "warranty" } }, 0, { cfg, today: TODAY });
   ok("billing: create z billing warranty → after.billing", b4.resolved.after?.billing === "warranty", b4.resolved.after);
-  const gb = (await exec(tools.get_event, { eventId: evFuture })) as { event?: { billing?: string | null; protocol?: unknown } };
-  ok("get_event: zwraca billing i protocol", gb.event?.billing === "paid" && gb.event?.protocol === null, gb.event);
-  const lb = (await exec(tools.list_events, { from: "2026-09-20", to: "2026-09-21", technicianId: t1 })) as { events: { id: number; billing?: string | null; protocol?: unknown }[] };
-  ok("list_events: pozycje mają billing/protocol", lb.events.some((e) => e.id === evFuture && e.billing === "paid" && e.protocol === null), lb.events);
-  ok("prompt: reguła rozliczenia 11a + protokół 11b + słownik", /11a\. ROZLICZENIE/.test(promptOn) && /11b\. PROTOKÓŁ/.test(promptOn) && /Rozliczenie \(billing\)/.test(promptOn));
+  // Serwis dostaje realizację + protokół (szkic) automatycznie — patrz src/lib/calendar-realizations.ts.
+  const gb = (await exec(tools.get_event, { eventId: evFuture })) as { event?: { billing?: string | null; protocol?: { status?: string } | null; realization?: { id: number; invoiced: boolean } | null } };
+  ok("get_event: zwraca billing, protokół szkicu i skrót realizacji", gb.event?.billing === "paid" && gb.event?.protocol?.status === "draft" && gb.event?.realization?.invoiced === false, gb.event);
+  const lb = (await exec(tools.list_events, { from: "2026-09-20", to: "2026-09-21", technicianId: t1 })) as { events: { id: number; billing?: string | null; protocol?: unknown; realization?: unknown }[] };
+  ok("list_events: pozycje mają billing/protocol/realization", lb.events.some((e) => e.id === evFuture && e.billing === "paid" && e.protocol != null && e.realization != null), lb.events);
+  ok("prompt: reguła rozliczenia 11a + protokół 11b + realizacje 11c + słownik", /11a\. ROZLICZENIE/.test(promptOn) && /11b\. PROTOKÓŁ/.test(promptOn) && /11c\. REALIZACJE/.test(promptOn) && /Rozliczenie \(billing\)/.test(promptOn));
 
   // Trasy kalendarza (bez asystenta) — bez dopisku
   const l0 = db.select().from(schema.activityLog).where(and(eq(schema.activityLog.entityType, "calendar_event"), eq(schema.activityLog.entityId, evBusy))).all();

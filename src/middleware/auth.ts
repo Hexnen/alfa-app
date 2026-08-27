@@ -110,7 +110,11 @@ export async function tabPermissionGuard(c: Context, next: Next) {
   if (!match) return next(); // trasa nieobjęta kontrolą (stats, history, ...)
 
   const level = maxLevel(user, match.tabs);
-  const isWrite = !READ_METHODS.has(c.req.method.toUpperCase());
+  // Zapis własnych preferencji (zestawy filtrów kalendarza, token ICS) to nie
+  // edycja danych modułu — wystarczy poziom "view".
+  const isOwnPreference =
+    path.startsWith("/calendar/filter-sets") || path.startsWith("/calendar/feed-token");
+  const isWrite = !isOwnPreference && !READ_METHODS.has(c.req.method.toUpperCase());
   if (level === "none") {
     return c.json({ success: false, error: "Brak dostępu do tej sekcji" }, 403);
   }

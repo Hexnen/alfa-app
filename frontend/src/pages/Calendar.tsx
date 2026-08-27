@@ -35,6 +35,7 @@ import {
   Building2,
   CalendarDays,
   CalendarPlus,
+  CalendarRange,
   CalendarX2,
   Check,
   CheckCheck,
@@ -47,6 +48,8 @@ import {
   ExternalLink,
   Eye,
   FileCheck2,
+  Receipt,
+  ReceiptText,
   FileText,
   FileX,
   Filter,
@@ -95,6 +98,7 @@ import {
   type CalendarEventInput,
   type CalendarEventStatus,
   type CalendarEventType,
+  type CalendarFilterSetFilters,
   type CalendarSeriesScope,
   type Technician,
 } from "@/lib/api";
@@ -109,8 +113,17 @@ import {
   EVENT_TYPE_ORDER,
   activityParts,
   billingApplies,
+  eventTipAria,
+  eventTipData,
+  eventsCount,
+  overdueTip,
   protocolBadgeKind,
   protocolHref,
+  REALIZATION_KIND_LABEL,
+  realizationApplies,
+  realizationBadgeKind,
+  realizationHref,
+  realizationMoney,
   fmtDayHeading,
   fmtRange,
   fmtRelative,
@@ -130,8 +143,17 @@ import {
   type CalendarEventPrefill,
 } from "@/components/CalendarEventDialog";
 import { CalendarBoard, isOverdue, type BoardGroupBy } from "@/components/CalendarBoard";
-import { BillingBadge, BillingMark, ProtocolBadge, ProtocolMark } from "@/components/CalendarEventBadges";
+import {
+  BillingBadge,
+  BillingMark,
+  ProtocolBadge,
+  ProtocolMark,
+  RealizationBadge,
+  RealizationMark,
+} from "@/components/CalendarEventBadges";
 import { NotesBadge } from "@/components/CalendarEventNotes";
+import { FilterSets } from "@/components/calendar/FilterSets";
+import { Tooltip, applyTip, blockTooltips, hideTooltip, tip } from "@/components/ui/tooltip";
 import { AssistantDrawer, type AssistantEventChangeKind, type AssistantPreview } from "@/components/assistant/AssistantDrawer";
 import { cn } from "@/lib/utils";
 import "./Calendar.css";
@@ -179,11 +201,43 @@ function readStoredBoardGroup(): BoardGroupBy {
   }
 }
 
+const WEEKENDS_STORAGE_KEY = "alfa.calendar.weekends";
+
+/** Weekendy domyślnie ukryte (5-dniowy tydzień = więcej miejsca na wydarzenia). */
+function readStoredWeekends(): boolean {
+  try {
+    return window.localStorage.getItem(WEEKENDS_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function storeWeekends(on: boolean) {
+  try {
+    window.localStorage.setItem(WEEKENDS_STORAGE_KEY, on ? "1" : "0");
+  } catch {
+    /* prywatny tryb / brak storage — ignoruj */
+  }
+}
+
+/** Czy data (ISO lokalne) wypada w sobotę lub niedzielę. */
+const isWeekendDay = (d: Date) => d.getDay() === 0 || d.getDay() === 6;
+
+/** Polska odmiana rzeczownika „wydarzenie” przy liczebniku. */
+const plEvents = (n: number) => {
+  if (n === 1) return "wydarzenie";
+  const t = n % 10;
+  const h = n % 100;
+  return t >= 2 && t <= 4 && (h < 12 || h > 14) ? "wydarzenia" : "wydarzeń";
+};
+
 const FILTERS_STORAGE_KEY = "alfa.calendar.filters";
 /** Wartość chipa rozliczenia: konkretne rozliczenie albo „bez rozliczenia”. */
 type BillingFilterValue = CalendarBilling | "none";
 /** Filtr protokołu: „” = wszystkie. */
 type ProtocolFilterValue = "" | "with" | "without";
+/** Filtr realizacji: „” = wszystkie. */
+type RealizationFilterValue = "" | "with" | "without";
 
 interface StoredFilters {
   types: CalendarEventType[];
@@ -191,6 +245,7 @@ interface StoredFilters {
   statuses: CalendarEventStatus[];
   billings: BillingFilterValue[];
   protocol: ProtocolFilterValue;
+  realization: RealizationFilterValue;
 }
 const isType = (v: unknown): v is CalendarEventType =>
   typeof v === "string" && v in EVENT_TYPE_META;
@@ -200,8 +255,17 @@ const isBilling = (v: unknown): v is BillingFilterValue =>
   v === "none" || (typeof v === "string" && v in BILLING_META);
 const isProtocolFilter = (v: unknown): v is ProtocolFilterValue =>
   v === "with" || v === "without" || v === "";
+const isRealizationFilter = (v: unknown): v is RealizationFilterValue =>
+  v === "with" || v === "without" || v === "";
 
-const EMPTY_FILTERS: StoredFilters = { types: [], technicianIds: [], statuses: [], billings: [], protocol: "" };
+const EMPTY_FILTERS: StoredFilters = {
+  types: [],
+  technicianIds: [],
+  statuses: [],
+  billings: [],
+  protocol: "",
+  realization: "",
+};
 
 /** Filtry z localStorage (walidowane — nieznane wartości pomijamy). */
 function readStoredFilters(): StoredFilters {
@@ -217,6 +281,7 @@ function readStoredFilters(): StoredFilters {
       statuses: Array.isArray(j.statuses) ? j.statuses.filter(isStatus) : [],
       billings: Array.isArray(j.billings) ? j.billings.filter(isBilling) : [],
       protocol: isProtocolFilter(j.protocol) ? j.protocol : "",
+      realization: isRealizationFilter(j.realization) ? j.realization : "",
     };
   } catch {
     return EMPTY_FILTERS;
@@ -225,7 +290,14 @@ function readStoredFilters(): StoredFilters {
 
 function storeFilters(f: StoredFilters) {
   try {
-    if (!f.types.length && !f.technicianIds.length && !f.statuses.length && !f.billings.length && !f.protocol) {
+    if (
+      !f.types.length &&
+      !f.technicianIds.length &&
+      !f.statuses.length &&
+      !f.billings.length &&
+      !f.protocol &&
+      !f.realization
+    ) {
       window.localStorage.removeItem(FILTERS_STORAGE_KEY);
     } else {
       window.localStorage.setItem(FILTERS_STORAGE_KEY, JSON.stringify(f));
@@ -253,6 +325,11 @@ const errMsg = (err: unknown, fallback: string) =>
 const isMobile = () =>
   typeof window !== "undefined" &&
   window.matchMedia("(max-width: 767px)").matches;
+
+/** Czy dopasowujemy wysokość kalendarza do okna (desktop = układ dwukolumnowy). */
+const isFitViewport = () =>
+  typeof window !== "undefined" &&
+  window.matchMedia("(min-width: 1024px)").matches;
 
 const typeColor = (t: CalendarEventType) =>
   `hsl(var(${EVENT_TYPE_META[t]?.cssVar ?? "--cal-biuro"}))`;
@@ -340,15 +417,18 @@ function renderEventContent(arg: EventContentArg) {
   // Rozliczenie / protokół: w liście pełne pigułki, w siatce sama ikona z tooltipem
   // (kafelki bywają wąskie — tekst by się nie zmieścił).
   const protoKind = ev ? protocolBadgeKind(ev) : null;
+  const realKind = ev ? realizationBadgeKind(ev) : null;
   /** Atrybuty pod stylowanie i testy E2E — na wrapperze treści (odświeżane z danymi). */
   const dataAttrs = {
     ...(ev?.billing ? { "data-billing": ev.billing } : {}),
     ...(protoKind ? { "data-protocol": protoKind } : {}),
+    ...(realKind ? { "data-realization": realKind } : {}),
   };
   const marks = ev ? (
     <>
       <BillingMark billing={ev.billing} className="cal-ev-mark" />
       <ProtocolMark event={ev} className="cal-ev-mark" />
+      <RealizationMark event={ev} className="cal-ev-mark" />
     </>
   ) : null;
 
@@ -364,6 +444,7 @@ function renderEventContent(arg: EventContentArg) {
           <span className="cal-list-badges">
             <BillingBadge billing={ev.billing} compact />
             <ProtocolBadge event={ev} compact />
+            <RealizationBadge event={ev} compact />
           </span>
         )}
         {status && (
@@ -416,6 +497,8 @@ export function Calendar() {
   const navigate = useNavigate();
 
   const calendarRef = useRef<FullCalendar>(null);
+  /** Kontener siatki — po zmianie danych odświeżamy w nim dymki kafelków. */
+  const gridRef = useRef<HTMLDivElement>(null);
   const mobile = useMemo(isMobile, []);
   const [view, setView] = useState<ViewName>(
     () => readStoredView() ?? (mobile ? "listWeek" : "dayGridMonth")
@@ -435,6 +518,14 @@ export function Calendar() {
       /* ignoruj */
     }
   };
+  /** Sob./niedz. w siatce — domyślnie ukryte, stan „lepki” w localStorage. */
+  const [weekends, setWeekendsState] = useState<boolean>(readStoredWeekends);
+  const weekendsRef = useRef(weekends);
+  weekendsRef.current = weekends;
+  const setWeekends = useCallback((on: boolean) => {
+    setWeekendsState(on);
+    storeWeekends(on);
+  }, []);
   const [title, setTitle] = useState("");
   const [range, setRange] = useState<{ from: string; to: string } | null>(null);
 
@@ -481,6 +572,7 @@ export function Calendar() {
   const [statusFilter, setStatusFilter] = useState<Set<CalendarEventStatus>>(() => new Set(stored.statuses));
   const [billingFilter, setBillingFilter] = useState<Set<BillingFilterValue>>(() => new Set(stored.billings));
   const [protocolFilter, setProtocolFilter] = useState<ProtocolFilterValue>(() => stored.protocol);
+  const [realizationFilter, setRealizationFilter] = useState<RealizationFilterValue>(() => stored.realization);
   const [technicians, setTechnicians] = useState<Technician[]>([]);
   const [filtersOpen, setFiltersOpen] = useState(false); // arkusz na mobile
   const activeFilterCount =
@@ -488,13 +580,15 @@ export function Calendar() {
     (technicianFilter.size > 0 ? 1 : 0) +
     (statusFilter.size > 0 ? 1 : 0) +
     (billingFilter.size > 0 ? 1 : 0) +
-    (protocolFilter ? 1 : 0);
+    (protocolFilter ? 1 : 0) +
+    (realizationFilter ? 1 : 0);
   const clearFilters = () => {
     setTypeFilter(new Set());
     setTechnicianFilter(new Set());
     setStatusFilter(new Set());
     setBillingFilter(new Set());
     setProtocolFilter("");
+    setRealizationFilter("");
   };
   useEffect(() => {
     storeFilters({
@@ -503,8 +597,9 @@ export function Calendar() {
       statuses: Array.from(statusFilter),
       billings: Array.from(billingFilter),
       protocol: protocolFilter,
+      realization: realizationFilter,
     });
-  }, [typeFilter, technicianFilter, statusFilter, billingFilter, protocolFilter]);
+  }, [typeFilter, technicianFilter, statusFilter, billingFilter, protocolFilter, realizationFilter]);
 
   useEffect(() => {
     getTechnicians(true)
@@ -558,7 +653,7 @@ export function Calendar() {
   }, [range, typeFilter, technicianFilter]);
 
   const events = useMemo(() => {
-    if (!statusFilter.size && !billingFilter.size && !protocolFilter) return allEvents;
+    if (!statusFilter.size && !billingFilter.size && !protocolFilter && !realizationFilter) return allEvents;
     return allEvents.filter((e) => {
       if (statusFilter.size && !statusFilter.has(e.status)) return false;
       if (billingFilter.size) {
@@ -568,9 +663,12 @@ export function Calendar() {
       if (protocolFilter === "with" && !e.protocol) return false;
       // „bez protokołu” = wykonane prace na obiekcie bez protokołu (badge „missing”).
       if (protocolFilter === "without" && protocolBadgeKind(e) !== "missing") return false;
+      if (realizationFilter === "with" && !e.realization) return false;
+      // „bez realizacji” = tylko typy objęte automatem (serwis/montaż/…).
+      if (realizationFilter === "without" && (e.realization || !realizationApplies(e.type))) return false;
       return true;
     });
-  }, [allEvents, statusFilter, billingFilter, protocolFilter]);
+  }, [allEvents, statusFilter, billingFilter, protocolFilter, realizationFilter]);
   const statusCounts = useMemo(() => {
     const m: Record<CalendarEventStatus, number> = { planned: 0, confirmed: 0, done: 0, cancelled: 0 };
     for (const e of allEvents) if (!e.deletedAt) m[e.status] = (m[e.status] ?? 0) + 1;
@@ -594,6 +692,16 @@ export function Calendar() {
       else if (protocolBadgeKind(e) === "missing") without += 1;
     }
     return { with: withP, without };
+  }, [allEvents]);
+  const realizationCounts = useMemo(() => {
+    let withR = 0;
+    let without = 0;
+    for (const e of allEvents) {
+      if (e.deletedAt) continue;
+      if (e.realization) withR += 1;
+      else if (realizationApplies(e.type)) without += 1;
+    }
+    return { with: withR, without };
   }, [allEvents]);
 
   useEffect(() => {
@@ -670,6 +778,11 @@ export function Calendar() {
     return base;
   }, [events, now, assistantPreview, view]);
   const visibleCount = useMemo(() => events.filter((e) => !e.deletedAt).length, [events]);
+  /** Ile wydarzeń chowa 5-dniowy tydzień (start w sobotę/niedzielę). */
+  const weekendHidden = useMemo(() => {
+    if (weekends || isBoard) return 0;
+    return events.filter((e) => !e.deletedAt && isWeekendDay(parseLocal(e.startAt))).length;
+  }, [events, weekends, isBoard]);
 
   // --- Dialog wydarzenia ---
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -805,26 +918,42 @@ export function Calendar() {
     el._alfaDbl = dbl;
     el.addEventListener("contextmenu", ctx);
     el.addEventListener("dblclick", dbl);
-    // Tooltip natywny — pełny tytuł, zakres, obiekt (obcięty tekst w komórce).
+    // Własny dymek zamiast natywnego `title`: kafelki bywają wąskie, więc dymek
+    // pokazuje pełny tytuł z kropką typu, termin z czasem trwania, obiekt,
+    // techników i stan (status/rozliczenie/protokół/realizacja) jako pigułki.
+    // Elementy FullCalendara powstają imperatywnie → atrybuty `data-tip*`,
+    // obsługiwane przez delegowany listener z `components/ui/tooltip`.
     if (ev) {
-      const protoKind = protocolBadgeKind(ev);
-      const bits = [
-        ev.title,
-        fmtRange(ev.startAt, ev.endAt, ev.allDay),
-        ev.objectName ?? "",
-        ev.technicians?.length ? ev.technicians.map(techShort).join(", ") : "",
-        `${EVENT_TYPE_META[ev.type]?.label ?? ev.type} · ${EVENT_STATUS_META[ev.status]?.label ?? ev.status}`,
-        ev.billing ? `Rozliczenie: ${BILLING_META[ev.billing].label}` : "",
-        ev.protocol
-          ? `Protokół: ${ev.protocol.number}`
-          : protoKind === "missing"
-            ? "Brak protokołu"
-            : "",
-      ].filter(Boolean);
-      el.title = bits.join("\n");
-      el.setAttribute("aria-label", bits.join(", "));
+      el.dataset.alfaEv = String(ev.id);
+      applyTip(el, eventTipData(ev));
+      el.setAttribute("aria-label", eventTipAria(ev));
     }
   }, [freshEvent]);
+
+  /**
+   * FullCalendar recyklinguje kafelki (eventDidMount nie powtarza się po zapisie),
+   * więc po każdej zmianie danych odświeżamy treść dymka na żyjących elementach.
+   */
+  useEffect(() => {
+    const root = gridRef.current;
+    if (!root) return;
+    for (const el of Array.from(root.querySelectorAll<HTMLElement>("[data-alfa-ev]"))) {
+      const ev = eventsByIdRef.current.get(Number(el.dataset.alfaEv));
+      if (!ev) continue;
+      applyTip(el, eventTipData(ev));
+      el.setAttribute("aria-label", eventTipAria(ev));
+    }
+  }, [allEvents]);
+
+  /**
+   * Dymki milkną, gdy na wierzchu jest coś ważniejszego: podgląd wydarzenia,
+   * menu kontekstowe, formularz albo potwierdzenie usunięcia.
+   */
+  useEffect(() => {
+    const busy = !!preview || !!ctxMenu || dialogOpen || !!deleteTarget;
+    blockTooltips("calendar-overlay", busy);
+    return () => blockTooltips("calendar-overlay", false);
+  }, [preview, ctxMenu, dialogOpen, deleteTarget]);
   const handleEventWillUnmount = useCallback((arg: EventMountArg) => {
     const el = arg.el as ElWithHandlers;
     if (el._alfaCtx) el.removeEventListener("contextmenu", el._alfaCtx);
@@ -959,6 +1088,16 @@ export function Calendar() {
         hint: ev.objectName ?? `#${ev.objectId}`,
         icon: ExternalLink,
         onSelect: () => navigate(`/objects/${ev.objectId}`),
+      });
+    }
+    const real = ev.realization;
+    if (real) {
+      items.push({
+        key: "realization",
+        label: "Otwórz realizację",
+        hint: `#${real.id} · ${realizationMoney(real.total)}`,
+        icon: Receipt,
+        onSelect: () => navigate(realizationHref(real.id, real.date)),
       });
     }
     const proto = ev.protocol;
@@ -1129,6 +1268,8 @@ export function Calendar() {
     (v: ViewName) => {
       storeView(v);
       setPreview(null);
+      // Siatka znika pod tooltipem — chowamy go, żeby nie wisiał nad nowym widokiem.
+      hideTooltip();
       if (v === "board") {
         // Kotwicy nie zaokrąglamy — Tablica sama liczy miesiąc z anchorDate,
         // a powrót do siatki wraca wtedy do tego samego tygodnia/dnia.
@@ -1186,6 +1327,79 @@ export function Calendar() {
     };
   }, []);
   const assistantAllowed = assistantStatus?.allowed ?? isAdmin;
+
+  // --- Dopasowanie do wysokości okna (desktop) -------------------------------
+  // Siatka ma wypełniać okno do dołu (więcej wydarzeń w komórce) zamiast rosnąć
+  // w nieskończoność. Liczymy dostępne miejsce z pozycji kontenera w dokumencie
+  // i z tego, co zostaje pod nim (dolny padding <main>), a FullCalendar dostaje
+  // height="100%" + expandRows. Poniżej lg (kolumny układają się pionowo, mobile
+  // przewija się normalnie) wracamy do naturalnej wysokości.
+  const fitRef = useRef<HTMLDivElement>(null);
+  /** Ostatnia funkcja licząca wysokość — wołana też przy zmianie szerokości. */
+  const fitApplyRef = useRef<(() => void) | null>(null);
+  const [fit, setFit] = useState(isFitViewport);
+  useEffect(() => {
+    const mq = window.matchMedia("(min-width: 1024px)");
+    const on = () => setFit(mq.matches);
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, []);
+  useLayoutEffect(() => {
+    const el = fitRef.current;
+    if (!el) return;
+    let raf = 0;
+    const apply = () => {
+      raf = 0;
+      if (!isFitViewport()) {
+        el.style.height = "";
+        return;
+      }
+      el.style.height = "";
+      const rect = el.getBoundingClientRect();
+      const top = rect.top + window.scrollY;
+      // Co jest pod siatką (stopka + padding <main>) — żeby strona nie urosła.
+      const main = el.closest("main");
+      const below = main
+        ? Math.max(0, main.getBoundingClientRect().bottom - rect.bottom)
+        : 0;
+      el.style.height = `${Math.max(420, Math.floor(window.innerHeight - top - below))}px`;
+    };
+    const schedule = () => {
+      if (!raf) raf = requestAnimationFrame(apply);
+    };
+    fitApplyRef.current = apply;
+    apply();
+    window.addEventListener("resize", schedule);
+    return () => {
+      if (raf) cancelAnimationFrame(raf);
+      window.removeEventListener("resize", schedule);
+    };
+  }, [fit, view, weekends, activityOpen, assistantOpen, activeFilterCount, editable, loadedOnce]);
+
+  // FullCalendar przelicza kolumny tylko przy resize okna — a szerokość
+  // kontenera zmienia też zwinięcie menu bocznego. Obserwujemy więc kontener.
+  useEffect(() => {
+    const el = fitRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    let w = el.clientWidth;
+    let raf = 0;
+    const ro = new ResizeObserver(() => {
+      if (el.clientWidth === w) return;
+      w = el.clientWidth;
+      if (!raf)
+        raf = requestAnimationFrame(() => {
+          raf = 0;
+          fitApplyRef.current?.();
+          calendarRef.current?.getApi()?.updateSize();
+        });
+    });
+    ro.observe(el);
+    return () => {
+      ro.disconnect();
+      if (raf) cancelAnimationFrame(raf);
+    };
+  }, []);
+
   /** Callback z karty propozycji „Edytuj” — wołany po zapisie z dialogu (zamiast Zatwierdź). */
   const assistantSavedRef = useRef<((ev: CalendarEvent) => void) | null>(null);
   const closeAssistant = useCallback(() => setAssistantOpen(false), []);
@@ -1323,6 +1537,11 @@ export function Calendar() {
         e.preventDefault();
         return;
       }
+      if (lower === "s") {
+        e.preventDefault();
+        setWeekends(!weekendsRef.current);
+        return;
+      }
       const v = VIEWS.find((x) => x.keys.includes(lower));
       if (v) {
         e.preventDefault();
@@ -1345,6 +1564,7 @@ export function Calendar() {
     navNext,
     openCreate,
     changeView,
+    setWeekends,
   ]);
 
   // --- Swipe (mobile) — lewo/prawo zmienia okres ---
@@ -1380,7 +1600,40 @@ export function Calendar() {
     ? [VIEWS[3], VIEWS[0], VIEWS[1], VIEWS[2], VIEWS[4]]
     : VIEWS;
 
+  // --- Zapisane zestawy filtrów (components/calendar/FilterSets.tsx) ---
+  const currentFilterState = useMemo(
+    () => ({
+      types: Array.from(typeFilter),
+      statuses: Array.from(statusFilter),
+      billings: Array.from(billingFilter),
+      technicianIds: Array.from(technicianFilter),
+      protocol: protocolFilter,
+      realization: realizationFilter,
+      view,
+      weekends,
+    }),
+    [typeFilter, statusFilter, billingFilter, technicianFilter, protocolFilter, realizationFilter, view, weekends]
+  );
+  /** Wczytanie zestawu: filtry (zapis do localStorage robi efekt niżej) + opcjonalnie widok i weekendy. */
+  const applyFilterSet = useCallback(
+    (f: CalendarFilterSetFilters) => {
+      setTypeFilter(new Set(f.types));
+      setStatusFilter(new Set(f.statuses));
+      setBillingFilter(new Set(f.billings));
+      setTechnicianFilter(new Set(f.technicianIds));
+      setProtocolFilter(f.protocol);
+      setRealizationFilter(f.realization);
+      if (f.view && isViewName(f.view)) changeView(f.view);
+      if (typeof f.weekends === "boolean") setWeekends(f.weekends);
+    },
+    [changeView, setWeekends]
+  );
+
   const overdueTotal = useMemo(() => events.filter((e) => isOverdue(e, now)).length, [events, now]);
+
+  /** Rzeczownik okresu do tooltipów nawigacji: „Poprzedni tydzień”, „Następny miesiąc”. */
+  const periodNoun =
+    view === "timeGridDay" ? "dzień" : view === "timeGridWeek" || view === "listWeek" ? "tydzień" : "miesiąc";
 
   /** Chipy typów + selecty — wspólne dla paska desktop i arkusza mobile. */
   const filterControls = (
@@ -1401,11 +1654,11 @@ export function Calendar() {
                 e.preventDefault();
                 toggleType(t, true);
               }}
-              title={
+              {...tip(
                 active
-                  ? `${m.label} — kliknij, by ukryć`
-                  : `${m.label} — kliknij, by filtrować (Alt+klik / dwuklik: tylko ten typ)`
-              }
+                  ? `Ukryj: ${m.label}\nAlt+klik lub dwuklik: zostaw wyłącznie ten typ`
+                  : `${typeFilter.size === 0 ? "Pokaż tylko" : "Pokaż też"}: ${m.label}\nAlt+klik lub dwuklik: zostaw wyłącznie ten typ`
+              )}
               className={cn(
                 "inline-flex h-8 items-center gap-1.5 rounded-full border px-2.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:h-7",
                 active
@@ -1433,6 +1686,8 @@ export function Calendar() {
       <BillingFilter value={billingFilter} counts={billingCounts} onChange={setBillingFilter} />
       <span className="hidden h-5 w-px bg-border md:block" aria-hidden />
       <ProtocolFilter value={protocolFilter} counts={protocolCounts} onChange={setProtocolFilter} />
+      <span className="hidden h-5 w-px bg-border md:block" aria-hidden />
+      <RealizationFilter value={realizationFilter} counts={realizationCounts} onChange={setRealizationFilter} />
       <span className="hidden h-5 w-px bg-border md:block" aria-hidden />
       <TechnicianFilter
         technicians={technicians}
@@ -1471,6 +1726,11 @@ export function Calendar() {
               setAssistantOpen(false);
               setActivityOpen((o) => !o);
             }}
+            {...tip(
+              activityOpen
+                ? "Zamknij panel aktywności"
+                : "Dziennik zmian w kalendarzu — kto, co i kiedy zmienił"
+            )}
           >
             <Activity className="mr-1 h-4 w-4" /> Aktywność
           </Button>
@@ -1484,18 +1744,33 @@ export function Calendar() {
                 setActivityOpen(false);
                 setAssistantOpen((o) => !o);
               }}
-              title="Asystent kalendarza (AI)"
+              {...tip(
+                assistantOpen
+                  ? "Zamknij panel asystenta"
+                  : "Asystent AI — opisz zwykłym zdaniem, co zaplanować lub zmienić w kalendarzu"
+              )}
               data-testid="assistant-toggle"
             >
               <Sparkles className="mr-1 h-4 w-4" /> Asystent
             </Button>
           )}
-          <Button variant="outline" size="sm" className="h-10 md:h-9" onClick={() => setIcsOpen(true)}>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-10 md:h-9"
+            onClick={() => setIcsOpen(true)}
+            {...tip("Subskrybuj kalendarz w Outlooku lub Google — link ICS tylko do odczytu")}
+          >
             <Rss className="mr-1 h-4 w-4" /> <span className="hidden sm:inline">Subskrybuj (ICS)</span>
             <span className="sm:hidden">ICS</span>
           </Button>
           {editable && (
-            <Button size="sm" className="h-10 md:h-9" onClick={() => openCreate()} title="Nowe wydarzenie (N)">
+            <Button
+              size="sm"
+              className="h-10 md:h-9"
+              onClick={() => openCreate()}
+              {...tip("Dodaj wydarzenie — otwiera pusty formularz", { shortcut: "N" })}
+            >
               <Plus className="mr-1 h-4 w-4" /> Nowe wydarzenie
             </Button>
           )}
@@ -1503,14 +1778,19 @@ export function Calendar() {
       </div>
 
       <div
+        ref={fitRef}
+        data-cal-fit={fit ? "true" : undefined}
         className={cn(
           "grid gap-4",
+          // Jeden wiersz o wysokości kontenera — bez tego treść kolumny bocznej
+          // (asystent) rozpycha wiersz ponad wyliczoną wysokość.
+          fit && "min-h-0 [grid-template-rows:minmax(0,1fr)]",
           activityOpen && "lg:grid-cols-[1fr_360px]",
           assistantOpen && "lg:grid-cols-[1fr_420px]"
         )}
       >
-        <Card className="min-w-0">
-          <CardContent className="space-y-3 p-3 sm:p-4">
+        <Card className={cn("min-w-0", fit && "flex min-h-0 flex-col overflow-hidden")}>
+          <CardContent className={cn("space-y-3 p-3 sm:p-4", fit && "flex min-h-0 flex-1 flex-col")}>
             {/* Toolbar — rząd 1: nawigacja + tytuł | widoki */}
             <div
               className={cn(
@@ -1524,8 +1804,8 @@ export function Calendar() {
                   size="icon"
                   className="h-10 w-10 md:h-9 md:w-9"
                   onClick={navPrev}
-                  aria-label="Poprzedni okres"
-                  title="Poprzedni (←)"
+                  aria-label={`Poprzedni ${periodNoun}`}
+                  {...tip(`Poprzedni ${periodNoun}`, { shortcut: "←" })}
                 >
                   <ChevronLeft className="h-4 w-4" />
                 </Button>
@@ -1534,7 +1814,7 @@ export function Calendar() {
                   size="sm"
                   className="h-10 md:h-9"
                   onClick={navToday}
-                  title="Dziś (T)"
+                  {...tip(`Wróć do bieżącego okresu (${periodNoun} z dzisiejszą datą)`, { shortcut: "T" })}
                 >
                   Dziś
                 </Button>
@@ -1543,8 +1823,8 @@ export function Calendar() {
                   size="icon"
                   className="h-10 w-10 md:h-9 md:w-9"
                   onClick={navNext}
-                  aria-label="Następny okres"
-                  title="Następny (→)"
+                  aria-label={`Następny ${periodNoun}`}
+                  {...tip(`Następny ${periodNoun}`, { shortcut: "→" })}
                 >
                   <ChevronRight className="h-4 w-4" />
                 </Button>
@@ -1568,14 +1848,28 @@ export function Calendar() {
                       setBoardGroup("status");
                     }}
                     className="ml-2 hidden items-center gap-1 rounded-full bg-red-100 px-2 py-0.5 text-[11px] font-semibold text-red-700 hover:bg-red-200 dark:bg-red-500/20 dark:text-red-200 dark:hover:bg-red-500/30 md:inline-flex"
-                    title="Zaplanowane, których termin minął — otwórz Tablicę"
+                    {...tip(
+                      `Zaplanowane wydarzenia, których termin już minął: ${overdueTotal}\nKliknij, by otworzyć Tablicę pogrupowaną wg statusu`
+                    )}
                   >
                     <AlertTriangle className="h-3 w-3" aria-hidden />
                     {overdueTotal} po terminie
                   </button>
                 )}
+                {!loading && loadedOnce && weekendHidden > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setWeekends(true)}
+                    className="ml-2 hidden shrink-0 items-center gap-1 whitespace-nowrap rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:inline-flex"
+                    {...tip("Weekendy są ukryte w siatce — kliknij, by je pokazać", { shortcut: "S" })}
+                    data-testid="weekend-hidden-hint"
+                  >
+                    <CalendarRange className="h-3 w-3" aria-hidden />
+                    {weekendHidden} {plEvents(weekendHidden)} w weekend — pokaż
+                  </button>
+                )}
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center justify-end gap-2 min-w-0">
                 {isBoard && !mobile && (
                   <SegmentedControl
                     label="Grupowanie tablicy"
@@ -1583,8 +1877,8 @@ export function Calendar() {
                     onChange={(k) => setBoardGroup(k as BoardGroupBy)}
                     tone="secondary"
                     options={[
-                      { key: "status", label: "wg statusu", icon: ListChecks },
-                      { key: "type", label: "wg typu", icon: Tags },
+                      { key: "status", label: "wg statusu", icon: ListChecks, hint: "Grupuj kolumny wg statusu wydarzenia" },
+                      { key: "type", label: "wg typu", icon: Tags, hint: "Grupuj kolumny wg typu wydarzenia" },
                     ]}
                   />
                 )}
@@ -1595,8 +1889,33 @@ export function Calendar() {
                   options={orderedViews.map((v) => ({
                     key: v.key,
                     label: mobile ? v.shortLabel : v.label,
-                    title: `${v.label} (${v.keys[0].toUpperCase()})`,
+                    hint: v.key === view ? `Bieżący widok: ${v.label}` : `Przełącz na widok: ${v.label}`,
+                    shortcut: v.keys[0].toUpperCase(),
                   }))}
+                />
+                {!isBoard && (
+                  <Button
+                    variant={weekends ? "secondary" : "outline"}
+                    size="icon"
+                    className="hidden h-10 w-10 md:inline-flex md:h-9 md:w-9"
+                    aria-pressed={weekends}
+                    onClick={() => setWeekends(!weekends)}
+                    aria-label={weekends ? "Ukryj weekendy" : "Pokaż weekendy"}
+                    {...tip(
+                      weekends
+                        ? "Ukryj soboty i niedziele — dni robocze dostaną więcej miejsca"
+                        : "Pokaż soboty i niedziele w siatce",
+                      { shortcut: "S" }
+                    )}
+                    data-testid="weekend-toggle"
+                  >
+                    {weekends ? <CalendarDays className="h-4 w-4" /> : <CalendarRange className="h-4 w-4" />}
+                  </Button>
+                )}
+                <FilterSets
+                  current={currentFilterState}
+                  onApply={applyFilterSet}
+                  technicians={technicians}
                 />
                 <Button
                   variant={activeFilterCount ? "secondary" : "outline"}
@@ -1620,7 +1939,7 @@ export function Calendar() {
                     onClick={() => setHelpOpen((o) => !o)}
                     aria-label="Pomoc: legenda i skróty"
                     aria-expanded={helpOpen}
-                    title="Legenda i skróty (?)"
+                    {...tip("Legenda kolorów, znaczników i skrótów klawiszowych", { shortcut: "?" })}
                   >
                     <HelpCircle className="h-4 w-4" />
                   </Button>
@@ -1641,13 +1960,15 @@ export function Calendar() {
               </span>
               {filterControls}
               {activeFilterCount > 0 && (
-                <button
-                  type="button"
-                  onClick={clearFilters}
-                  className="inline-flex h-8 items-center gap-1 rounded-md px-2 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                >
-                  <FilterX className="h-3.5 w-3.5" aria-hidden /> Wyczyść filtry
-                </button>
+                <Tooltip content={`Zdejmij wszystkie filtry (aktywne: ${activeFilterCount}) i pokaż pełny kalendarz`}>
+                  <button
+                    type="button"
+                    onClick={clearFilters}
+                    className="inline-flex h-8 items-center gap-1 rounded-md px-2 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    <FilterX className="h-3.5 w-3.5" aria-hidden /> Wyczyść filtry
+                  </button>
+                </Tooltip>
               )}
               {isBoard && mobile && null}
             </div>
@@ -1667,7 +1988,12 @@ export function Calendar() {
 
             {/* Tablica (kanban) — zamiast siatki FullCalendar */}
             {isBoard && (
-              <div className="alfa-calendar relative min-w-0" onTouchStart={onTouchStart} onTouchEnd={onTouchEnd}>
+              <div
+                className={cn("alfa-calendar relative min-w-0", fit && "flex min-h-0 flex-1 flex-col")}
+                data-fit={fit ? "true" : undefined}
+                onTouchStart={onTouchStart}
+                onTouchEnd={onTouchEnd}
+              >
                 {mobile && (
                   <div className="mb-2">
                     <SegmentedControl
@@ -1676,8 +2002,8 @@ export function Calendar() {
                       onChange={(k) => setBoardGroup(k as BoardGroupBy)}
                       tone="secondary"
                       options={[
-                        { key: "status", label: "wg statusu", icon: ListChecks },
-                        { key: "type", label: "wg typu", icon: Tags },
+                        { key: "status", label: "wg statusu", icon: ListChecks, hint: "Grupuj kolumny wg statusu wydarzenia" },
+                        { key: "type", label: "wg typu", icon: Tags, hint: "Grupuj kolumny wg typu wydarzenia" },
                       ]}
                     />
                   </div>
@@ -1699,13 +2025,20 @@ export function Calendar() {
             {/* Kalendarz */}
             {!isBoard && (
               <div
-                className="alfa-calendar relative"
+                ref={gridRef}
+                className={cn("alfa-calendar relative", fit && "flex min-h-0 flex-1 flex-col")}
+                data-fit={fit ? "true" : undefined}
+                // FullCalendar sam dokleja `title` do „+N więcej”, linków dni i
+                // przycisku zamknięcia popovera — w tym zakresie przejmuje je
+                // nasz tooltip (patrz `data-tip-scope` w components/ui/tooltip).
+                data-tip-scope=""
                 onContextMenu={handleGridContextMenu}
                 onTouchStart={onTouchStart}
                 onTouchEnd={onTouchEnd}
                 aria-busy={loading || undefined}
               >
                 {!loadedOnce && <CalendarSkeleton columns={view === "timeGridDay" ? 1 : 7} />}
+                <div className={cn(fit && "min-h-0 flex-1")}>
                 <FullCalendar
                   ref={calendarRef}
                   plugins={[dayGridPlugin, timeGridPlugin, listPlugin, interactionPlugin]}
@@ -1714,13 +2047,15 @@ export function Calendar() {
                   initialDate={anchorDate}
                   headerToolbar={false}
                   firstDay={1}
-                  height="auto"
+                  height={fit ? "100%" : "auto"}
+                  expandRows={fit}
+                  weekends={weekends}
                   nowIndicator
                   slotMinTime="06:00:00"
                   slotMaxTime="20:00:00"
                   slotDuration="00:30:00"
                   scrollTime="07:00:00"
-                  dayMaxEvents={mobile ? 2 : 3}
+                  dayMaxEvents={mobile ? 2 : fit ? true : 3}
                   weekNumbers={!mobile}
                   weekText="T"
                   eventTimeFormat={{ hour: "2-digit", minute: "2-digit", hour12: false }}
@@ -1756,11 +2091,12 @@ export function Calendar() {
                     />
                   )}
                   moreLinkContent={(a) => `+${a.num} więcej`}
-                  moreLinkHint={(n) => `Pokaż ${n} więcej`}
-                  navLinkHint="Przejdź do dnia"
-                  closeHint="Zamknij"
+                  moreLinkHint={(n) => `Pokaż pozostałe ${eventsCount(n)} tego dnia`}
+                  navLinkHint={(t) => `Przejdź do dnia: ${t}`}
+                  closeHint="Zamknij listę wydarzeń dnia"
                   eventHint="Wydarzenie"
                 />
+                </div>
                 {/* Pusty stan w siatce (mies./tydz.) — subtelny pasek pod siatką */}
                 {loadedOnce && !loading && visibleCount === 0 && view !== "listWeek" && (
                   <div className="mt-2 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 rounded-md border border-dashed px-3 py-2 text-xs text-muted-foreground">
@@ -1898,6 +2234,18 @@ export function Calendar() {
           onClear={clearFilters}
           onClose={() => setFiltersOpen(false)}
         >
+          {!isBoard && (
+            <button
+              type="button"
+              aria-pressed={weekends}
+              onClick={() => setWeekends(!weekends)}
+              className="flex h-11 items-center gap-2 rounded-md border px-3 text-sm font-medium"
+              data-testid="weekend-toggle-mobile"
+            >
+              {weekends ? <CalendarDays className="h-4 w-4" /> : <CalendarRange className="h-4 w-4" />}
+              {weekends ? "Weekendy widoczne" : "Weekendy ukryte (więcej miejsca)"}
+            </button>
+          )}
           {filterControls}
         </FiltersSheet>
       )}
@@ -1907,13 +2255,11 @@ export function Calendar() {
 
       <IcsDialog open={icsOpen} onClose={() => setIcsOpen(false)} notify={notify} />
 
-      {/* Link do listy obiektów — dla wygody planowania */}
-      <p className="text-xs text-muted-foreground">
+      {/* Link do listy obiektów — dla wygody planowania. Na desktopie ta sama
+          informacja siedzi w pomocy „?” (siatka zajmuje pełną wysokość okna). */}
+      <p className="text-xs text-muted-foreground lg:hidden">
         Wydarzenia powiązane z obiektem są też widoczne w zakładce „Kalendarz” na{" "}
         <Link to="/objects" className="underline">karcie obiektu</Link>.
-        <span className="hidden md:inline">
-          {" "}Skróty klawiaturowe: <kbd className="alfa-kbd">?</kbd>
-        </span>
       </p>
     </div>
   );
@@ -1927,7 +2273,10 @@ interface SegmentedOption {
   key: string;
   label: string;
   icon?: typeof Tags;
-  title?: string;
+  /** Treść tooltipa (domyślnie pełna etykieta — przydatne przy skróconych nazwach). */
+  hint?: string;
+  /** Skrót klawiszowy pokazany po prawej stronie tooltipa. */
+  shortcut?: string;
 }
 
 /** Grupa radio (segmented) z nawigacją strzałkami / Home / End. */
@@ -1976,7 +2325,7 @@ function SegmentedControl({
             role="radio"
             aria-checked={active}
             tabIndex={active ? 0 : -1}
-            title={o.title}
+            {...tip(o.hint ?? o.label, { shortcut: o.shortcut })}
             onClick={() => onChange(o.key)}
             className={cn(
               "inline-flex h-9 items-center gap-1 rounded px-2.5 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:h-8",
@@ -2077,6 +2426,8 @@ function HelpPopover({ onClose, editable }: { onClose: () => void; editable: boo
     [["D"], "Dzień"],
     [["L", "A"], "Lista (agenda)"],
     [["B"], "Tablica"],
+    [["S"], "Weekendy (sob./niedz.) wł./wył."],
+    [["F"], "Zestawy filtrów (zapisane kombinacje)"],
     ...(editable ? ([[["N", "C"], "Nowe wydarzenie"]] as [string[], string][]) : []),
     [["Esc"], "Zamknij podgląd / menu / pomoc"],
     [["?"], "Ta ściąga"],
@@ -2086,7 +2437,7 @@ function HelpPopover({ onClose, editable }: { onClose: () => void; editable: boo
       ref={ref}
       role="dialog"
       aria-label="Legenda i skróty"
-      className="alfa-pop absolute right-0 top-11 z-40 w-[26rem] max-w-[calc(100vw-2rem)] rounded-lg border bg-popover p-4 text-sm text-popover-foreground shadow-xl"
+      className="alfa-pop absolute right-0 top-11 z-40 max-h-[calc(100vh-12rem)] w-[26rem] max-w-[calc(100vw-2rem)] overflow-y-auto rounded-lg border bg-popover p-4 text-sm text-popover-foreground shadow-xl"
     >
       <div className="mb-3 flex items-center justify-between">
         <h3 className="text-sm font-semibold">Legenda i skróty</h3>
@@ -2161,6 +2512,10 @@ function HelpPopover({ onClose, editable }: { onClose: () => void; editable: boo
           </div>
         </div>
       </div>
+      <p className="mt-3 border-t pt-2 text-[11px] text-muted-foreground">
+        Wydarzenia powiązane z obiektem są też widoczne w zakładce „Kalendarz” na{" "}
+        <Link to="/objects" className="underline">karcie obiektu</Link>.
+      </p>
     </div>
   );
 }
@@ -2267,7 +2622,10 @@ function EventPreview({
             <span>{meta?.label ?? ev.type}</span>
             <span className={cn("rounded-full px-1.5 py-px text-[10px] font-semibold", status?.badge)}>{status?.label}</span>
             {overdue && (
-              <span className="inline-flex items-center gap-0.5 text-[10px] font-semibold text-red-600 dark:text-red-300">
+              <span
+                className="inline-flex items-center gap-0.5 text-[10px] font-semibold text-red-600 dark:text-red-300"
+                {...tip(overdueTip(ev))}
+              >
                 <AlertTriangle className="h-3 w-3" aria-hidden /> po terminie
               </span>
             )}
@@ -2277,6 +2635,7 @@ function EventPreview({
           <div className="mt-1 flex flex-wrap items-center gap-1.5 empty:mt-0">
             <BillingBadge billing={ev.billing} />
             <ProtocolBadge event={ev} link />
+            <RealizationBadge event={ev} link />
           </div>
         </div>
         <Button variant="ghost" size="icon" className="-mr-1 -mt-1 h-7 w-7" onClick={onClose} aria-label="Zamknij podgląd">
@@ -2298,6 +2657,17 @@ function EventPreview({
           <div className="flex gap-2">
             <dt className="w-4 shrink-0 text-muted-foreground"><MapPin className="h-3.5 w-3.5" aria-label="Lokalizacja" /></dt>
             <dd className="truncate">{ev.location}</dd>
+          </div>
+        )}
+        {ev.realization && (
+          <div className="flex gap-2" data-testid="preview-realization">
+            <dt className="w-4 shrink-0 text-muted-foreground"><Receipt className="h-3.5 w-3.5" aria-label="Realizacja" /></dt>
+            <dd className="min-w-0 truncate">
+              {REALIZATION_KIND_LABEL[ev.realization.kind] ?? ev.realization.kind}
+              {" · "}
+              <span className="tabular-nums">{realizationMoney(ev.realization.total)}</span>
+              <span className="text-muted-foreground"> · {ev.realization.site}</span>
+            </dd>
           </div>
         )}
         {ev.technicians.length > 0 && (
@@ -2324,7 +2694,7 @@ function EventPreview({
         {lastNote && (
           <div className="flex gap-2" data-testid="preview-last-note">
             <dt className="w-4 shrink-0 text-amber-600 dark:text-amber-400"><StickyNote className="h-3.5 w-3.5" aria-label="Ostatnia notatka" /></dt>
-            <dd className="min-w-0 truncate" title={lastNote.text}>
+            <dd className="min-w-0 truncate" {...tip(lastNote.text.replace(/\s+/g, " "))}>
               <span className="text-muted-foreground">{lastNote.userLabel || (lastNote.source === "assistant" ? "Asystent" : "—")}:</span>{" "}
               {lastNote.text.replace(/\s+/g, " ")}
             </dd>
@@ -2496,7 +2866,11 @@ function StatusFilter({
               e.preventDefault();
               toggle(s, true);
             }}
-            title={`${m.label}: ${count} w tym okresie — ${m.hint}`}
+            {...tip(
+              `${m.label} — ${eventsCount(count)} w tym okresie\n${m.hint}\n${
+                active ? "Kliknij, by zdjąć filtr" : "Kliknij, by pokazać tylko ten status"
+              }`
+            )}
             className={cn(
               "inline-flex h-8 items-center gap-1.5 rounded-full border px-2.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:h-7",
               active
@@ -2578,7 +2952,11 @@ function BillingFilter({
               e.preventDefault();
               toggle(c.key, true);
             }}
-            title={`${c.label}: ${count} w tym okresie — ${c.hint}`}
+            {...tip(
+              `${c.label} — ${eventsCount(count)} w tym okresie\n${c.hint}\n${
+                active ? "Kliknij, by zdjąć filtr" : "Kliknij, by pokazać tylko te wydarzenia"
+              }`
+            )}
             className={cn(
               "inline-flex h-8 items-center gap-1.5 rounded-full border px-2.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:h-7",
               active
@@ -2645,7 +3023,79 @@ function ProtocolFilter({
             data-testid={`protocol-filter-${o.key || "all"}`}
             aria-pressed={active}
             onClick={() => onChange(active && o.key ? "" : o.key)}
-            title={`Protokół — ${o.hint}`}
+            {...tip(
+              `Filtr protokołu: ${o.label.toLowerCase()}${o.count != null ? ` — ${eventsCount(o.count)} w tym okresie` : ""}\n${o.hint}`
+            )}
+            className={cn(
+              "inline-flex h-7 items-center gap-1.5 rounded-full px-2.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:h-6",
+              active ? "bg-primary text-primary-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+            )}
+          >
+            {Icon && <Icon className="h-3.5 w-3.5" aria-hidden />}
+            {o.label}
+            {o.count != null && (
+              <span
+                className={cn(
+                  "rounded-full px-1.5 py-px text-[10px] font-semibold tabular-nums",
+                  active ? "bg-background/25" : "bg-muted text-muted-foreground"
+                )}
+              >
+                {o.count}
+              </span>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * Filtr realizacji: wszystkie / z realizacją / bez realizacji.
+ * „Bez realizacji” liczy tylko typy objęte automatem (serwis, montaż, wizja,
+ * demontaż, konserwacja) — dla urlopu/biura/przygotowania realizacja nie powstaje.
+ */
+function RealizationFilter({
+  value,
+  counts,
+  onChange,
+}: {
+  value: RealizationFilterValue;
+  counts: { with: number; without: number };
+  onChange: (next: RealizationFilterValue) => void;
+}) {
+  const opts: { key: RealizationFilterValue; label: string; icon?: typeof Receipt; count?: number; hint: string }[] = [
+    { key: "", label: "Wszystkie", hint: "bez filtra realizacji" },
+    {
+      key: "with",
+      label: "Z realizacją",
+      icon: Receipt,
+      count: counts.with,
+      hint: "wydarzenia powiązane z realizacją",
+    },
+    {
+      key: "without",
+      label: "Bez realizacji",
+      icon: ReceiptText,
+      count: counts.without,
+      hint: "serwisy/montaże/demontaże/konserwacje/wizje bez powiązanej realizacji",
+    },
+  ];
+  return (
+    <div className="inline-flex rounded-full border bg-background p-0.5" role="group" aria-label="Realizacja">
+      {opts.map((o) => {
+        const active = value === o.key;
+        const Icon = o.icon;
+        return (
+          <button
+            key={o.key || "all"}
+            type="button"
+            data-testid={`realization-filter-${o.key || "all"}`}
+            aria-pressed={active}
+            onClick={() => onChange(active && o.key ? "" : o.key)}
+            {...tip(
+              `Filtr realizacji: ${o.label.toLowerCase()}${o.count != null ? ` — ${eventsCount(o.count)} w tym okresie` : ""}\n${o.hint}`
+            )}
             className={cn(
               "inline-flex h-7 items-center gap-1.5 rounded-full px-2.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:h-6",
               active ? "bg-primary text-primary-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
@@ -2797,7 +3247,7 @@ function TechnicianFilter({
                 {leave && (
                   <span
                     className="inline-flex items-center gap-1 rounded-full bg-rose-100 px-1.5 py-px text-[10px] font-semibold text-rose-700 dark:bg-rose-500/20 dark:text-rose-200"
-                    title="Ma urlop w tym okresie"
+                    {...tip(`${t.firstName} ${t.lastName} ma zaplanowany urlop w wyświetlanym okresie`)}
                   >
                     urlop
                   </span>
@@ -2845,7 +3295,11 @@ function TechnicianFilter({
         aria-expanded={open}
         aria-pressed={active}
         onClick={() => setOpen((o) => !o)}
-        title="Filtruj wg techników"
+        {...tip(
+          selected.length
+            ? `Filtr techników: ${selected.map((t) => `${t.firstName} ${t.lastName}`).join(", ")}\nKliknij, by zmienić wybór`
+            : "Filtruj wydarzenia po przypisanych technikach"
+        )}
         className={cn(
           "inline-flex h-8 max-w-[16rem] items-center gap-1.5 rounded-full border px-2.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:h-7",
           active
@@ -2905,8 +3359,8 @@ function ActivityPanel({
   }, [filtered]);
 
   return (
-    <Card className="h-fit lg:sticky lg:top-4">
-      <CardContent className="p-3">
+    <Card className="flex h-fit min-w-0 flex-col lg:h-full lg:min-h-0 lg:overflow-hidden">
+      <CardContent className="flex min-h-0 flex-1 flex-col p-3">
         <div className="mb-2 flex items-center justify-between">
           <h2 className="flex items-center gap-2 text-sm font-semibold">
             <Activity className="h-4 w-4" aria-hidden /> Ostatnia aktywność
@@ -2919,6 +3373,7 @@ function ActivityPanel({
               onClick={onRefresh}
               aria-label="Odśwież aktywność"
               disabled={loading}
+              {...tip("Wczytaj najnowsze wpisy dziennika")}
             >
               <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
             </Button>
@@ -2974,7 +3429,7 @@ function ActivityPanel({
             </p>
           </div>
         ) : (
-          <div className="max-h-[70vh] space-y-3 overflow-y-auto pr-1">
+          <div className="max-h-[70vh] space-y-3 overflow-y-auto pr-1 lg:max-h-none lg:min-h-0 lg:flex-1">
             {groups.map(([day, items]) => (
               <section key={day} aria-label={fmtDayHeading(day, now)}>
                 <h3 className="sticky top-0 z-[1] mb-1 bg-card py-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
@@ -3015,7 +3470,15 @@ function ActivityRow({
         type="button"
         disabled={!onOpen}
         onClick={onOpen}
-        title={fmtTimestamp(a.createdAt)}
+        {...tip(
+          [
+            fmtTimestamp(a.createdAt),
+            parts.detail,
+            onOpen ? "Kliknij, by otworzyć wydarzenie w kalendarzu" : "",
+          ]
+            .filter(Boolean)
+            .join("\n")
+        )}
         className="group w-full rounded-md px-1.5 py-1.5 text-left text-xs transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default disabled:hover:bg-transparent"
       >
         <div className="flex items-start gap-2">
@@ -3051,7 +3514,7 @@ function ActivityRow({
               {eventDate && <span className="shrink-0 tabular-nums text-muted-foreground">· {eventDate}</span>}
             </div>
             {parts.detail && (
-              <div className="mt-0.5 truncate text-[11px] text-muted-foreground" title={parts.detail}>
+              <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
                 {parts.detail}
               </div>
             )}

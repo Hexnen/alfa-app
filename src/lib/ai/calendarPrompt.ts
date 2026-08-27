@@ -133,6 +133,9 @@ export function assembleSystemPrompt(ctx: PromptContext): string {
     "11b. PROTOKÓŁ: wydarzenia mają `protocol` (numer, status draft/final, signed) tylko do odczytu — protokoły powstają w module Protokoły, NIE z czatu. Wzmianka o protokole („podpisany protokół”, „bez protokołu”, „klient nie podpisał”) → tylko informacyjnie w notatce (`note`), nigdy jako pole wydarzenia. Pytanie „czy jest protokół” → odpowiedz z `protocol` (null = brak)."
   );
   rules.push(
+    "11c. REALIZACJE: wydarzenia serwisowe (serwis, montaż, wizja, demontaż, konserwacja) trafiają do modułu Realizacje AUTOMATYCZNIE przy zapisie — pole `realization` (id, invoiced) jest tylko do odczytu. NIE twórz realizacji osobno, NIE obiecuj wpisania kwot i NIE modyfikuj rozliczeń — kwoty uzupełnia księgowość. Realizacja zafakturowana (`invoiced: true`) nie zmienia się przy edycji wydarzenia — uprzedź o tym użytkownika."
+  );
+  rules.push(
     listEvents
       ? `12. PRZEGLĄD („co na dziś / jutro / w tym tygodniu / na teraz i przyszły tydzień”, „co do zrobienia”, „grafik Wojtka”) → DOKŁADNIE JEDNO \`list_events\` na CAŁY zakres (od teraz do końca zakresu; „na teraz i przyszły tydzień” = od ${today} do niedzieli przyszłego tygodnia włącznie; filtr technika/obiektu gdy o kogoś/coś pytano)${showEvents ? " → `show_events` z WSZYSTKIMI id, `groupBy` (\"day\" dla zakresów, \"technician\" gdy pytanie „kto co robi”, \"object\"/\"type\" na życzenie) i `range` {from, to} jak w list_events" : " i zwięzła lista (data, godziny, typ, tytuł, obiekt)"}. Zakres maks. ${r.maxHorizonDays} dni — dłuższy jest przycinany (\`truncatedRange\`), NIE ponawiaj z krótszym.${freeSlots ? " „Kto jest wolny?” / wolne terminy → `find_free_slots` (technicianIds: []), nie `list_events` per osoba." : ""}`
       : "12. Brak narzędzia grafiku — na pytania o grafik odpowiedz, że podgląd jest w kalendarzu."

@@ -5,6 +5,7 @@ import {
   real,
   primaryKey,
   index,
+  uniqueIndex,
   type AnySQLiteColumn,
 } from "drizzle-orm/sqlite-core";
 import { sql } from "drizzle-orm";
@@ -1197,6 +1198,12 @@ export const calendarEvents = sqliteTable(
       () => realizations.id,
       { onDelete: "set null" }
     ),
+    // Użytkownik ręcznie odpiął realizację ("Odepnij") — nie twórz jej automatycznie
+    // przy kolejnych zapisach ani przy statusie „wykonane”. Zdejmowane przez ręczne
+    // podpięcie realizacji (src/lib/calendar-realizations.ts).
+    realizationOptout: integer("realization_optout", { mode: "boolean" })
+      .default(false)
+      .notNull(),
     seriesId: integer("series_id").references(() => calendarSeries.id, {
       onDelete: "set null",
     }),
@@ -1225,6 +1232,10 @@ export const calendarEvents = sqliteTable(
     objectIdIdx: index("calendar_events_object_id_idx").on(t.objectId),
     deletedAtIdx: index("calendar_events_deleted_at_idx").on(t.deletedAt),
     seriesIdIdx: index("calendar_events_series_id_idx").on(t.seriesId),
+    // Realizacja ↔ wydarzenie 1:1 (indeks częściowy — wiele wydarzeń bez realizacji jest OK).
+    realizationIdIdx: uniqueIndex("calendar_events_realization_id_uidx")
+      .on(t.realizationId)
+      .where(sql`realization_id IS NOT NULL`),
   })
 );
 
@@ -1284,6 +1295,37 @@ export const calendarEventNotes = sqliteTable(
 export type CalendarEventNote = typeof calendarEventNotes.$inferSelect;
 export type NewCalendarEventNote = typeof calendarEventNotes.$inferInsert;
 
+/**
+ * Zapisane zestawy filtrów kalendarza (per użytkownik). `filters` to JSON z tymi
+ * samymi kluczami, co localStorage `alfa.calendar.filters` (+ opcjonalnie view/weekends).
+ */
+export const calendarFilterSets = sqliteTable(
+  "calendar_filter_sets",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    userId: integer("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    filters: text("filters").notNull(), // JSON (string)
+    isDefault: integer("is_default", { mode: "boolean" }).default(false).notNull(),
+    sortOrder: integer("sort_order").default(0).notNull(),
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+    updatedAt: text("updated_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+  },
+  (t) => ({
+    userNameUidx: uniqueIndex("calendar_filter_sets_user_name_uidx").on(t.userId, t.name),
+    userSortIdx: index("calendar_filter_sets_user_sort_idx").on(t.userId, t.sortOrder),
+  })
+);
+
+export type CalendarFilterSet = typeof calendarFilterSets.$inferSelect;
+export type NewCalendarFilterSet = typeof calendarFilterSets.$inferInsert;
+
 // ============================================================================
 // ACTIVITY LOG — generyczny dziennik zmian dla całej aplikacji
 // (kalendarz jest pierwszym konsumentem; w przyszłości magazyn itd.)
@@ -1301,6 +1343,9 @@ export const ACTIVITY_ACTIONS = [
   "note_added",
   "note_updated",
   "note_deleted",
+  // Powiązanie encji (wydarzenie kalendarza ↔ realizacja tworzona automatycznie)
+  "linked",
+  "unlinked",
 ] as const;
 export type ActivityAction = (typeof ACTIVITY_ACTIONS)[number];
 

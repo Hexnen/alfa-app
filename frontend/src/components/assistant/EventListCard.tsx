@@ -2,10 +2,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { CalendarRange, CalendarSearch, Check, ExternalLink, Loader2, MessageSquareText, MoveRight, Sparkles, UserPlus, UserX, XCircle, type LucideIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { AssistantBriefEvent, AssistantQuickChangeKind, AssistantShowEventsGroupBy, AssistantShowEventsOutput, CalendarEventStatus, CalendarEventType } from "@/lib/api";
-import { BILLING_META, EVENT_STATUS_META, EVENT_TYPE_META, EVENT_TYPE_UI, PROTOCOL_BADGE_META, eventStatusLabel, eventTypeLabel, fmtRange, initials, notesLabel, parseLocal, protocolBadgeKind, statusBadgeClass } from "@/lib/calendar-labels";
+import { BILLING_META, EVENT_STATUS_META, EVENT_TYPE_META, EVENT_TYPE_UI, PROTOCOL_BADGE_META, billingTip, protocolTip, eventStatusLabel, eventTypeLabel, fmtRange, initials, notesLabel, parseLocal, protocolBadgeKind, statusBadgeClass } from "@/lib/calendar-labels";
 import type { CalendarBilling } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { ObjectPeek } from "./ObjectPeek";
+import { tip } from "@/components/ui/tooltip";
 import type { PreviewRange } from "./parts";
 
 /** Zakres do podświetlenia na siatce; `focus` = „Pokaż” (kalendarz przewija i podświetla). */
@@ -51,7 +52,7 @@ function BillingIcon({ billing }: { billing: CalendarBilling | null | undefined 
   const m = billing ? BILLING_META[billing] : undefined;
   if (!m) return null;
   return (
-    <span className={cn("inline-flex items-center rounded-full p-0.5", m.badge)} title={`Rozliczenie: ${m.label}`} aria-label={`Rozliczenie: ${m.label}`} data-testid="billing-badge" data-kind={billing}>
+    <span className={cn("inline-flex items-center rounded-full p-0.5", m.badge)} {...tip(billingTip(billing))} aria-label={`Rozliczenie: ${m.label.toLowerCase()}`} data-testid="billing-badge" data-kind={billing}>
       <m.icon className="h-3 w-3" aria-hidden />
     </span>
   );
@@ -63,10 +64,11 @@ function ProtocolIcon({ event }: { event: AssistantBriefEvent }) {
   const kind = protocolBadgeKind({ type: event.type, status: event.status, protocol: event.protocol ?? null });
   if (!kind) return null;
   const m = PROTOCOL_BADGE_META[kind];
-  const label = m.label(event.protocol?.number);
-  const title = kind === "missing" ? "Wykonane, ale bez protokołu" : `${label} (${kind === "final" ? "zatwierdzony" : "szkic"})`;
+  const title =
+    protocolTip({ type: event.type, status: event.status, protocol: event.protocol ?? null }) ??
+    m.label(event.protocol?.number);
   return (
-    <span className={cn("inline-flex items-center rounded-full p-0.5", m.badge)} title={title} aria-label={title} data-testid="protocol-badge" data-kind={kind}>
+    <span className={cn("inline-flex items-center rounded-full p-0.5", m.badge)} {...tip(title)} aria-label={title.replace(/\n/g, " · ")} data-testid="protocol-badge" data-kind={kind}>
       <m.icon className="h-3 w-3" aria-hidden />
     </span>
   );
@@ -292,7 +294,7 @@ export function EventListRows({ events, source, onOpenEvent, onPreview, actions,
                       {techs.map((t) => (
                         <span
                           key={t.id}
-                          title={t.name}
+                          {...tip(`Technik: ${t.name}`)}
                           className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-background bg-muted text-[9px] font-semibold uppercase text-foreground"
                         >
                           {initials(t.name)}

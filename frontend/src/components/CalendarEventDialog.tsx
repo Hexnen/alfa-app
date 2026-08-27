@@ -14,6 +14,7 @@ import {
   Building2,
   Check,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   CircleCheck,
   Clock,
@@ -24,7 +25,9 @@ import {
   Loader2,
   MapPin,
   Pencil,
+  Receipt,
   Repeat,
+  RotateCcw,
   Search,
   StickyNote,
   Trash2,
@@ -59,6 +62,7 @@ import {
   calendarApi,
   getObjects,
   getProtocols,
+  getRealizations,
   getTechnicians,
   type ActivityEntry,
   type CalendarBilling,
@@ -66,6 +70,7 @@ import {
   type CalendarEvent,
   type CalendarEventInput,
   type CalendarEventProtocol,
+  type CalendarEventRealization,
   type CalendarEventStatus,
   type CalendarEventType,
   type CalendarNote,
@@ -73,6 +78,7 @@ import {
   type CalendarSeriesScope,
   type ObjectWithContractor,
   type Protocol,
+  type Realization,
   type Technician,
   type TechnicianAvailability,
 } from "@/lib/api";
@@ -94,6 +100,7 @@ import {
   SERIES_FREQ_META,
   billingApplies,
   billingBadgeClass,
+  billingTip,
   describeActivity,
   eventStatusLabel,
   eventTypeLabel,
@@ -106,12 +113,20 @@ import {
   protocolBadgeClass,
   protocolBadgeKind,
   protocolHref,
+  REALIZATION_BADGE_META,
+  REALIZATION_KIND_LABEL,
+  realizationApplies,
+  realizationBadgeClass,
+  realizationBadgeKind,
+  realizationHref,
+  realizationMoney,
   seriesShortLabel,
   toDateStr,
   toDateTimeStr,
 } from "@/lib/calendar-labels";
 import { cn } from "@/lib/utils";
 import { CalendarEventNotes } from "@/components/CalendarEventNotes";
+import { tip } from "@/components/ui/tooltip";
 
 export type CalendarDialogMode = "create" | "edit" | "view";
 
@@ -183,6 +198,10 @@ interface FormState {
   billing: CalendarBilling | null;
   /** Jawnie przypięty protokół (null = brak / protokół realizacji wyliczany przez backend). */
   protocolId: number | null;
+  /** Powiązana realizacja (null = brak / do utworzenia automatem). */
+  realizationId: number | null;
+  /** `true` = realizacja ręcznie odpięta — automat jej nie odtworzy. */
+  realizationOptout: boolean;
   // Powtarzanie (tylko create)
   recFreq: "" | CalendarSeriesFreq;
   recInterval: string;
@@ -235,6 +254,8 @@ function buildInitial(
       technicianIds: event.technicians.map((t) => t.id),
       billing: event.billing ?? null,
       protocolId: event.protocolId ?? null,
+      realizationId: event.realizationId ?? null,
+      realizationOptout: event.realizationOptout ?? false,
       recFreq: "",
       recInterval: "1",
       recMode: "until",
@@ -268,6 +289,8 @@ function buildInitial(
     technicianIds: prefill?.technicianIds ? [...prefill.technicianIds] : [],
     billing: null,
     protocolId: null,
+    realizationId: null,
+    realizationOptout: false,
     recFreq: isKons ? "quarterly" : "",
     recInterval: "1",
     recMode: "until",
@@ -294,6 +317,8 @@ function toInput(f: FormState): CalendarEventInput {
     technicianIds: f.technicianIds,
     billing: billingApplies(f.type) ? f.billing : null,
     protocolId: billingApplies(f.type) ? f.protocolId : null,
+    realizationId: realizationApplies(f.type) ? f.realizationId : null,
+    realizationOptout: realizationApplies(f.type) ? f.realizationOptout : false,
   };
   if (f.recFreq && !isUrlop) {
     input.recurrence = {
@@ -472,6 +497,7 @@ function ObjectPicker({
         <button
           type="button"
           aria-label="Usuń powiązanie z obiektem"
+          {...tip("Odepnij obiekt — wydarzenie zostanie bez powiązania")}
           onClick={() => {
             onChange("");
             setQ("");
@@ -708,6 +734,175 @@ function ProtocolPicker({ onPick, disabled }: { onPick: (p: Protocol) => void; d
   );
 }
 
+/** Pełny rekord realizacji (`/realizations`) → skrót używany w dialogu. */
+function toEventRealization(r: Realization): CalendarEventRealization {
+  return { id: r.id, date: r.date, site: r.site, kind: r.kind, invoiced: r.invoiced, total: r.total };
+}
+
+/**
+ * Wybór istniejącej realizacji: lista miesiąca (strzałki ← →, start z daty
+ * wydarzenia) + filtr tekstowy po obiekcie/adnotacji. Backend realizacji nie ma
+ * wyszukiwarki globalnej, więc szukamy w obrębie miesiąca.
+ */
+function RealizationPicker({
+  dateHint,
+  siteHint,
+  onPick,
+  disabled,
+}: {
+  dateHint: string;
+  siteHint?: string;
+  onPick: (r: Realization) => void;
+  disabled?: boolean;
+}) {
+  const hint = /^\d{4}-\d{2}/.test(dateHint) ? dateHint : toDateStr(new Date());
+  const [openList, setOpenList] = useState(false);
+  const [ym, setYm] = useState<{ y: number; m: number }>(() => ({
+    y: Number(hint.slice(0, 4)),
+    m: Number(hint.slice(5, 7)),
+  }));
+  const [q, setQ] = useState("");
+  /** Wynik ostatniego pobrania wraz z kluczem miesiąca — `loading` jest z niego wyliczane. */
+  const [loaded, setLoaded] = useState<{ key: string; items: Realization[] } | null>(null);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const monthKey = `${ym.y}-${ym.m}`;
+  const items = loaded?.key === monthKey ? loaded.items : [];
+  const loading = loaded?.key !== monthKey;
+
+  useEffect(() => {
+    if (!openList) return;
+    let cancelled = false;
+    const key = `${ym.y}-${ym.m}`;
+    getRealizations(ym.y, ym.m)
+      .then((res) => {
+        if (!cancelled) setLoaded({ key, items: res.data || [] });
+      })
+      .catch(() => {
+        if (!cancelled) setLoaded({ key, items: [] });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [openList, ym]);
+
+  useEffect(() => {
+    if (!openList) return;
+    const onDoc = (e: MouseEvent) => {
+      if (!wrapRef.current?.contains(e.target as Node)) setOpenList(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    window.setTimeout(() => inputRef.current?.focus(), 0);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [openList]);
+
+  const needle = q.trim().toLowerCase();
+  const filtered = needle
+    ? items.filter((r) => `${r.site} ${r.note ?? ""}`.toLowerCase().includes(needle))
+    : items;
+  const shiftMonth = (d: number) =>
+    setYm(({ y, m }) => {
+      const n = m + d;
+      if (n < 1) return { y: y - 1, m: 12 };
+      if (n > 12) return { y: y + 1, m: 1 };
+      return { y, m: n };
+    });
+
+  return (
+    <div ref={wrapRef} className="relative">
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        disabled={disabled}
+        aria-expanded={openList}
+        aria-controls="cal-realization-list"
+        data-testid="realization-pick"
+        onClick={() =>
+          setOpenList((v) => {
+            if (!v) setQ(siteHint?.trim() ?? "");
+            return !v;
+          })
+        }
+      >
+        <Receipt className="mr-1 h-4 w-4" /> Podepnij istniejącą…
+      </Button>
+      {openList && (
+        <div className="absolute left-0 z-20 mt-1 w-full min-w-[20rem] max-w-[28rem] rounded-md border bg-popover p-1.5 text-sm shadow-md sm:w-[26rem]">
+          <div className="mb-1 flex items-center gap-1">
+            <Button type="button" variant="ghost" size="icon" className="h-7 w-7" aria-label="Poprzedni miesiąc" {...tip("Poprzedni miesiąc na liście realizacji")} onClick={() => shiftMonth(-1)}>
+              <ChevronLeft className="h-4 w-4" />
+            </Button>
+            <span className="flex-1 text-center text-xs font-medium tabular-nums" data-testid="realization-pick-month">
+              {String(ym.m).padStart(2, "0")}.{ym.y}
+            </span>
+            <Button type="button" variant="ghost" size="icon" className="h-7 w-7" aria-label="Następny miesiąc" {...tip("Następny miesiąc na liście realizacji")} onClick={() => shiftMonth(1)}>
+              <ChevronRight className="h-4 w-4" />
+            </Button>
+          </div>
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              ref={inputRef}
+              aria-label="Szukaj realizacji"
+              data-testid="realization-search"
+              value={q}
+              placeholder="Obiekt, adnotacja…"
+              className="h-9 pl-8"
+              onChange={(e) => setQ(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") {
+                  e.stopPropagation();
+                  setOpenList(false);
+                }
+              }}
+            />
+          </div>
+          <ul id="cal-realization-list" role="listbox" className="mt-1 max-h-64 overflow-y-auto">
+            {loading ? (
+              <li className="flex items-center gap-2 px-2 py-1.5 text-xs text-muted-foreground">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" /> Szukam…
+              </li>
+            ) : filtered.length === 0 ? (
+              <li className="px-2 py-1.5 text-xs text-muted-foreground">Brak realizacji w tym miesiącu.</li>
+            ) : (
+              filtered.map((r) => (
+                <li
+                  key={r.id}
+                  role="option"
+                  aria-selected={false}
+                  data-testid={`realization-option-${r.id}`}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    onPick(r);
+                    setOpenList(false);
+                    setQ("");
+                  }}
+                  className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 hover:bg-accent hover:text-accent-foreground"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="truncate font-medium">{r.site || `Realizacja #${r.id}`}</span>
+                      <span className="text-xs text-muted-foreground tabular-nums">{fmtLong(r.date, true)}</span>
+                    </div>
+                    <div className="truncate text-xs text-muted-foreground">
+                      {REALIZATION_KIND_LABEL[r.kind] ?? r.kind} · {realizationMoney(r.total)}
+                    </div>
+                  </div>
+                  <span className={cn(realizationBadgeClass(r.invoiced ? "invoiced" : "open"), "shrink-0")}>
+                    {r.invoiced ? "zafakturowana" : "otwarta"}
+                  </span>
+                </li>
+              ))
+            )}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Historia (oś czasu)
 // — agregacja wpisów z jednej operacji, grupowanie po dniu
@@ -838,7 +1033,7 @@ function HistoryTimeline({ entries }: { entries: ActivityEntry[] }) {
                   </div>
                   <time
                     dateTime={g.at}
-                    title={fmtTimestamp(g.at)}
+                    {...tip(fmtTimestamp(g.at))}
                     className="shrink-0 whitespace-nowrap text-xs text-muted-foreground"
                   >
                     {fmtRelative(g.at)}
@@ -1254,6 +1449,8 @@ export function CalendarEventDialog({
   const [form, setForm] = useState<FormState>(initialRef.current);
   /** Protokół wybrany z listy w tej sesji edycji (podgląd przed zapisem). */
   const [pickedProtocol, setPickedProtocol] = useState<CalendarEventProtocol | null>(null);
+  /** Realizacja wybrana z listy w tej sesji edycji (podgląd przed zapisem). */
+  const [pickedRealization, setPickedRealization] = useState<CalendarEventRealization | null>(null);
   const [technicians, setTechnicians] = useState<Technician[]>([]);
   const [objects, setObjects] = useState<ObjectWithContractor[]>([]);
   const [history, setHistory] = useState<ActivityEntry[]>([]);
@@ -1271,6 +1468,7 @@ export function CalendarEventDialog({
     repeat: mode === "create" && !!init.recFreq,
     notes: mode !== "create" || !!init.description,
     protocol: mode !== "create" && !!(init.protocolId || event?.protocol),
+    realization: mode !== "create" && !!(init.realizationId || event?.realization || init.realizationOptout),
     journal: true,
     firstNote: false,
     history: false,
@@ -1407,6 +1605,21 @@ export function CalendarEventDialog({
   /** Odpięto protokół przypięty jawnie — po zapisie backend wróci do protokołu realizacji lub braku. */
   const protocolUnpinned = !!event && event.protocolId != null && form.protocolId == null;
 
+  const showRealization = realizationApplies(form.type);
+  /** Realizacja widoczna w formularzu: wybrana z listy albo przypięta do wydarzenia. */
+  const formRealization: CalendarEventRealization | null =
+    form.realizationId == null
+      ? null
+      : pickedRealization?.id === form.realizationId
+        ? pickedRealization
+        : event?.realization?.id === form.realizationId
+          ? event.realization
+          : null;
+  /** Odpięto realizację — po zapisie wydarzenie zostanie bez niej (automat może utworzyć nową). */
+  const realizationUnpinned = !!event && event.realizationId != null && form.realizationId == null;
+  /** Świadome odpięcie: automat nie utworzy realizacji, dopóki nie zostanie włączony z powrotem. */
+  const realizationOptedOut = form.realizationOptout && form.realizationId == null;
+
   const onLeave = useMemo(() => {
     const m = new Map<number, TechnicianAvailability>();
     for (const a of availability) {
@@ -1473,6 +1686,7 @@ export function CalendarEventDialog({
         next.billing = null;
         next.protocolId = null;
       }
+      if (!realizationApplies(type)) next.realizationId = null;
       if (type === "urlop") {
         next.allDay = true;
         next.start = f.start.slice(0, 10);
@@ -1976,6 +2190,32 @@ export function CalendarEventDialog({
           </>
         )}
 
+        {realizationApplies(event.type) && (
+          <>
+            <dt className="flex items-center gap-1.5 text-muted-foreground">
+              <Receipt className="h-3.5 w-3.5" /> Realizacja
+            </dt>
+            <dd>
+              {event.realization ? (
+                <span className="inline-flex flex-wrap items-center gap-2">
+                  <Link to={realizationHref(event.realization.id, event.realization.date)} className="hover:underline">
+                    <span className={realizationBadgeClass(event.realization.invoiced ? "invoiced" : "open")}>
+                      <Receipt className="h-3.5 w-3.5" />#{event.realization.id}
+                    </span>
+                  </Link>
+                  <span className="text-xs text-muted-foreground">
+                    {REALIZATION_KIND_LABEL[event.realization.kind] ?? event.realization.kind} ·{" "}
+                    <span className="tabular-nums">{realizationMoney(event.realization.total)}</span>
+                    {event.realization.invoiced ? " · zafakturowana" : ""}
+                  </span>
+                </span>
+              ) : (
+                <span className="text-muted-foreground">—</span>
+              )}
+            </dd>
+          </>
+        )}
+
         <dt className="flex items-center gap-1.5 text-muted-foreground">
           <Users className="h-3.5 w-3.5" /> Technicy
         </dt>
@@ -2092,7 +2332,7 @@ export function CalendarEventDialog({
                   type="button"
                   role="radio"
                   aria-checked={active}
-                  title={m.hint}
+                  {...tip(billingTip(b) ?? m.hint)}
                   data-testid={`billing-chip-${b}`}
                   onClick={() => set("billing", b)}
                   className={cn(
@@ -2178,7 +2418,7 @@ export function CalendarEventDialog({
               {overnight && (
                 <span
                   className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[11px] font-medium text-amber-800 dark:text-amber-300"
-                  title={`Koniec ${fmtLong(dateOf(form.end), true)}`}
+                  {...tip(`Wydarzenie kończy się następnego dnia: ${fmtLong(dateOf(form.end), true)}`)}
                 >
                   +1 dzień
                 </span>
@@ -2274,9 +2514,11 @@ export function CalendarEventDialog({
                   {leave && (
                     <span
                       className="inline-flex items-center gap-0.5 rounded-full bg-rose-500/15 px-1.5 py-px text-[10px] font-medium uppercase tracking-wide text-rose-700 dark:text-rose-300"
-                      title={leave.leaves
-                        .map((l) => fmtRange(l.startAt, l.endAt, l.allDay))
-                        .join(", ")}
+                      {...tip(
+                        `${name} — urlop w tym terminie:\n${leave.leaves
+                          .map((l) => fmtRange(l.startAt, l.endAt, l.allDay))
+                          .join("\n")}`
+                      )}
                     >
                       <TreePalm className="h-3 w-3" /> urlop
                     </span>
@@ -2348,7 +2590,7 @@ export function CalendarEventDialog({
                       <button
                         type="button"
                         onClick={() => onOpenEvent(c.id)}
-                        title="Otwórz to wydarzenie"
+                        {...tip(`Otwórz kolidujące wydarzenie: ${c.title}`)}
                         className="flex flex-wrap items-center gap-1 text-left hover:underline"
                       >
                         {inner}
@@ -2514,6 +2756,110 @@ export function CalendarEventDialog({
               </div>
             );
           })()}
+        </Section>
+      )}
+
+      {/* Realizacja — powiązanie z rejestrem Realizacji (auto lub ręcznie) */}
+      {showRealization && (
+        <Section
+          id="sec-realization"
+          icon={Receipt}
+          title="Realizacja"
+          open={openSec.realization}
+          onToggle={() => toggleSec("realization")}
+          summary={
+            formRealization
+              ? `#${formRealization.id} · ${realizationMoney(formRealization.total)}${formRealization.invoiced ? " (zafakturowana)" : ""}`
+              : realizationOptedOut
+                ? "odpięta ręcznie"
+                : realizationUnpinned
+                  ? "odpięto"
+                  : mode === "create"
+                    ? "powstanie automatycznie"
+                    : "brak"
+          }
+        >
+          <div className="space-y-2">
+            {formRealization ? (
+              <div
+                data-testid="realization-linked"
+                className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/40 px-2.5 py-1.5 text-sm"
+              >
+                {(() => {
+                  const kind = realizationBadgeKind({ realization: formRealization }) ?? "open";
+                  const KindIcon = REALIZATION_BADGE_META[kind].icon;
+                  return (
+                    <span className={realizationBadgeClass(kind)}>
+                      <KindIcon className="h-3.5 w-3.5" />#{formRealization.id}
+                    </span>
+                  );
+                })()}
+                <span className="text-xs text-muted-foreground">
+                  {fmtLong(formRealization.date, true)} · {REALIZATION_KIND_LABEL[formRealization.kind] ?? formRealization.kind} ·{" "}
+                  <span className="tabular-nums">{realizationMoney(formRealization.total)}</span>
+                  {formRealization.site ? ` · ${formRealization.site}` : ""}
+                </span>
+                <span className="ml-auto flex items-center gap-2">
+                  <Link
+                    to={realizationHref(formRealization.id, formRealization.date)}
+                    data-testid="realization-open"
+                    className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                  >
+                    <ExternalLink className="h-3.5 w-3.5" /> Otwórz w Realizacjach
+                  </Link>
+                  <button
+                    type="button"
+                    data-testid="realization-unpin"
+                    onClick={() => {
+                      setForm((f) => ({ ...f, realizationId: null, realizationOptout: true }));
+                      setPickedRealization(null);
+                    }}
+                    className="inline-flex items-center gap-1 rounded px-1 py-0.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    <Unlink className="h-3.5 w-3.5" /> Odepnij
+                  </button>
+                </span>
+              </div>
+            ) : realizationOptedOut ? (
+              <div
+                data-testid="realization-optout"
+                className="flex flex-wrap items-center gap-2 rounded-md border border-amber-300/60 bg-amber-50/60 px-2.5 py-1.5 text-xs text-amber-800 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-300"
+              >
+                <Unlink className="h-3.5 w-3.5 shrink-0" />
+                <span>Ręcznie odpięta — realizacja nie powstanie automatycznie.</span>
+                <button
+                  type="button"
+                  data-testid="realization-optout-off"
+                  onClick={() => set("realizationOptout", false)}
+                  className="ml-auto inline-flex items-center gap-1 rounded px-1 py-0.5 text-xs font-medium hover:bg-amber-100 dark:hover:bg-amber-500/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" /> Włącz automat
+                </button>
+              </div>
+            ) : (
+              <p className="text-xs text-muted-foreground" data-testid="realization-empty">
+                {realizationUnpinned
+                  ? "Odpięto. Po zapisie wydarzenie zostanie bez realizacji — automat może utworzyć nową zgodnie z ustawieniem."
+                  : "Brak powiązanej realizacji. Powstanie automatycznie (przy zapisie albo po oznaczeniu jako wykonane — zgodnie z ustawieniem w Administracja → Kalendarz) albo podepnij istniejącą."}
+              </p>
+            )}
+            {formRealization?.invoiced && (
+              <p className="text-xs text-amber-700 dark:text-amber-400">
+                Realizacja jest zafakturowana — zmiany wydarzenia nie będą do niej przenoszone.
+              </p>
+            )}
+            <RealizationPicker
+              dateHint={form.start.slice(0, 10)}
+              siteHint={selectedObject?.name}
+              onPick={(r) => {
+                setPickedRealization(toEventRealization(r));
+                setForm((f) => ({ ...f, realizationId: r.id, realizationOptout: false }));
+              }}
+            />
+            <p className="text-[11px] text-muted-foreground">
+              Kwoty i rabat ustawiasz w module Realizacje — kalendarz ich nie nadpisuje.
+            </p>
+          </div>
         </Section>
       )}
 
@@ -2723,13 +3069,13 @@ export function CalendarEventDialog({
   const metaLine = event && (
     <span className="truncate text-[11px] text-muted-foreground">
       Utworzył {event.createdByLabel ?? "—"},{" "}
-      <time dateTime={event.createdAt} title={fmtTimestamp(event.createdAt)}>
+      <time dateTime={event.createdAt} {...tip(`Utworzono: ${fmtTimestamp(event.createdAt)}`)}>
         {fmtRelative(event.createdAt)}
       </time>
       {event.updatedByLabel && event.updatedAt !== event.createdAt && (
         <>
           {" · "}Zmienił {event.updatedByLabel},{" "}
-          <time dateTime={event.updatedAt} title={fmtTimestamp(event.updatedAt)}>
+          <time dateTime={event.updatedAt} {...tip(`Ostatnia zmiana: ${fmtTimestamp(event.updatedAt)}`)}>
             {fmtRelative(event.updatedAt)}
           </time>
         </>
@@ -2792,7 +3138,9 @@ export function CalendarEventDialog({
                     size="sm"
                     onClick={handleSubmit}
                     disabled={saving}
-                    title="Ctrl/Cmd + Enter"
+                    {...tip(isEdit ? "Zapisz zmiany w wydarzeniu" : "Utwórz wydarzenie", {
+                      shortcut: "Ctrl+Enter",
+                    })}
                   >
                     {saving ? (
                       <Loader2 className="mr-1 h-4 w-4 animate-spin" />

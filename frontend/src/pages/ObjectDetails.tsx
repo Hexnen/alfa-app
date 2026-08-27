@@ -34,12 +34,13 @@ import {
   Send,
 } from "lucide-react";
 import { CalendarEventDialog, type CalendarDialogMode } from "@/components/CalendarEventDialog";
-import { BillingBadge, ProtocolBadge } from "@/components/CalendarEventBadges";
+import { BillingBadge, ProtocolBadge, RealizationBadge } from "@/components/CalendarEventBadges";
 import {
   EVENT_STATUS_META,
   EVENT_TYPE_META,
   EVENT_TYPE_UI,
   activityIcon,
+  eventTipData,
   describeActivity,
   fmtRelative,
   initials,
@@ -48,7 +49,9 @@ import {
   fmtTimestamp,
   parseLocal,
   parseTimestamp,
+  overdueTip,
 } from "@/lib/calendar-labels";
+import { tip, tipAttrs } from "@/components/ui/tooltip";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
@@ -686,7 +689,7 @@ export function ObjectDetails() {
                           <div className="flex shrink-0 items-center gap-1.5">
                             {who && (
                               <span
-                                title={who}
+                                {...tip(`Autor zmiany: ${who}`)}
                                 className="hidden h-5 w-5 items-center justify-center rounded-full bg-muted text-[9px] font-semibold uppercase text-muted-foreground sm:inline-flex"
                               >
                                 {initials(who)}
@@ -694,7 +697,7 @@ export function ObjectDetails() {
                             )}
                             <time
                               dateTime={when}
-                              title={fmtTimestamp(when)}
+                              {...tip(fmtTimestamp(when))}
                               className="whitespace-nowrap text-xs text-muted-foreground"
                             >
                               {fmtRelative(when)}
@@ -865,14 +868,19 @@ function ObjectEventList({
                   "flex items-center gap-3 px-3 py-2 text-sm",
                   muted && "text-muted-foreground"
                 )}
+                {...tipAttrs(
+                  eventTipData(ev, {
+                    hint: "Kliknij tytuł, by otworzyć szczegóły · „w kalendarzu” przenosi do modułu",
+                  })
+                )}
               >
                 <span
                   className={cn(
                     "flex h-8 w-8 shrink-0 items-center justify-center rounded-md",
                     ui?.soft
                   )}
-                  title={meta?.label}
-                  aria-label={meta?.label}
+                  aria-label={`Typ: ${meta?.label ?? ev.type}`}
+                  {...tip(`Typ: ${meta?.label ?? ev.type}`)}
                 >
                   <Icon className="h-4 w-4" />
                 </span>
@@ -898,12 +906,16 @@ function ObjectEventList({
                       {EVENT_STATUS_META[ev.status]?.label ?? ev.status}
                     </span>
                     {overdue && (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-700 dark:text-amber-300">
+                      <span
+                        className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-700 dark:text-amber-300"
+                        {...tip(overdueTip(ev))}
+                      >
                         <ClockAlert className="h-3 w-3" /> po terminie
                       </span>
                     )}
                     <BillingBadge billing={ev.billing} compact />
                     <ProtocolBadge event={ev} compact link />
+                    <RealizationBadge event={ev} compact link />
                   </div>
                   <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
                     <span className="whitespace-nowrap">
@@ -915,7 +927,7 @@ function ObjectEventList({
                           {ev.technicians.slice(0, 4).map((t) => (
                             <span
                               key={t.id}
-                              title={`${t.firstName} ${t.lastName}`}
+                              {...tip(`Technik: ${t.firstName} ${t.lastName}`)}
                               className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-background bg-muted text-[9px] font-semibold uppercase text-muted-foreground"
                             >
                               {initials(`${t.firstName} ${t.lastName}`)}
@@ -937,7 +949,7 @@ function ObjectEventList({
                 <Link
                   to={`/technical/kalendarz?event=${ev.id}&date=${ev.startAt.slice(0, 10)}`}
                   className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap text-xs text-primary hover:underline"
-                  title="Pokaż w kalendarzu"
+                  {...tip(`Otwórz „${ev.title}” w module Kalendarz`)}
                 >
                   <span className="hidden sm:inline">w kalendarzu</span>
                   <ArrowRight className="h-3.5 w-3.5" />

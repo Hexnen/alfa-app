@@ -13,6 +13,7 @@ import {
   HardHat,
   Pencil,
   Plus,
+  Receipt,
   StickyNote,
   Trash2,
   TreePalm,
@@ -26,10 +27,14 @@ import {
 import type {
   ActivityEntry,
   CalendarBilling,
+  CalendarEvent,
+  CalendarEventRealization,
   CalendarEventStatus,
   CalendarEventType,
   CalendarSeriesFreq,
+  RealizationKind,
 } from "@/lib/api";
+import type { RichTip, TipPill, TipRow, TipTone } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
 /**
@@ -444,6 +449,8 @@ export const ACTIVITY_FIELD_LABELS: Record<string, string> = {
   orderId: "zlecenie",
   realization_id: "realizację",
   realizationId: "realizację",
+  realization_optout: "Automatyczna realizacja",
+  realizationOptout: "Automatyczna realizacja",
   billing: "rozliczenie",
   protocol_id: "protokół",
   protocolId: "protokół",
@@ -469,6 +476,9 @@ function fieldValue(field: string | null, v: string | null): string {
     case "all_day":
     case "allDay":
       return v === "1" || v === "true" ? "tak" : "nie";
+    case "realization_optout":
+    case "realizationOptout":
+      return v === "1" || v === "true" ? "wyłączona (ręcznie odpięta)" : "włączona";
     default:
       return quote(v);
   }
@@ -721,3 +731,383 @@ export function protocolBadgeClass(kind: ProtocolBadgeKind): string {
 
 /** Deep-link do protokołu w module Protokoły (Technical.tsx obsługuje ?protocol=ID). */
 export const protocolHref = (id: number): string => `/technical/protokoly?protocol=${id}`;
+
+// ---------------------------------------------------------------------------
+// Realizacje z kalendarza (REALIZATIONS_CONTRACT.md)
+// ---------------------------------------------------------------------------
+
+/**
+ * Typy wydarzeń objęte automatem realizacji. To domyślna lista z kontraktu —
+ * faktyczny zestaw ustala admin (Administracja → Kalendarz), więc UI używa jej
+ * wyłącznie do podpowiedzi („powstanie automatycznie…”) i do filtra.
+ */
+export const REALIZATION_TYPES: readonly CalendarEventType[] = [
+  "serwis",
+  "montaz",
+  "wizja",
+  "demontaz",
+  "konserwacja",
+];
+
+export const realizationApplies = (type: CalendarEventType | string): boolean =>
+  REALIZATION_TYPES.includes(type as CalendarEventType);
+
+/** Etykiety rodzajów realizacji (jak w zakładce Realizacje). */
+export const REALIZATION_KIND_LABEL: Record<RealizationKind, string> = {
+  service: "Serwis płatny",
+  warranty: "Gwarancyjny",
+  installation: "Montaż",
+};
+
+export type RealizationBadgeKind = "invoiced" | "open";
+
+/** Stan realizacji dla badge'a; null = wydarzenie bez realizacji. */
+export function realizationBadgeKind(e: {
+  realization?: CalendarEventRealization | null;
+}): RealizationBadgeKind | null {
+  if (!e.realization) return null;
+  return e.realization.invoiced ? "invoiced" : "open";
+}
+
+export const REALIZATION_BADGE_META: Record<
+  RealizationBadgeKind,
+  { icon: LucideIcon; badge: string; /** Kolor samej ikony — kompaktowy znacznik. */ tone: string; label: string; hint: string }
+> = {
+  invoiced: {
+    icon: Receipt,
+    badge: "bg-emerald-100 text-emerald-800 dark:bg-emerald-500/20 dark:text-emerald-200",
+    tone: "text-emerald-600 dark:text-emerald-300",
+    label: "Zafakturowana",
+    hint: "realizacja rozliczona — edycja wydarzenia jej nie zmienia",
+  },
+  open: {
+    icon: Receipt,
+    badge: "bg-slate-200 text-slate-700 dark:bg-slate-500/25 dark:text-slate-200",
+    tone: "text-slate-500 dark:text-slate-300",
+    label: "Realizacja",
+    hint: "nierozliczona — synchronizuje się z wydarzeniem",
+  },
+};
+
+/** Pełna klasa badge'a realizacji. */
+export function realizationBadgeClass(kind: RealizationBadgeKind): string {
+  return cn("inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium", REALIZATION_BADGE_META[kind].badge);
+}
+
+/** Kwota realizacji w formacie PLN (badge / podgląd). */
+const plnFmt = new Intl.NumberFormat("pl-PL", { style: "currency", currency: "PLN", maximumFractionDigits: 0 });
+export const realizationMoney = (v: number | null | undefined): string => plnFmt.format(Number(v || 0));
+
+/**
+ * Deep-link do realizacji w module Techniczny (Technical.tsx obsługuje
+ * `?realization=ID`; `date` pozwala od razu ustawić właściwy miesiąc).
+ */
+export const realizationHref = (id: number, date?: string | null): string =>
+  `/technical/realizacje?realization=${id}${date ? `&date=${date.slice(0, 10)}` : ""}`;
+
+/** Deep-link do wydarzenia w kalendarzu (Calendar.tsx obsługuje ?event=ID&date=). */
+export const calendarEventHref = (id: number, startAt?: string | null): string =>
+  `/technical/kalendarz?event=${id}${startAt ? `&date=${startAt.slice(0, 10)}` : ""}`;
+
+// ---------------------------------------------------------------------------
+// Teksty tooltipów (hover) — wspólne dla siatki FullCalendar (natywny `title`),
+// tablicy, badge'y i dialogu. Wzorzec: „etykieta: wartość”, bez powtarzania
+// tego, co i tak widać na ekranie, bez kropki na końcu krótkich etykiet.
+// ---------------------------------------------------------------------------
+
+const PLURAL_PL = new Intl.PluralRules("pl-PL");
+
+/** Odmiana liczebnika po polsku: `pluralPl(3, "wydarzenie", "wydarzenia", "wydarzeń")` → „3 wydarzenia”. */
+export function pluralPl(n: number, one: string, few: string, many: string): string {
+  const cat = PLURAL_PL.select(n);
+  return `${n} ${cat === "one" ? one : cat === "few" ? few : many}`;
+}
+
+/** „1 wydarzenie” / „3 wydarzenia” / „13 wydarzeń”. */
+export const eventsCount = (n: number): string => pluralPl(n, "wydarzenie", "wydarzenia", "wydarzeń");
+
+/** „2 dni” / „1 dzień”. */
+export const daysCount = (n: number): string => pluralPl(n, "dzień", "dni", "dni");
+
+/** Data bez godziny z dowolnego znacznika API („12.03.2026”). */
+export function fmtDateOnly(v: string | null | undefined): string {
+  if (!v) return "—";
+  const d = parseTimestamp(v);
+  if (Number.isNaN(d.getTime())) return v;
+  return `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()}`;
+}
+
+/** Kwota realizacji z groszami — do tooltipów („4 500,00 zł”). */
+const plnExactFmt = new Intl.NumberFormat("pl-PL", {
+  style: "currency",
+  currency: "PLN",
+  minimumFractionDigits: 2,
+});
+export const realizationMoneyExact = (v: number | null | undefined): string =>
+  plnExactFmt.format(Number(v || 0));
+
+/** „Rozliczenie: gwarancyjny — w ramach gwarancji”. Null → brak tooltipa. */
+export function billingTip(b: CalendarBilling | null | undefined): string | null {
+  if (!b) return null;
+  const m = BILLING_META[b];
+  if (!m) return null;
+  return `Rozliczenie: ${m.label.toLowerCase()} — ${m.hint}`;
+}
+
+/**
+ * Tooltip znacznika protokołu:
+ *   „Protokół P/2026/03/008 — podpisany 12.03.2026”
+ *   „Protokół P/2026/03/008 — szkic, jeszcze niezatwierdzony”
+ *   „Brak protokołu — wydarzenie wykonane, protokół nie został utworzony”
+ */
+export function protocolTip(e: {
+  type: CalendarEventType | string;
+  status: CalendarEventStatus | string;
+  protocol?: { number?: string | null; status: "draft" | "final"; signedAt?: string | null; signed?: boolean } | null;
+}): string | null {
+  const kind = protocolBadgeKind(e);
+  if (!kind) return null;
+  if (kind === "missing") return "Brak protokołu — wydarzenie wykonane, protokół nie został utworzony";
+  const num = e.protocol?.number ? `Protokół ${e.protocol.number}` : "Protokół";
+  if (kind === "draft") return `${num} — szkic, jeszcze niezatwierdzony`;
+  const signedAt = e.protocol?.signedAt;
+  return signedAt ? `${num} — podpisany ${fmtDateOnly(signedAt)}` : `${num} — zatwierdzony`;
+}
+
+/**
+ * Tooltip znacznika realizacji:
+ *   „Realizacja #97 — nierozliczona, 4 500,00 zł
+ *    Serwis płatny · Magazyn Centralny · 12.03.2026”
+ */
+export function realizationTip(r: CalendarEventRealization | null | undefined): string | null {
+  if (!r) return null;
+  const head = `Realizacja #${r.id} — ${r.invoiced ? "zafakturowana" : "nierozliczona"}, ${realizationMoneyExact(r.total)}`;
+  const rest = [REALIZATION_KIND_LABEL[r.kind] ?? r.kind, r.site, r.date ? fmtDateOnly(r.date) : ""]
+    .filter(Boolean)
+    .join(" · ");
+  return rest ? `${head}\n${rest}` : head;
+}
+
+/** „Termin minął 2 dni temu, status wciąż Zaplanowane” — dla wydarzeń po terminie. */
+export function overdueTip(
+  e: { endAt: string; status: CalendarEventStatus | string },
+  now: Date | number = Date.now()
+): string {
+  const end = parseLocal(e.endAt).getTime();
+  const ms = (typeof now === "number" ? now : now.getTime()) - end;
+  const status = eventStatusLabel(String(e.status));
+  if (!Number.isFinite(ms) || ms <= 0) return `Termin minął, status wciąż ${status}`;
+  const mins = Math.floor(ms / 60_000);
+  const when =
+    mins < 60
+      ? `${pluralPl(Math.max(mins, 1), "minutę", "minuty", "minut")} temu`
+      : mins < 1440
+        ? `${pluralPl(Math.floor(mins / 60), "godzinę", "godziny", "godzin")} temu`
+        : `${daysCount(Math.floor(mins / 1440))} temu`;
+  return `Termin minął ${when}, status wciąż ${status}`;
+}
+
+/**
+ * Pełny opis wydarzenia jako jeden tekst — dziś służy `aria-label` kafelka
+ * (czytniki ekranu) i podglądom tekstowym. Wersja pokazywana wzrokowo to
+ * `eventTipData` (te same treści rozbite na pola).
+ */
+export function eventTooltipText(
+  ev: {
+    title: string;
+    type: CalendarEventType | string;
+    status: CalendarEventStatus | string;
+    startAt: string;
+    endAt: string;
+    allDay: boolean;
+    objectName?: string | null;
+    location?: string | null;
+    billing?: CalendarBilling | null;
+    protocol?: CalendarEvent["protocol"];
+    realization?: CalendarEventRealization | null;
+    technicians?: { firstName: string; lastName: string }[];
+    series?: { freq: CalendarSeriesFreq; interval: number } | null;
+    seriesId?: number | null;
+    seriesIndex?: number;
+    seriesTotal?: number;
+    notesCount?: number;
+    deletedAt?: string | null;
+  },
+  now: Date | number = Date.now()
+): string {
+  const typeLabel = eventTypeLabel(String(ev.type));
+  const duration = fmtDuration(ev.startAt, ev.endAt, ev.allDay);
+  const lines: string[] = [
+    ev.title,
+    [typeLabel, ev.objectName || ""].filter(Boolean).join(" · "),
+    `${fmtRange(ev.startAt, ev.endAt, ev.allDay)}${duration ? ` (${duration})` : ""}${ev.allDay ? " · cały dzień" : ""}`,
+  ];
+  if (ev.location) lines.push(`Lokalizacja: ${ev.location}`);
+  if (ev.technicians?.length) {
+    lines.push(
+      `${ev.technicians.length > 1 ? "Technicy" : "Technik"}: ${ev.technicians
+        .map((t) => `${t.firstName} ${t.lastName}`.trim())
+        .join(", ")}`
+    );
+  }
+  // Status + rozliczenie + protokół + realizacja w jednej linii „Status: …”.
+  const statusBits = [eventStatusLabel(String(ev.status))];
+  if (ev.billing && BILLING_META[ev.billing]) statusBits.push(BILLING_META[ev.billing].label.toLowerCase());
+  const kind = protocolBadgeKind(ev);
+  if (kind === "final") {
+    statusBits.push(
+      `protokół ${ev.protocol?.number ?? ""}`.trim() + (ev.protocol?.signedAt ? " (podpisany)" : " (zatwierdzony)")
+    );
+  } else if (kind === "draft") {
+    statusBits.push(`protokół ${ev.protocol?.number ?? ""}`.trim() + " (szkic)");
+  } else if (kind === "missing") {
+    statusBits.push("brak protokołu");
+  }
+  if (ev.realization) {
+    statusBits.push(
+      `realizacja #${ev.realization.id} ${ev.realization.invoiced ? "zafakturowana" : "nierozliczona"}`
+    );
+  }
+  lines.push(`Status: ${statusBits.join(" · ")}`);
+  if (ev.seriesId) {
+    const freq = ev.series ? seriesShortLabel(ev.series.freq, ev.series.interval) : "seria";
+    const pos = ev.seriesIndex != null && ev.seriesTotal != null ? ` (${ev.seriesIndex}/${ev.seriesTotal})` : "";
+    lines.push(`Seria: ${freq}${pos}`);
+  }
+  if (ev.notesCount) lines.push(notesLabel(ev.notesCount));
+  const isPending = ev.status === "planned" || ev.status === "confirmed";
+  if (isPending && parseLocal(ev.endAt).getTime() < (typeof now === "number" ? now : now.getTime())) {
+    lines.push(overdueTip({ endAt: ev.endAt, status: ev.status }, now));
+  }
+  if (ev.deletedAt) lines.push("Wydarzenie usunięte (w koszu)");
+  return lines.filter(Boolean).join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// Ustrukturyzowany dymek wydarzenia (własny tooltip, patrz components/ui/tooltip)
+// ---------------------------------------------------------------------------
+
+/** Wejście wspólne dla `eventTooltipText` i `eventTipData`. */
+export type EventTipInput = Parameters<typeof eventTooltipText>[0];
+
+const STATUS_TONE: Record<CalendarEventStatus, TipTone> = {
+  planned: "info",
+  confirmed: "good",
+  done: "neutral",
+  cancelled: "bad",
+};
+
+const BILLING_TONE: Record<CalendarBilling, TipTone> = {
+  warranty: "info",
+  free: "good",
+  paid: "warn",
+};
+
+const PROTOCOL_TONE: Record<ProtocolBadgeKind, TipTone> = {
+  final: "good",
+  draft: "neutral",
+  missing: "warn",
+};
+
+/** Domyślna podpowiedź na dole dymka kafelka w siatce / na karcie tablicy. */
+export const EVENT_TIP_HINT = "Kliknij, by otworzyć · prawy przycisk: więcej";
+
+/**
+ * To samo, co `eventTooltipText`, ale rozbite na pola — nagłówek z kropką typu,
+ * linia „Typ · Obiekt”, termin, technicy, pigułki stanu i ostrzeżenia.
+ * Renderuje to `RichTip` z `@/components/ui/tooltip`.
+ */
+export function eventTipData(
+  ev: EventTipInput,
+  opts: { hint?: string | null; warnings?: string[]; now?: Date | number } = {}
+): RichTip {
+  const now = opts.now ?? Date.now();
+  const type = ev.type as CalendarEventType;
+  const typeLabel = eventTypeLabel(String(ev.type));
+  const duration = fmtDuration(ev.startAt, ev.endAt, ev.allDay);
+
+  const rows: TipRow[] = [
+    {
+      icon: "clock",
+      text: `${fmtRange(ev.startAt, ev.endAt, ev.allDay)}${duration ? ` (${duration})` : ""}${
+        ev.allDay ? " · cały dzień" : ""
+      }`,
+    },
+  ];
+  if (ev.technicians?.length) {
+    rows.push({
+      icon: "users",
+      label: ev.technicians.length > 1 ? "Technicy" : "Technik",
+      text: ev.technicians.map((t) => `${t.firstName} ${t.lastName}`.trim()).join(", "),
+    });
+  }
+  if (ev.location) rows.push({ icon: "pin", label: "Lokalizacja", text: ev.location });
+  if (ev.seriesId) {
+    const freq = ev.series ? seriesShortLabel(ev.series.freq, ev.series.interval) : "seria";
+    const pos = ev.seriesIndex != null && ev.seriesTotal != null ? ` (${ev.seriesIndex}/${ev.seriesTotal})` : "";
+    rows.push({ icon: "repeat", label: "Seria", text: `${freq}${pos}` });
+  }
+  if (ev.notesCount) rows.push({ icon: "note", text: notesLabel(ev.notesCount) });
+
+  const status = ev.status as CalendarEventStatus;
+  const pills: TipPill[] = [
+    { label: eventStatusLabel(String(ev.status)), tone: STATUS_TONE[status] ?? "neutral" },
+  ];
+  if (ev.billing && BILLING_META[ev.billing]) {
+    pills.push({ label: BILLING_META[ev.billing].label, tone: BILLING_TONE[ev.billing] });
+  }
+  const kind = protocolBadgeKind(ev);
+  if (kind) {
+    const num = ev.protocol?.number ? ` ${ev.protocol.number}` : "";
+    const label =
+      kind === "missing"
+        ? "Brak protokołu"
+        : kind === "draft"
+          ? `Protokół${num} · szkic`
+          : `Protokół${num} · ${ev.protocol?.signedAt ? "podpisany" : "zatwierdzony"}`;
+    pills.push({ label, tone: PROTOCOL_TONE[kind] });
+  }
+  if (ev.realization) {
+    pills.push({
+      label: `Realizacja #${ev.realization.id} · ${ev.realization.invoiced ? "zafakturowana" : "nierozliczona"}`,
+      tone: ev.realization.invoiced ? "good" : "neutral",
+    });
+  }
+
+  const warnings = [...(opts.warnings ?? [])];
+  const pending = ev.status === "planned" || ev.status === "confirmed";
+  if (pending && parseLocal(ev.endAt).getTime() < (typeof now === "number" ? now : now.getTime())) {
+    warnings.push(overdueTip({ endAt: ev.endAt, status: ev.status }, now));
+  }
+  if (ev.deletedAt) warnings.push("Wydarzenie usunięte (w koszu)");
+
+  return {
+    title: ev.title,
+    accentClass: EVENT_TYPE_UI[type]?.dot,
+    strike: ev.status === "cancelled" || !!ev.deletedAt,
+    meta: [typeLabel, ev.objectName || ""].filter(Boolean).join(" · "),
+    rows,
+    pills,
+    warnings,
+    hint: opts.hint === null ? undefined : (opts.hint ?? EVENT_TIP_HINT),
+  };
+}
+
+/**
+ * Jednolinijkowy `aria-label` dla kafelka — czytnik ekranu dostaje to samo, co
+ * widzi wzrokowiec w dymku.
+ */
+export const eventTipAria = (ev: EventTipInput, now?: Date | number): string =>
+  eventTooltipText(ev, now).replace(/\n/g, " · ");
+
+/**
+ * Rozbicie krótkiego opisu „Nagłówek — wyjaśnienie” (billingTip / protocolTip /
+ * realizationTip) na pogrubiony tytuł i treść dymka.
+ */
+export function splitTip(text: string | null | undefined): RichTip | null {
+  if (!text) return null;
+  const [head, ...rest] = text.split("\n");
+  const dash = head.indexOf(" — ");
+  if (dash < 0) return { title: head, text: rest.join("\n") || undefined };
+  return { title: head.slice(0, dash), text: [head.slice(dash + 3), ...rest].join("\n") };
+}

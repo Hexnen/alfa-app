@@ -20,6 +20,7 @@ import authRoutes from "./auth.js";
 import publicRoutes from "./public.js";
 import adminRoutes from "./admin.js";
 import adminAssistantRoutes from "./admin-assistant.js";
+import adminCalendarRoutes from "./admin-calendar.js";
 import assistantRoutes from "./assistant.js";
 import calendarRoutes, { calendarPublicRoutes } from "./calendar.js";
 import activityRoutes from "./activity.js";
@@ -49,6 +50,7 @@ api.use("*", requireAuth);
 // Zamontowane przed strażnikiem zakładek (który i tak nie obejmuje /admin).
 // /admin/assistant PRZED /admin — Hono dopasowuje po kolejności rejestracji.
 api.route("/admin/assistant", adminAssistantRoutes);
+api.route("/admin/calendar", adminCalendarRoutes);
 api.route("/admin", adminRoutes);
 
 // --- ASYSTENT AI (kalendarz) — dostęp wg ustawienia assistant.access (admin lub edytorzy kalendarza);

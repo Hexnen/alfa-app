@@ -917,6 +917,11 @@ export interface Realization {
   subtotal: number; // suma bez rabatu (liczona w API)
   total: number; // suma netto (liczona w API)
   labourCost: number; // koszt roboczogodzin (liczony w API)
+  /**
+   * Wydarzenie kalendarza, z którego powstała realizacja (LEFT JOIN po
+   * `calendar_events.realization_id`). Brak pola = starszy backend.
+   */
+  calendarEventId?: number | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -952,9 +957,15 @@ export interface RealizationSummary {
   months: { month: number; revenue: number; loss: number }[];
 }
 
-export async function getRealizations(year: number, month: number) {
+/** `source` — filtr pochodzenia (opcjonalny; starszy backend go ignoruje). */
+export async function getRealizations(
+  year: number,
+  month: number,
+  opts?: { source?: "calendar" | "manual" }
+) {
+  const q = opts?.source ? `&source=${opts.source}` : "";
   return request<ApiResponse<Realization[]>>(
-    `/realizations?year=${year}&month=${month}`
+    `/realizations?year=${year}&month=${month}${q}`
   );
 }
 
@@ -2301,6 +2312,21 @@ export interface CalendarEventProtocol {
   workDate?: string;
 }
 
+/**
+ * Skrót realizacji powiązanej z wydarzeniem (`calendar_events.realization_id`).
+ * Brak pola w odpowiedzi = starszy backend (traktujemy jak `null`).
+ */
+export interface CalendarEventRealization {
+  id: number;
+  /** YYYY-MM-DD */
+  date: string;
+  site: string;
+  kind: RealizationKind;
+  invoiced: boolean;
+  /** Suma netto (amountHours + amountMaterial + amountKm - discount). */
+  total: number;
+}
+
 export type CalendarSeriesFreq =
   | "weekly"
   | "monthly"
@@ -2352,6 +2378,10 @@ export interface CalendarEvent {
   protocolId?: number | null;
   /** Wyliczone przez backend: protokół z `protocolId` albo z realizacji. */
   protocol?: CalendarEventProtocol | null;
+  /** Skrót realizacji z `realizationId`. Brak pola = starszy backend. */
+  realization?: CalendarEventRealization | null;
+  /** `true` = realizacja została ręcznie odpięta; automat jej nie odtworzy. */
+  realizationOptout: boolean;
   technicians: CalendarEventTechnician[];
   createdBy: number | null;
   createdByLabel: string | null;
@@ -2402,7 +2432,10 @@ export interface CalendarEventInput {
   status?: CalendarEventStatus;
   objectId?: number | null;
   orderId?: number | null;
+  /** Ręczne podpięcie (id realizacji) / odpięcie (`null`). */
   realizationId?: number | null;
+  /** `true` = nie twórz realizacji automatem (ustawiane przez „Odepnij”); `false` = włącz automat. */
+  realizationOptout?: boolean;
   /** Rozliczenie (null = nie dotyczy; ignorowane dla urlop/biuro/przygotowanie). */
   billing?: CalendarBilling | null;
   /** Jawnie przypięty protokół (null = odepnij → protokół realizacji / brak). */
@@ -2635,6 +2668,77 @@ export const calendarApi = {
       "/calendar/feed-token",
       { method: "POST" }
     );
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Zapisane zestawy filtrów kalendarza (per użytkownik) — /calendar/filter-sets
+// ---------------------------------------------------------------------------
+
+/**
+ * Filtry zapisane w zestawie — te same klucze, co localStorage `alfa.calendar.filters`,
+ * plus opcjonalnie widok i weekendy (zapisywane tylko gdy user zaznaczy checkbox).
+ * Backend waliduje białą listą i wycina nieznane klucze/wartości.
+ */
+export interface CalendarFilterSetFilters {
+  types: CalendarEventType[];
+  statuses: CalendarEventStatus[];
+  billings: (CalendarBilling | "none")[];
+  technicianIds: number[];
+  protocol: "" | "with" | "without";
+  realization: "" | "with" | "without";
+  /** "dayGridMonth" | "timeGridWeek" | "timeGridDay" | "listWeek" | "board" */
+  view?: string;
+  weekends?: boolean;
+}
+
+export interface CalendarFilterSet {
+  id: number;
+  name: string;
+  filters: CalendarFilterSetFilters;
+  isDefault: boolean;
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Limit zestawów na użytkownika (musi zgadzać się z MAX_FILTER_SETS na backendzie). */
+export const CALENDAR_FILTER_SET_LIMIT = 20;
+/** Maksymalna długość nazwy zestawu (backend: FILTER_SET_NAME_MAX). */
+export const CALENDAR_FILTER_SET_NAME_MAX = 60;
+
+export const calendarFilterSetsApi = {
+  async list() {
+    return request<ApiResponse<CalendarFilterSet[]>>("/calendar/filter-sets");
+  },
+
+  async create(payload: { name: string; filters: CalendarFilterSetFilters; isDefault?: boolean }) {
+    return request<ApiResponse<CalendarFilterSet>>("/calendar/filter-sets", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  },
+
+  /** Częściowa aktualizacja: nazwa (zmiana nazwy) i/lub filters (nadpisanie bieżącymi). */
+  async update(
+    id: number,
+    payload: { name?: string; filters?: CalendarFilterSetFilters; isDefault?: boolean; sortOrder?: number }
+  ) {
+    return request<ApiResponse<CalendarFilterSet>>(`/calendar/filter-sets/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async remove(id: number) {
+    return request<ApiResponse<{ id: number }>>(`/calendar/filter-sets/${id}`, { method: "DELETE" });
+  },
+
+  /** Ustawia zestaw jako domyślny (odznacza pozostałe); zwraca całą, świeżą listę. */
+  async setDefault(id: number) {
+    return request<ApiResponse<CalendarFilterSet[]>>(`/calendar/filter-sets/${id}/default`, {
+      method: "POST",
+    });
   },
 };
 
@@ -3245,5 +3349,99 @@ export const adminAssistantApi = {
   async deleteAllChats() {
     const r = await request<ApiResponse<{ deleted: number }>>("/admin/assistant/chats", { method: "DELETE" });
     return r.data as { deleted: number };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Administracja kalendarza (admin-only) — realizacje z wydarzeń.
+// Kontrakt: scratchpad/REALIZATIONS_CONTRACT.md §1 i §4. Precedencja wartości
+// jak w asystencie: DB → env → domyślne (`sources` per pole).
+// ---------------------------------------------------------------------------
+
+/** Kiedy wydarzenie ma tworzyć realizację. */
+export type CalendarAutoRealization = "on_create" | "on_done" | "off";
+
+export interface CalendarSettingsValues {
+  autoRealization: CalendarAutoRealization;
+  /** Typy wydarzeń objęte automatem (np. serwis, montaz, wizja, demontaz, konserwacja). */
+  realizationTypes: string[];
+  /** Czy edycja wydarzenia aktualizuje powiązaną realizację. */
+  realizationSync: boolean;
+}
+
+export type CalendarSettingsField = keyof CalendarSettingsValues;
+
+export interface AdminCalendarSettings {
+  values: CalendarSettingsValues;
+  /** Może nie przyjść ze starszego backendu — UI radzi sobie bez tego. */
+  sources?: Partial<Record<CalendarSettingsField, AssistantSettingSource>>;
+  defaults?: CalendarSettingsValues;
+  meta?: {
+    /** Typy, które wolno objąć automatem (urlop nigdy). */
+    allowedTypes?: CalendarEventType[];
+    forbiddenTypes?: CalendarEventType[];
+    defaultTypes?: CalendarEventType[];
+    autoRealizationModes?: { value: CalendarAutoRealization; label: string }[];
+  };
+}
+
+/** PUT: dowolny podzbiór; `null` = usuń z bazy (powrót do env/domyślnego). */
+export type AdminCalendarSettingsUpdate = {
+  [K in CalendarSettingsField]?: CalendarSettingsValues[K] | null;
+};
+
+export interface AdminCalendarBackfillCandidate {
+  eventId: number;
+  title: string;
+  startAt: string;
+  type: CalendarEventType | string;
+  /** Obiekt realizacji wyliczony z wydarzenia. */
+  site: string;
+}
+export interface AdminCalendarBackfillCreated {
+  eventId: number;
+  realizationId: number;
+  protocolNumber: string | null;
+}
+export interface AdminCalendarBackfillSkipped {
+  eventId: number;
+  reason: string;
+}
+
+/**
+ * Wynik backfillu. Backend zwraca listy; akceptujemy też same liczby, gdyby
+ * kiedyś odchudził odpowiedź (UI liczy `backfillCount`).
+ */
+export interface AdminCalendarBackfillResult {
+  /** Wydarzenia kwalifikujące się do utworzenia realizacji. */
+  candidates: AdminCalendarBackfillCandidate[] | number;
+  /** Faktycznie utworzone (brak w trybie `dryRun`). */
+  created?: AdminCalendarBackfillCreated[] | number;
+  /** Pominięte (mają już realizację / typ nieobjęty / błąd). */
+  skipped: AdminCalendarBackfillSkipped[] | number;
+}
+
+/** Liczność pola wyniku backfillu — lista albo gotowa liczba. */
+export const backfillCount = (v: unknown[] | number | undefined): number =>
+  Array.isArray(v) ? v.length : typeof v === "number" ? v : 0;
+
+export const adminCalendarApi = {
+  async settings() {
+    const r = await request<ApiResponse<AdminCalendarSettings>>("/admin/calendar/settings");
+    return r.data as AdminCalendarSettings;
+  },
+  async updateSettings(body: AdminCalendarSettingsUpdate) {
+    const r = await request<ApiResponse<AdminCalendarSettings>>("/admin/calendar/settings", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
+    return r.data as AdminCalendarSettings;
+  },
+  async backfillRealizations(body: { dryRun: boolean; from?: string }) {
+    const r = await request<ApiResponse<AdminCalendarBackfillResult>>(
+      "/admin/calendar/backfill-realizations",
+      { method: "POST", body: JSON.stringify(body) }
+    );
+    return r.data as AdminCalendarBackfillResult;
   },
 };

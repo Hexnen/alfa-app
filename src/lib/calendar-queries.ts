@@ -123,6 +123,19 @@ export interface SeriesRef {
   count: number | null;
 }
 
+/** Skrót realizacji powiązanej z wydarzeniem (`realizationId`). */
+export interface RealizationRef {
+  id: number;
+  /** Data realizacji (YYYY-MM-DD). */
+  date: string;
+  /** Obiekt (nazwa tekstowa w realizacjach). */
+  site: string;
+  kind: "service" | "warranty" | "installation";
+  invoiced: boolean;
+  /** Suma netto: godziny + materiały + km − rabat. */
+  total: number;
+}
+
 /** Skrót protokołu wydarzenia (jawnie przypięty `protocolId` albo protokół realizacji). */
 export interface ProtocolRef {
   id: number;
@@ -147,6 +160,10 @@ export interface CalendarEventJson {
   objectName: string | null;
   orderId: number | null;
   realizationId: number | null;
+  /** Wyliczone: realizacja z `realizationId` (kwoty, status faktury) — null, gdy brak. */
+  realization: RealizationRef | null;
+  /** Użytkownik ręcznie odpiął realizację — automat jej nie utworzy (także backfill). */
+  realizationOptout: boolean;
   /** Rozliczenie: warranty | free | paid | null (nie dotyczy). */
   billing: CalendarBilling | null;
   /** Jawnie przypięty protokół (NULL → protokół realizacji, jeśli jest). */
@@ -280,6 +297,36 @@ export function loadEvents(dbx: DbOrTx, ids: number[]): CalendarEventJson[] {
     }
   }
 
+  // Realizacje wydarzeń (1:1 po realization_id) — jedno zapytanie zbiorcze.
+  const realById = new Map<number, RealizationRef>();
+  if (realIds.length > 0) {
+    const rRows = dbx
+      .select({
+        id: schema.realizations.id,
+        date: schema.realizations.date,
+        site: schema.realizations.site,
+        kind: schema.realizations.kind,
+        invoiced: schema.realizations.invoiced,
+        amountHours: schema.realizations.amountHours,
+        amountMaterial: schema.realizations.amountMaterial,
+        amountKm: schema.realizations.amountKm,
+        discount: schema.realizations.discount,
+      })
+      .from(schema.realizations)
+      .where(inArray(schema.realizations.id, realIds))
+      .all();
+    for (const r of rRows) {
+      realById.set(r.id, {
+        id: r.id,
+        date: r.date,
+        site: r.site,
+        kind: r.kind,
+        invoiced: r.invoiced,
+        total: Math.round((r.amountHours + r.amountMaterial + r.amountKm - r.discount) * 100) / 100,
+      });
+    }
+  }
+
   const notesCount = notesCountByEvent(dbx, ids);
   const label = (email: string | null, name: string | null) => (email == null ? null : (name || "").trim() || email);
 
@@ -301,6 +348,8 @@ export function loadEvents(dbx: DbOrTx, ids: number[]): CalendarEventJson[] {
       objectName: r.objectName ?? null,
       orderId: e.orderId,
       realizationId: e.realizationId,
+      realization: (e.realizationId != null ? realById.get(e.realizationId) : null) ?? null,
+      realizationOptout: e.realizationOptout,
       billing: e.billing,
       protocolId: e.protocolId,
       protocol: (e.protocolId != null ? protoById.get(e.protocolId) : null) ?? (e.realizationId != null ? protoByReal.get(e.realizationId) : null) ?? null,
