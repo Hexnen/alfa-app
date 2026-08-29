@@ -142,8 +142,13 @@ export function ObiektyView({ scope, search, reloadKey }: AnalyticsViewProps) {
           objects: 1,
           withCost: r.hasCost ? 1 : 0,
           revenue: r.revenue,
-          cost: r.hasCost ? r.cost : 0,
-          profit: r.hasCost ? r.profit : 0,
+          // Koszt i zysk idą wprost z API — dla obiektu bez kosztu backend liczy
+          // koszt jako 0, więc zysk równa się przychodowi. Wycinanie takich
+          // wierszy z zysku (a zostawianie ich w przychodzie) rozjeżdżało kafelki:
+          // „przychód − koszt" przestawało się zgadzać z pokazanym zyskiem.
+          // Uczciwość niesie `coverage`, nie okrojona suma.
+          cost: r.cost,
+          profit: r.profit,
           setupCost: r.setupCost,
         }))
       ),

@@ -117,7 +117,12 @@ export function aggregate(rows: AggInput[]): Agg {
   return {
     ...acc,
     coverage: acc.objects > 0 ? acc.objectsWithCost / acc.objects : 0,
-    margin: acc.revenue > 0 ? (acc.profit / acc.revenue) * 100 : null,
+    // Bez ani jednego znanego kosztu marża jest NIEZNANA, a nie stuprocentowa —
+    // ta sama reguła, co marginOf() w src/routes/analytics.ts.
+    margin:
+      acc.objectsWithCost > 0 && acc.revenue > 0
+        ? (acc.profit / acc.revenue) * 100
+        : null,
     arpo: acc.objects > 0 ? acc.revenue / acc.objects : null,
   };
 }
