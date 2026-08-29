@@ -251,7 +251,9 @@ export function Contractors() {
           {contractors.length}{" "}
           {contractors.length === 1 ? "kontrahent" : "kontrahentów"} ·{" "}
           {totals.objects} {totals.objects === 1 ? "obiekt" : "obiektów"} ·{" "}
-          {formatCurrency(totals.value)} / mies.
+          {formatCurrency(totals.value)} / mies. ·{" "}
+          {/* Jedno zdanie o konwencji na ekran — abonamenty i koszty są bez VAT. */}
+          kwoty netto (bez VAT)
         </p>
 
         {editable && (

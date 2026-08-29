@@ -342,6 +342,9 @@ export function Objects() {
       parts.push(`zysk ${formatCurrency(summary.value - summary.cost)}`);
       parts.push(`koszt uzupełniony: ${summary.withCost}`);
     }
+    // Jedno zdanie o konwencji na ekran zamiast dopisku „netto” przy każdej
+    // kolumnie — kwoty handlowe w całej aplikacji są bez VAT.
+    parts.push("kwoty netto (bez VAT)");
     return parts.join(" · ");
   }, [summary]);
 
@@ -557,6 +560,8 @@ export function Objects() {
                     <SortHeader label="Spółka" sortKey="company" />
                     <SortHeader label="Handlowiec" sortKey="salesperson" />
                     <SortHeader label="Wartosc mies." sortKey="value" align="right" />
+                    {/* To jest koszt POZOSTAŁY z kartoteki (monitoring, sprzęt);
+                        pensje załogi dolicza dopiero Analityka z Kadr. */}
                     <SortHeader label="Koszt mies." sortKey="cost" align="right" />
                     <SortHeader label="Zysk mies." sortKey="profit" align="right" />
                     <th className="text-right py-3 px-2 font-medium">Akcje</th>
