@@ -21,6 +21,8 @@ import {
   clearPersonnelCostCache,
   fullMonths,
 } from "../src/lib/object-personnel-cost.js";
+import { COMPANY_FIELDS } from "../src/lib/company-config.js";
+import { deleteSetting, getSetting, setSetting } from "../src/lib/settings.js";
 
 let failures = 0;
 function ok(label: string, cond: boolean, extra?: unknown) {
@@ -33,6 +35,52 @@ function near(a: number | null, b: number, eps = 0.001) {
 }
 
 const PREFIX = "__ZZ_ANALYTICS__";
+
+/* --- Narzuty składek pracodawcy ------------------------------------------
+ * Test podmienia GLOBALNE ustawienia narzutów w app_settings, więc musi je
+ * przywrócić co do wpisu: „było 1,59" i „nie było wpisu wcale" (czyli wartość
+ * domyślna z kodu) to dwa różne stany i mylenie ich zostawiłoby po teście
+ * zaśmiecone ustawienia firmy.
+ */
+const MARKUP_FIELDS = [
+  "employerMarkupUop",
+  "employerMarkupZlecenieZua",
+  "employerMarkupZlecenieZza",
+  "employerMarkupOfficeDefault",
+] as const;
+type MarkupField = (typeof MARKUP_FIELDS)[number];
+
+const markupKey = (f: MarkupField) => COMPANY_FIELDS[f].dbKey;
+
+/** Stan wpisów sprzed testu: klucz → wartość albo null („wpisu nie było"). */
+const savedMarkups = new Map<string, string | null>();
+
+function stashMarkups() {
+  for (const f of MARKUP_FIELDS) {
+    const key = markupKey(f);
+    if (!savedMarkups.has(key)) savedMarkups.set(key, getSetting(key));
+  }
+}
+
+function setMarkup(f: MarkupField, value: number) {
+  stashMarkups();
+  setSetting(markupKey(f), String(value), null);
+}
+
+function restoreMarkups() {
+  for (const [key, value] of savedMarkups) {
+    if (value === null) deleteSetting(key);
+    else setSetting(key, value, null);
+  }
+  savedMarkups.clear();
+}
+
+/**
+ * Narzuty na czas testu — celowo okrągłe i różne od domyślnych (1,65 / 1,59 / 1,22 / 1,65),
+ * żeby każdą kwotę dało się sprawdzić w głowie i żeby przypadkowa równość dwóch
+ * współczynników nie przepuściła błędu „wszystko liczone tym samym narzutem".
+ */
+const MK = { uop: 2, zlecenieZua: 1.5, zlecenieZza: 1.2, officeDefault: 1.8 };
 
 /**
  * Hard delete fikstur. Kolejność wymuszona kluczami obcymi: godziny i wypłaty przed
@@ -80,6 +128,10 @@ function cleanup() {
   }
   db.delete(schema.contractors).where(like(schema.contractors.name, `${PREFIX}%`)).run();
   db.delete(schema.salespeople).where(like(schema.salespeople.lastName, `${PREFIX}%`)).run();
+  // Fikstura spółki — nośnik nadpisań narzutu per spółka.
+  db.delete(schema.companies).where(like(schema.companies.name, `${PREFIX}%`)).run();
+  // Ustawienia narzutów wracają do stanu sprzed testu (patrz `restoreMarkups`).
+  restoreMarkups();
   // Cache kosztu osobowego trzyma wynik dla stanu danych sprzed sprzątania.
   clearPersonnelCostCache();
 }
@@ -93,6 +145,15 @@ async function call(path: string) {
 
 async function main() {
   cleanup();
+
+  /*
+   * Cała arytmetyka alokacji (sekcje niżej) liczy się przy narzutach składkowych
+   * USTAWIONYCH NA 1, czyli koszt pracodawcy = wypłata netto. Dzięki temu asercje
+   * o kosztach obiektów mówią o rozdziale godzin, a nie o składkach — a składki
+   * dostają własną sekcję na końcu, gdzie narzuty są jawnie różne.
+   */
+  for (const f of MARKUP_FIELDS) setMarkup(f, 1);
+  clearPersonnelCostCache();
 
   // --- Fikstury -----------------------------------------------------------
   // Handlowiec A: ma koszt własny i prowizję — na nim liczymy pełną formułę.
@@ -215,11 +276,19 @@ async function main() {
     .returning()
     .all();
 
+  // Własna spółka fikstury — narzuty per spółka testujemy na NIEJ, żeby nie ruszać
+  // nadpisań prawdziwych spółek grupy. Dopasowanie umowa→spółka idzie po NAZWIE.
+  const [comp] = db
+    .insert(schema.companies)
+    .values({ name: `${PREFIX}SPOLKA` })
+    .returning()
+    .all();
+
   const [contract] = db
     .insert(schema.hrContracts)
     .values({
       employeeId: emp.id,
-      company: "ALFA",
+      company: comp.name,
       contractType: "zlecenie",
       zua: "tak", // niepuste ZUA = umowa główna; bez tego godziny są nierozliczane
       mainChannel: "przelew",
@@ -444,7 +513,149 @@ async function main() {
       info.unmappedHoursShare > 0 &&
       info.unmappedHoursShare <= 1,
     info);
-  ok("totals: kwoty oznaczone jako NETTO (bez kosztu pracodawcy)", info.net === true, info);
+  ok("totals: kwoty opisane jako SZACOWANY KOSZT PRACODAWCY, a nie „na rękę”",
+    info.costBasis === "employerCost" && info.employer?.applied === true, info);
+
+  /* --- Składki pracodawcy -------------------------------------------------
+   * Od tego miejsca narzuty są RÓŻNE (MK), więc każda kwota kosztu osobowego to
+   * już „wypłata netto × narzut formy zatrudnienia".
+   *
+   * Punkt odniesienia bez zmian: pracownik ma 3 000 zł netto i połowę godzin na O8,
+   * czyli na obiekt idzie 1 500 zł netto × narzut.
+   */
+  setMarkup("employerMarkupUop", MK.uop);
+  setMarkup("employerMarkupZlecenieZua", MK.zlecenieZua);
+  setMarkup("employerMarkupZlecenieZza", MK.zlecenieZza);
+  setMarkup("employerMarkupOfficeDefault", MK.officeDefault);
+  clearPersonnelCostCache();
+
+  const o8cost = async () => {
+    const d = await call("/obiekty?scope=current&costWindow=1");
+    return d.rows.find((r: any) => r.name === `${PREFIX}O8`);
+  };
+  const setForm = (v: Partial<typeof schema.hrContracts.$inferInsert>) => {
+    db.update(schema.hrContracts).set(v).where(eq(schema.hrContracts.id, contract.id)).run();
+    clearPersonnelCostCache();
+  };
+
+  // (a) ta sama wypłata, trzy formy zatrudnienia → trzy różne koszty
+  const zua = await o8cost();
+  ok(`Zlecenie ZUA: 1 500 netto × ${MK.zlecenieZua}`,
+    near(zua?.personnelCost, 1500 * MK.zlecenieZua), zua);
+
+  setForm({ contractType: "praca", zua: "tak", zza: "" });
+  const uop = await o8cost();
+  ok(`Umowa o pracę: 1 500 netto × ${MK.uop}`, near(uop?.personnelCost, 1500 * MK.uop), uop);
+
+  setForm({ contractType: "zlecenie", zua: "", zza: "tak" });
+  const zza = await o8cost();
+  ok(`Zlecenie ZZA (pracodawca nie dopłaca): 1 500 netto × ${MK.zlecenieZza}`,
+    near(zza?.personnelCost, 1500 * MK.zlecenieZza), zza);
+  ok("Ta sama wypłata na UoP i na ZZA daje różny koszt, w proporcji narzutów",
+    near(uop.personnelCost / zza.personnelCost, MK.uop / MK.zlecenieZza),
+    { uop: uop.personnelCost, zza: zza.personnelCost });
+
+  // (b) nadpisanie per spółka wygrywa z globalnym
+  db.update(schema.companies)
+    .set({ employerMarkupZlecenieZza: 3 })
+    .where(eq(schema.companies.id, comp.id))
+    .run();
+  clearPersonnelCostCache();
+  const overridden = await o8cost();
+  ok("Nadpisanie spółki (×3) wygrywa z narzutem globalnym",
+    near(overridden?.personnelCost, 1500 * 3) &&
+      !near(overridden?.personnelCost, 1500 * MK.zlecenieZza), overridden);
+  const ovInfo = (await call("/obiekty?scope=current&costWindow=1")).totals.personnel.employer;
+  ok("Nadpisanie widać w audycie (companyOverrides ≥ 1), a `markups` pokazuje wartości GLOBALNE",
+    ovInfo.companyOverrides >= 1 && near(ovInfo.markups.zlecenieZza, MK.zlecenieZza), ovInfo);
+
+  db.update(schema.companies)
+    .set({ employerMarkupZlecenieZza: null })
+    .where(eq(schema.companies.id, comp.id))
+    .run();
+  setForm({ contractType: "zlecenie", zua: "tak", zza: "" }); // powrót do stanu bazowego
+
+  // (c) rozliczenie biura BEZ umowy w kadrach → narzut domyślny
+  // (w produkcyjnej bazie to 156 ze 168 wierszy biura — formy nie ma skąd odczytać).
+  const [officeEmp] = db
+    .insert(schema.hrEmployees)
+    .values({ fullName: `${PREFIX}Biuro`, kind: "biuro", active: true })
+    .returning()
+    .all();
+  db.insert(schema.hrOfficePayroll)
+    .values({ employeeId: officeEmp.id, year: m1.year, month: m1.month, rorBase: 1000 })
+    .run();
+  // Godziny WYŁĄCZNIE na pozycji zmapowanej — całe 1 000 zł idzie na O8, więc kwotę
+  // da się rozdzielić na składnik „umowa" i składnik „biuro" bez zgadywania.
+  db.insert(schema.hrHours)
+    .values({ employeeId: officeEmp.id, objectId: hroMapped.id, year: m1.year, month: m1.month, workedHours: 100 })
+    .run();
+  clearPersonnelCostCache();
+
+  const withOffice = await o8cost();
+  ok(`Biuro bez umowy: 1 000 zł × narzut domyślny ${MK.officeDefault} (razem z umową ${1500 * MK.zlecenieZua})`,
+    near(withOffice?.personnelCost, 1500 * MK.zlecenieZua + 1000 * MK.officeDefault), withOffice);
+
+  // ...a gdy umowa ISTNIEJE, wygrywa jej forma (umowa bez wypłaty — sam nośnik formy).
+  const [officeContract] = db
+    .insert(schema.hrContracts)
+    .values({
+      employeeId: officeEmp.id,
+      company: comp.name,
+      contractType: "praca",
+      zua: "tak",
+      mainChannel: "przelew",
+      bonusType: "brak",
+      active: true,
+    })
+    .returning()
+    .all();
+  clearPersonnelCostCache();
+  const officeWithContract = await o8cost();
+  ok(`Biuro Z umową: forma z umowy (${MK.uop}) wygrywa z narzutem domyślnym`,
+    near(officeWithContract?.personnelCost, 1500 * MK.zlecenieZua + 1000 * MK.uop),
+    officeWithContract);
+  db.delete(schema.hrContracts).where(eq(schema.hrContracts.id, officeContract.id)).run();
+  clearPersonnelCostCache();
+
+  // (d) audyt: rozkład wierszy i narzut wypadkowy
+  const emp1 = (await call("/obiekty?scope=current&costWindow=1")).totals.personnel.employer;
+  ok("byForm liczy wiersze: zlecenie ZUA (umowa) i fallback biura",
+    emp1.byForm.zlecenieZua >= 1 && emp1.byForm.officeFallback >= 1, emp1.byForm);
+  ok("markups w audycie = ustawione wartości globalne",
+    near(emp1.markups.uop, MK.uop) &&
+      near(emp1.markups.zlecenieZua, MK.zlecenieZua) &&
+      near(emp1.markups.zlecenieZza, MK.zlecenieZza) &&
+      near(emp1.markups.officeDefault, MK.officeDefault), emp1.markups);
+
+  // effectiveMarkup = koszt łączny / wypłaty netto łącznie, więc z definicji leży
+  // między najniższym a najwyższym FAKTYCZNIE użytym narzutem. Sprawdzamy to tylko,
+  // gdy żadna spółka nie ma nadpisania — nadpisanie może legalnie wyjść poza globalne.
+  const usedGlobals = [
+    emp1.byForm.uop ? MK.uop : null,
+    emp1.byForm.zlecenieZua ? MK.zlecenieZua : null,
+    emp1.byForm.zlecenieZza ? MK.zlecenieZza : null,
+    emp1.byForm.officeFallback ? MK.officeDefault : null,
+  ].filter((v): v is number => v !== null);
+  if (emp1.companyOverrides === 0) {
+    ok("effectiveMarkup mieści się między najniższym a najwyższym użytym narzutem",
+      emp1.effectiveMarkup >= Math.min(...usedGlobals) - 0.001 &&
+        emp1.effectiveMarkup <= Math.max(...usedGlobals) + 0.001,
+      { effectiveMarkup: emp1.effectiveMarkup, usedGlobals });
+  } else {
+    ok("effectiveMarkup ≥ 1 (są nadpisania per spółka, więc granice globalne nie obowiązują)",
+      emp1.effectiveMarkup >= 1, emp1);
+  }
+
+  // (e) zmiana USTAWIENIA unieważnia cache — bez tego admin zmieniłby narzut
+  //     w panelu i zobaczył stare liczby (dane kadrowe przecież nie drgnęły).
+  const before = await o8cost();
+  setSetting(markupKey("employerMarkupZlecenieZua"), String(MK.zlecenieZza), null); // BEZ clearPersonnelCostCache()
+  const after = await o8cost();
+  ok("Zmiana narzutu w ustawieniach przelicza koszt bez ręcznego czyszczenia cache’u",
+    !near(after?.personnelCost, before.personnelCost) &&
+      near(after?.personnelCost, 1500 * MK.zlecenieZza + 1000 * MK.officeDefault),
+    { before: before.personnelCost, after: after?.personnelCost });
 }
 
 try {

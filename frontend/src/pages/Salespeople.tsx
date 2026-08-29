@@ -163,7 +163,7 @@ export function Salespeople() {
               </th>
               <th
                 className="text-right py-3 px-2 font-medium"
-                title="Kwota netto. Dla osoby powiązanej z Kadrami liczona z jej wypłat — netto „na rękę”, bez składek pracodawcy."
+                title="Kwota netto. Dla osoby powiązanej z Kadrami liczona z jej wypłat i powiększona o narzut składek pracodawcy (Administracja → Firma)."
               >
                 Koszt mies.
               </th>
@@ -317,11 +317,11 @@ export function Salespeople() {
         </div>
         {/* Jedno zdanie o konwencji na ekran zamiast dopisku przy każdej kwocie.
             Uwaga o wypłatach jest tu istotna: koszt osoby z Kadr to kwota NA RĘKĘ,
-            bez składek pracodawcy, więc nie jest pełnym kosztem zatrudnienia. */}
+            powiększona o narzut składek pracodawcy — czyli szacowany pełny koszt. */}
         <p className="flex items-center gap-2 text-sm text-muted-foreground">
           <Users className="h-4 w-4" />
           Opiekunowie przypisywani kontrahentom i obiektom · kwoty netto (bez VAT);
-          koszt osoby z Kadr to wypłata netto na rękę, bez składek pracodawcy
+          koszt osoby z Kadr to wypłata powiększona o szacowane składki pracodawcy
         </p>
         {editable && (
           <Button className="ml-auto" onClick={() => setFormOpen(true)}>

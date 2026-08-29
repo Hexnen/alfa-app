@@ -12,16 +12,40 @@ import {
 } from "./ui/dialog";
 import { Badge } from "./ui/badge";
 import { NIPField } from "./NIPField";
-import type { Company, CompanyData, CompanyInput } from "@/lib/api";
+import { COMPANY_FALLBACK_VALUES, type Company, type CompanyData, type CompanyInput } from "@/lib/api";
+
+/** Narzuty składek pracodawcy obowiązujące globalnie (Administracja → Firma). */
+export interface EmployerMarkupGlobals {
+  uop: number;
+  zua: number;
+  zza: number;
+}
+
+const DEFAULT_MARKUP_GLOBALS: EmployerMarkupGlobals = {
+  uop: COMPANY_FALLBACK_VALUES.employerMarkupUop,
+  zua: COMPANY_FALLBACK_VALUES.employerMarkupZlecenieZua,
+  zza: COMPANY_FALLBACK_VALUES.employerMarkupZlecenieZza,
+};
 
 interface CompanyFormProps {
   open: boolean;
   onClose: () => void;
   onSubmit: (data: CompanyInput) => Promise<void>;
   company?: Company | null;
+  /** Wartości globalne — pokazujemy je jako placeholder w polach narzutów. */
+  globalMarkups?: EmployerMarkupGlobals;
 }
 
-export function CompanyForm({ open, onClose, onSubmit, company }: CompanyFormProps) {
+/** Pole narzutu w formularzu przyjmuje tekst — puste znaczy „dziedzicz globalne”. */
+const markupToInput = (v: number | null | undefined) => (v == null ? "" : String(v));
+
+export function CompanyForm({
+  open,
+  onClose,
+  onSubmit,
+  company,
+  globalMarkups = DEFAULT_MARKUP_GLOBALS,
+}: CompanyFormProps) {
   const [loading, setLoading] = useState(false);
   const [formData, setFormData] = useState<CompanyInput>({
     name: company?.name || "",
@@ -37,6 +61,15 @@ export function CompanyForm({ open, onClose, onSubmit, company }: CompanyFormPro
     notes: company?.notes || "",
     active: company?.active ?? true,
   });
+
+  // Narzuty trzymamy jako tekst, bo pusty input ma znaczenie („użyj globalnego”),
+  // a liczba tego nie wyrazi.
+  const [markups, setMarkups] = useState({
+    uop: markupToInput(company?.employerMarkupUop),
+    zua: markupToInput(company?.employerMarkupZlecenieZua),
+    zza: markupToInput(company?.employerMarkupZlecenieZza),
+  });
+  const [markupError, setMarkupError] = useState<string | null>(null);
 
   /** „Wstaw dane” z wykazu VAT MF — ten sam walidator, co przy kontrahentach. */
   const applyCompany = (mf: CompanyData) => {
@@ -57,11 +90,35 @@ export function CompanyForm({ open, onClose, onSubmit, company }: CompanyFormPro
   const setField = (name: keyof CompanyInput, value: unknown) =>
     setFormData((p) => ({ ...p, [name]: value }));
 
+  /** "" → null (dziedzicz globalne); liczba musi mieścić się w 1–3. */
+  const parseMarkup = (raw: string): number | null | "error" => {
+    const t = raw.trim().replace(",", ".");
+    if (!t) return null;
+    const n = parseFloat(t);
+    if (!Number.isFinite(n) || n < 1 || n > 3) return "error";
+    return n;
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    const uop = parseMarkup(markups.uop);
+    const zua = parseMarkup(markups.zua);
+    const zza = parseMarkup(markups.zza);
+    if (uop === "error" || zua === "error" || zza === "error") {
+      setMarkupError(
+        "Narzut musi być liczbą od 1 do 3 (1 = koszt równy wypłacie). Zostaw pole puste, żeby użyć wartości globalnej."
+      );
+      return;
+    }
+    setMarkupError(null);
     setLoading(true);
     try {
-      await onSubmit(formData);
+      await onSubmit({
+        ...formData,
+        employerMarkupUop: uop,
+        employerMarkupZlecenieZua: zua,
+        employerMarkupZlecenieZza: zza,
+      });
       onClose();
     } catch (error) {
       alert(error instanceof Error ? error.message : "Błąd zapisu spółki");
@@ -188,6 +245,72 @@ export function CompanyForm({ open, onClose, onSubmit, company }: CompanyFormPro
               value={formData.notes}
               onChange={(e) => setField("notes", e.target.value)}
             />
+          </div>
+
+          {/* Nadpisania narzutów składek — puste pole dziedziczy wartość globalną
+              z Administracja → Firma → Składki pracodawcy. */}
+          <div className="space-y-2 rounded-md border p-3">
+            <div>
+              <Label className="text-sm font-medium">Składki pracodawcy (opcjonalnie)</Label>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Mnożnik, którym z wypłaty netto szacujemy pełny koszt zatrudnienia w tej spółce.
+                <strong> Puste = wartość globalna</strong> z Administracja → Firma.
+              </p>
+            </div>
+            <div className="grid grid-cols-3 gap-3">
+              <div className="space-y-1">
+                <Label htmlFor="company-markup-uop" className="text-xs">
+                  Umowa o pracę
+                </Label>
+                <Input
+                  id="company-markup-uop"
+                  data-testid="company-markup-uop"
+                  type="number"
+                  step="0.01"
+                  min="1"
+                  max="3"
+                  className="tabular-nums"
+                  placeholder={String(globalMarkups.uop)}
+                  value={markups.uop}
+                  onChange={(e) => setMarkups((p) => ({ ...p, uop: e.target.value }))}
+                />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="company-markup-zua" className="text-xs">
+                  Zlecenie ZUA
+                </Label>
+                <Input
+                  id="company-markup-zua"
+                  data-testid="company-markup-zua"
+                  type="number"
+                  step="0.01"
+                  min="1"
+                  max="3"
+                  className="tabular-nums"
+                  placeholder={String(globalMarkups.zua)}
+                  value={markups.zua}
+                  onChange={(e) => setMarkups((p) => ({ ...p, zua: e.target.value }))}
+                />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="company-markup-zza" className="text-xs">
+                  Zlecenie ZZA
+                </Label>
+                <Input
+                  id="company-markup-zza"
+                  data-testid="company-markup-zza"
+                  type="number"
+                  step="0.01"
+                  min="1"
+                  max="3"
+                  className="tabular-nums"
+                  placeholder={String(globalMarkups.zza)}
+                  value={markups.zza}
+                  onChange={(e) => setMarkups((p) => ({ ...p, zza: e.target.value }))}
+                />
+              </div>
+            </div>
+            {markupError && <p className="text-xs text-destructive">{markupError}</p>}
           </div>
 
           <label className="flex items-center gap-2 text-sm">

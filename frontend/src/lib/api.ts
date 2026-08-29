@@ -1493,6 +1493,11 @@ export interface Company {
   vatCheckedAt: string | null;
   notes: string | null;
   active: boolean;
+  // Nadpisania narzutów składek pracodawcy dla tej spółki. NULL = bierzemy
+  // wartość globalną z Ustawień firmy (Administracja → Firma → Składki pracodawcy).
+  employerMarkupUop: number | null;
+  employerMarkupZlecenieZua: number | null;
+  employerMarkupZlecenieZza: number | null;
   /** Liczone przez API. */
   objectsCount?: number;
   objectsMonthlyValue?: number;
@@ -1515,6 +1520,10 @@ export interface CompanyInput {
   vatCheckedAt?: string;
   notes?: string;
   active?: boolean;
+  /** null = wyczyść nadpisanie i wróć do wartości globalnej. */
+  employerMarkupUop?: number | null;
+  employerMarkupZlecenieZua?: number | null;
+  employerMarkupZlecenieZza?: number | null;
 }
 
 /** Skrót spółki dołączany do obiektu. */
@@ -4398,6 +4407,17 @@ export interface CompanySettingsValues {
   kmSource: CompanyKmSource;
   /** Narzut procentowy na materiały z protokołu. */
   materialMarkup: number;
+  // Narzuty składek pracodawcy. Wypłaty w kadrach są netto „na rękę”, więc żeby
+  // pokazać realny koszt zatrudnienia, mnożymy je przez współczynnik zależny od
+  // formy zatrudnienia. Spółka może mieć własne wartości (Company.employerMarkup*).
+  /** Umowa o pracę (ZUA) — pełne składki pracodawcy. */
+  employerMarkupUop: number;
+  /** Zlecenie ze zgłoszeniem ZUA — te same składki, bez chorobowego. */
+  employerMarkupZlecenieZua: number;
+  /** Zlecenie ze zgłoszeniem ZZA — tylko zdrowotne po stronie pracownika. */
+  employerMarkupZlecenieZza: number;
+  /** Wiersze wynagrodzeń biura bez dopasowanej umowy — formy nie da się odczytać. */
+  employerMarkupOfficeDefault: number;
   autofillEnabled: boolean;
   autofillFields: string[];
   /** Czy realizacja podlicza się wstępnie już po oznaczeniu wydarzenia jako „wykonane”. */
@@ -4474,6 +4494,10 @@ export const COMPANY_FALLBACK_VALUES: CompanySettingsValues = {
   kmRoundTrip: true,
   kmSource: "route",
   materialMarkup: 0,
+  employerMarkupUop: 1.65,
+  employerMarkupZlecenieZua: 1.59,
+  employerMarkupZlecenieZza: 1.22,
+  employerMarkupOfficeDefault: 1.65,
   autofillEnabled: true,
   autofillFields: [...AUTOFILL_FIELDS],
   autofillOnEventDone: true,
@@ -4531,6 +4555,10 @@ function coerceCompanyValues(raw: unknown): CompanySettingsValues {
       ? (kmSource as CompanyKmSource)
       : fb.kmSource,
     materialMarkup: asNum(v.materialMarkup, fb.materialMarkup),
+    employerMarkupUop: asNum(v.employerMarkupUop, fb.employerMarkupUop),
+    employerMarkupZlecenieZua: asNum(v.employerMarkupZlecenieZua, fb.employerMarkupZlecenieZua),
+    employerMarkupZlecenieZza: asNum(v.employerMarkupZlecenieZza, fb.employerMarkupZlecenieZza),
+    employerMarkupOfficeDefault: asNum(v.employerMarkupOfficeDefault, fb.employerMarkupOfficeDefault),
     autofillEnabled: asBool(v.autofillEnabled, fb.autofillEnabled),
     autofillFields: Array.isArray(v.autofillFields) ? v.autofillFields.map(String) : fb.autofillFields,
     autofillOnEventDone: asBool(v.autofillOnEventDone, fb.autofillOnEventDone),
@@ -4616,9 +4644,10 @@ export const isMissingEndpoint = (e: unknown): boolean => errStatus(e) === 404;
 //
 // KWOTY SĄ NETTO, ale w DWÓCH różnych znaczeniach. Strona handlowa (abonamenty,
 // koszty pozostałe, nakłady) jest netto „bez VAT". Koszt osobowy pochodzi z wypłat,
-// więc jest netto „na rękę" — BEZ składek pracodawcy, czyli nie jest pełnym kosztem
-// zatrudnienia. Zysk i marża liczone z tej podstawy są zawyżone; `personnel.net`
-// istnieje po to, żeby UI mogło to napisać wprost.
+// a następnie mnożony przez narzut składek pracodawcy, czyli jest SZACOWANYM pełnym kosztem
+// zatrudnienia — mnożnik jest jednak PRZYBLIŻENIEM, bo składki liczy się od brutto,
+// a aplikacja zna tylko netto. `personnel.employer` niesie użyte narzuty i strukturę
+// form zatrudnienia, żeby UI mogło pokazać, skąd liczba się wzięła.
 
 /** Zakres danych: bieżące (bez archiwum), tylko aktywne, albo wszystko. */
 export type AnalyticsScope = "current" | "active" | "all";
@@ -4649,8 +4678,34 @@ export interface PersonnelInfo {
   hrObjectsTotal: number;
   /** 0..1 — jaka część godzin poszła w koszt ogólny firmy zamiast na obiekt. */
   unmappedHoursShare: number;
-  /** Zawsze true: kwoty z wypłat są netto „na rękę", bez składek pracodawcy. */
-  net: true;
+  /**
+   * Podstawa kwoty kosztu osobowego. "employerCost" = wypłata netto przemnożona
+   * przez narzut składek pracodawcy (Administracja → Firma), czyli SZACOWANY pełny
+   * koszt zatrudnienia. Zastąpiło dawne `net: true` — po doliczeniu składek zdanie
+   * „bez składek pracodawcy" przestało być prawdziwe.
+   */
+  costBasis: "employerCost";
+  /** Skąd wzięła się kwota — do przypisu i do obrony liczby przed księgową. */
+  employer: EmployerCostInfo;
+}
+
+/** Rozliczenie narzutu składek: ile wierszy poszło którą formą i jakim mnożnikiem. */
+export interface EmployerCostInfo {
+  applied: true;
+  /** Ile wypłat użyło narzutu danej formy zatrudnienia. */
+  byForm: {
+    uop: number;
+    zlecenieZua: number;
+    zlecenieZza: number;
+    /** Rozliczenia biura bez dopasowanej umowy — narzut domyślny. */
+    officeFallback: number;
+  };
+  /** Globalne wartości narzutów (spółka może mieć własne). */
+  markups: { uop: number; zlecenieZua: number; zlecenieZza: number; officeDefault: number };
+  /** Ile spółek ma własne narzuty zamiast globalnych. */
+  companyOverrides: number;
+  /** Koszt łączny / wypłaty netto łącznie — jedna liczba do pokazania w UI. */
+  effectiveMarkup: number;
 }
 
 export interface AnalyticsTotals {

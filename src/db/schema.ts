@@ -704,6 +704,29 @@ export const companies = sqliteTable("companies", {
   /** Dzień sprawdzenia w wykazie ("YYYY-MM-DD"). */
   vatCheckedAt: text("vat_checked_at"),
   notes: text("notes"),
+  /*
+   * NARZUT SKŁADEK PRACODAWCY — nadpisania per spółka (NULL = użyj wartości globalnej
+   * z app_settings, klucze `company.employer_markup_*`; opis: src/lib/company-config.ts).
+   *
+   * Współczynnik, przez który mnożymy wypłatę NETTO („na rękę"), żeby dostać szacunkowy
+   * KOSZT PRACODAWCY. Aplikacja nie zna kwot brutto — księgowość podaje wyłącznie netto —
+   * więc jest to jawne przybliżenie, a nie wyliczenie z podstawy wymiaru składek.
+   *
+   * Nadpisania są per spółka, bo składka WYPADKOWA zależy od branży (PKD) i od wielkości
+   * płatnika: spółka ochroniarska z kilkuset osobami ma inną stopę niż mała spółka biurowa
+   * z tej samej grupy, a stopa jest ustalana indywidualnie na rok składkowy. Reszta składek
+   * (emerytalna, rentowa, FP, FGŚP) jest wspólna, ale różnice w wypadkowej i w zwolnieniach
+   * z FP/FGŚP potrafią przesunąć narzut o kilka punktów procentowych.
+   *
+   * Dopasowanie do umów idzie po NAZWIE (`hr_contracts.company` = `companies.name`) —
+   * w kadrach spółka jest tekstem, nie kluczem obcym (patrz komentarz nad tabelą).
+   */
+  /** Umowa o pracę (zawsze ZUA) — pełne składki po stronie pracodawcy. */
+  employerMarkupUop: real("employer_markup_uop"),
+  /** Zlecenie zgłoszone na ZUA — te same składki pracodawcy, ale bez chorobowego pracownika. */
+  employerMarkupZlecenieZua: real("employer_markup_zlecenie_zua"),
+  /** Zlecenie zgłoszone tylko na ZZA — samo zdrowotne, pracodawca do ZUS nie dopłaca nic. */
+  employerMarkupZlecenieZza: real("employer_markup_zlecenie_zza"),
   active: integer("active", { mode: "boolean" }).default(true).notNull(),
   createdAt: text("created_at")
     .default(sql`(datetime('now'))`)

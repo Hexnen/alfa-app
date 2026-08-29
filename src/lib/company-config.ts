@@ -1,6 +1,7 @@
 /**
- * Ustawienia firmy (tabela app_settings, klucze `company.*`) — adres biura, stawki domyślne
- * i konfiguracja automatu uzupełniającego realizacje (src/lib/realization-autofill.ts).
+ * Ustawienia firmy (tabela app_settings, klucze `company.*`) — adres biura, stawki domyślne,
+ * narzuty składek pracodawcy (src/lib/object-personnel-cost.ts) i konfiguracja automatu
+ * uzupełniającego realizacje (src/lib/realization-autofill.ts).
  *
  * Precedencja: DB → wartość domyślna (bez env, tak jak w src/lib/calendar-config.ts).
  * Wartości czytane przy KAŻDEJ operacji (bez restartu backendu), z fallbackiem na domyślne,
@@ -98,6 +99,43 @@ export interface CompanySettingsValues {
   kmSource: KmSource;
   /** Narzut procentowy na materiały z protokołu (0 = bez narzutu). */
   materialMarkup: number;
+  /*
+   * NARZUTY SKŁADEK PRACODAWCY — współczynniki, przez które moduł kosztu osobowego
+   * (src/lib/object-personnel-cost.ts) mnoży wypłatę NETTO, żeby dostać szacunkowy
+   * koszt pracodawcy. Wartości globalne; spółka może mieć własne
+   * (`companies.employer_markup_*`, NULL = bierzemy stąd).
+   *
+   * DLACZEGO MNOŻNIK OD NETTO, A NIE PROCENT OD BRUTTO: aplikacja nie zna kwot brutto.
+   * Księgowość podaje do kadr wyłącznie kwoty „na rękę" (`hr_payroll.main_amount`),
+   * a podstawy wymiaru składek nie ma w żadnej tabeli. Liczenie 20,48% od brutto
+   * wymagałoby odtworzenia całej drabinki podatkowo-składkowej z netto — z ulgami,
+   * progami i kosztami uzyskania — czyli budowy drugiego systemu płacowego.
+   * Zamiast tego mnożymy netto przez jeden współczynnik na formę zatrudnienia.
+   * To JAWNE PRZYBLIŻENIE i tak ma być opisane w UI.
+   *
+   * SKĄD DOMYŚLNE LICZBY (do zweryfikowania i podważenia przez księgową):
+   *   składki po stronie pracodawcy ≈ 20,48% brutto
+   *     = emerytalna 9,76 + rentowa 6,50 + wypadkowa ~1,67 + FP 2,45 + FGŚP 0,10;
+   *   UoP:            netto/brutto ≈ 0,73 → koszt/netto ≈ 1,2048 / 0,73 ≈ 1,65
+   *   zlecenie ZUA:   bez chorobowego pracownika, netto/brutto ≈ 0,76 →   ≈ 1,59
+   *   zlecenie ZZA:   pracodawca nie dopłaca nic, netto/brutto ≈ 0,82 →   ≈ 1,22
+   * Wypadkowa jest indywidualna dla płatnika (branża + wielkość), stąd nadpisania
+   * per spółka. Liczby są ORIENTACYJNE — realne współczynniki podstawia księgowa
+   * ze swoich list płac (koszt całkowity / suma wypłat netto za miesiąc).
+   */
+  /** Umowa o pracę (zawsze ZUA). */
+  employerMarkupUop: number;
+  /** Zlecenie zgłoszone na ZUA. */
+  employerMarkupZlecenieZua: number;
+  /** Zlecenie zgłoszone tylko na ZZA (samo zdrowotne). */
+  employerMarkupZlecenieZza: number;
+  /**
+   * Rozliczenia biura (`hr_office_payroll`) bez odpowiadającej umowy w `hr_contracts`.
+   * W praktyce dotyczy to większości wierszy biura — arkusz biura jest prowadzony
+   * niezależnie od arkusza umów i nie da się z niego odczytać formy zatrudnienia.
+   * Gdy umowa ISTNIEJE, wygrywa jej forma; ten narzut jest tylko awaryjny.
+   */
+  employerMarkupOfficeDefault: number;
   /** Główny włącznik automatu (dotyczy też haka po podpisaniu protokołu). */
   autofillEnabled: boolean;
   /** Pola objęte automatem. */
@@ -125,6 +163,10 @@ export const COMPANY_DEFAULTS: CompanySettingsValues = {
   kmRoundTrip: true,
   kmSource: "route",
   materialMarkup: 0,
+  employerMarkupUop: 1.65,
+  employerMarkupZlecenieZua: 1.59,
+  employerMarkupZlecenieZza: 1.22,
+  employerMarkupOfficeDefault: 1.65,
   autofillEnabled: true,
   autofillFields: DEFAULT_AUTOFILL_FIELDS,
   autofillOnEventDone: true,
@@ -207,6 +249,43 @@ function numberField(
     },
     serialize: (v) => String(v),
     format: (v) => `${v}${opts.unit ? ` ${opts.unit}` : ""}`,
+  };
+}
+
+/**
+ * Granice narzutu składkowego. Dolna to 1, bo mnożnik poniżej jedynki znaczyłby,
+ * że pracodawcę kosztuje MNIEJ, niż wypłaca pracownikowi — składki nie bywają ujemne.
+ * Górna 3 jest workiem na literówki (16,5 zamiast 1,65): nawet umowa o pracę
+ * z maksymalną wypadkową nie zbliża się do trzykrotności kwoty netto.
+ */
+export const EMPLOYER_MARKUP_MIN = 1;
+export const EMPLOYER_MARKUP_MAX = 3;
+
+function markupField(dbKey: string, label: string): CompanyFieldDef<number> {
+  const inRange = (n: number) => n >= EMPLOYER_MARKUP_MIN && n <= EMPLOYER_MARKUP_MAX;
+  return {
+    dbKey,
+    label,
+    type: "number",
+    validate: (v) => {
+      if (typeof v !== "number" || !Number.isFinite(v)) return `${label}: oczekiwano liczby`;
+      if (v < EMPLOYER_MARKUP_MIN) {
+        return `${label}: współczynnik nie może być mniejszy niż ${EMPLOYER_MARKUP_MIN} — koszt pracodawcy nigdy nie jest niższy od wypłaty netto`;
+      }
+      if (v > EMPLOYER_MARKUP_MAX) {
+        return `${label}: współczynnik nie może przekraczać ${EMPLOYER_MARKUP_MAX} (np. 1,65 = koszt o 65% wyższy od kwoty na rękę)`;
+      }
+      return null;
+    },
+    coerce: toNumber,
+    parse: (raw) => {
+      const n = Number(raw.trim().replace(",", "."));
+      return Number.isFinite(n) && inRange(n) ? n : undefined;
+    },
+    serialize: (v) => String(v),
+    // „×1,65 (+65%)” — mnożnik jest tym, co siedzi w bazie, a procent tym,
+    // co człowiek ma w głowie, mówiąc „składki to jakieś 20 procent".
+    format: (v) => `×${v} (+${Math.round((v - 1) * 100)}%)`,
   };
 }
 
@@ -314,6 +393,19 @@ export const COMPANY_FIELDS: { [K in CompanySettingField]: CompanyFieldDef<Compa
   kmRoundTrip: booleanField("company.km_round_trip", "Dystans w obie strony"),
   kmSource: kmSourceField,
   materialMarkup: numberField("company.material_markup", "Narzut na materiały", { min: -100, max: 1000, unit: "%" }),
+  employerMarkupUop: markupField("company.employer_markup_uop", "Narzut składek — umowa o pracę"),
+  employerMarkupZlecenieZua: markupField(
+    "company.employer_markup_zlecenie_zua",
+    "Narzut składek — zlecenie ZUA"
+  ),
+  employerMarkupZlecenieZza: markupField(
+    "company.employer_markup_zlecenie_zza",
+    "Narzut składek — zlecenie ZZA"
+  ),
+  employerMarkupOfficeDefault: markupField(
+    "company.employer_markup_office_default",
+    "Narzut składek — biuro (bez umowy)"
+  ),
   autofillEnabled: booleanField("company.autofill_enabled", "Automat uzupełniania"),
   autofillFields: autofillFieldsField,
   autofillOnEventDone: booleanField(
@@ -376,6 +468,9 @@ export function companySettingsMeta() {
       hint: AUTOFILL_FIELD_HINTS[f],
       available: !AUTOFILL_UNAVAILABLE_FIELDS.includes(f),
     })),
+    // Zakres suwaka/pola dla narzutów składkowych — front nie musi go zgadywać
+    // ani duplikować (walidacja i tak stoi po stronie API).
+    employerMarkupRange: { min: EMPLOYER_MARKUP_MIN, max: EMPLOYER_MARKUP_MAX },
     defaultAutofillFields: [...DEFAULT_AUTOFILL_FIELDS],
     unavailableAutofillFields: [...AUTOFILL_UNAVAILABLE_FIELDS],
     fieldTypes: Object.fromEntries(

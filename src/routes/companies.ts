@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { db, schema } from "../db/index.js";
+import { EMPLOYER_MARKUP_MAX, EMPLOYER_MARKUP_MIN } from "../lib/company-config.js";
 import { asc, eq, sql } from "drizzle-orm";
 import type { ApiResponse } from "../types/index.js";
 import { normalizeNIP, validateNIP } from "../utils/nip.js";
@@ -52,6 +53,37 @@ interface CompanyFields {
   vatCheckedAt: string;
   notes: string;
   active: boolean;
+  // Nadpisania narzutów składek pracodawcy. null = spółka bierze wartość globalną
+  // z app_settings (`company.employer_markup_*`).
+  employerMarkupUop: number | null;
+  employerMarkupZlecenieZua: number | null;
+  employerMarkupZlecenieZza: number | null;
+}
+
+/**
+ * Narzut: pusty/`null` = dziedzicz globalny; liczba musi mieścić się w 1–3.
+ * Poniżej 1 znaczyłoby, że koszt zatrudnienia jest niższy niż sama wypłata,
+ * powyżej 3 — że składki są dwukrotnie wyższe od pensji; oba to pomyłka wpisu.
+ */
+function parseMarkup(v: unknown, label: string): { value: number | null } | { error: string } {
+  if (v === undefined || v === null || v === "") return { value: null };
+  const n = typeof v === "number" ? v : typeof v === "string" ? parseFloat(v.replace(",", ".")) : NaN;
+  if (!Number.isFinite(n)) {
+    return { error: `Narzut składek (${label}) musi być liczbą albo pozostać pusty` };
+  }
+  // Granice z company-config.ts, a nie wpisane tu drugi raz — inaczej zmiana
+  // limitu w ustawieniach globalnych rozjechałaby się z walidacją nadpisań.
+  if (n < EMPLOYER_MARKUP_MIN) {
+    return {
+      error: `Narzut składek (${label}) nie może być mniejszy niż ${EMPLOYER_MARKUP_MIN} — znaczyłoby to, że koszt zatrudnienia jest niższy niż sama wypłata. Zostaw pole puste, żeby użyć wartości globalnej.`,
+    };
+  }
+  if (n > EMPLOYER_MARKUP_MAX) {
+    return {
+      error: `Narzut składek (${label}) nie może być większy niż ${EMPLOYER_MARKUP_MAX} — to już ${EMPLOYER_MARKUP_MAX}-krotność wypłaty, więc pewnie literówka. Zostaw pole puste, żeby użyć wartości globalnej.`,
+    };
+  }
+  return { value: n };
 }
 
 function parseBody(body: Record<string, unknown>): { data?: CompanyFields; error?: string } {
@@ -64,6 +96,14 @@ function parseBody(body: Record<string, unknown>): { data?: CompanyFields; error
   if (nip && !validateNIP(nip)) {
     return { error: "Nieprawidłowy NIP (błędna suma kontrolna)" };
   }
+
+  const uop = parseMarkup(body.employerMarkupUop, "umowa o pracę");
+  if ("error" in uop) return { error: uop.error };
+  const zua = parseMarkup(body.employerMarkupZlecenieZua, "zlecenie ZUA");
+  if ("error" in zua) return { error: zua.error };
+  const zza = parseMarkup(body.employerMarkupZlecenieZza, "zlecenie ZZA");
+  if ("error" in zza) return { error: zza.error };
+
   return {
     data: {
       name,
@@ -78,6 +118,9 @@ function parseBody(body: Record<string, unknown>): { data?: CompanyFields; error
       vatCheckedAt: str(body.vatCheckedAt),
       notes: typeof body.notes === "string" ? body.notes : "",
       active: body.active === undefined ? true : Boolean(body.active),
+      employerMarkupUop: uop.value,
+      employerMarkupZlecenieZua: zua.value,
+      employerMarkupZlecenieZza: zza.value,
     },
   };
 }

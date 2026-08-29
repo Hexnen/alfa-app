@@ -367,7 +367,7 @@ export function HandlowcyView({
           label="Koszt handlowców"
           value={plnFull(team.ownCost)}
           sub="wynagrodzenie, auto, telefon"
-          tip="Koszt własny handlowców — niezależny od kosztu obiektów. Dla osób powiązanych z Kadrami liczony z ich wypłat (netto na rękę, bez składek pracodawcy)."
+          tip="Koszt własny handlowców — niezależny od kosztu obiektów. Dla osób powiązanych z Kadrami liczony z ich wypłat powiększonych o narzut składek pracodawcy."
         />
         <KpiTile
           label="Prowizje"
@@ -760,7 +760,7 @@ function SalespersonRow({
         className="px-2 py-2 text-right tabular-nums"
         title={
           row.ownCostSource === "kadry"
-            ? `Liczone z wypłat w Kadrach (netto na rękę, bez składek pracodawcy)${
+            ? `Liczone z wypłat w Kadrach, powiększonych o narzut składek pracodawcy${
                 row.manualMonthlyCost !== null
                   ? `; pole ręczne (${plnFull(row.manualMonthlyCost)}) jest wtedy ignorowane`
                   : ""

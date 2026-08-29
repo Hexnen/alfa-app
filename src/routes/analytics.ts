@@ -8,6 +8,8 @@ import {
   computeObjectPersonnelCost,
   parseCostWindow,
   type CostWindow,
+  type EmployerCostInfo,
+  type PersonnelCostBasis,
   type PersonnelCostResult,
 } from "../lib/object-personnel-cost.js";
 
@@ -33,8 +35,15 @@ import {
  * Nigdy jedno ZAMIAST drugiego — podmiana zaniżyłaby koszt obiektów fizycznej
  * ochrony dokładnie o pensję ludzi, którzy na nich stoją.
  *
- * Kwoty osobowe są NETTO („na rękę") — aplikacja nie zna kosztu pracodawcy.
- * Wraca to w odpowiedzi jako `totals.personnel.net`, żeby UI mogło to napisać.
+ * Kwoty osobowe to SZACOWANY KOSZT PRACODAWCY, a nie wypłata „na rękę": moduł kosztu
+ * osobowego mnoży wypłatę netto przez narzut składkowy zależny od formy zatrudnienia
+ * (praca+ZUA / zlecenie+ZUA / zlecenie+ZZA), konfigurowalny globalnie i per spółka.
+ * Odpowiedź niesie to jako `totals.personnel.costBasis` (= "employerCost") plus blok
+ * `totals.personnel.employer` z audytem: jakie narzuty, ile wierszy którym poszło
+ * i jaki wyszedł narzut wypadkowy (`effectiveMarkup`) — UI robi z tego przypis.
+ * Pole `net: true` ZNIKŁO celowo: po doliczeniu składek zdanie „bez składek
+ * pracodawcy" stało się nieprawdą, a cicha zmiana znaczenia pod tą samą nazwą
+ * zostawiłaby w interfejsie kłamstwo, którego nikt by nie zauważył.
  *
  * Rozróżnienie NULL vs 0 przy koszcie niesie całą historię „pokrycia danymi”
  * (`coverage`): marża obiektu bez ŻADNEGO znanego kosztu jest NIEZNANA, a nie
@@ -111,7 +120,14 @@ export interface PersonnelInfo {
   mappedObjects: number;
   hrObjectsTotal: number;
   unmappedHoursShare: number;
-  net: true;
+  /**
+   * Na czym stoją kwoty: "employerCost" = wypłata netto × szacunkowy narzut składek
+   * pracodawcy. Zastępuje dawne `net: true` — kwoty NIE są już „na rękę".
+   * (Uwaga na dwa różne „netto": po stronie handlowej kwoty nadal są bez VAT.)
+   */
+  costBasis: PersonnelCostBasis;
+  /** Audyt doliczonych składek — narzuty, rozkład wierszy, narzut wypadkowy. */
+  employer: EmployerCostInfo;
 }
 
 function personnelInfo(costWindow: CostWindow, p: PersonnelCostResult): PersonnelInfo {
@@ -122,7 +138,8 @@ function personnelInfo(costWindow: CostWindow, p: PersonnelCostResult): Personne
     mappedObjects: p.mappedObjects,
     hrObjectsTotal: p.hrObjectsTotal,
     unmappedHoursShare: p.unmappedHoursShare,
-    net: true,
+    costBasis: p.costBasis,
+    employer: p.employer,
   };
 }
 

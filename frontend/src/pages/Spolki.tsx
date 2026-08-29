@@ -5,7 +5,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { CompanyForm } from "@/components/CompanyForm";
+import { CompanyForm, type EmployerMarkupGlobals } from "@/components/CompanyForm";
 import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
 import { usePerms } from "@/auth/permissions";
 import {
@@ -20,11 +20,13 @@ import {
   Trash2,
 } from "lucide-react";
 import {
+  adminCompanyApi,
   getCompanies,
   createCompany,
   updateCompany,
   deleteCompany,
   lookupCompanyInMf,
+  COMPANY_FALLBACK_VALUES,
   type Company,
   type CompanyInput,
 } from "@/lib/api";
@@ -48,6 +50,16 @@ export function Spolki() {
   const [editing, setEditing] = useState<Company | null>(null);
   /** Id spółki, dla której trwa sprawdzenie w wykazie MF. */
   const [checking, setChecking] = useState<number | null>(null);
+  /**
+   * Globalne narzuty składek — potrzebne tylko po to, żeby w formularzu pokazać
+   * w placeholderze, co spółka odziedziczy. Endpoint jest za `requireAdmin`,
+   * więc dla zwykłego użytkownika po cichu zostają wartości domyślne.
+   */
+  const [globalMarkups, setGlobalMarkups] = useState<EmployerMarkupGlobals>({
+    uop: COMPANY_FALLBACK_VALUES.employerMarkupUop,
+    zua: COMPANY_FALLBACK_VALUES.employerMarkupZlecenieZua,
+    zza: COMPANY_FALLBACK_VALUES.employerMarkupZlecenieZza,
+  });
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -64,6 +76,35 @@ export function Spolki() {
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    adminCompanyApi
+      .settings()
+      .then((s) =>
+        setGlobalMarkups({
+          uop: s.values.employerMarkupUop,
+          zua: s.values.employerMarkupZlecenieZua,
+          zza: s.values.employerMarkupZlecenieZza,
+        })
+      )
+      .catch(() => {
+        /* brak uprawnień albo starszy backend — zostają wartości domyślne */
+      });
+  }, []);
+
+  /** Ma własne narzuty? Wystarczy jedno nadpisanie, żeby oznaczyć wiersz. */
+  const hasOwnMarkups = (c: Company) =>
+    c.employerMarkupUop != null || c.employerMarkupZlecenieZua != null || c.employerMarkupZlecenieZza != null;
+
+  /** Podpowiedź pod plakietką: które formy mają własny mnożnik. */
+  const markupsTitle = (c: Company) =>
+    [
+      c.employerMarkupUop != null ? `umowa o pracę: ${c.employerMarkupUop}` : null,
+      c.employerMarkupZlecenieZua != null ? `zlecenie ZUA: ${c.employerMarkupZlecenieZua}` : null,
+      c.employerMarkupZlecenieZza != null ? `zlecenie ZZA: ${c.employerMarkupZlecenieZza}` : null,
+    ]
+      .filter(Boolean)
+      .join(" · ");
 
   const matches = (c: Company) => {
     const q = search.trim().toLowerCase();
@@ -174,7 +215,19 @@ export function Spolki() {
             {list.map((c) => (
               <tr key={c.id} className="border-b hover:bg-muted/50">
                 <td className="py-3 px-2 font-medium">
-                  {c.name}
+                  <span className="flex flex-wrap items-center gap-1.5">
+                    {c.name}
+                    {hasOwnMarkups(c) && (
+                      <Badge
+                        variant="secondary"
+                        className="h-5 px-1.5 text-[10px] font-normal"
+                        title={`Własne narzuty składek pracodawcy (${markupsTitle(c)}) — pozostałe formy biorą wartość globalną`}
+                        data-testid={`company-markups-${c.id}`}
+                      >
+                        własne składki
+                      </Badge>
+                    )}
+                  </span>
                   {c.notes && (
                     <span className="block text-xs text-muted-foreground">{c.notes}</span>
                   )}
@@ -379,6 +432,7 @@ export function Spolki() {
           onClose={closeForm}
           onSubmit={editing ? handleUpdate : handleCreate}
           company={editing}
+          globalMarkups={globalMarkups}
         />
       )}
     </div>

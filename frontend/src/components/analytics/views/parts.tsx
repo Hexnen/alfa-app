@@ -87,9 +87,10 @@ export function NoCostEmpty({ what }: { what: string }) {
  *     a jest dziurą w danych — dlatego zamiast przypisu leci wtedy komunikat
  *     z linkiem do miejsca, w którym można to naprawić.
  *  2. „Netto" znaczy tu dwie różne rzeczy: strona handlowa jest bez VAT,
- *     a wypłaty są „na rękę" — bez składek pracodawcy. Koszt osobowy jest więc
- *     ZANIŻONY względem realnego kosztu zatrudnienia, a zysk i marża zawyżone.
- *     Kto tego nie wie, podejmie decyzję na zawyżonej marży.
+ *     a wypłaty są „na rękę". Do wypłat doliczamy narzut składek pracodawcy,
+ *     więc koszt osobowy jest SZACOWANYM pełnym kosztem zatrudnienia — ale
+ *     mnożnik przelicza z netto, choć składki liczy się od brutto, więc to
+ *     przybliżenie. Kto tego nie wie, weźmie mnożnik za kwotę z listy płac.
  */
 export function PersonnelFootnote({ personnel }: { personnel: PersonnelInfo }) {
   const mapped = personnel.mappedObjects > 0;
@@ -125,9 +126,11 @@ export function PersonnelFootnote({ personnel }: { personnel: PersonnelInfo }) {
         {mapped && (
           <>
             {" "}
-            Koszt osobowy pochodzi z wypłat: to kwoty netto „na rękę", bez
-            składek pracodawcy, więc realny koszt zatrudnienia jest wyższy, a
-            zysk i marża odpowiednio zawyżone.
+            Koszt osobowy pochodzi z wypłat powiększonych o narzut składek
+            pracodawcy (średnio ×{personnel.employer.effectiveMarkup.toFixed(2)}
+            ). Składki liczy się od brutto, a mnożnik przelicza z netto, więc to{" "}
+            <strong>szacunek</strong> — narzuty ustawia się w Administracja →
+            Firma.
           </>
         )}
       </p>

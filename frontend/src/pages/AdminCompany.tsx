@@ -46,6 +46,13 @@ import {
 const pln = new Intl.NumberFormat("pl-PL", { style: "currency", currency: "PLN" });
 const dec = new Intl.NumberFormat("pl-PL", { maximumFractionDigits: 2 });
 
+/**
+ * Podgląd narzutu na okrągłej kwocie — sam mnożnik („1,65”) niewiele mówi,
+ * a „1 000 zł netto → 1 650 zł kosztu” od razu pokazuje, co się liczy.
+ */
+const markupExample = (m: number) =>
+  `1 000 zł netto → ${pln.format(1000 * (Number.isFinite(m) ? m : 0))} kosztu`;
+
 type Draft = Partial<CompanySettingsValues>;
 
 /** „lat, lng" → URL Google Maps, którym karmimy `LocationPicker`. */
@@ -523,6 +530,115 @@ export function AdminCompany() {
               className="tabular-nums"
               value={val("materialMarkup")}
               onChange={(e) => setField("materialMarkup", parseFloat(e.target.value) || 0)}
+            />
+          </Field>
+        </div>
+      </SectionCard>
+
+      <SectionCard
+        id="skladki"
+        title="Składki pracodawcy"
+        description="Mnożniki, którymi z wypłaty netto szacujemy pełny koszt zatrudnienia. Kadry trzymają kwoty „na rękę”, więc bez nich koszt osobowy obiektu jest zaniżony."
+      >
+        <div className="space-y-1.5 rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+          <p>
+            W bazie mamy tylko kwoty <strong>netto na rękę</strong> — brutto i realnych składek aplikacja nie zna.
+            Dlatego koszt liczymy jako <em>wypłata × mnożnik</em>, osobno dla każdej formy zatrudnienia.
+          </p>
+          <p>
+            Składki pracodawcy to ok. 20% liczone <strong>od brutto</strong>, a my przeliczamy z netto — mnożnik jest
+            więc <strong>przybliżeniem</strong>, a nie kwotą z listy płac.
+          </p>
+          <p>
+            Wartości domyślne (1,65 / 1,59 / 1,22) są orientacyjne — <strong>warto potwierdzić je z księgową</strong> i
+            podstawić tu liczby wyliczone z realnych list płac. Spółka może mieć własne narzuty (Kadry → Spółki),
+            wtedy one mają pierwszeństwo.
+          </p>
+        </div>
+
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field
+            id="company-markup-uop"
+            label="Umowa o pracę (ZUA)"
+            source={source("employerMarkupUop")}
+            dirty={isDirty("employerMarkupUop")}
+            description={`Pełne składki pracodawcy (emerytalna, rentowa, wypadkowa, FP, FGŚP). ${markupExample(
+              val("employerMarkupUop")
+            )}`}
+          >
+            <Input
+              id="company-markup-uop"
+              data-testid="company-markup-uop"
+              type="number"
+              step="0.01"
+              min="1"
+              max="3"
+              className="tabular-nums"
+              value={val("employerMarkupUop")}
+              onChange={(e) => setField("employerMarkupUop", parseFloat(e.target.value) || 0)}
+            />
+          </Field>
+          <Field
+            id="company-markup-zlecenie-zua"
+            label="Zlecenie ZUA"
+            source={source("employerMarkupZlecenieZua")}
+            dirty={isDirty("employerMarkupZlecenieZua")}
+            description={`Zlecenie zgłoszone do pełnych ubezpieczeń — te same składki pracodawcy, zleceniobiorca bez chorobowego. ${markupExample(
+              val("employerMarkupZlecenieZua")
+            )}`}
+          >
+            <Input
+              id="company-markup-zlecenie-zua"
+              data-testid="company-markup-zlecenie-zua"
+              type="number"
+              step="0.01"
+              min="1"
+              max="3"
+              className="tabular-nums"
+              value={val("employerMarkupZlecenieZua")}
+              onChange={(e) => setField("employerMarkupZlecenieZua", parseFloat(e.target.value) || 0)}
+            />
+          </Field>
+          <Field
+            id="company-markup-zlecenie-zza"
+            label="Zlecenie ZZA"
+            source={source("employerMarkupZlecenieZza")}
+            dirty={isDirty("employerMarkupZlecenieZza")}
+            description={`Zlecenie zgłoszone tylko do zdrowotnej (np. student, drugi etat) — pracodawca nie dopłaca składek, więc narzut jest niski. ${markupExample(
+              val("employerMarkupZlecenieZza")
+            )}`}
+          >
+            <Input
+              id="company-markup-zlecenie-zza"
+              data-testid="company-markup-zlecenie-zza"
+              type="number"
+              step="0.01"
+              min="1"
+              max="3"
+              className="tabular-nums"
+              value={val("employerMarkupZlecenieZza")}
+              onChange={(e) => setField("employerMarkupZlecenieZza", parseFloat(e.target.value) || 0)}
+            />
+          </Field>
+          <Field
+            id="company-markup-office"
+            label="Rozliczenia biura bez umowy"
+            source={source("employerMarkupOfficeDefault")}
+            dirty={isDirty("employerMarkupOfficeDefault")}
+            description={`Większość wierszy wynagrodzeń biura nie ma dopasowanej umowy, więc formy zatrudnienia nie da się odczytać — używamy wtedy tego narzutu. ${markupExample(
+              val("employerMarkupOfficeDefault")
+            )}`}
+          >
+            <Input
+              id="company-markup-office"
+              data-testid="company-markup-office"
+              type="number"
+              step="0.01"
+              min="1"
+              max="3"
+              className="tabular-nums"
+              value={val("employerMarkupOfficeDefault")}
+              onChange={(e) => setField("employerMarkupOfficeDefault", parseFloat(e.target.value) || 0)}
             />
           </Field>
         </div>

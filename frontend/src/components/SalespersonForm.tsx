@@ -156,8 +156,8 @@ export function SalespersonForm({
               <div className="space-y-2">
                 {/* „zł netto" jak w pozostałych polach kwotowych aplikacji.
                     Przy osobie z Kadr pole jest zablokowane, a kwota bierze się
-                    z wypłat — te są netto „na rękę”, czyli w innym znaczeniu
-                    tego słowa; mówi o tym podpis pod polem. */}
+                    z wypłat powiększonych o narzut składek pracodawcy; mówi
+                    o tym podpis pod polem. */}
                 <Label htmlFor="salesperson-monthly-cost">
                   Koszt miesięczny (zł netto)
                 </Label>
@@ -177,8 +177,8 @@ export function SalespersonForm({
                 />
                 {onPayroll && (
                   <p className="text-xs text-muted-foreground">
-                    Liczone z Kadr — z wypłat tej osoby (netto na rękę, bez
-                    składek pracodawcy).
+                    Liczone z Kadr — z wypłat tej osoby powiększonych o narzut
+                    składek pracodawcy.
                   </p>
                 )}
               </div>
