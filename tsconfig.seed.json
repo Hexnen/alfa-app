@@ -1,0 +1,7 @@
+{
+  // Typecheck skryptów seeda. Domyślny tsconfig.json ma include: ["src/**/*"],
+  // więc `npx tsc --noEmit` NIE widzi katalogu scripts/ — bez tego pliku błędy
+  // w generatorze wychodzą dopiero przy uruchomieniu.
+  "extends": "./tsconfig.json",
+  "include": ["scripts/seed-dev-year.ts", "scripts/seed-dev/**/*", "src/**/*"]
+}
