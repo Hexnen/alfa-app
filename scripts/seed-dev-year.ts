@@ -17,7 +17,14 @@
  *
  * Każdy wygenerowany wiersz niesie znacznik MARKER w polu tekstowym — po nim
  * `--reset` odróżnia własne dane od zastanych. Kasowanie idzie wyłącznie po tym
- * znaczniku, nigdy „wyczyść tabelę".
+ * znaczniku, nigdy „wyczyść tabelę". Tam, gdzie wiersz jest RODZICEM w kaskadzie
+ * FK (kontrahent → obiekty), sam znacznik nie wystarcza: rodzic ginie dopiero
+ * wtedy, gdy nie zostało po nim ani jedno cudze dziecko.
+ *
+ * CAŁY PRZEBIEG TO JEDNA TRANSAKCJA — reset i generowanie razem. Błąd w piątym
+ * module cofa też cztery pierwsze, więc baza jest albo sprzed uruchomienia, albo
+ * po nim, nigdy w połowie. Stąd wymóg wobec modułów: mają być SYNCHRONICZNE
+ * i przyjmować uchwyt transakcji (patrz `runInTx` w seed-dev/shared.ts).
  *
  * DETERMINIZM dotyczy TREŚCI, nie kluczy. Dwa przebiegi dają te same nazwy, kwoty
  * i daty, ale inne `id` — SQLite AUTOINCREMENT nie odzyskuje skasowanych numerów,
@@ -27,7 +34,8 @@
  * UWAGA: better-sqlite3 jest zbudowany pod Node 22:
  *   export PATH="/config/.nvm/versions/node/v22.22.0/bin:$PATH"
  */
-import { PERIOD, seed as setSeed } from "./seed-dev/shared.js";
+import { db } from "../src/db/index.js";
+import { PERIOD, type Tx, seed as setSeed } from "./seed-dev/shared.js";
 import { seedCommercial, resetCommercial } from "./seed-dev/commercial.js";
 import { seedOperations, resetOperations } from "./seed-dev/operations.js";
 import { seedWarehouse, resetWarehouse } from "./seed-dev/warehouse.js";
@@ -76,7 +84,7 @@ function report(title: string, counts: object) {
   console.log(`  ${title}${parts.length ? " — " + parts.join(", ") : " — nic do zrobienia"}`);
 }
 
-async function main() {
+function main() {
   const { reset, generate, only } = parseArgs();
   const mods = MODULES.filter((m) => !only || only.includes(m.name));
   if (only && mods.length === 0) {
@@ -86,31 +94,49 @@ async function main() {
 
   console.log(`Baza deweloperska, okno ${PERIOD.from} … ${PERIOD.to}`);
 
-  if (reset) {
-    console.log("\n— kasowanie danych z poprzedniego seeda (po znaczniku) —");
-    // Odwrotna kolejność: dzieci przed rodzicami, inaczej FK zablokuje delete.
-    for (const m of [...mods].reverse()) report(m.name, await m.undo());
-  }
+  // CAŁY PRZEBIEG W JEDNEJ TRANSAKCJI — reset i generowanie razem.
+  //
+  // Wcześniej każdy moduł otwierał własną: awaria w piątym zostawiała bazę
+  // w połowie, z czterema modułami skasowanymi i dwoma zasianymi, a jedynym
+  // wyjściem był ręczny remont. Teraz błąd w dowolnym miejscu cofa wszystko
+  // do stanu sprzed uruchomienia — łącznie z rejestrami w `app_settings`.
+  //
+  // Dlatego moduły MUSZĄ być synchroniczne i przyjmować uchwyt transakcji:
+  // `db.transaction()` w better-sqlite3 jest synchroniczne, więc jedno `await`
+  // w środku wykonałoby resztę pracy JUŻ PO commicie. Uchwyt jest potrzebny,
+  // bo SQLite nie zna zagnieżdżonych transakcji (patrz `runInTx` w shared.ts).
+  try {
+    db.transaction((tx: Tx) => {
+      if (reset) {
+        console.log("\n— kasowanie danych z poprzedniego seeda (po znaczniku) —");
+        // Odwrotna kolejność: dzieci przed rodzicami, inaczej FK zablokuje delete.
+        for (const m of [...mods].reverse()) report(m.name, m.undo(tx));
+      }
 
-  if (generate) {
-    // Ziarno ustawiamy RAZ dla całego przebiegu — moduły dzielą jeden strumień
-    // losowości, więc kolejność ich uruchomienia współtworzy wynik. To celowe:
-    // pełny przebieg jest powtarzalny, a `--only` służy do szybkich iteracji,
-    // nie do odtwarzania bit w bit tej samej bazy.
-    setSeed(SEED);
-    console.log("\n— generowanie —");
-    for (const m of mods) {
-      const t0 = Date.now();
-      const counts = await m.run();
-      report(`${m.name} (${m.label})`, counts);
-      console.log(`    ${Date.now() - t0} ms`);
-    }
+      if (generate) {
+        // Ziarno ustawiamy RAZ dla całego przebiegu — moduły dzielą jeden strumień
+        // losowości, więc kolejność ich uruchomienia współtworzy wynik. To celowe:
+        // pełny przebieg jest powtarzalny, a `--only` służy do szybkich iteracji,
+        // nie do odtwarzania bit w bit tej samej bazy.
+        setSeed(SEED);
+        console.log("\n— generowanie —");
+        for (const m of mods) {
+          const t0 = Date.now();
+          const counts = m.run(tx);
+          report(`${m.name} (${m.label})`, counts);
+          console.log(`    ${Date.now() - t0} ms`);
+        }
+      }
+    });
+  } catch (err) {
+    // Liczby wypisane wyżej opisują pracę, której już nie ma — mówimy to wprost,
+    // żeby nikt nie szukał w bazie wierszy z raportu.
+    console.error("\nBŁĄD seeda — CAŁY przebieg wycofany, baza jest w stanie sprzed uruchomienia.");
+    console.error(err instanceof Error ? err.message : err);
+    process.exit(1);
   }
 
   console.log("\nGotowe.");
 }
 
-main().catch((err) => {
-  console.error("BŁĄD seeda:", err);
-  process.exit(1);
-});
+main();

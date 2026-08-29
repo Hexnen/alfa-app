@@ -29,7 +29,7 @@
  * które w danym magazynie faktycznie leżą.
  */
 
-import { and, eq, inArray, isNotNull, like, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, like, sql, type SQL } from "drizzle-orm";
 import { db, schema } from "../../src/db/index.js";
 import {
   MARKER,
@@ -44,9 +44,10 @@ import {
   pick,
   pickMany,
   weighted,
+  type Tx,
+  assertNotSeeded,
+  runInTx,
 } from "./shared.js";
-
-type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 /** Login wpisywany w `created_by` — magazyn prowadzi admin. */
 const CREATED_BY = "msajdak";
@@ -292,7 +293,20 @@ export interface WarehouseSeedCounts {
   stockRows: number;
 }
 
-export async function seedWarehouse(): Promise<WarehouseSeedCounts> {
+export function seedWarehouse(outerTx?: Tx): WarehouseSeedCounts {
+  // Drugi przebieg bez resetu wywaliłby się dopiero w środku, na UNIQUE
+  // `warehouse_items.sku` — z komunikatem sterownika, który nic nie mówi
+  // o przyczynie. Pytamy więc sami, na wejściu, i podpowiadamy `--reset`.
+  assertNotSeeded(
+    "warehouse",
+    db
+      .select({ id: schema.warehouses.id })
+      .from(schema.warehouses)
+      .where(like(schema.warehouses.name, `%${MARKER}%`))
+      .limit(1)
+      .get() !== undefined,
+  );
+
   const counts: WarehouseSeedCounts = {
     warehouses: 0,
     items: 0,
@@ -323,7 +337,7 @@ export async function seedWarehouse(): Promise<WarehouseSeedCounts> {
 
   const draftFrom = addDays(PERIOD.to, -DRAFT_WINDOW_DAYS);
 
-  db.transaction((tx) => {
+  runInTx(outerTx, (tx) => {
     /* --- 1. Magazyny -------------------------------------------------- */
     const warehouseIds: number[] = [];
     for (const def of WAREHOUSE_DEFS) {
@@ -621,12 +635,26 @@ export interface WarehouseResetCounts {
  * dokumentów — nigdy „wszystko z tabeli".
  *
  * Kolejność jest odwrotna do zależności: ruchy → pozycje → dokumenty →
- * przeliczenie cache → towary → magazyny → przeliczenie sekwencji. Wiersze
+ * przeliczenie cache → towary → magazyny → cofnięcie sekwencji. Wiersze
  * niepochodzące z seeda przeżywają każdy z tych kroków, bo:
  *   - stany są PRZELICZANE z pozostałego ledgera (a nie kasowane hurtem),
  *   - towar/magazyn ginie tylko wtedy, gdy nie został po nim ani jeden ruch.
+ *
+ * DWIE RZECZY, KTÓRE MUSZĄ BYĆ WĄSKIE — obie kosztowały już dane:
+ *
+ *   1. STANY liczymy WYŁĄCZNIE dla par (towar, magazyn), których dotknął ruch
+ *      z seeda. Wcześniej pętla szła po CAŁEJ tabeli `warehouse_stock` i kasowała
+ *      każdy wiersz bez pokrycia w ledgerze — a taki jest właśnie bilans otwarcia
+ *      wpisany ręcznie (42 szt., zero ruchów w księdze). Cache seeda odtwarzamy,
+ *      cudzego nie tykamy nawet wtedy, gdy łamie kontrakt „cache = suma ledgera".
+ *
+ *   2. SEKWENCJI NIE KASUJEMY i ruszamy tylko te (typ, rok), dla których seed
+ *      brał numery. Cofamy licznik do najwyższego numeru, jaki ZOSTAŁ
+ *      w dokumentach — nigdy w górę i nigdy do zera „bo tabela wygląda na pustą".
+ *      Skasowany numerator to numer wydany drugi raz i UNIQUE na
+ *      `warehouse_documents.doc_number` w twarz przy zatwierdzaniu z UI.
  */
-export async function resetWarehouse(): Promise<WarehouseResetCounts> {
+export function resetWarehouse(outerTx?: Tx): WarehouseResetCounts {
   const counts: WarehouseResetCounts = {
     documents: 0,
     documentItems: 0,
@@ -637,17 +665,42 @@ export async function resetWarehouse(): Promise<WarehouseResetCounts> {
     sequences: 0,
   };
 
-  db.transaction((tx) => {
-    const seededDocs = tx
-      .select({ id: schema.warehouseDocuments.id })
+  runInTx(outerTx, (tx) => {
+    const seededDocRows = tx
+      .select({
+        id: schema.warehouseDocuments.id,
+        docType: schema.warehouseDocuments.docType,
+        issuedAt: schema.warehouseDocuments.issuedAt,
+      })
       .from(schema.warehouseDocuments)
       .where(like(schema.warehouseDocuments.notes, `%${MARKER}%`))
-      .all()
-      .map((r) => r.id);
+      .all();
+    const seededDocs = seededDocRows.map((r) => r.id);
+
+    // Co seed ruszył w cache stanów — pary (towar, magazyn) tknięte JEGO ruchami.
+    // Zbieramy je PRZED skasowaniem ruchów; potem nie ma już po czym poznać,
+    // których wierszy `warehouse_stock` dotyczył seed, a które są cudze.
+    const touchedStock = new Set<string>();
+    // Numeratory, z których seed brał numery — para (typ, rok daty dokumentu),
+    // dokładnie tak, jak liczy je `nextDocNumberSync()` w routes/warehouse.ts.
+    const touchedSequences = new Set<string>();
+    for (const doc of seededDocRows) {
+      touchedSequences.add(`${doc.docType}|${Number(doc.issuedAt.slice(0, 4))}`);
+    }
 
     if (seededDocs.length > 0) {
       for (let i = 0; i < seededDocs.length; i += 200) {
         const chunk = seededDocs.slice(i, i + 200);
+        for (const m of tx
+          .select({
+            itemId: schema.warehouseMovements.itemId,
+            warehouseId: schema.warehouseMovements.warehouseId,
+          })
+          .from(schema.warehouseMovements)
+          .where(inArray(schema.warehouseMovements.documentId, chunk))
+          .all()) {
+          touchedStock.add(`${m.itemId}|${m.warehouseId}`);
+        }
         counts.movements += tx
           .delete(schema.warehouseMovements)
           .where(inArray(schema.warehouseMovements.documentId, chunk))
@@ -663,10 +716,17 @@ export async function resetWarehouse(): Promise<WarehouseResetCounts> {
       }
     }
 
-    // Cache stanów PRZELICZANY z ledgera (jedyne źródło prawdy). Wiersz bez
-    // ruchów po czyszczeniu znika; wiersz z ruchami dostaje ich sumę — także
-    // wtedy, gdy część ruchów pochodziła spoza seeda.
-    const stockRows = tx.select().from(schema.warehouseStock).all();
+    // Cache stanów PRZELICZANY z ledgera (jedyne źródło prawdy) — ale tylko dla
+    // par, które ruszył seed. Wiersz bez ruchów po czyszczeniu znika; wiersz
+    // z ruchami dostaje ich sumę, także gdy część ruchów pochodziła spoza seeda.
+    //
+    // NIE ma tu pętli po całej tabeli: stan wpisany przez człowieka jako bilans
+    // otwarcia nie ma pokrycia w ledgerze i taka pętla kasowała go jako „sierotę".
+    const stockRows = tx
+      .select()
+      .from(schema.warehouseStock)
+      .all()
+      .filter((s) => touchedStock.has(`${s.itemId}|${s.warehouseId}`));
     for (const s of stockRows) {
       const sum = tx
         .select({ total: sql<number | null>`sum(${schema.warehouseMovements.quantityDelta})` })
@@ -702,9 +762,20 @@ export async function resetWarehouse(): Promise<WarehouseResetCounts> {
       }
     }
 
+    /** Czy na tej pozycji/magazynie leży jeszcze niezerowy stan (choćby cudzy). */
+    const hasStockLeft = (where: SQL): boolean =>
+      tx
+        .select({ id: schema.warehouseStock.itemId })
+        .from(schema.warehouseStock)
+        .where(and(where, sql`${schema.warehouseStock.quantity} <> 0`))
+        .limit(1)
+        .get() !== undefined;
+
     // Towary seeda — tylko te, po których nie został żaden ruch. Gdyby ktoś
     // wystawił własny dokument na towar z seeda, kartoteka zostaje (inaczej
     // FK by pękło, a historia jego dokumentu przestałaby się spinać).
+    // Zostaje też towar z niezerowym stanem: skoro coś na nim leży, a ledger
+    // tego nie tłumaczy, to jest to czyjś bilans otwarcia — nie nasz śmieć.
     const seededItems = tx
       .select({ id: schema.warehouseItems.id })
       .from(schema.warehouseItems)
@@ -725,6 +796,7 @@ export async function resetWarehouse(): Promise<WarehouseResetCounts> {
         .limit(1)
         .get();
       if (used || onDoc) continue;
+      if (hasStockLeft(eq(schema.warehouseStock.itemId, id))) continue;
       tx.delete(schema.warehouseStock).where(eq(schema.warehouseStock.itemId, id)).run();
       counts.items += tx
         .delete(schema.warehouseItems)
@@ -754,6 +826,7 @@ export async function resetWarehouse(): Promise<WarehouseResetCounts> {
         .limit(1)
         .get();
       if (used || child) continue;
+      if (hasStockLeft(eq(schema.warehouseStock.warehouseId, w.id))) continue;
       tx.delete(schema.warehouseStock).where(eq(schema.warehouseStock.warehouseId, w.id)).run();
       counts.warehouses += tx
         .delete(schema.warehouses)
@@ -761,10 +834,19 @@ export async function resetWarehouse(): Promise<WarehouseResetCounts> {
         .run().changes;
     }
 
-    // Sekwencje numeracji: cofamy licznik do najwyższego numeru, jaki został
+    // Sekwencje numeracji: cofamy licznik do najwyższego numeru, jaki ZOSTAŁ
     // w dokumentach. Bez tego po resecie sekwencja zostałaby „w przyszłości"
     // i pierwszy dokument z UI dostałby numer z dziurą.
-    const seqs = tx.select().from(schema.warehouseDocSequences).all();
+    //
+    // Ruszamy WYŁĄCZNIE numeratory, z których seed brał numery, i tylko w dół.
+    // Numerator typu/roku, którego seed nie tknął, jest cudzą historią: gdyby
+    // reset go skasował albo wyzerował, kolejny dokument z UI dostałby numer
+    // wydany już wcześniej — i wpadł na UNIQUE `warehouse_documents.doc_number`.
+    const seqs = tx
+      .select()
+      .from(schema.warehouseDocSequences)
+      .all()
+      .filter((s) => touchedSequences.has(`${s.docType}|${s.year}`));
     for (const s of seqs) {
       const docs = tx
         .select({ docNumber: schema.warehouseDocuments.docNumber })
@@ -781,18 +863,13 @@ export async function resetWarehouse(): Promise<WarehouseResetCounts> {
         const n = Number(d.docNumber?.split("/")[2] ?? 0);
         return Number.isFinite(n) ? Math.max(m, n) : m;
       }, 0);
-      if (max === 0) {
+      // Wiersza NIE kasujemy nawet przy `max === 0` — numerator z zerem znaczy
+      // „następny będzie 001", dokładnie to samo co brak wiersza, ale bez ryzyka,
+      // że skasujemy licznik, którego seed nie założył. W górę nie idziemy nigdy:
+      // wyższy licznik to numery, które ktoś już mógł zobaczyć.
+      if (max < s.lastNumber) {
         counts.sequences += tx
-          .delete(schema.warehouseDocSequences)
-          .where(
-            and(
-              eq(schema.warehouseDocSequences.docType, s.docType),
-              eq(schema.warehouseDocSequences.year, s.year),
-            ),
-          )
-          .run().changes;
-      } else if (max !== s.lastNumber) {
-        tx.update(schema.warehouseDocSequences)
+          .update(schema.warehouseDocSequences)
           .set({ lastNumber: max })
           .where(
             and(
@@ -800,8 +877,7 @@ export async function resetWarehouse(): Promise<WarehouseResetCounts> {
               eq(schema.warehouseDocSequences.year, s.year),
             ),
           )
-          .run();
-        counts.sequences++;
+          .run().changes;
       }
     }
   });

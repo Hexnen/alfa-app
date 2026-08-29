@@ -16,6 +16,9 @@
  *    liczonych wstecz od TODAY. Daty poza tym oknem psują widoki miesięczne.
  */
 
+import { eq } from "drizzle-orm";
+import { db, schema } from "../../src/db/index.js";
+
 /** Dzień „dzisiaj" dla generatora — stały, żeby baza była powtarzalna. */
 export const TODAY = "2026-08-29";
 
@@ -38,6 +41,103 @@ export const isSeeded = (v: string | null | undefined): boolean =>
 /** Dokleja znacznik do notatki, zachowując treść. */
 export const mark = (text?: string): string =>
   text && text.trim() ? `${text}\n\n${MARKER}` : MARKER;
+
+/* ------------------------------------------------------------------ */
+/* Transakcje — jeden przebieg = jedna transakcja                      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Uchwyt transakcyjny drizzle — ten sam interfejs, co `db`, ale w otwartej
+ * transakcji. Wyciągnięty z sygnatury `db.transaction`, żeby nie wpisywać na
+ * sztywno wewnętrznych typów sterownika.
+ */
+export type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+/**
+ * Uruchamia `fn` w transakcji — a jeśli jesteśmy już w cudzej, to po prostu
+ * w niej, bez otwierania własnej.
+ *
+ * DLACZEGO. Orkiestrator (`seed-dev-year.ts`) opakowuje CAŁY przebieg
+ * (`--reset` + generowanie) w jedną transakcję, żeby awaria w piątym module
+ * cofała też cztery pierwsze — inaczej baza zostaje w połowie i nikt nie wie,
+ * co w niej jest. Ale drizzle na better-sqlite3 wysyła w `db.transaction()`
+ * gołe `BEGIN`, a SQLite nie zna zagnieżdżonych transakcji („cannot start
+ * a transaction within a transaction"). Moduł dostaje więc uchwyt z zewnątrz
+ * i pisze przez niego; uruchomiony samodzielnie (test, `--only`) otwiera własną.
+ *
+ * UWAGA: to jest jedno połączenie better-sqlite3, więc zapytania puszczone
+ * gołym `db` w trakcie otwartej transakcji i tak w niej siedzą — nie ma tu
+ * drugiej sesji, która mogłaby zobaczyć niezatwierdzony stan.
+ */
+export function runInTx<T>(outer: Tx | undefined, fn: (tx: Tx) => T): T {
+  return outer ? fn(outer) : db.transaction(fn);
+}
+
+/* ------------------------------------------------------------------ */
+/* Guard przed podwójnym zasianiem                                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Przerywa seedowanie, gdy dane modułu już są w bazie.
+ *
+ * DLACZEGO NIE „i tak dopiszemy". Moduły dokładają wiersze, a nie wstawiają je
+ * idempotentnie, więc drugi przebieg bez `--reset` cichcem DUBLUJE dane:
+ * `--only=operations` dwa razy to 1205 wydarzeń zamiast 605, bez jednego
+ * ostrzeżenia. Część modułów wywaliłaby się dopiero na UNIQUE w środku
+ * transakcji (komunikat sterownika nie mówi wtedy nic o przyczynie), część
+ * — jak kalendarz — nie wywali się wcale. Dlatego pytamy wprost, na wejściu.
+ */
+export function assertNotSeeded(module: string, alreadyPresent: boolean): void {
+  if (!alreadyPresent) return;
+  throw new Error(
+    `Dane modułu "${module}" ${MARKER} już są w bazie — drugi przebieg zdublowałby je po cichu. ` +
+      `Uruchom najpierw: npx tsx scripts/seed-dev-year.ts --reset --only=${module}`,
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Rejestr zmian w cudzych wierszach (app_settings)                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Nie wszystko, co seed robi, da się rozpoznać po znaczniku. Gdy UZUPEŁNIA pole
+ * w wierszu, który NIE jest jego (koszt handlowca sprzed seeda, norma miesiąca
+ * bez kolumny na notatkę), po fakcie nie da się odróżnić „to wpisał seed" od
+ * „to wpisał człowiek" — a reset zgadujący traci dane użytkownika.
+ *
+ * Dlatego seed zapisuje, co dokładnie ustawił, w `app_settings`, a reset cofa
+ * WYŁĄCZNIE to i tylko wtedy, gdy wartość nadal jest tą, którą wpisał. Wzorzec
+ * pochodzi z `links.ts` (REGISTRY_KEY) — tu jest wyciągnięty do wspólnej formy.
+ *
+ * Rejestr czytamy i piszemy gołym `db`: to jedno połączenie, więc gdy trwa
+ * transakcja przebiegu, zapis siedzi w niej i wycofa się razem z resztą.
+ */
+export function readRegistry<T>(key: string, fallback: T): T {
+  const row = db.select().from(schema.appSettings).where(eq(schema.appSettings.key, key)).get();
+  if (!row) return fallback;
+  try {
+    return { ...fallback, ...(JSON.parse(row.value) as Partial<T>) };
+  } catch {
+    // Uszkodzony JSON traktujemy jak brak rejestru: lepiej nie cofnąć nic,
+    // niż cofnąć na chybił trafił.
+    return fallback;
+  }
+}
+
+export function writeRegistry(key: string, value: unknown): void {
+  const json = JSON.stringify(value);
+  db.insert(schema.appSettings)
+    .values({ key, value: json })
+    .onConflictDoUpdate({
+      target: schema.appSettings.key,
+      set: { value: json, updatedAt: new Date().toISOString() },
+    })
+    .run();
+}
+
+export function dropRegistry(key: string): void {
+  db.delete(schema.appSettings).where(eq(schema.appSettings.key, key)).run();
+}
 
 /* ------------------------------------------------------------------ */
 /* Deterministyczna losowość (mulberry32)                              */

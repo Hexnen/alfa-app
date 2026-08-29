@@ -20,7 +20,7 @@
  */
 import { db, schema } from "../../src/db/index.js";
 import { and, eq, isNull, sql } from "drizzle-orm";
-import { MARKER, int, pickMany, weighted } from "./shared.js";
+import { MARKER, type Tx, assertNotSeeded, int, pickMany, runInTx, weighted } from "./shared.js";
 
 export interface ServicesCounts {
   cameraCounts: number;
@@ -43,7 +43,7 @@ function cameraCount(): number {
   ] as const);
 }
 
-export async function seedServices(): Promise<ServicesCounts> {
+export function seedServices(outerTx?: Tx): ServicesCounts {
   // Tylko obiekty ze znacznikiem — 9 pierwotnych zostawiamy w spokoju, bo to nie
   // są dane seeda i ich reset i tak by nie posprzątał.
   const seeded = db
@@ -51,6 +51,25 @@ export async function seedServices(): Promise<ServicesCounts> {
     .from(schema.objects)
     .where(sql`${schema.objects.notes} like ${`%${MARKER}%`}`)
     .all();
+
+  // Drugi przebieg bez resetu nie zdubluje wierszy (moduł tylko uzupełnia pola
+  // przez `isNull`), ale przesunąłby wideorecepcję na kolejną porcję obiektów
+  // i cicho rozjechał dane z tym, co pokazuje raport. Odmawiamy tak samo jak
+  // reszta modułów — jeden przebieg, jeden stan.
+  assertNotSeeded(
+    "services",
+    db
+      .select({ id: schema.objects.id })
+      .from(schema.objects)
+      .where(
+        and(
+          sql`${schema.objects.notes} like ${`%${MARKER}%`}`,
+          sql`${schema.objects.cameraCount} is not null`,
+        ),
+      )
+      .limit(1)
+      .get() !== undefined,
+  );
 
   let cameraCounts = 0;
   let videoreception = 0;
@@ -65,7 +84,7 @@ export async function seedServices(): Promise<ServicesCounts> {
     pickMany(withCameras, Math.max(3, Math.round(withCameras.length * 0.12))).map((o) => o.id)
   );
 
-  db.transaction((tx) => {
+  runInTx(outerTx, (tx) => {
     for (const o of seeded) {
       if (o.hasCameras) {
         // `isNull` w warunku: nie nadpisujemy liczby, którą ktoś już wpisał ręcznie.
@@ -97,10 +116,10 @@ export async function seedServices(): Promise<ServicesCounts> {
  * sam `--only=services --reset`, ma wrócić stan sprzed: brak liczby kamer i brak
  * wideorecepcji. Obiektów spoza seeda nie ruszamy w żadną stronę.
  */
-export async function resetServices(): Promise<ServicesCounts> {
+export function resetServices(outerTx?: Tx): ServicesCounts {
   let cameraCounts = 0;
   let videoreception = 0;
-  db.transaction((tx) => {
+  runInTx(outerTx, (tx) => {
     const marked = sql`${schema.objects.notes} like ${`%${MARKER}%`}`;
     cameraCounts = tx
       .update(schema.objects)

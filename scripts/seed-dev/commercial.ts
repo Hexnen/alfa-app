@@ -11,10 +11,16 @@
  * 30 spółek) i niczego z niej nie kasuje ani nie przepisuje — z jedynym wyjątkiem
  * kosztów trzech pierwotnych handlowców, opisanym przy `updateLegacySalespeople`.
  */
-import { eq, inArray, isNotNull } from "drizzle-orm";
+import { and, eq, inArray, isNull } from "drizzle-orm";
 import { db, schema } from "../../src/db/index.js";
 import {
   MARKER,
+  type Tx,
+  assertNotSeeded,
+  dropRegistry,
+  readRegistry,
+  runInTx,
+  writeRegistry,
   PERIOD,
   TODAY,
   addDays,
@@ -41,11 +47,18 @@ import {
 } from "./shared.js";
 
 /**
- * Uchwyt transakcyjny drizzle — ten sam interfejs, co `db`, ale w otwartej
- * transakcji. Wyciągnięty z sygnatury `db.transaction`, żeby nie wpisywać na
- * sztywno wewnętrznych typów sterownika.
+ * Rejestr zmian, które seed wprowadził w CUDZYCH wierszach — patrz
+ * `updateLegacySalespeople()`. Bez niego reset nie odróżnia kosztu wpisanego
+ * przez seed od kosztu wpisanego przez człowieka.
  */
-type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+const REGISTRY_KEY = "dev.seed.commercial";
+
+/** Co seed ustawił handlowcom sprzed seeda: [id, koszt|null, prowizja|null]. */
+interface CommercialRegistry {
+  legacySalespeople: Array<[number, number | null, number | null]>;
+}
+
+const EMPTY_REGISTRY: CommercialRegistry = { legacySalespeople: [] };
 
 /**
  * Ziarno modułu. Seedujemy TUTAJ, a nie licząc na orkiestrator, żeby
@@ -222,30 +235,77 @@ function insertSalespeople(tx: Tx): number[] {
 }
 
 /**
- * Trzem pierwotnym handlowcom (bez znacznika) dopisujemy koszt i prowizję.
+ * Handlowcom sprzed seeda (bez znacznika) UZUPEŁNIAMY koszt i prowizję — tylko
+ * tam, gdzie pole jest puste, i tylko po to, żeby Analityka miała co liczyć.
  *
- * UWAGA — to JEDYNA zmiana seeda w danych sprzed jego uruchomienia. Wiersze nie
- * dostają MARKER-a (nie są nasze i mają zostać po resecie), więc `resetCommercial()`
- * nie rozpozna ich po znaczniku i musi je wyzerować JAWNIE: przywraca `monthly_cost`
- * i `commission_rate` do NULL, czyli do stanu sprzed seeda.
+ * UWAGA — to JEDYNA zmiana seeda w danych sprzed jego uruchomienia i jedyne
+ * miejsce, w którym można stracić czyjąś pracę. Dlatego dwa zabezpieczenia:
+ *
+ *   1. WARUNEK `is null` W SAMYM UPDATE. Kiedyś seed pisał bezwarunkowo, więc
+ *      ręcznie wpisany koszt 7777 zł ginął już przy GENEROWANIU, zanim ktokolwiek
+ *      pomyślał o resecie. Teraz UPDATE nie ma prawa nadpisać wartości, która tam
+ *      jest. Koszt i prowizja idą osobnymi zapytaniami, bo są niezależne:
+ *      ktoś mógł wpisać samą prowizję i zostawić koszt pusty.
+ *
+ *   2. REJESTR. Zapisujemy, co dokładnie ustawiliśmy — reset cofa do NULL
+ *      WYŁĄCZNIE te wartości i tylko wtedy, gdy nikt ich w międzyczasie nie
+ *      zmienił. Wcześniej reset celował w wiersze „bo nie mają znacznika"
+ *      i zerował koszt każdemu prawdziwemu handlowcowi.
  */
-function updateLegacySalespeople(tx: Tx, seededIds: readonly number[]): number {
+function updateLegacySalespeople(
+  tx: Tx,
+  seededIds: readonly number[],
+): { count: number; registry: CommercialRegistry["legacySalespeople"] } {
   const legacy = tx
-    .select({ id: schema.salespeople.id, notes: schema.salespeople.notes })
+    .select({
+      id: schema.salespeople.id,
+      notes: schema.salespeople.notes,
+      monthlyCost: schema.salespeople.monthlyCost,
+      commissionRate: schema.salespeople.commissionRate,
+    })
     .from(schema.salespeople)
     .all()
     .filter((r) => !seededIds.includes(r.id) && !isSeeded(r.notes));
 
+  const registry: CommercialRegistry["legacySalespeople"] = [];
+  let count = 0;
+
   for (const row of legacy) {
-    tx.update(schema.salespeople)
-      .set({
-        monthlyCost: money(3200, 6800, 50),
-        commissionRate: chance(0.7) ? Math.round((rng() * 6 + 2) * 10) / 10 : null,
-      })
-      .where(eq(schema.salespeople.id, row.id))
-      .run();
+    // Losujemy ZAWSZE, także gdy nie będziemy zapisywać — strumień `rng()` jest
+    // wspólny dla całego seeda i pominięcie losowania przesunęłoby wszystko dalej.
+    const cost = money(3200, 6800, 50);
+    const rate = chance(0.7) ? Math.round((rng() * 6 + 2) * 10) / 10 : null;
+
+    const setCost =
+      row.monthlyCost === null
+        ? tx
+            .update(schema.salespeople)
+            .set({ monthlyCost: cost })
+            .where(and(eq(schema.salespeople.id, row.id), isNull(schema.salespeople.monthlyCost)))
+            .run().changes
+        : 0;
+
+    // Prowizja NULL bywa świadomą decyzją („ten handlowiec jej nie ma"), więc
+    // nie ma tu czego uzupełniać, gdy wylosowało się `null` — zapisujemy tylko
+    // wartość, i tylko na puste pole.
+    const setRate =
+      row.commissionRate === null && rate !== null
+        ? tx
+            .update(schema.salespeople)
+            .set({ commissionRate: rate })
+            .where(
+              and(eq(schema.salespeople.id, row.id), isNull(schema.salespeople.commissionRate)),
+            )
+            .run().changes
+        : 0;
+
+    if (setCost || setRate) {
+      count += 1;
+      registry.push([row.id, setCost ? cost : null, setRate ? rate : null]);
+    }
   }
-  return legacy.length;
+
+  return { count, registry };
 }
 
 /* ------------------------------------------------------------------ */
@@ -810,28 +870,38 @@ function insertHistory(tx: Tx, ids: readonly number[], planned: readonly Planned
 /* Wejście publiczne                                                   */
 /* ------------------------------------------------------------------ */
 
-export async function seedCommercial(): Promise<CommercialCounts> {
+export function seedCommercial(outerTx?: Tx): CommercialCounts {
   seed(SEED);
 
   // Drugi przebieg bez resetu wywaliłby się dopiero na UNIQUE (`contractors.nip`,
   // `orders.order_number`) w środku transakcji — komunikat sterownika nic wtedy nie
   // mówi o przyczynie, więc sprawdzamy to sami i od razu podpowiadamy `--reset`.
-  const alreadySeeded = db
-    .select({ notes: schema.contractors.notes })
-    .from(schema.contractors)
-    .all()
-    .some((r) => isSeeded(r.notes));
-  if (alreadySeeded) {
-    throw new Error(`Dane handlowe ${MARKER} już są w bazie — uruchom najpierw resetCommercial().`);
-  }
+  assertNotSeeded(
+    "commercial",
+    db
+      .select({ notes: schema.contractors.notes })
+      .from(schema.contractors)
+      .all()
+      .some((r) => isSeeded(r.notes)),
+  );
 
   const companyIds = db.select({ id: schema.companies.id }).from(schema.companies).all().map((r) => r.id);
   if (companyIds.length === 0) throw new Error("Brak spółek w bazie — uruchom najpierw seed spółek.");
 
   // Cały moduł w jednej transakcji: ~270 wierszy to jeden fsync zamiast 270.
-  return db.transaction((tx) => {
+  // Gdy orkiestrator prowadzi własną transakcję dla całego przebiegu, piszemy w niej.
+  return runInTx(outerTx, (tx) => {
     const newSalespeople = insertSalespeople(tx);
-    const salespeopleUpdated = updateLegacySalespeople(tx, newSalespeople);
+    const legacy = updateLegacySalespeople(tx, newSalespeople);
+    // Rejestr piszemy od razu: gdyby dalsza część przebiegu padła, transakcja
+    // cofnie i zmiany, i rejestr — jedno i drugie albo nic.
+    writeRegistry(REGISTRY_KEY, {
+      legacySalespeople: [
+        ...readRegistry(REGISTRY_KEY, EMPTY_REGISTRY).legacySalespeople,
+        ...legacy.registry,
+      ],
+    } satisfies CommercialRegistry);
+    const salespeopleUpdated = legacy.count;
 
     // Do przypisań bierzemy WSZYSTKICH handlowców (także trzech pierwotnych) —
     // inaczej portfel sprzed seeda zostałby odcięty od nowych kontrahentów.
@@ -896,9 +966,30 @@ export async function seedCommercial(): Promise<CommercialCounts> {
  * w polu tekstowym, nigdy po zakresie identyfikatorów. Kolejność jest odwrotna do
  * zależności FK (`foreign_keys = ON`), bo zlecenia trzymają referencję do obiektu
  * BEZ kaskady i skasowanie obiektu przed zleceniem wywróciłoby transakcję.
+ *
+ * ZNACZNIK TO ZA MAŁO, gdy wiersz jest RODZICEM. `objects.contractor_id` kaskaduje,
+ * więc kontrahent z seeda kasuje ze sobą obiekty — także te dopisane przez
+ * użytkownika. Dlatego rodzic (kontrahent) ginie dopiero wtedy, gdy nie zostało
+ * po nim ani jedno dziecko, a obiekt trzymany cudzym zleceniem zostaje w bazie.
+ * Zasada ogólna: reset wolno zostawić NIEDOKOŃCZONY, ale nigdy nie wolno mu
+ * zabrać czegoś, czego sam nie stworzył.
  */
-export async function resetCommercial(): Promise<CommercialCounts> {
-  return db.transaction((tx) => {
+export function resetCommercial(outerTx?: Tx): CommercialCounts {
+  return runInTx(outerTx, (tx) => {
+    // WSZYSTKIE liczniki idą z `.changes` sterownika, nigdy z długości listy
+    // identyfikatorów. To nie kosmetyka raportu: przy kaskadzie FK jedno DELETE
+    // zabiera więcej wierszy, niż było na liście, a raport „objects: 111" przy
+    // 112 faktycznie skasowanych obiektach ukrywał dokładnie tę stratę.
+    const counts: CommercialCounts = {
+      salespeople: 0,
+      salespeopleUpdated: 0,
+      contractors: 0,
+      objects: 0,
+      contracts: 0,
+      orders: 0,
+      history: 0,
+    };
+
     const historyIds = tx
       .select({ id: schema.objectHistory.id, description: schema.objectHistory.description })
       .from(schema.objectHistory)
@@ -906,7 +997,10 @@ export async function resetCommercial(): Promise<CommercialCounts> {
       .filter((r) => isSeeded(r.description))
       .map((r) => r.id);
     for (const batch of chunks(historyIds, 200)) {
-      tx.delete(schema.objectHistory).where(inArray(schema.objectHistory.id, batch)).run();
+      counts.history += tx
+        .delete(schema.objectHistory)
+        .where(inArray(schema.objectHistory.id, batch))
+        .run().changes;
     }
 
     const contractIds = tx
@@ -916,7 +1010,10 @@ export async function resetCommercial(): Promise<CommercialCounts> {
       .filter((r) => isSeeded(r.filePath))
       .map((r) => r.id);
     for (const batch of chunks(contractIds, 200)) {
-      tx.delete(schema.contracts).where(inArray(schema.contracts.id, batch)).run();
+      counts.contracts += tx
+        .delete(schema.contracts)
+        .where(inArray(schema.contracts.id, batch))
+        .run().changes;
     }
 
     const orderIds = tx
@@ -926,27 +1023,77 @@ export async function resetCommercial(): Promise<CommercialCounts> {
       .filter((r) => isSeeded(r.notes))
       .map((r) => r.id);
     for (const batch of chunks(orderIds, 200)) {
-      tx.delete(schema.orders).where(inArray(schema.orders.id, batch)).run();
+      counts.orders += tx.delete(schema.orders).where(inArray(schema.orders.id, batch)).run().changes;
     }
+
+    // Zlecenia, które ZOSTAŁY — czyje? Użytkownika. `orders.object_id` oraz
+    // `orders.payer_contractor_id` nie mają ON DELETE, więc obiekt i kontrahent,
+    // na których takie zlecenie wisi, muszą przeżyć reset; inaczej cała
+    // transakcja wywraca się na „FOREIGN KEY constraint failed".
+    const keptOrders = tx
+      .select({ objectId: schema.orders.objectId, contractorId: schema.orders.payerContractorId })
+      .from(schema.orders)
+      .all();
+    const objectsInUse = new Set(keptOrders.map((r) => r.objectId).filter((v): v is number => v != null));
+    const contractorsInUse = new Set(
+      keptOrders.map((r) => r.contractorId).filter((v): v is number => v != null),
+    );
+
+    // Umowy, które ZOSTAŁY po czyszczeniu, też trzymają swój obiekt przy życiu:
+    // `contracts.object_id` kaskaduje, a umowa to dokument z plikiem, nie zapis
+    // pomocniczy. Historii obiektu świadomie NIE liczymy do tej ochrony — to log
+    // zmian samego obiektu, bez niego bezużyteczny, a wpisy dorabia aplikacja przy
+    // każdej edycji, więc reset nie miałby czego posprzątać.
+    const objectsWithContracts = new Set(
+      tx
+        .select({ objectId: schema.contracts.objectId })
+        .from(schema.contracts)
+        .all()
+        .map((r) => r.objectId)
+        .filter((v): v is number => v != null),
+    );
 
     const objectIds = tx
       .select({ id: schema.objects.id, notes: schema.objects.notes })
       .from(schema.objects)
       .all()
-      .filter((r) => isSeeded(r.notes))
+      .filter((r) => isSeeded(r.notes) && !objectsInUse.has(r.id) && !objectsWithContracts.has(r.id))
       .map((r) => r.id);
     for (const batch of chunks(objectIds, 200)) {
-      tx.delete(schema.objects).where(inArray(schema.objects.id, batch)).run();
+      counts.objects += tx.delete(schema.objects).where(inArray(schema.objects.id, batch)).run().changes;
     }
 
+    // KONTRAHENCI — tu leżała największa mina. Znacznik NIE wystarcza:
+    // `objects.contractor_id` ma ON DELETE CASCADE, a za obiektem kaskadują
+    // umowy i historia. Kontrahent z seeda, pod którego ktoś dopisał WŁASNY
+    // obiekt, zabierał go ze sobą razem z całą jego dokumentacją — i to po
+    // cichu (121 obiektów przed resetem → 9 po, przy raporcie „objects: 111").
+    //
+    // Dlatego kolejność jest odwrotna do intuicyjnej: najpierw znikają obiekty
+    // ZE ZNACZNIKIEM (wyżej), a kontrahent ginie dopiero wtedy, gdy nic po nim
+    // nie zostało. Kontrahent z cudzym obiektem zostaje w bazie — z widocznym
+    // znacznikiem, ale to znacznie mniejszy problem niż skasowany obiekt.
+    const contractorsWithObjects = new Set(
+      tx
+        .select({ contractorId: schema.objects.contractorId })
+        .from(schema.objects)
+        .all()
+        .map((r) => r.contractorId)
+        .filter((v): v is number => v != null),
+    );
     const contractorIds = tx
       .select({ id: schema.contractors.id, notes: schema.contractors.notes })
       .from(schema.contractors)
       .all()
-      .filter((r) => isSeeded(r.notes))
+      .filter(
+        (r) => isSeeded(r.notes) && !contractorsWithObjects.has(r.id) && !contractorsInUse.has(r.id),
+      )
       .map((r) => r.id);
     for (const batch of chunks(contractorIds, 200)) {
-      tx.delete(schema.contractors).where(inArray(schema.contractors.id, batch)).run();
+      counts.contractors += tx
+        .delete(schema.contractors)
+        .where(inArray(schema.contractors.id, batch))
+        .run().changes;
     }
 
     const salespersonIds = tx
@@ -956,35 +1103,39 @@ export async function resetCommercial(): Promise<CommercialCounts> {
       .filter((r) => isSeeded(r.notes))
       .map((r) => r.id);
     for (const batch of chunks(salespersonIds, 200)) {
-      tx.delete(schema.salespeople).where(inArray(schema.salespeople.id, batch)).run();
-    }
-
-    // Handlowcy sprzed seeda nie mają znacznika, więc nie da się ich rozpoznać po
-    // MARKER-ze — a seed DOPISAŁ im koszt i prowizję (`updateLegacySalespeople`).
-    // Reset musi to cofnąć jawnie: z powrotem do NULL, czyli „nieuzupełniony".
-    const legacy = tx
-      .select({ id: schema.salespeople.id, notes: schema.salespeople.notes })
-      .from(schema.salespeople)
-      .where(isNotNull(schema.salespeople.monthlyCost))
-      .all()
-      .filter((r) => !isSeeded(r.notes))
-      .map((r) => r.id);
-    for (const batch of chunks(legacy, 200)) {
-      tx.update(schema.salespeople)
-        .set({ monthlyCost: null, commissionRate: null })
+      counts.salespeople += tx
+        .delete(schema.salespeople)
         .where(inArray(schema.salespeople.id, batch))
-        .run();
+        .run().changes;
     }
 
-    return {
-      salespeople: salespersonIds.length,
-      salespeopleUpdated: legacy.length,
-      contractors: contractorIds.length,
-      objects: objectIds.length,
-      contracts: contractIds.length,
-      orders: orderIds.length,
-      history: historyIds.length,
-    };
+    // Handlowcy sprzed seeda: cofamy WYŁĄCZNIE to, co seed sam ustawił, i tylko
+    // wtedy, gdy wartość nadal jest tą, którą wpisał — z rejestru, a nie „bo
+    // wiersz nie ma znacznika". Poprzednia wersja celowała w BRAK znacznika,
+    // czyli w prawdziwych handlowców, i zerowała im ręcznie wpisany koszt
+    // i prowizję (7777 zł / 9,9% → NULL/NULL).
+    const registry = readRegistry(REGISTRY_KEY, EMPTY_REGISTRY);
+    for (const [id, cost, rate] of registry.legacySalespeople) {
+      let touched = 0;
+      if (cost !== null) {
+        touched += tx
+          .update(schema.salespeople)
+          .set({ monthlyCost: null })
+          .where(and(eq(schema.salespeople.id, id), eq(schema.salespeople.monthlyCost, cost)))
+          .run().changes;
+      }
+      if (rate !== null) {
+        touched += tx
+          .update(schema.salespeople)
+          .set({ commissionRate: null })
+          .where(and(eq(schema.salespeople.id, id), eq(schema.salespeople.commissionRate, rate)))
+          .run().changes;
+      }
+      if (touched > 0) counts.salespeopleUpdated += 1;
+    }
+    dropRegistry(REGISTRY_KEY);
+
+    return counts;
   });
 }
 

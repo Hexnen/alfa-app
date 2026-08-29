@@ -19,8 +19,17 @@
  */
 import { db, schema } from "../../src/db/index.js";
 import { computeObjectPersonnelCost } from "../../src/lib/object-personnel-cost.js";
-import { and, eq, inArray, isNull, sql } from "drizzle-orm";
-import { MARKER, pickMany } from "./shared.js";
+import { and, eq, isNull, sql } from "drizzle-orm";
+import {
+  MARKER,
+  type Tx,
+  assertNotSeeded,
+  dropRegistry,
+  pickMany,
+  readRegistry,
+  runInTx,
+  writeRegistry,
+} from "./shared.js";
 
 /** Klucz rejestru zmian w app_settings. */
 const REGISTRY_KEY = "dev.seed.links";
@@ -35,36 +44,6 @@ interface Registry {
 }
 
 const EMPTY: Registry = { hrObjects: [], salespeople: [], technicians: [] };
-
-function readRegistry(): Registry {
-  const row = db
-    .select()
-    .from(schema.appSettings)
-    .where(eq(schema.appSettings.key, REGISTRY_KEY))
-    .get();
-  if (!row) return EMPTY;
-  try {
-    const parsed = JSON.parse(row.value) as Partial<Registry>;
-    return {
-      hrObjects: parsed.hrObjects ?? [],
-      salespeople: parsed.salespeople ?? [],
-      technicians: parsed.technicians ?? [],
-    };
-  } catch {
-    return EMPTY;
-  }
-}
-
-function writeRegistry(reg: Registry): void {
-  const value = JSON.stringify(reg);
-  db.insert(schema.appSettings)
-    .values({ key: REGISTRY_KEY, value })
-    .onConflictDoUpdate({
-      target: schema.appSettings.key,
-      set: { value, updatedAt: new Date().toISOString() },
-    })
-    .run();
-}
 
 export interface LinksCounts {
   hrObjectsMapped: number;
@@ -82,8 +61,17 @@ function isOverhead(name: string): boolean {
   return name.startsWith("#") || name.trim().toUpperCase() === "CMA";
 }
 
-export async function seedLinks(): Promise<LinksCounts> {
-  const reg = readRegistry();
+export function seedLinks(outerTx?: Tx): LinksCounts {
+  const reg = readRegistry(REGISTRY_KEY, EMPTY);
+
+  // Drugi przebieg bez resetu zmapowałby KOLEJNE pozycje kadrowe (filtr bierze
+  // te z `object_id is null`, a poprzednio zmapowane już go nie mają) — koszt
+  // osobowy obiektów urósłby po cichu ponad cel 30% przychodu. Rejestr z treścią
+  // znaczy „ten moduł już tu był".
+  assertNotSeeded(
+    "links",
+    reg.hrObjects.length > 0 || reg.salespeople.length > 0 || reg.technicians.length > 0,
+  );
 
   // --- 1. Pozycje kadrowe → obiekty -------------------------------------
   // Mapujemy tylko pozycje z godzinami (inaczej mapowanie nic nie wnosi) i nie
@@ -176,7 +164,7 @@ export async function seedLinks(): Promise<LinksCounts> {
     // widoczny w UI, więc obie gałęzie mają być reprezentowane w danych.
     const linkCount = Math.min(Math.ceil(seededSales.length / 2), officeEmployees.length);
     const chosen = pickMany(seededSales, linkCount);
-    db.transaction((tx) => {
+    runInTx(outerTx, (tx) => {
       chosen.forEach((s, i) => {
         const employeeId = officeEmployees[i % officeEmployees.length];
         tx.update(schema.salespeople)
@@ -207,7 +195,7 @@ export async function seedLinks(): Promise<LinksCounts> {
       .map((e) => [norm(e.fullName), e.id])
   );
   const techLinks: Array<[number, number]> = [];
-  db.transaction((tx) => {
+  runInTx(outerTx, (tx) => {
     for (const t of db
       .select({ id: schema.technicians.id, firstName: schema.technicians.firstName, lastName: schema.technicians.lastName, employeeId: schema.technicians.employeeId })
       .from(schema.technicians)
@@ -220,7 +208,7 @@ export async function seedLinks(): Promise<LinksCounts> {
     }
   });
 
-  writeRegistry({
+  writeRegistry(REGISTRY_KEY, {
     hrObjects: [...reg.hrObjects, ...mapped],
     salespeople: [...reg.salespeople, ...salesLinks],
     technicians: [...reg.technicians, ...techLinks],
@@ -238,13 +226,13 @@ export async function seedLinks(): Promise<LinksCounts> {
  * którą wpisał seed. Gdy ktoś zmienił mapowanie ręcznie, zostaje jego — reset
  * danych deweloperskich nie ma prawa kasować decyzji użytkownika.
  */
-export async function resetLinks(): Promise<LinksCounts> {
-  const reg = readRegistry();
+export function resetLinks(outerTx?: Tx): LinksCounts {
+  const reg = readRegistry(REGISTRY_KEY, EMPTY);
   let hrObjectsMapped = 0;
   let salespeopleLinked = 0;
   let techniciansLinked = 0;
 
-  db.transaction((tx) => {
+  runInTx(outerTx, (tx) => {
     for (const [hrObjectId, objectId] of reg.hrObjects) {
       const r = tx
         .update(schema.hrObjects)
@@ -269,7 +257,7 @@ export async function resetLinks(): Promise<LinksCounts> {
         .run();
       techniciansLinked += r.changes;
     }
-    tx.delete(schema.appSettings).where(eq(schema.appSettings.key, REGISTRY_KEY)).run();
+    dropRegistry(REGISTRY_KEY);
   });
 
   return { hrObjectsMapped, salespeopleLinked, techniciansLinked };

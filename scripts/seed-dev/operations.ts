@@ -44,10 +44,10 @@ import {
   rng,
   seed,
   weighted,
+  type Tx,
+  assertNotSeeded,
+  runInTx,
 } from "./shared.js";
-
-/** Uchwyt transakcyjny drizzle — ten sam interfejs co `db`, ale w otwartej transakcji. */
-type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 /**
  * Ziarno modułu. Seedujemy TUTAJ (jak `commercial.ts`), żeby `seedOperations()` dawało
@@ -1165,11 +1165,25 @@ function insertActivity(
 /* Wejście publiczne                                                   */
 /* ------------------------------------------------------------------ */
 
-export async function seedOperations(): Promise<OperationsCounts> {
+export function seedOperations(outerTx?: Tx): OperationsCounts {
   seed(SEED);
 
+  // Drugi przebieg bez resetu nie ma o co się wywrócić — w kalendarzu nie ma
+  // kolumny UNIQUE, która by go zatrzymała — więc po cichu DUBLUJE rok pracy
+  // (605 → 1205 wydarzeń, 289 → 576 realizacji, zero ostrzeżeń). Dlatego moduł
+  // pyta sam, na wejściu, dokładnie jak `commercial`.
+  assertNotSeeded(
+    "operations",
+    db
+      .select({ description: schema.calendarEvents.description })
+      .from(schema.calendarEvents)
+      .all()
+      .some((r) => isSeeded(r.description)),
+  );
+
   // Cały moduł w jednej transakcji: ~1700 wierszy to jeden fsync zamiast 1700.
-  return db.transaction((tx) => {
+  // Gdy orkiestrator prowadzi transakcję całego przebiegu, piszemy w niej.
+  return runInTx(outerTx, (tx) => {
     const ctx = loadContext(tx);
 
     // Kolejność jest wymuszona przepływem dokumentów, nie wygodą: seria daje `series_id`
@@ -1213,8 +1227,8 @@ export async function seedOperations(): Promise<OperationsCounts> {
  * odwrotnej kolejności bazy sprzed migracji 0043, w których FK dodane przez
  * ALTER TABLE nie mają ON DELETE, wywróciłyby się na „FOREIGN KEY constraint failed”.
  */
-export async function resetOperations(): Promise<OperationsCounts> {
-  return db.transaction((tx) => {
+export function resetOperations(outerTx?: Tx): OperationsCounts {
+  return runInTx(outerTx, (tx) => {
     const counts = emptyCounts();
 
     const seededEvents = tx

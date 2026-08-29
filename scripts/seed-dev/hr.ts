@@ -28,8 +28,11 @@
  *   wpisał. Wyjątkiem są 2026-07 i 2026-08 — leżą w oknie seeda, bo import
  *   zostawił tam wyłącznie puste zaczepy; tam pracuje sam ZAMEK 1.
  *
- *   `hr_month_norms` nie ma pola `notes`, więc broni go wyłącznie ZAMEK 2:
- *   kasujemy normy tylko z 2025-09…12, a import napisał wyłącznie rok 2026.
+ *   ZAMEK 3 (rejestr). `hr_month_norms` nie ma pola `notes`, więc ZAMEK 1 tam
+ *   nie działa, a samo okno miesięcy nie odróżnia normy seeda od normy wpisanej
+ *   ręcznie w tym samym miesiącu — i kasowało obie. Dlatego seed zapisuje
+ *   w `app_settings` (REGISTRY_KEY), które normy założył i z jakimi wartościami,
+ *   a reset cofa wyłącznie te, których nikt potem nie poprawił.
  */
 
 import { and, eq, like, or, type SQL, type SQLWrapper } from "drizzle-orm";
@@ -41,7 +44,38 @@ import type {
   HrPayroll,
 } from "../../src/db/schema.js";
 import { buildHoursAggregates, computePayroll } from "../../src/utils/hr-calc.js";
-import { MARKER, chance, int, mark, num, pick, rng } from "./shared.js";
+import {
+  MARKER,
+  type Tx,
+  assertNotSeeded,
+  chance,
+  dropRegistry,
+  int,
+  mark,
+  num,
+  pick,
+  readRegistry,
+  rng,
+  runInTx,
+  writeRegistry,
+} from "./shared.js";
+
+/**
+ * Rejestr norm dopisanych przez seed — TRZECI ZAMEK dla `hr_month_norms`.
+ *
+ * Ta jedna tabela nie ma pola `notes`, więc do niedawna broniło jej wyłącznie
+ * okno miesięcy: reset kasował WSZYSTKIE normy z 2025-09…12, także te wpisane
+ * ręcznie przez kadrową. Teraz zapamiętujemy, które wiersze założyliśmy i z jakimi
+ * wartościami — reset kasuje wyłącznie je i tylko wtedy, gdy nikt ich nie poprawił.
+ */
+const REGISTRY_KEY = "dev.seed.hr";
+
+/** [rok, miesiąc, workNorm, contractNorm] — dokładnie to, co seed wpisał. */
+interface HrRegistry {
+  monthNorms: Array<[number, number, number, number]>;
+}
+
+const EMPTY_REGISTRY: HrRegistry = { monthNorms: [] };
 
 interface YM {
   year: number;
@@ -256,7 +290,7 @@ function asPayrollRow(
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
-export async function seedHr(): Promise<HrSeedCounts> {
+export function seedHr(outerTx?: Tx): HrSeedCounts {
   const counts: HrSeedCounts = {
     monthNorms: 0,
     hours: 0,
@@ -265,12 +299,28 @@ export async function seedHr(): Promise<HrSeedCounts> {
     monthsCovered: SEEDED_PAYROLL_MONTHS.length,
   };
 
-  /* --- Odczyt stanu (poza transakcją — same SELECT-y) ---------------- */
-  const employees: HrEmployee[] = await db.select().from(schema.hrEmployees);
-  const contracts: HrContract[] = await db.select().from(schema.hrContracts);
-  const existingHours: HrHours[] = await db.select().from(schema.hrHours);
-  const existingNorms = await db.select().from(schema.hrMonthNorms);
-  const officeTemplate = await db
+  // Drugi przebieg bez resetu dołożyłby drugi komplet godzin i wypłat obok
+  // pierwszego — `hr_hours` z założenia dopuszcza kilka wpisów na osobę
+  // w miesiącu, więc nic by nie pisnęło, a godziny urosłyby dwukrotnie.
+  assertNotSeeded(
+    "hr",
+    db
+      .select({ id: schema.hrHours.id })
+      .from(schema.hrHours)
+      .where(like(schema.hrHours.notes, `%${MARKER}%`))
+      .limit(1)
+      .get() !== undefined,
+  );
+
+  /* --- Odczyt stanu (same SELECT-y) --------------------------------- */
+  // Bez `await`: cały moduł musi być SYNCHRONICZNY, bo orkiestrator uruchamia go
+  // w transakcji better-sqlite3, a ta jest synchroniczna. Jedno `await` oddałoby
+  // sterowanie do pętli zdarzeń i reszta seeda wykonałaby się PO commicie.
+  const employees: HrEmployee[] = db.select().from(schema.hrEmployees).all();
+  const contracts: HrContract[] = db.select().from(schema.hrContracts).all();
+  const existingHours: HrHours[] = db.select().from(schema.hrHours).all();
+  const existingNorms = db.select().from(schema.hrMonthNorms).all();
+  const officeTemplate = db
     .select()
     .from(schema.hrOfficePayroll)
     .where(
@@ -278,7 +328,8 @@ export async function seedHr(): Promise<HrSeedCounts> {
         eq(schema.hrOfficePayroll.year, IMPORTED_PAYROLL_MONTHS[0].year),
         eq(schema.hrOfficePayroll.month, IMPORTED_PAYROLL_MONTHS[0].month),
       ),
-    );
+    )
+    .all();
 
   const normByKey = new Map<number, { workNorm: number; contractNorm: number }>();
   for (const n of existingNorms) {
@@ -616,10 +667,20 @@ export async function seedHr(): Promise<HrSeedCounts> {
   }
 
   /* --- 5. Zapis (jedna transakcja, partiami) ------------------------ */
-  db.transaction((tx) => {
+  runInTx(outerTx, (tx) => {
     if (newNorms.length > 0) {
       tx.insert(schema.hrMonthNorms).values(newNorms).run();
       counts.monthNorms += newNorms.length;
+      // Rejestr norm — zapisujemy DOKŁADNIE to, co wstawiliśmy. Tylko po tym
+      // reset odróżni normę seeda od normy wpisanej ręcznie przez kadrową.
+      writeRegistry(REGISTRY_KEY, {
+        monthNorms: [
+          ...readRegistry(REGISTRY_KEY, EMPTY_REGISTRY).monthNorms,
+          ...newNorms.map(
+            (n) => [n.year, n.month, n.workNorm, n.contractNorm] as [number, number, number, number],
+          ),
+        ],
+      } satisfies HrRegistry);
     }
     for (let i = 0; i < newHours.length; i += 200) {
       const chunk = newHours.slice(i, i + 200);
@@ -675,14 +736,16 @@ function monthsFilter(
  * wtedy, gdyby ktoś rozszerzył okno, a okno wyklucza je nawet wtedy, gdyby
  * kadrowa wkleiła MARKER w notatkę.
  *
- * Wyjątek: `hr_month_norms` nie ma pola `notes`, więc broni go tylko ZAMEK 2.
- * Jest to bezpieczne, bo import napisał normy wyłącznie dla roku 2026, a seed
- * dotyka wyłącznie 2025-09…12 — `assertDisjoint()` pilnuje, żeby tak zostało.
+ * Wyjątek: `hr_month_norms` nie ma pola `notes`. Tam pracuje ZAMEK 3 — rejestr
+ * w `app_settings` z listą norm, które seed sam założył, i z wartościami, jakie
+ * im nadał. Kasujemy wyłącznie wiersze z tej listy, nadal mieszczące się w oknie
+ * miesięcy i nadal mające te wartości. Norma wpisana ręcznie przez kadrową dla
+ * 2025-09…12 (albo poprawiona po seedzie) zostaje w bazie.
  *
  * Reset nie dotyka `hr_employees`, `hr_contracts` ani `hr_objects` — seed ich
  * nie tworzy, więc nie ma tam czego cofać.
  */
-export async function resetHr(): Promise<HrResetCounts> {
+export function resetHr(outerTx?: Tx): HrResetCounts {
   assertDisjoint("hr_hours", SEEDED_HOURS_MONTHS, IMPORTED_HOURS_MONTHS);
   assertDisjoint("hr_payroll", SEEDED_PAYROLL_MONTHS, IMPORTED_PAYROLL_MONTHS);
   assertDisjoint("hr_month_norms", SEEDED_NORM_MONTHS, IMPORTED_NORM_MONTHS);
@@ -694,7 +757,7 @@ export async function resetHr(): Promise<HrResetCounts> {
     officePayroll: 0,
   };
 
-  db.transaction((tx) => {
+  runInTx(outerTx, (tx) => {
     counts.hours = tx
       .delete(schema.hrHours)
       .where(
@@ -725,13 +788,32 @@ export async function resetHr(): Promise<HrResetCounts> {
       )
       .run().changes;
 
-    // Normy — jedyna tabela bez znacznika. Kasujemy dokładnie te miesiące,
-    // które seed mógł dołożyć, i tylko wtedy, gdy nie ma po nich śladu
-    // godzin ani wypłat (czyli po posprzątaniu powyżej).
-    counts.monthNorms = tx
-      .delete(schema.hrMonthNorms)
-      .where(monthsFilter(schema.hrMonthNorms.year, schema.hrMonthNorms.month, SEEDED_NORM_MONTHS))
-      .run().changes;
+    // Normy — jedyna tabela bez znacznika, więc idziemy po REJESTRZE, a nie po
+    // oknie miesięcy. Wcześniej jedno DELETE zabierało wszystkie normy
+    // z 2025-09…12: także tę, którą kadrowa wpisała ręcznie, zanim seed
+    // w ogóle ruszył (seed omija istniejące normy, więc jej nie zakładał —
+    // ale reset i tak ją kasował).
+    //
+    // Trzy warunki naraz: wiersz jest w rejestrze (ZAMEK 3), leży w oknie
+    // miesięcy seeda (ZAMEK 2 — na wypadek rejestru z innej epoki bazy)
+    // i ma nadal wartości, które seed wpisał (gdy ktoś je poprawił, zostaje
+    // jego wersja).
+    const registry = readRegistry(REGISTRY_KEY, EMPTY_REGISTRY);
+    for (const [year, month, workNorm, contractNorm] of registry.monthNorms) {
+      if (!hasYM(SEEDED_NORM_MONTHS, year, month)) continue;
+      counts.monthNorms += tx
+        .delete(schema.hrMonthNorms)
+        .where(
+          and(
+            eq(schema.hrMonthNorms.year, year),
+            eq(schema.hrMonthNorms.month, month),
+            eq(schema.hrMonthNorms.workNorm, workNorm),
+            eq(schema.hrMonthNorms.contractNorm, contractNorm),
+          ),
+        )
+        .run().changes;
+    }
+    dropRegistry(REGISTRY_KEY);
   });
 
   return counts;
