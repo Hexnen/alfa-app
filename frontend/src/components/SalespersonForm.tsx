@@ -10,13 +10,15 @@ import {
   DialogTitle,
   DialogFooter,
 } from "./ui/dialog";
-import type { Salesperson, SalespersonInput } from "@/lib/api";
+import type { HrEmployeeRef, Salesperson, SalespersonInput } from "@/lib/api";
 
 interface SalespersonFormProps {
   open: boolean;
   onClose: () => void;
   onSubmit: (data: SalespersonInput) => Promise<void>;
   salesperson?: Salesperson | null;
+  /** Pracownicy z kadr do powiązania; pusta lista = pole pokazuje tylko „bez powiązania". */
+  employees?: HrEmployeeRef[];
 }
 
 /** Formularz handlowca — ten sam układ, co formularz technika. */
@@ -25,6 +27,7 @@ export function SalespersonForm({
   onClose,
   onSubmit,
   salesperson,
+  employees = [],
 }: SalespersonFormProps) {
   const [loading, setLoading] = useState(false);
   const [formData, setFormData] = useState<SalespersonInput>({
@@ -35,12 +38,20 @@ export function SalespersonForm({
     region: salesperson?.region || "",
     monthlyCost: salesperson?.monthlyCost ?? null,
     commissionRate: salesperson?.commissionRate ?? null,
+    employeeId: salesperson?.employeeId ?? null,
     notes: salesperson?.notes || "",
     active: salesperson?.active ?? true,
   });
 
   const setField = (name: keyof SalespersonInput, value: unknown) =>
     setFormData((p) => ({ ...p, [name]: value }));
+
+  /**
+   * Handlowiec z listy płac: koszt własny liczy się z jego wypłat w Kadrach,
+   * więc ręczne pole kosztu jest zablokowane. Inaczej ten sam człowiek
+   * kosztowałby firmę dwa razy — raz w Kadrach, raz w Analityce.
+   */
+  const onPayroll = formData.employeeId != null;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -113,9 +124,43 @@ export function SalespersonForm({
           </div>
 
           <div className="space-y-2">
+            <Label htmlFor="salesperson-employee">Pracownik w kadrach</Label>
+            <select
+              id="salesperson-employee"
+              data-testid="salesperson-employee"
+              className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+              value={formData.employeeId ?? ""}
+              onChange={(e) =>
+                setField("employeeId", e.target.value ? Number(e.target.value) : null)
+              }
+            >
+              <option value="">— bez powiązania (spoza listy płac) —</option>
+              {employees
+                .filter((e) => e.active || e.id === salesperson?.employeeId)
+                .map((e) => (
+                  <option key={e.id} value={e.id}>
+                    {e.fullName}
+                    {e.active ? "" : " (nieaktywny)"}
+                  </option>
+                ))}
+            </select>
+            <p className="text-xs text-muted-foreground">
+              Powiąż, jeśli handlowiec jest na liście płac — wtedy jego koszt
+              bierze się z wypłat w Kadrach. Zostaw puste dla osoby na własnej
+              działalności i wpisz koszt ręcznie.
+            </p>
+          </div>
+
+          <div className="space-y-2">
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
-                <Label htmlFor="salesperson-monthly-cost">Koszt miesięczny (PLN)</Label>
+                {/* „zł netto" jak w pozostałych polach kwotowych aplikacji.
+                    Przy osobie z Kadr pole jest zablokowane, a kwota bierze się
+                    z wypłat — te są netto „na rękę”, czyli w innym znaczeniu
+                    tego słowa; mówi o tym podpis pod polem. */}
+                <Label htmlFor="salesperson-monthly-cost">
+                  Koszt miesięczny (zł netto)
+                </Label>
                 {/* Puste pole to „nieuzupełniony”, więc `null`, a nie 0 zł. */}
                 <Input
                   id="salesperson-monthly-cost"
@@ -123,12 +168,19 @@ export function SalespersonForm({
                   type="number"
                   step="0.01"
                   min="0"
+                  disabled={onPayroll}
                   className="tabular-nums"
                   value={formData.monthlyCost ?? ""}
                   onChange={(e) =>
                     setField("monthlyCost", e.target.value === "" ? null : Number(e.target.value))
                   }
                 />
+                {onPayroll && (
+                  <p className="text-xs text-muted-foreground">
+                    Liczone z Kadr — z wypłat tej osoby (netto na rękę, bez
+                    składek pracodawcy).
+                  </p>
+                )}
               </div>
               <div className="space-y-2">
                 <Label htmlFor="salesperson-commission">Prowizja (%)</Label>

@@ -477,7 +477,11 @@ export function ObjectForm({
             <div className="space-y-2">
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
-                  <Label htmlFor="monthlyValue">Wartość miesięczna (PLN)</Label>
+                  {/* „zł netto" w etykiecie, a nie samo „PLN": abonament wchodzi
+                      tu wprost ze zlecenia („Abonament (zł netto)"), więc pole
+                      musi mówić tym samym językiem, co formularz, z którego
+                      kwota przyszła. */}
+                  <Label htmlFor="monthlyValue">Wartość miesięczna (zł netto)</Label>
                   <Input
                     id="monthlyValue"
                     name="monthlyValue"
@@ -488,7 +492,9 @@ export function ObjectForm({
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="monthlyCost">Koszt miesięczny (PLN)</Label>
+                  <Label htmlFor="monthlyCost">
+                    Koszt miesięczny — pozostały (zł netto)
+                  </Label>
                   {/* `?? ""` zamiast `|| ""` — 0 zł to świadomy wpis („obiekt nic
                       nie kosztuje”), a `|| ""` zamieniałby go w puste pole. */}
                   <Input
@@ -504,10 +510,19 @@ export function ObjectForm({
                       setFormData((prev) => ({ ...prev, monthlyCost: parseCost(e.target.value) }))
                     }
                   />
+                  {/* To pole to koszt POZA wynagrodzeniami. Pensje załogi dolicza
+                      Analityka z Kadr (godziny × wypłaty) i sumuje z tą kwotą —
+                      wpisanie tu pensji policzyłoby ludzi drugi raz. */}
+                  <p className="text-xs text-muted-foreground">
+                    Monitoring, sprzęt, abonamenty — wszystko poza wynagrodzeniami.
+                    Koszt osobowy dolicza się sam z Kadr.
+                  </p>
                 </div>
               </div>
               <div className="space-y-2">
-                <Label htmlFor="setupCost">Koszt instalacji / wdrożenia (PLN, jednorazowo)</Label>
+                <Label htmlFor="setupCost">
+                  Koszt instalacji / wdrożenia (zł netto, jednorazowo)
+                </Label>
                 <Input
                   id="setupCost"
                   name="setupCost"

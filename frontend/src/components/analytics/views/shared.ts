@@ -12,7 +12,13 @@
  * żeby ten plik nie mieszał eksportów i nie psuł fast refresh.
  */
 import { useEffect, useState } from "react";
-import { errStatus, type AnalyticsScope } from "@/lib/api";
+import { pct, plnFull } from "@/components/analytics";
+import {
+  errStatus,
+  type AnalyticsScope,
+  type CostWindow,
+  type PersonnelInfo,
+} from "@/lib/api";
 
 // ---------------------------------------------------------------------------
 // Pobranie danych
@@ -33,11 +39,15 @@ export type LoadState = "loading" | "ready" | "forbidden" | "error";
  * a przy okazji odpada jeden render na każdą zmianę filtra.
  */
 export function useAnalyticsResource<T>(
-  load: (scope: AnalyticsScope) => Promise<{ data?: T }>,
+  load: (scope: AnalyticsScope, costWindow: CostWindow) => Promise<{ data?: T }>,
   scope: AnalyticsScope,
+  costWindow: CostWindow,
   reloadKey: number
 ): { data: T | null; state: LoadState } {
-  const key = `${scope}|${reloadKey}`;
+  // Okno kosztu osobowego jest częścią klucza żądania, a nie tylko parametrem:
+  // po jego zmianie wracają INNE liczby, więc odpowiedź na poprzednie okno nie
+  // może podmienić danych bieżącego (i widok ma wtedy pokazać „ładowanie”).
+  const key = `${scope}|${costWindow}|${reloadKey}`;
   const [result, setResult] = useState<{
     key: string;
     data: T | null;
@@ -46,7 +56,7 @@ export function useAnalyticsResource<T>(
 
   useEffect(() => {
     let alive = true;
-    load(scope)
+    load(scope, costWindow)
       .then((res) => {
         if (alive) setResult({ key, data: res.data ?? null, state: "ready" });
       })
@@ -61,7 +71,7 @@ export function useAnalyticsResource<T>(
     return () => {
       alive = false;
     };
-  }, [load, scope, key]);
+  }, [load, scope, costWindow, key]);
 
   if (result?.key !== key) return { data: null, state: "loading" };
   return { data: result.data, state: result.state };
@@ -78,7 +88,12 @@ export interface Agg {
   /** 0..1 — na ilu obiektach opiera się zysk i marża. */
   coverage: number;
   revenue: number;
+  /** Koszt CAŁKOWITY — suma dwóch poniższych. */
   cost: number;
+  /** Część osobowa (z wypłat w Kadrach, netto „na rękę"). */
+  personnelCost: number;
+  /** Część pozostała (ręczne `monthly_cost`: monitoring, sprzęt, abonamenty). */
+  otherCost: number;
   profit: number;
   margin: number | null;
   setupCost: number;
@@ -90,6 +105,8 @@ export interface AggInput {
   withCost: number;
   revenue: number;
   cost: number;
+  personnelCost: number;
+  otherCost: number;
   profit: number;
   setupCost: number;
 }
@@ -109,10 +126,21 @@ export function aggregate(rows: AggInput[]): Agg {
       objectsWithCost: a.objectsWithCost + r.withCost,
       revenue: a.revenue + r.revenue,
       cost: a.cost + r.cost,
+      personnelCost: a.personnelCost + r.personnelCost,
+      otherCost: a.otherCost + r.otherCost,
       profit: a.profit + r.profit,
       setupCost: a.setupCost + r.setupCost,
     }),
-    { objects: 0, objectsWithCost: 0, revenue: 0, cost: 0, profit: 0, setupCost: 0 }
+    {
+      objects: 0,
+      objectsWithCost: 0,
+      revenue: 0,
+      cost: 0,
+      personnelCost: 0,
+      otherCost: 0,
+      profit: 0,
+      setupCost: 0,
+    }
   );
   return {
     ...acc,
@@ -190,6 +218,53 @@ export function spLabel(
   return sp ? `${sp.firstName} ${sp.lastName}`.trim() : null;
 }
 
+// ---------------------------------------------------------------------------
+// Koszt osobowy — słowa, którymi go opisujemy
+// ---------------------------------------------------------------------------
+
+/** Etykieta okna uśredniania: „ostatni pełny miesiąc" / „średnia z 3 mies.". */
+export function costWindowLabel(w: CostWindow): string {
+  return w === 1 ? "ostatni pełny miesiąc" : `średnia z ${w} mies.`;
+}
+
+/**
+ * Podpis pod kafelkiem „Koszt mies.": z czego składa się pokazana suma.
+ *
+ * Koszt obiektu to DWIE różne rzeczy zsumowane w jedną liczbę — pensje załogi
+ * z Kadr i ręczny koszt pozostały. Bez tego podpisu nie da się odróżnić obiektu
+ * fizycznej ochrony (prawie sam koszt osobowy) od monitoringu (prawie sam sprzęt),
+ * a to zupełnie inne dźwignie kosztowe.
+ */
+export function costSplitLabel(personnelCost: number, otherCost: number): string {
+  return `osobowy ${plnFull(personnelCost)} · pozostały ${plnFull(otherCost)}`;
+}
+
+/**
+ * Przypis o pochodzeniu kosztu osobowego — składany z `personnel` z API.
+ *
+ * Liczby same w sobie nic nie mówią, dopóki nie wiadomo, ILE miesięcy faktycznie
+ * weszło do średniej i JAKA część godzin w ogóle trafiła na obiekty. Miesiąc bez
+ * wypłat i pracownik z całym etatem na CMA wyglądają w kwocie identycznie —
+ * jak niski koszt.
+ */
+export function personnelNote(p: PersonnelInfo): string {
+  const parts = [`Koszt osobowy: ${costWindowLabel(p.costWindow)}`];
+  if (p.monthsUsed === 0) {
+    parts[0] += " (brak danych płacowych w tym oknie)";
+  } else if (p.monthsUsed < p.costWindow) {
+    parts[0] += ` (dane za ${p.monthsUsed})`;
+  }
+  parts.push(
+    `zmapowano ${p.mappedObjects} z ${p.hrObjectsTotal} pozycji kadrowych`
+  );
+  if (p.unmappedHoursShare > 0) {
+    parts.push(
+      `${pct(p.unmappedHoursShare * 100)} godzin poza obiektami (koszt ogólny)`
+    );
+  }
+  return `${parts.join(", ")}.`;
+}
+
 /** Filtr tekstowy: bez rozróżniania wielkości liter, po kilku polach naraz. */
 export function matches(needle: string, ...fields: (string | null | undefined)[]) {
   const q = needle.trim().toLowerCase();
@@ -200,6 +275,8 @@ export function matches(needle: string, ...fields: (string | null | undefined)[]
 /** Wspólne propsy trzech widoków — pasek narzędzi mieszka w powłoce strony. */
 export interface AnalyticsViewProps {
   scope: AnalyticsScope;
+  /** Okno uśredniania kosztu osobowego (1 / 3 / 12 mies.) z paska narzędzi. */
+  costWindow: CostWindow;
   search: string;
   reloadKey: number;
 }

@@ -68,6 +68,14 @@ const API_TAB_MAP: { prefix: string; tabs: string[] }[] = [
   { prefix: "/analytics/kontrahenci", tabs: ["analityka/kontrahenci"] },
   { prefix: "/analytics/obiekty", tabs: ["analityka/obiekty"] },
   { prefix: "/analytics/handlowcy", tabs: ["analityka/handlowcy"] },
+  // Skrócona lista pracowników kadr (id + nazwisko, bez płac) — czytają ją
+  // formularze handlowca i technika, żeby powiązać osobę z listą płac.
+  // MUSI stać PRZED "/hr": find() bierze pierwsze dopasowanie, więc szerszy
+  // wpis kadrowy przykryłby ten węższy i handlowiec-edytor dostałby 403.
+  {
+    prefix: "/hr/directory",
+    tabs: ["kadry/pracownicy", "handlowcy", "technical/technicy"],
+  },
   // Kadry — jedno API dla wszystkich podzakładek; kontrola per-podzakładka
   // (ukrywanie + read-only) odbywa się na froncie, backend pilnuje modułu.
   {

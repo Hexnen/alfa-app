@@ -10,6 +10,21 @@ import {
 } from "drizzle-orm/sqlite-core";
 import { sql } from "drizzle-orm";
 
+/**
+ * KWOTY: NETTO CZY BRUTTO
+ *
+ * Wszystkie kwoty handlowe w tej bazie są NETTO, w sensie „bez VAT": abonamenty,
+ * umowy, wyceny, cennik, realizacje, magazyn. Wynika to ze źródła — formularz
+ * zlecenia przyjmuje „Abonament (zł netto)", a konwersja zlecenia na obiekt
+ * przepisuje tę kwotę wprost do `objects.monthly_value` (src/services/orders.ts).
+ *
+ * UWAGA NA PUŁAPKĘ: w module kadr „netto" znaczy coś INNEGO — kwotę na rękę,
+ * po podatku i składkach pracownika. Kwoty z `hr_payroll` / `hr_office_payroll`
+ * to wypłaty netto w tym drugim sensie i NIE zawierają składek pracodawcy, więc
+ * nie są pełnym kosztem zatrudnienia. Zestawiając je z przychodem (Analityka,
+ * koszt osobowy obiektu) trzeba o tym pamiętać: to nie są te same „netto".
+ */
+
 // Contractors table
 export const contractors = sqliteTable("contractors", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -72,14 +87,22 @@ export const objects = sqliteTable("objects", {
   })
     .default("sales")
     .notNull(),
+  /** Abonament miesięczny w zł NETTO (bez VAT) — przepisywany z kwoty ze zlecenia. */
   monthlyValue: real("monthly_value"),
   /**
-   * Miesięczny koszt obsługi obiektu (zł/mies.). NULL = nieuzupełniony, i to NIE
-   * to samo, co 0 zł — Analityka liczy pokrycie danymi kosztowymi po tej różnicy,
-   * a marża obiektu bez kosztu jest nieznana, nie stuprocentowa.
+   * Miesięczny koszt POZOSTAŁY obiektu (zł NETTO/mies., bez VAT) — wszystko poza wynagrodzeniami:
+   * monitoring, abonamenty, sprzęt, dojazdy. NIE jest to koszt całkowity.
+   *
+   * Koszt osobowy liczy się osobno z wypłat (src/lib/object-personnel-cost.ts),
+   * przez mapowanie hr_objects.object_id, i DODAJE SIĘ do tego pola. Wpisanie tu
+   * sumy wszystkiego policzyłoby wynagrodzenia drugi raz.
+   *
+   * NULL = nieuzupełniony, i to NIE to samo, co 0 zł — Analityka liczy pokrycie
+   * danymi kosztowymi po tej różnicy, a marża obiektu bez żadnego znanego kosztu
+   * jest nieznana, nie stuprocentowa.
    */
   monthlyCost: real("monthly_cost"),
-  /** Jednorazowy koszt instalacji / wdrożenia (zł). NULL = nieuzupełniony. */
+  /** Jednorazowy koszt instalacji / wdrożenia w zł NETTO (bez VAT). NULL = nieuzupełniony. */
   setupCost: real("setup_cost"),
   notes: text("notes"),
   // Współrzędne obiektu (WGS84). NULL = jeszcze nieustalone; uzupełniane leniwie
@@ -116,6 +139,7 @@ export const contracts = sqliteTable("contracts", {
   contractNumber: text("contract_number").notNull(),
   startDate: text("start_date").notNull(),
   endDate: text("end_date"),
+  /** Wartość umowy w zł NETTO (bez VAT). */
   value: real("value"),
   filePath: text("file_path"),
   status: text("status", {
@@ -185,8 +209,10 @@ export const orders = sqliteTable("orders", {
   videoReception: integer("video_reception", { mode: "boolean" }).default(false),
   
   // Dane finansowe
+  /** Abonament w zł NETTO (bez VAT) — tak podpisane w formularzu przyjęcia zlecenia. */
   monthlyAmount: real("monthly_amount"),
   contractLengthMonths: integer("contract_length_months"),
+  /** Dzierżawa w zł NETTO (bez VAT). */
   rentalAmount: real("rental_amount"),
   rentalLengthMonths: integer("rental_length_months"),
   invoiceIssuer: text("invoice_issuer"),
@@ -551,7 +577,8 @@ export const realizations = sqliteTable("realizations", {
   contractor2: text("contractor_2"), // Wykonawca 2
   actualHours: real("actual_hours").default(0).notNull(), // Faktyczne godziny pracownicze
   actualKm: real("actual_km").default(0).notNull(), // Faktyczne KM
-  hourlyCost: real("hourly_cost").default(0).notNull(), // Koszt godzinowy
+  // Koszt godzinowy technika w zł NETTO (bez VAT) — wewnętrzny koszt roboczogodziny.
+  hourlyCost: real("hourly_cost").default(0).notNull(),
   // Ślad automatu (src/lib/realization-autofill.ts): JSON { [pole]: { source, detail, at } }
   // dla pól uzupełnionych automatycznie. NULL = nic nie uzupełniano. Wpis pola znika,
   // gdy ktoś zmieni tę wartość ręcznie (PUT /realizations/:id) — badge „auto" nie kłamie.
@@ -582,6 +609,14 @@ export const technicians = sqliteTable("technicians", {
     .notNull(),
   notes: text("notes"),
   active: integer("active", { mode: "boolean" }).default(true).notNull(),
+  /**
+   * Ta sama osoba w kartotece kadrowej (NULL = technik spoza listy płac).
+   * Dotąd technik i pracownik kadr byli osobnymi rekordami bez żadnego związku,
+   * choć część osób figuruje w obu (Jaworski, Sajdak).
+   */
+  employeeId: integer("employee_id").references(() => hrEmployees.id, {
+    onDelete: "set null",
+  }),
   // Cennik przypisany technikowi (NULL = korzysta z cennika głównego).
   priceListId: integer("price_list_id").references(() => priceLists.id, {
     onDelete: "set null",
@@ -611,10 +646,26 @@ export const salespeople = sqliteTable("salespeople", {
   email: text("email"),
   /** Region / obszar działania — czysty opis, bez słownika. */
   region: text("region"),
-  /** Ile handlowiec kosztuje firmę miesięcznie (wynagrodzenie, auto, telefon). NULL = nieuzupełniony. */
+  /**
+   * Ile handlowiec kosztuje firmę miesięcznie: wynagrodzenie, auto, telefon.
+   * Kwota wpisywana ręcznie — podawaj ją w tej samej skali, co wypłaty z kadr,
+   * czyli NETTO na rękę (aplikacja nie zna składek pracodawcy). Gdy handlowiec
+   * jest powiązany z pracownikiem (`employeeId`), to pole jest ignorowane, a koszt
+   * bierze się wprost z wypłat. NULL = nieuzupełniony.
+   */
   monthlyCost: real("monthly_cost"),
   /** Prowizja w % od przychodu prowadzonego portfela (0–100). NULL = brak prowizji. */
   commissionRate: real("commission_rate"),
+  /**
+   * Ta sama osoba w kartotece kadrowej. NULL = handlowiec spoza listy płac
+   * (np. na własnej działalności) i wtedy liczy się `monthlyCost` wpisany ręcznie.
+   * Gdy powiązanie ISTNIEJE, koszt własny bierze się z wypłat, a pole ręczne jest
+   * ignorowane — inaczej ten sam człowiek kosztowałby firmę dwa razy: raz
+   * w Kadrach, raz w Analityce.
+   */
+  employeeId: integer("employee_id").references(() => hrEmployees.id, {
+    onDelete: "set null",
+  }),
   notes: text("notes"),
   active: integer("active", { mode: "boolean" }).default(true).notNull(),
   createdAt: text("created_at")
@@ -975,6 +1026,18 @@ export type NewHrEmployee = typeof hrEmployees.$inferInsert;
 export const hrObjects = sqliteTable("hr_objects", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   name: text("name").notNull().unique(),
+  /**
+   * Obiekt z kartoteki, którego dotyczą godziny zapisane na tej pozycji.
+   * NULL = niezmapowany, i to jest stan domyślny: słownik kadrowy powstał
+   * niezależnie od kartoteki i nazwy nie pokrywają się ani w jednym przypadku
+   * („PUŁAWSKA 233" vs „Magazyn Centralny Kraków-Płaszów"). Bez tego ogniwa
+   * nie da się przypisać wynagrodzeń do obiektu — mapowanie robi się ręcznie
+   * w Kadry → Obiekty. Pozycje techniczne (#BIURO, CMA) zostają niezmapowane
+   * celowo: to koszt ogólny, nie koszt konkretnego obiektu.
+   */
+  objectId: integer("object_id").references(() => objects.id, {
+    onDelete: "set null",
+  }),
   active: integer("active", { mode: "boolean" }).default(true).notNull(),
   createdAt: text("created_at")
     .default(sql`(datetime('now'))`)
@@ -1240,6 +1303,7 @@ export const warehouseDocumentItems = sqliteTable(
       .notNull()
       .references(() => warehouseItems.id),
     quantity: real("quantity").notNull(),
+    /** Cena jednostkowa w zł NETTO (bez VAT). */
     unitPrice: real("unit_price"),
     positionNo: integer("position_no").notNull(),
   },

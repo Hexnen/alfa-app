@@ -1329,6 +1329,10 @@ export interface Technician {
   active: boolean;
   /** Cennik przypisany technikowi; null = korzysta z cennika głównego. */
   priceListId: number | null;
+  /** Ta sama osoba w kartotece kadrowej; null = technik spoza listy płac. */
+  employeeId: number | null;
+  /** Nazwisko z Kadr doklejane przez API (null = brak powiązania). */
+  employeeName?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -1345,6 +1349,8 @@ export interface TechnicianInput {
   active?: boolean;
   /** null / brak = cennik główny. */
   priceListId?: number | null;
+  /** Powiązanie z kartoteką kadrową; null czyści powiązanie. */
+  employeeId?: number | null;
 }
 
 export async function getTechnicians(onlyActive = false) {
@@ -1388,6 +1394,14 @@ export interface Salesperson {
   monthlyCost: number | null;
   /** Prowizja w % od przychodu portfela (0–100). null = brak prowizji. */
   commissionRate: number | null;
+  /**
+   * Ta sama osoba w kartotece kadrowej; null = handlowiec spoza listy płac.
+   * Gdy jest ustawiona, koszt własny bierze się z wypłat, a `monthlyCost`
+   * jest ignorowany — inaczej ten sam człowiek kosztowałby firmę dwa razy.
+   */
+  employeeId: number | null;
+  /** Nazwisko z Kadr doklejane przez API (null = brak powiązania). */
+  employeeName?: string | null;
   notes: string | null;
   active: boolean;
   /** Liczone przez API: ilu kontrahentów i ile obiektów prowadzi. */
@@ -1414,6 +1428,8 @@ export interface SalespersonInput {
   monthlyCost?: number | null;
   /** Prowizja w % (0–100); null czyści wartość. Backend odrzuca spoza zakresu. */
   commissionRate?: number | null;
+  /** Powiązanie z kartoteką kadrową; null czyści powiązanie. */
+  employeeId?: number | null;
   notes?: string;
   active?: boolean;
 }
@@ -2319,9 +2335,37 @@ export interface HrEmployeeInput {
   notes?: string;
 }
 
+/** Obiekt z kartoteki w formie pozycji listy wyboru przy mapowaniu. */
+export interface HrObjectRef {
+  id: number;
+  name: string;
+  city: string | null;
+  contractorName: string;
+}
+
 export interface HrObject {
   id: number;
   name: string;
+  active: boolean;
+  /**
+   * Obiekt z kartoteki, którego dotyczą godziny tej pozycji. null = niezmapowana
+   * (stan domyślny — słownik kadrowy powstał niezależnie od kartoteki i nazwy się
+   * nie pokrywają). Bez tego ogniwa wynagrodzenia nie trafią do Analityki obiektu.
+   */
+  objectId: number | null;
+  /** Rozwinięcie `objectId` doklejane przez API (null = brak mapowania). */
+  object: HrObjectRef | null;
+  /** Suma godzin z CAŁEJ historii — waga pozycji przy mapowaniu. */
+  hoursTotal: number;
+  /** Ilu różnych pracowników kiedykolwiek księgowało godziny na tej pozycji. */
+  employeesCount: number;
+}
+
+/** Pracownik kadr w wersji do listy wyboru (bez danych płacowych). */
+export interface HrEmployeeRef {
+  id: number;
+  fullName: string;
+  kind: HrEmployeeKind;
   active: boolean;
 }
 
@@ -2547,6 +2591,27 @@ export const updateHrObject = (
   });
 export const deleteHrObject = (id: number) =>
   request<ApiResponse<null>>(`/hr/objects/${id}`, { method: "DELETE" });
+
+/**
+ * Ustawia (albo zdejmuje przy `null`) mapowanie pozycji kadrowej na obiekt
+ * z kartoteki. Osobny endpoint od zapisu nazwy, żeby edycja nazwy nie czyściła
+ * przypadkiem powiązania.
+ */
+export const setHrObjectMapping = (id: number, objectId: number | null) =>
+  request<ApiResponse<HrObject>>(`/hr/objects/${id}/mapping`, {
+    method: "PUT",
+    body: JSON.stringify({ objectId }),
+  });
+
+/** Kartoteka obiektów do listy wyboru w mapowaniu (pod /hr — bez modułu Obiekty). */
+export const getHrObjectCatalog = () =>
+  request<ApiResponse<HrObjectRef[]>>("/hr/object-catalog");
+
+/** Skrócona lista pracowników kadr — do powiązania handlowca / technika z listą płac. */
+export const getHrEmployeeDirectory = (onlyActive = false) =>
+  request<ApiResponse<HrEmployeeRef[]>>(
+    `/hr/directory/employees${onlyActive ? "?active=true" : ""}`,
+  );
 
 export const getHrNorms = (year: number) =>
   request<ApiResponse<HrMonthNorm[]>>(`/hr/norms?year=${year}`);
@@ -4538,14 +4603,55 @@ export const isMissingEndpoint = (e: unknown): boolean => errStatus(e) === 404;
 //
 // Wszystkie trzy widoki mówią tym samym słownikiem faktów, liczonym w
 // src/routes/analytics.ts:
-//   revenue = coalesce(monthly_value, 0)     cost = coalesce(monthly_cost, 0)
+//   revenue = coalesce(monthly_value, 0)
+//   cost    = personnelCost + otherCost      ← KOSZT SKŁADA SIĘ Z DWÓCH CZĘŚCI
 //   profit  = revenue - cost                 margin = profit / revenue * 100
+// gdzie `personnelCost` to koszt osobowy policzony z wypłat kadrowych (mapowanie
+// hr_objects.object_id → obiekt), a `otherCost` to ręczne `objects.monthly_cost`
+// (monitoring, sprzęt, abonamenty). Nigdy jedno ZAMIAST drugiego — podmiana
+// zaniżyłaby koszt obiektów fizycznej ochrony o całą pensję załogi.
 // Kluczowe rozróżnienie: koszt NULL znaczy „nieuzupełniony”, a nie 0 zł.
 // Sumy traktują go jak zero, ale `objectsWithCost` / `coverage` mówią, na ilu
 // obiektach ta arytmetyka w ogóle się opiera — bez tego marża kłamie.
+//
+// KWOTY SĄ NETTO, ale w DWÓCH różnych znaczeniach. Strona handlowa (abonamenty,
+// koszty pozostałe, nakłady) jest netto „bez VAT". Koszt osobowy pochodzi z wypłat,
+// więc jest netto „na rękę" — BEZ składek pracodawcy, czyli nie jest pełnym kosztem
+// zatrudnienia. Zysk i marża liczone z tej podstawy są zawyżone; `personnel.net`
+// istnieje po to, żeby UI mogło to napisać wprost.
 
 /** Zakres danych: bieżące (bez archiwum), tylko aktywne, albo wszystko. */
 export type AnalyticsScope = "current" | "active" | "all";
+
+/**
+ * Okno uśredniania KOSZTU OSOBOWEGO: ostatni pełny miesiąc / średnia z 3 / z 12.
+ * Jeden miesiąc bywa wystrzałowy (premie, wyrównania), dwanaście rozmywa sezon —
+ * stąd domyślna trójka po stronie backendu (`DEFAULT_COST_WINDOW`).
+ */
+export type CostWindow = 1 | 3 | 12;
+
+/**
+ * Skąd wziął się koszt osobowy — blok informacyjny, z którego UI robi przypis.
+ *
+ * Bez niego „koszt osobowy 0 zł" jest nie do odróżnienia od „nikt nie zmapował
+ * pozycji kadrowych na obiekty", a to dwie zupełnie różne historie: pierwsza to
+ * wynik, druga to milcząca dziura w danych.
+ */
+export interface PersonnelInfo {
+  costWindow: CostWindow;
+  /** Ile miesięcy FAKTYCZNIE weszło do średniej — bywa mniej niż `costWindow`. */
+  monthsUsed: number;
+  /** Które to miesiące, od najstarszego. */
+  months: Array<{ year: number; month: number }>;
+  /** Ile pozycji słownika kadrowego ma mapowanie na kartotekę obiektów. */
+  mappedObjects: number;
+  /** Ile pozycji kadrowych jest w ogóle — do przypisu „12 z 44". */
+  hrObjectsTotal: number;
+  /** 0..1 — jaka część godzin poszła w koszt ogólny firmy zamiast na obiekt. */
+  unmappedHoursShare: number;
+  /** Zawsze true: kwoty z wypłat są netto „na rękę", bez składek pracodawcy. */
+  net: true;
+}
 
 export interface AnalyticsTotals {
   objects: number;
@@ -4554,7 +4660,12 @@ export interface AnalyticsTotals {
   /** objectsWithCost / objects, 0..1 — „na ilu obiektach opiera się marża”. */
   coverage: number;
   revenue: number;
+  /** Koszt CAŁKOWITY: `personnelCost + otherCost`. */
   cost: number;
+  /** Część osobowa — z wypłat kadrowych, netto „na rękę". */
+  personnelCost: number;
+  /** Część pozostała — ręczne `objects.monthly_cost` (monitoring, sprzęt). */
+  otherCost: number;
   profit: number;
   /** Procent; null gdy przychód = 0 (marża byłaby dzieleniem przez zero). */
   margin: number | null;
@@ -4564,6 +4675,7 @@ export interface AnalyticsTotals {
   /** Obiekty z uzupełnionym kosztem i ujemnym zyskiem. */
   unprofitable: number;
   noRevenue: number;
+  personnel: PersonnelInfo;
 }
 
 /** Kubełek zestawienia (wg typu, statusu, spółki, przedziału marży). */
@@ -4580,8 +4692,11 @@ export interface AnalyticsBucket {
 /** Wspólna koperta odpowiedzi wszystkich trzech widoków. */
 interface AnalyticsEnvelope {
   scope: AnalyticsScope;
+  /** Echo parametru zapytania — okno, z którego policzono koszt osobowy. */
+  costWindow: CostWindow;
   generatedAt: string;
   totals: AnalyticsTotals;
+  personnel: PersonnelInfo;
 }
 
 export interface AnalyticsContractorRow {
@@ -4595,6 +4710,9 @@ export interface AnalyticsContractorRow {
   objectsWithCost: number;
   revenue: number;
   cost: number;
+  /** Rozbicie kosztu: osobowy z Kadr + pozostały z kartotek obiektów. */
+  personnelCost: number;
+  otherCost: number;
   profit: number;
   margin: number | null;
   setupCost: number;
@@ -4627,6 +4745,9 @@ export interface AnalyticsObjectRow {
   } | null;
   revenue: number;
   cost: number;
+  /** Rozbicie kosztu: osobowy z Kadr + pozostały z pola `monthly_cost`. */
+  personnelCost: number;
+  otherCost: number;
   profit: number;
   margin: number | null;
   setupCost: number;
@@ -4650,15 +4771,28 @@ export interface AnalyticsSalespersonRow {
   lastName: string;
   region: string | null;
   active: boolean;
+  /** Powiązanie z kartoteką kadrową; null = osoba spoza listy płac. */
+  employeeId: number | null;
   contractorsCount: number;
   objectsCount: number;
   objectsWithCost: number;
   unprofitableObjects: number;
   revenue: number;
   objectsCost: number;
+  /** Rozbicie kosztu obiektów portfela: osobowy z Kadr + pozostały. */
+  objectsPersonnelCost: number;
+  objectsOtherCost: number;
   setupCost: number;
   /** Koszt własny handlowca (wynagrodzenie, auto, telefon). */
   ownCost: number;
+  /**
+   * Skąd `ownCost`: „kadry" = z wypłat powiązanego pracownika (pole ręczne jest
+   * wtedy IGNOROWANE, inaczej ten sam człowiek kosztowałby firmę dwa razy),
+   * „reczny" = z pola `salespeople.monthly_cost`.
+   */
+  ownCostSource: "kadry" | "reczny";
+  /** Kwota z pola ręcznego; przy źródle „kadry" NIE wchodzi do wyniku. */
+  manualMonthlyCost: number | null;
   commissionRate: number | null;
   commission: number;
   /** Marża portfela PRZED kosztem handlowca: revenue - objectsCost. */
@@ -4677,6 +4811,8 @@ export interface AnalyticsUnassigned {
   unprofitableObjects: number;
   revenue: number;
   objectsCost: number;
+  objectsPersonnelCost: number;
+  objectsOtherCost: number;
   setupCost: number;
   profit: number;
   margin: number | null;
@@ -4694,10 +4830,17 @@ export interface AnalyticsSalespeopleData extends AnalyticsEnvelope {
   unassigned: AnalyticsUnassigned;
 }
 
-function analyticsQuery(params?: { scope?: AnalyticsScope; limit?: number }) {
+function analyticsQuery(params?: {
+  scope?: AnalyticsScope;
+  limit?: number;
+  costWindow?: CostWindow;
+}) {
   const sp = new URLSearchParams();
   if (params?.scope) sp.set("scope", params.scope);
   if (params?.limit) sp.set("limit", String(params.limit));
+  // Brak wartości = nie wysyłamy parametru: domyślne okno (3 mies.) zna backend
+  // i nie ma powodu, żeby front trzymał drugą kopię tej decyzji.
+  if (params?.costWindow) sp.set("costWindow", String(params.costWindow));
   const q = sp.toString();
   return q ? `?${q}` : "";
 }
@@ -4705,6 +4848,7 @@ function analyticsQuery(params?: { scope?: AnalyticsScope; limit?: number }) {
 export async function getAnalyticsContractors(params?: {
   scope?: AnalyticsScope;
   limit?: number;
+  costWindow?: CostWindow;
 }) {
   return request<ApiResponse<AnalyticsContractorsData>>(
     `/analytics/kontrahenci${analyticsQuery(params)}`
@@ -4714,6 +4858,7 @@ export async function getAnalyticsContractors(params?: {
 export async function getAnalyticsObjects(params?: {
   scope?: AnalyticsScope;
   limit?: number;
+  costWindow?: CostWindow;
 }) {
   return request<ApiResponse<AnalyticsObjectsData>>(
     `/analytics/obiekty${analyticsQuery(params)}`
@@ -4723,6 +4868,7 @@ export async function getAnalyticsObjects(params?: {
 export async function getAnalyticsSalespeople(params?: {
   scope?: AnalyticsScope;
   limit?: number;
+  costWindow?: CostWindow;
 }) {
   return request<ApiResponse<AnalyticsSalespeopleData>>(
     `/analytics/handlowcy${analyticsQuery(params)}`

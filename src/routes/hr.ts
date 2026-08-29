@@ -2,7 +2,7 @@
 // Kalkulacja płac: src/utils/hr-calc.ts (agregacja godzin + jeden przebieg).
 import { Hono } from "hono";
 import { db, schema } from "../db/index.js";
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import type { ApiResponse } from "../types/index.js";
 import type {
   NewHrContract,
@@ -184,14 +184,109 @@ app.delete("/employees/:id", async (c) => {
 
 // ==================== OBIEKTY ====================
 
+/**
+ * Słownik kadrowy obiektów (posterunków) — to na nim wiszą godziny. Do każdej
+ * pozycji doklejamy:
+ *  - obiekt z kartoteki, na który wskazuje ręczne mapowanie (`object_id`),
+ *    razem z miastem i kontrahentem, żeby front nie musiał dociągać kartoteki
+ *    po id pozycja po pozycji;
+ *  - wagę pozycji: sumę godzin i liczbę osób z CAŁEJ historii `hr_hours`,
+ *    a nie z wybranego miesiąca. Mapowanie robi się raz i na stałe, więc ma je
+ *    porządkować realny wolumen pracy, a nie to, kto akurat był na urlopie
+ *    w miesiącu otwartym w zakładce.
+ */
 app.get("/objects", async (c) => {
   const onlyActive = c.req.query("active") === "true";
-  let rows = await db
-    .select()
+  const rows = await db
+    .select({
+      row: schema.hrObjects,
+      objectName: schema.objects.name,
+      objectCity: schema.objects.city,
+      contractorName: schema.contractors.name,
+      // Kolumnę nadrzędną piszemy DOSŁOWNIE (`hr_objects.id`) — drizzle renderuje
+      // ${schema.hrObjects.id} w szablonie jako niekwalifikowane "id", które
+      // wewnątrz podzapytania trafiłoby w kolumnę tabeli z podzapytania.
+      hoursTotal: sql<number>`(
+        select coalesce(sum(coalesce(hr_hours.worked_hours, 0)), 0)
+        from hr_hours where hr_hours.object_id = hr_objects.id
+      )`,
+      employeesCount: sql<number>`(
+        select count(distinct hr_hours.employee_id)
+        from hr_hours where hr_hours.object_id = hr_objects.id
+      )`,
+    })
     .from(schema.hrObjects)
+    .leftJoin(schema.objects, eq(schema.hrObjects.objectId, schema.objects.id))
+    .leftJoin(
+      schema.contractors,
+      eq(schema.objects.contractorId, schema.contractors.id),
+    )
     .orderBy(asc(schema.hrObjects.name));
-  if (onlyActive) rows = rows.filter((o) => o.active);
+  const data = rows
+    .filter((r) => !onlyActive || r.row.active)
+    .map((r) => ({
+      ...r.row,
+      // Mapowanie może wskazywać na obiekt skasowany w międzyczasie (FK jest
+      // "set null", więc taki stan długo nie potrwa) — stąd null zamiast obiektu
+      // z pustymi polami.
+      object:
+        r.row.objectId != null && r.objectName != null
+          ? {
+              id: r.row.objectId,
+              name: r.objectName,
+              city: r.objectCity,
+              contractorName: r.contractorName ?? "",
+            }
+          : null,
+      hoursTotal: r.hoursTotal ?? 0,
+      employeesCount: r.employeesCount ?? 0,
+    }));
+  return c.json({ success: true, data });
+});
+
+/**
+ * Kartoteka obiektów w formie listy wyboru do mapowania. Świadomie pod `/hr`,
+ * a nie przez `GET /objects`: mapowanie robi kadrowa, która nie musi mieć
+ * dostępu do modułu Kontrahenci/Obiekty, a tutaj potrzebuje wyłącznie nazw.
+ */
+app.get("/object-catalog", async (c) => {
+  const rows = await db
+    .select({
+      id: schema.objects.id,
+      name: schema.objects.name,
+      city: schema.objects.city,
+      contractorName: schema.contractors.name,
+    })
+    .from(schema.objects)
+    .innerJoin(
+      schema.contractors,
+      eq(schema.objects.contractorId, schema.contractors.id),
+    )
+    .orderBy(asc(schema.objects.name));
   return c.json({ success: true, data: rows });
+});
+
+/**
+ * Skrócona lista pracowników kadr (bez danych płacowych) — potrzebna poza
+ * Kadrami: formularz handlowca i technika wiąże osobę z listą płac. Prefiks
+ * `/hr/directory` ma w API_TAB_MAP własny, węższy wpis, żeby handlowiec-edytor
+ * bez dostępu do Kadr mógł wybrać osobę, ale nie zobaczył jej wynagrodzenia.
+ */
+app.get("/directory/employees", async (c) => {
+  const onlyActive = c.req.query("active") === "true";
+  const rows = await db
+    .select({
+      id: schema.hrEmployees.id,
+      fullName: schema.hrEmployees.fullName,
+      kind: schema.hrEmployees.kind,
+      active: schema.hrEmployees.active,
+    })
+    .from(schema.hrEmployees)
+    .orderBy(asc(schema.hrEmployees.fullName));
+  return c.json({
+    success: true,
+    data: onlyActive ? rows.filter((e) => e.active) : rows,
+  });
 });
 
 app.post("/objects", async (c) => {
@@ -236,6 +331,61 @@ app.put("/objects/:id", async (c) => {
     );
   }
   return c.json({ success: true, data: result[0], message: "Obiekt zapisany" });
+});
+
+/**
+ * Ręczne mapowanie pozycji kadrowej na obiekt z kartoteki.
+ * `{ objectId: null }` = zdejmij mapowanie (tak zostają pozycje typu #BIURO
+ * czy CMA — to koszt ogólny, nie koszt konkretnego obiektu).
+ *
+ * Osobny endpoint zamiast pola w PUT /objects/:id, bo mapowanie ustawia się
+ * jednym selectem w tabeli, bez przechodzenia przez formularz nazwy — i nie
+ * chcemy, żeby zapis samej nazwy przypadkiem czyścił powiązanie.
+ */
+app.put("/objects/:id/mapping", async (c) => {
+  const id = parseInt(c.req.param("id"));
+  const body = await c.req.json<Record<string, unknown>>();
+  const raw = body.objectId;
+  let objectId: number | null = null;
+  if (raw !== null && raw !== undefined && raw !== "") {
+    const n = toNum(raw);
+    if (n == null || !Number.isInteger(n) || n <= 0) {
+      return c.json<ApiResponse<null>>(
+        { success: false, error: "Nieprawidłowy obiekt" },
+        400,
+      );
+    }
+    objectId = n;
+  }
+  if (objectId !== null) {
+    const [obj] = await db
+      .select({ id: schema.objects.id })
+      .from(schema.objects)
+      .where(eq(schema.objects.id, objectId))
+      .limit(1);
+    if (!obj) {
+      return c.json<ApiResponse<null>>(
+        { success: false, error: "Nie znaleziono obiektu w kartotece" },
+        404,
+      );
+    }
+  }
+  const result = await db
+    .update(schema.hrObjects)
+    .set({ objectId, updatedAt: new Date().toISOString() })
+    .where(eq(schema.hrObjects.id, id))
+    .returning();
+  if (result.length === 0) {
+    return c.json<ApiResponse<null>>(
+      { success: false, error: "Nie znaleziono obiektu" },
+      404,
+    );
+  }
+  return c.json({
+    success: true,
+    data: result[0],
+    message: objectId === null ? "Mapowanie usunięte" : "Mapowanie zapisane",
+  });
 });
 
 app.delete("/objects/:id", async (c) => {

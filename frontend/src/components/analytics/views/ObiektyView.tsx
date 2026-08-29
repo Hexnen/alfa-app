@@ -15,6 +15,7 @@ import {
   type AnalyticsObjectRow,
   type AnalyticsObjectsData,
   type AnalyticsScope,
+  type CostWindow,
 } from "@/lib/api";
 import {
   ChartCard,
@@ -39,15 +40,22 @@ import {
   aggregate,
   cmpNullLast,
   cmpText,
+  costSplitLabel,
   matches,
   spLabel,
   tintOf,
   useAnalyticsResource,
   type AnalyticsViewProps,
 } from "./shared";
-import { NoCostEmpty, ResourceNotice, SortHeader } from "./parts";
+import {
+  NoCostEmpty,
+  PersonnelFootnote,
+  ResourceNotice,
+  SortHeader,
+} from "./parts";
 
-const load = (scope: AnalyticsScope) => getAnalyticsObjects({ scope });
+const load = (scope: AnalyticsScope, costWindow: CostWindow) =>
+  getAnalyticsObjects({ scope, costWindow });
 
 type SortKey =
   | "name"
@@ -96,11 +104,17 @@ function paybackBand(months: number): { color: string; label: string } {
   return { color: COLOR_LOSS, label: "ponad 2 lata" };
 }
 
-export function ObiektyView({ scope, search, reloadKey }: AnalyticsViewProps) {
+export function ObiektyView({
+  scope,
+  costWindow,
+  search,
+  reloadKey,
+}: AnalyticsViewProps) {
   const navigate = useNavigate();
   const { data, state } = useAnalyticsResource<AnalyticsObjectsData>(
     load,
     scope,
+    costWindow,
     reloadKey
   );
   const [sort, setSort] = useState<SortKey>("revenue");
@@ -148,6 +162,8 @@ export function ObiektyView({ scope, search, reloadKey }: AnalyticsViewProps) {
           // „przychód − koszt" przestawało się zgadzać z pokazanym zyskiem.
           // Uczciwość niesie `coverage`, nie okrojona suma.
           cost: r.cost,
+          personnelCost: r.personnelCost,
+          otherCost: r.otherCost,
           profit: r.profit,
           setupCost: r.setupCost,
         }))
@@ -328,8 +344,14 @@ export function ObiektyView({ scope, search, reloadKey }: AnalyticsViewProps) {
         <KpiTile
           label="Koszt mies."
           value={hasCostData ? plnFull(agg.cost) : DASH}
-          sub={hasCostData ? undefined : "koszty nieuzupełnione"}
-          tip="Suma kosztów miesięcznych. Obiekt bez kosztu wchodzi do sumy jako zero — patrz pokrycie."
+          // Rozbicie w podpisie, bo suma sama w sobie nie mówi, czy obiekt
+          // kosztuje ludźmi, czy sprzętem — a to inne dźwignie.
+          sub={
+            hasCostData
+              ? costSplitLabel(agg.personnelCost, agg.otherCost)
+              : "koszty nieuzupełnione"
+          }
+          tip="Koszt osobowy z Kadr + koszt pozostały z kartoteki obiektu. Obiekt bez kosztu wchodzi do sumy jako zero — patrz pokrycie."
           coverage={coverageProps}
         />
         <KpiTile
@@ -364,6 +386,8 @@ export function ObiektyView({ scope, search, reloadKey }: AnalyticsViewProps) {
           tip="Suma kosztów instalacji. Zwrot liczy się z miesięcznego zysku obiektu."
         />
       </KpiRow>
+
+      <PersonnelFootnote personnel={data.personnel} />
 
       <div className="grid gap-3 xl:grid-cols-2">
         <ChartCard
@@ -601,7 +625,7 @@ export function ObiektyView({ scope, search, reloadKey }: AnalyticsViewProps) {
                   active={sort === "cost"}
                   dir={dir}
                   onToggle={toggleSort}
-                  tip="„—” = koszt nieuzupełniony, a nie zero"
+                  tip="Koszt osobowy (z Kadr) + pozostały (kartoteka obiektu); „—” = koszt nieuzupełniony, a nie zero"
                 />
                 <SortHeader label="Zysk" sortKey="profit" align="right" active={sort === "profit"} dir={dir} onToggle={toggleSort} />
                 <SortHeader label="Marża" sortKey="margin" active={sort === "margin"} dir={dir} onToggle={toggleSort} />
@@ -685,8 +709,31 @@ function ObjectRow({
         )}
       </td>
       <td className="px-2 py-2 text-right tabular-nums">{plnFull(row.revenue)}</td>
-      <td className="px-2 py-2 text-right tabular-nums">
-        {row.hasCost ? plnFull(row.cost) : <span className="text-slate-400">{DASH}</span>}
+      {/* Rozbicie idzie DRUGĄ LINIĄ w tej samej komórce, a nie osobną kolumną:
+          tabela ma już jedenaście kolumn i 1200 px minimalnej szerokości, więc
+          dwie kolejne kosztowałyby czytelność bardziej, niż dają. Gdy koszt
+          osobowy wynosi zero (brak mapowania w Kadrach), linia w ogóle się nie
+          pojawia — nie ma czego rozbijać. */}
+      <td
+        className="px-2 py-2 text-right tabular-nums"
+        title={
+          row.hasCost
+            ? `Koszt osobowy (z Kadr): ${plnFull(row.personnelCost)} · koszt pozostały (kartoteka obiektu): ${plnFull(row.otherCost)}`
+            : "Koszt nieuzupełniony — ani z Kadr, ani ręcznie"
+        }
+      >
+        {row.hasCost ? (
+          <>
+            {plnFull(row.cost)}
+            {row.personnelCost > 0 && (
+              <span className="block text-xs font-normal text-muted-foreground">
+                os. {plnFull(row.personnelCost)} · poz. {plnFull(row.otherCost)}
+              </span>
+            )}
+          </>
+        ) : (
+          <span className="text-slate-400">{DASH}</span>
+        )}
       </td>
       <td
         className={cn(

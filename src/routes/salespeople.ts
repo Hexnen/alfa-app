@@ -32,6 +32,28 @@ function parseAmount(raw: unknown): number | null | typeof INVALID {
   return Number.isFinite(n) ? n : INVALID;
 }
 
+/**
+ * Powiązanie z kartoteką kadrową: brak / pusty / null → null (osoba spoza listy
+ * płac), śmieć → INVALID. Odrębny parser od kwot, bo tu wolno wyłącznie
+ * dodatnią liczbę całkowitą (id wiersza), a nie „1,5”.
+ */
+function parseEmployeeId(raw: unknown): number | null | typeof INVALID {
+  if (raw === undefined || raw === null || raw === "") return null;
+  const n = typeof raw === "number" ? raw : Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : INVALID;
+}
+
+/** Czy wskazany pracownik kadr istnieje (null = brak powiązania, zawsze OK). */
+async function employeeOk(id: number | null | undefined): Promise<boolean> {
+  if (!id) return true;
+  const rows = await db
+    .select({ id: schema.hrEmployees.id })
+    .from(schema.hrEmployees)
+    .where(eq(schema.hrEmployees.id, id))
+    .limit(1);
+  return rows.length > 0;
+}
+
 function parseBody(body: Record<string, unknown>): {
   data?: Partial<NewSalesperson>;
   error?: string;
@@ -59,8 +81,15 @@ function parseBody(body: Record<string, unknown>): {
     return { error: "Prowizja musi być z zakresu 0–100%" };
   }
 
+  // Ten sam człowiek w kadrach. Gdy powiązanie jest ustawione, koszt własny
+  // liczy się z jego wypłat, a `monthlyCost` przestaje być brane pod uwagę —
+  // inaczej handlowiec kosztowałby firmę dwa razy.
+  const employeeId = parseEmployeeId(body.employeeId);
+  if (employeeId === INVALID) return { error: "Nieprawidłowy pracownik kadr" };
+
   return {
     data: {
+      employeeId,
       firstName,
       lastName,
       phone: typeof body.phone === "string" ? body.phone.trim() : "",
@@ -100,6 +129,9 @@ app.get("/", async (c) => {
   const rows = await db
     .select({
       salesperson: schema.salespeople,
+      // Nazwisko z kartoteki kadrowej — lista pokazuje, kto jest na liście płac,
+      // bez dociągania Kadr osobnym żądaniem.
+      employeeName: schema.hrEmployees.fullName,
       // Odwołanie do kolumny nadrzędnej piszemy DOSŁOWNIE (`salespeople.id`): drizzle
       // renderuje \${schema.salespeople.id} w szablonie jako niekwalifikowane "id", które
       // wewnątrz podzapytania trafiłoby w kolumnę `id` tabeli z podzapytania.
@@ -130,12 +162,17 @@ app.get("/", async (c) => {
       )`,
     })
     .from(schema.salespeople)
+    .leftJoin(
+      schema.hrEmployees,
+      eq(schema.salespeople.employeeId, schema.hrEmployees.id),
+    )
     .orderBy(asc(sql`lower(${schema.salespeople.lastName})`), asc(schema.salespeople.firstName));
 
   const data = rows
     .filter((r) => !onlyActive || r.salesperson.active)
     .map((r) => ({
       ...r.salesperson,
+      employeeName: r.employeeName ?? null,
       contractorsCount: r.contractorsCount ?? 0,
       objectsCount: r.objectsCount ?? 0,
       objectsMonthlyValue: r.objectsMonthlyValue ?? 0,
@@ -152,6 +189,13 @@ app.post("/", async (c) => {
   const { data, error } = parseBody(body);
   if (error || !data) {
     return c.json<ApiResponse<null>>({ success: false, error }, 400);
+  }
+
+  if (!(await employeeOk(data.employeeId))) {
+    return c.json<ApiResponse<null>>(
+      { success: false, error: "Nie znaleziono pracownika w kadrach" },
+      404,
+    );
   }
 
   const result = await db
@@ -192,6 +236,13 @@ app.put("/:id", async (c) => {
   const { data, error } = parseBody(body);
   if (error || !data) {
     return c.json<ApiResponse<null>>({ success: false, error }, 400);
+  }
+
+  if (!(await employeeOk(data.employeeId))) {
+    return c.json<ApiResponse<null>>(
+      { success: false, error: "Nie znaleziono pracownika w kadrach" },
+      404,
+    );
   }
 
   const result = await db

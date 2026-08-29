@@ -12,6 +12,7 @@ import {
   DialogFooter,
 } from "./ui/dialog";
 import type {
+  HrEmployeeRef,
   PriceListGroup,
   Technician,
   TechnicianInput,
@@ -25,6 +26,8 @@ interface TechnicianFormProps {
   technician?: Technician | null;
   /** Cenniki do wyboru; pusta lista = pole „Cennik" pokazuje tylko główny. */
   priceLists?: PriceListGroup[];
+  /** Pracownicy z kadr do powiązania; pusta lista = pole pokazuje tylko „bez powiązania". */
+  employees?: HrEmployeeRef[];
 }
 
 export function TechnicianForm({
@@ -33,6 +36,7 @@ export function TechnicianForm({
   onSubmit,
   technician,
   priceLists = [],
+  employees = [],
 }: TechnicianFormProps) {
   const [loading, setLoading] = useState(false);
   const [formData, setFormData] = useState<TechnicianInput>({
@@ -46,6 +50,7 @@ export function TechnicianForm({
     notes: technician?.notes || "",
     active: technician?.active ?? true,
     priceListId: technician?.priceListId ?? null,
+    employeeId: technician?.employeeId ?? null,
   });
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -194,6 +199,38 @@ export function TechnicianForm({
             </select>
             <p className="text-xs text-muted-foreground">
               Cennik podpowiadany przy wycenach dla tego technika.
+            </p>
+          </div>
+
+          {/* Powiązanie z kartoteką kadrową — technik i pracownik kadr to dotąd
+              były dwa osobne rekordy, choć część osób figuruje w obu. */}
+          <div className="space-y-2">
+            <Label htmlFor="tech-employee">Pracownik w kadrach</Label>
+            <select
+              id="tech-employee"
+              data-testid="tech-employee"
+              value={formData.employeeId ?? ""}
+              onChange={(e) =>
+                setFormData((p) => ({
+                  ...p,
+                  employeeId: e.target.value ? Number(e.target.value) : null,
+                }))
+              }
+              className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+            >
+              <option value="">— bez powiązania (spoza listy płac) —</option>
+              {employees
+                .filter((e) => e.active || e.id === technician?.employeeId)
+                .map((e) => (
+                  <option key={e.id} value={e.id}>
+                    {e.fullName}
+                    {e.active ? "" : " (nieaktywny)"}
+                  </option>
+                ))}
+            </select>
+            <p className="text-xs text-muted-foreground">
+              Powiąż, jeśli technik jest na liście płac. Podwykonawcę na własnej
+              działalności zostaw bez powiązania.
             </p>
           </div>
 

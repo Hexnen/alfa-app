@@ -369,7 +369,12 @@ export function ObjectDetails() {
                   zamiast kwoty i 100% marży pokazujemy kreskę. Cztery pozycje,
                   żeby siatka `grid-cols-2` została parzysta. */}
               <div>
-                <dt className="text-sm text-muted-foreground">Koszt miesięczny</dt>
+                <dt
+                  className="text-sm text-muted-foreground"
+                  title="Koszty poza wynagrodzeniami (monitoring, sprzęt, abonamenty). Pensje załogi dolicza Analityka z Kadr."
+                >
+                  Koszt miesięczny (pozostały)
+                </dt>
                 <dd className="font-medium">
                   {monthlyCost === null ? (
                     <span className="text-muted-foreground">—</span>
@@ -431,6 +436,16 @@ export function ObjectDetails() {
                 </div>
               )}
             </dl>
+            {/* Jedno zdanie o konwencji na całą kartę zamiast dopisku „netto”
+                przy każdej kwocie. Druga połowa jest ważniejsza: zysk i marża
+                stoją tu WYŁĄCZNIE na koszcie pozostałym — koszt osobowy z Kadr
+                dokłada dopiero Analityka, więc marża z tej karty jest zawyżona
+                dla każdego obiektu, na którym stoją ludzie. */}
+            <p className="mt-4 text-xs text-muted-foreground">
+              Wszystkie kwoty są netto (bez VAT). Zysk i marża liczone są z
+              samego kosztu pozostałego — koszt osobowy z Kadr dolicza dopiero
+              Analityka.
+            </p>
           </CardContent>
         </Card>
 

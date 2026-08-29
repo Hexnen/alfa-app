@@ -18,6 +18,7 @@ import { usePerms } from "@/auth/permissions";
 import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
 import {
   Plus,
+  BadgeCheck,
   CalendarDays,
   ChevronLeft,
   ChevronRight,
@@ -64,6 +65,7 @@ import {
   updateRealization,
   deleteRealization,
   getTechnicians,
+  getHrEmployeeDirectory,
   createTechnician,
   updateTechnician,
   deleteTechnician,
@@ -87,6 +89,7 @@ import {
   type RealizationSummary,
   type RealizationWorkType,
   type Technician,
+  type HrEmployeeRef,
   type TechnicianInput,
   type PriceListGroup,
   type Protocol,
@@ -281,6 +284,9 @@ export function Technical() {
   const [editingTech, setEditingTech] = useState<Technician | null>(null);
   const [techView, setTechView] = useState<"active" | "archived">("active");
 
+  /** Kartoteka kadrowa — lista wyboru „Pracownik w kadrach" w formularzu technika. */
+  const [hrEmployees, setHrEmployees] = useState<HrEmployeeRef[]>([]);
+
   /** Cenniki — do kolumny „Cennik" w tabeli techników i selecta w formularzu. */
   const [priceLists, setPriceLists] = useState<PriceListGroup[]>([]);
   /** Cennik wybrany do prefillu nowej wyceny (0 = główny). */
@@ -329,6 +335,14 @@ export function Technical() {
   useEffect(() => {
     loadTechnicians();
   }, [loadTechnicians]);
+
+  // Kartoteka kadrowa do pola „Pracownik w kadrach" w formularzu technika.
+  // Brak uprawnień do Kadr nie może wywalić zakładki — lista zostaje pusta.
+  useEffect(() => {
+    getHrEmployeeDirectory()
+      .then((res) => setHrEmployees(res.data ?? []))
+      .catch(() => setHrEmployees([]));
+  }, []);
 
   const handleTechCreate = async (data: TechnicianInput) => {
     if (!editable) return;
@@ -401,6 +415,12 @@ export function Technical() {
               <th className="px-3 py-2 font-medium">Nazwisko</th>
               <th className="px-3 py-2 font-medium">Typ</th>
               <th className="px-3 py-2 font-medium">Cennik</th>
+              <th
+                className="px-3 py-2 font-medium"
+                title="Powiązanie z kartoteką kadrową — czy technik jest na liście płac"
+              >
+                Kadry
+              </th>
               <th className="px-3 py-2 font-medium">Telefon</th>
               <th className="px-3 py-2 font-medium">E-mail</th>
               <th className="px-3 py-2 font-medium">Firma</th>
@@ -434,6 +454,19 @@ export function Technical() {
                     </span>
                   ) : (
                     <span className="text-xs text-muted-foreground">Główny</span>
+                  )}
+                </td>
+                <td className="px-3 py-2">
+                  {tech.employeeId ? (
+                    <span
+                      className="inline-flex items-center gap-1 text-xs"
+                      title={`Na liście płac: ${tech.employeeName ?? "pracownik kadr"}`}
+                    >
+                      <BadgeCheck className="h-3.5 w-3.5 text-emerald-600" />
+                      {tech.employeeName || "powiązany"}
+                    </span>
+                  ) : (
+                    <span className="text-xs text-muted-foreground">—</span>
                   )}
                 </td>
                 <td className="whitespace-nowrap px-3 py-2 tabular-nums">
@@ -1971,6 +2004,7 @@ export function Technical() {
           onSubmit={editingTech ? handleTechUpdate : handleTechCreate}
           technician={editingTech}
           priceLists={priceLists}
+          employees={hrEmployees}
         />
       )}
 

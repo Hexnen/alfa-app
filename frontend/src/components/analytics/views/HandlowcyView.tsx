@@ -16,6 +16,7 @@ import {
   type AnalyticsSalespeopleData,
   type AnalyticsSalespersonRow,
   type AnalyticsScope,
+  type CostWindow,
 } from "@/lib/api";
 import {
   ChartCard,
@@ -37,14 +38,16 @@ import {
 import {
   cmpNullLast,
   cmpText,
+  costSplitLabel,
   matches,
   tintOf,
   useAnalyticsResource,
   type AnalyticsViewProps,
 } from "./shared";
-import { ResourceNotice, SortHeader } from "./parts";
+import { PersonnelFootnote, ResourceNotice, SortHeader } from "./parts";
 
-const load = (scope: AnalyticsScope) => getAnalyticsSalespeople({ scope });
+const load = (scope: AnalyticsScope, costWindow: CostWindow) =>
+  getAnalyticsSalespeople({ scope, costWindow });
 
 /**
  * Koszt własny handlowca to też koszt, więc dostaje odcień tej samej barwy co
@@ -85,11 +88,17 @@ function roiLabel(roi: number | null): string {
   return `×${roi.toLocaleString("pl-PL", { maximumFractionDigits: 1 })}`;
 }
 
-export function HandlowcyView({ scope, search, reloadKey }: AnalyticsViewProps) {
+export function HandlowcyView({
+  scope,
+  costWindow,
+  search,
+  reloadKey,
+}: AnalyticsViewProps) {
   const navigate = useNavigate();
   const { data, state } = useAnalyticsResource<AnalyticsSalespeopleData>(
     load,
     scope,
+    costWindow,
     reloadKey
   );
   const [sort, setSort] = useState<SortKey>("profit");
@@ -131,6 +140,10 @@ export function HandlowcyView({ scope, search, reloadKey }: AnalyticsViewProps) 
       return {
         revenue: t.revenue,
         objectsCost: t.cost,
+        // Koszt obiektów rozbity na część osobową (Kadry) i pozostałą (ręczną) —
+        // te dwie liczby SUMUJĄ SIĘ do `objectsCost`.
+        objectsPersonnelCost: t.personnelCost,
+        objectsOtherCost: t.otherCost,
         ownCost: t.salespeopleCost,
         commission: t.commission,
         netProfit: t.netProfit,
@@ -143,6 +156,8 @@ export function HandlowcyView({ scope, search, reloadKey }: AnalyticsViewProps) 
       (a, r) => ({
         revenue: a.revenue + r.revenue,
         objectsCost: a.objectsCost + r.objectsCost,
+        objectsPersonnelCost: a.objectsPersonnelCost + r.objectsPersonnelCost,
+        objectsOtherCost: a.objectsOtherCost + r.objectsOtherCost,
         ownCost: a.ownCost + r.ownCost,
         commission: a.commission + r.commission,
         netProfit: a.netProfit + r.profit,
@@ -152,6 +167,8 @@ export function HandlowcyView({ scope, search, reloadKey }: AnalyticsViewProps) 
       {
         revenue: 0,
         objectsCost: 0,
+        objectsPersonnelCost: 0,
+        objectsOtherCost: 0,
         ownCost: 0,
         commission: 0,
         netProfit: 0,
@@ -338,15 +355,19 @@ export function HandlowcyView({ scope, search, reloadKey }: AnalyticsViewProps) 
         <KpiTile
           label="Koszt obiektów"
           value={hasCostData ? plnFull(team.objectsCost) : DASH}
-          sub={hasCostData ? undefined : "koszty nieuzupełnione"}
-          tip="Miesięczny koszt utrzymania obiektów z portfeli"
+          sub={
+            hasCostData
+              ? costSplitLabel(team.objectsPersonnelCost, team.objectsOtherCost)
+              : "koszty nieuzupełnione"
+          }
+          tip="Koszt osobowy z Kadr + koszt pozostały z kartotek obiektów w portfelach"
           coverage={coverageProps}
         />
         <KpiTile
           label="Koszt handlowców"
           value={plnFull(team.ownCost)}
           sub="wynagrodzenie, auto, telefon"
-          tip="Koszt własny handlowców — niezależny od kosztu obiektów"
+          tip="Koszt własny handlowców — niezależny od kosztu obiektów. Dla osób powiązanych z Kadrami liczony z ich wypłat (netto na rękę, bez składek pracodawcy)."
         />
         <KpiTile
           label="Prowizje"
@@ -363,17 +384,22 @@ export function HandlowcyView({ scope, search, reloadKey }: AnalyticsViewProps) 
               ? "przychód − obiekty − handlowcy − prowizje"
               : "uzupełnij koszty, żeby policzyć"
           }
-          tip="Wynik po wszystkich czterech potrąceniach"
+          // „Netto" znaczy tu „po potrąceniach", a nie „bez VAT" — po dołożeniu
+          // oznaczeń netto/brutto w całej aplikacji ta dwuznaczność musi zniknąć
+          // z dymka, inaczej ktoś odczyta to jako kwotę do opodatkowania.
+          tip="Wynik po wszystkich czterech potrąceniach. „Netto” znaczy tu „po kosztach” — z VAT-em nie ma to nic wspólnego, wszystkie kwoty i tak są bez VAT."
           coverage={coverageProps}
         />
         <KpiTile
           label="Marża netto"
           value={<MarginGauge value={netMargin} size="lg" />}
           sub={hasAnyCost ? "zysk netto / przychód" : "nieznana bez kosztów"}
-          tip="Zysk netto podzielony przez przychód portfeli"
+          tip="Zysk po wszystkich potrąceniach podzielony przez przychód portfeli"
           coverage={coverageProps}
         />
       </KpiRow>
+
+      <PersonnelFootnote personnel={data.personnel} />
 
       <ChartCard
         title="Od przychodu do zysku"
@@ -529,9 +555,17 @@ export function HandlowcyView({ scope, search, reloadKey }: AnalyticsViewProps) 
                   active={sort === "objectsCost"}
                   dir={dir}
                   onToggle={toggleSort}
-                  tip="„—” = żaden obiekt portfela nie ma uzupełnionego kosztu"
+                  tip="Koszt osobowy (z Kadr) + pozostały (kartoteki obiektów); „—” = żaden obiekt portfela nie ma uzupełnionego kosztu"
                 />
-                <SortHeader label="Koszt własny" sortKey="ownCost" align="right" active={sort === "ownCost"} dir={dir} onToggle={toggleSort} />
+                <SortHeader
+                  label="Koszt własny"
+                  sortKey="ownCost"
+                  align="right"
+                  active={sort === "ownCost"}
+                  dir={dir}
+                  onToggle={toggleSort}
+                  tip="„z Kadr” = liczone z wypłat powiązanego pracownika; bez dopisku = kwota wpisana ręcznie"
+                />
                 <SortHeader label="Prowizja" sortKey="commission" align="right" active={sort === "commission"} dir={dir} onToggle={toggleSort} />
                 <SortHeader label="Zysk" sortKey="profit" align="right" active={sort === "profit"} dir={dir} onToggle={toggleSort} />
                 <SortHeader label="Marża" sortKey="margin" active={sort === "margin"} dir={dir} onToggle={toggleSort} />
@@ -585,9 +619,24 @@ export function HandlowcyView({ scope, search, reloadKey }: AnalyticsViewProps) 
                   <td className="px-2 py-2 text-right tabular-nums">
                     {plnFull(unassigned.revenue)}
                   </td>
-                  <td className="px-2 py-2 text-right tabular-nums">
+                  <td
+                    className="px-2 py-2 text-right tabular-nums"
+                    title={
+                      unassigned.objectsWithCost > 0
+                        ? `Koszt osobowy (z Kadr): ${plnFull(unassigned.objectsPersonnelCost)} · koszt pozostały: ${plnFull(unassigned.objectsOtherCost)}`
+                        : "Żaden obiekt bez opiekuna nie ma uzupełnionego kosztu"
+                    }
+                  >
                     {unassigned.objectsWithCost > 0 ? (
-                      plnFull(unassigned.objectsCost)
+                      <>
+                        {plnFull(unassigned.objectsCost)}
+                        {unassigned.objectsPersonnelCost > 0 && (
+                          <span className="block text-xs font-normal text-muted-foreground">
+                            os. {plnFull(unassigned.objectsPersonnelCost)} · poz.{" "}
+                            {plnFull(unassigned.objectsOtherCost)}
+                          </span>
+                        )}
+                      </>
                     ) : (
                       <span className="text-slate-400">{DASH}</span>
                     )}
@@ -681,14 +730,51 @@ function SalespersonRow({
         <span className="text-muted-foreground"> / {row.objectsWithCost}</span>
       </td>
       <td className="px-2 py-2 text-right tabular-nums">{plnFull(row.revenue)}</td>
-      <td className="px-2 py-2 text-right tabular-nums">
+      <td
+        className="px-2 py-2 text-right tabular-nums"
+        title={
+          knownCost
+            ? `Koszt osobowy (z Kadr): ${plnFull(row.objectsPersonnelCost)} · koszt pozostały (kartoteki obiektów): ${plnFull(row.objectsOtherCost)}`
+            : "Żaden obiekt portfela nie ma uzupełnionego kosztu"
+        }
+      >
         {knownCost ? (
-          plnFull(row.objectsCost)
+          <>
+            {plnFull(row.objectsCost)}
+            {row.objectsPersonnelCost > 0 && (
+              <span className="block text-xs font-normal text-muted-foreground">
+                os. {plnFull(row.objectsPersonnelCost)} · poz.{" "}
+                {plnFull(row.objectsOtherCost)}
+              </span>
+            )}
+          </>
         ) : (
           <span className="text-slate-400">{DASH}</span>
         )}
       </td>
-      <td className="px-2 py-2 text-right tabular-nums">{plnFull(row.ownCost)}</td>
+      {/* Przy powiązaniu z Kadrami kwota pochodzi z WYPŁAT, a ręczne
+          `monthly_cost` jest ignorowane (inaczej ta sama osoba kosztowałaby
+          firmę dwa razy). Pokazywanie tu kwoty ręcznej byłoby więc podaniem
+          liczby, która nie bierze udziału w żadnym wyniku na tym ekranie. */}
+      <td
+        className="px-2 py-2 text-right tabular-nums"
+        title={
+          row.ownCostSource === "kadry"
+            ? `Liczone z wypłat w Kadrach (netto na rękę, bez składek pracodawcy)${
+                row.manualMonthlyCost !== null
+                  ? `; pole ręczne (${plnFull(row.manualMonthlyCost)}) jest wtedy ignorowane`
+                  : ""
+              }`
+            : "Kwota wpisana ręcznie w kartotece handlowca"
+        }
+      >
+        {plnFull(row.ownCost)}
+        {row.ownCostSource === "kadry" && (
+          <span className="block text-xs font-normal text-muted-foreground">
+            z Kadr
+          </span>
+        )}
+      </td>
       <td className="px-2 py-2 text-right tabular-nums">
         {plnFull(row.commission)}
         {row.commissionRate !== null && (

@@ -15,6 +15,7 @@ import {
   type AnalyticsContractorRow,
   type AnalyticsContractorsData,
   type AnalyticsScope,
+  type CostWindow,
 } from "@/lib/api";
 import {
   ChartCard,
@@ -38,16 +39,23 @@ import {
   aggregate,
   cmpNullLast,
   cmpText,
+  costSplitLabel,
   matches,
   spLabel,
   tintOf,
   useAnalyticsResource,
   type AnalyticsViewProps,
 } from "./shared";
-import { NoCostEmpty, ResourceNotice, SortHeader } from "./parts";
+import {
+  NoCostEmpty,
+  PersonnelFootnote,
+  ResourceNotice,
+  SortHeader,
+} from "./parts";
 
 /** Stabilna tożsamość dla efektu w `useAnalyticsResource`. */
-const load = (scope: AnalyticsScope) => getAnalyticsContractors({ scope });
+const load = (scope: AnalyticsScope, costWindow: CostWindow) =>
+  getAnalyticsContractors({ scope, costWindow });
 
 type SortKey =
   | "name"
@@ -75,11 +83,17 @@ const DEFAULT_DIR: Record<SortKey, "asc" | "desc"> = {
   payback: "asc",
 };
 
-export function KontrahenciView({ scope, search, reloadKey }: AnalyticsViewProps) {
+export function KontrahenciView({
+  scope,
+  costWindow,
+  search,
+  reloadKey,
+}: AnalyticsViewProps) {
   const navigate = useNavigate();
   const { data, state } = useAnalyticsResource<AnalyticsContractorsData>(
     load,
     scope,
+    costWindow,
     reloadKey
   );
   const [sort, setSort] = useState<SortKey>("revenue");
@@ -118,6 +132,8 @@ export function KontrahenciView({ scope, search, reloadKey }: AnalyticsViewProps
           withCost: r.objectsWithCost,
           revenue: r.revenue,
           cost: r.cost,
+          personnelCost: r.personnelCost,
+          otherCost: r.otherCost,
           profit: r.profit,
           setupCost: r.setupCost,
         }))
@@ -269,8 +285,14 @@ export function KontrahenciView({ scope, search, reloadKey }: AnalyticsViewProps
         <KpiTile
           label="Koszt mies."
           value={hasCostData ? plnFull(agg.cost) : DASH}
-          sub={hasCostData ? undefined : "koszty nieuzupełnione"}
-          tip="Suma kosztów miesięcznych obiektów. Koszt nieuzupełniony liczy się jak zero — patrz pokrycie."
+          // Rozbicie na osobowy i pozostały — bez niego nie widać, czy klienta
+          // drogo kosztuje załoga, czy sprzęt.
+          sub={
+            hasCostData
+              ? costSplitLabel(agg.personnelCost, agg.otherCost)
+              : "koszty nieuzupełnione"
+          }
+          tip="Koszt osobowy z Kadr + koszt pozostały z kartotek obiektów. Koszt nieuzupełniony liczy się jak zero — patrz pokrycie."
           coverage={coverageProps}
         />
         <KpiTile
@@ -307,6 +329,8 @@ export function KontrahenciView({ scope, search, reloadKey }: AnalyticsViewProps
           onClick={() => navigate("/objects?hasCost=0")}
         />
       </KpiRow>
+
+      <PersonnelFootnote personnel={data.personnel} />
 
       <div className="grid gap-3 xl:grid-cols-2">
         <ChartCard
@@ -475,7 +499,7 @@ export function KontrahenciView({ scope, search, reloadKey }: AnalyticsViewProps
                   active={sort === "cost"}
                   dir={dir}
                   onToggle={toggleSort}
-                  tip="Suma kosztów miesięcznych obiektów; „—” gdy żaden nie ma kosztu"
+                  tip="Koszt osobowy (z Kadr) + pozostały (kartoteki obiektów); „—” gdy żaden obiekt nie ma kosztu"
                 />
                 <SortHeader
                   label="Zysk"
@@ -579,8 +603,29 @@ function ContractorRow({
         <span className="text-muted-foreground"> / {row.objectsWithCost}</span>
       </td>
       <td className="px-2 py-2 text-right tabular-nums">{plnFull(row.revenue)}</td>
-      <td className="px-2 py-2 text-right tabular-nums">
-        {known ? plnFull(row.cost) : <span className="text-slate-400">{DASH}</span>}
+      {/* Rozbicie drugą linią zamiast dwóch nowych kolumn — tabela ma już
+          dziesięć i 1100 px minimalnej szerokości. Przy zerowym koszcie
+          osobowym (brak mapowania w Kadrach) linia znika: nie ma czego dzielić. */}
+      <td
+        className="px-2 py-2 text-right tabular-nums"
+        title={
+          known
+            ? `Koszt osobowy (z Kadr): ${plnFull(row.personnelCost)} · koszt pozostały (kartoteki obiektów): ${plnFull(row.otherCost)}`
+            : "Żaden obiekt kontrahenta nie ma uzupełnionego kosztu"
+        }
+      >
+        {known ? (
+          <>
+            {plnFull(row.cost)}
+            {row.personnelCost > 0 && (
+              <span className="block text-xs font-normal text-muted-foreground">
+                os. {plnFull(row.personnelCost)} · poz. {plnFull(row.otherCost)}
+              </span>
+            )}
+          </>
+        ) : (
+          <span className="text-slate-400">{DASH}</span>
+        )}
       </td>
       <td
         className={cn(

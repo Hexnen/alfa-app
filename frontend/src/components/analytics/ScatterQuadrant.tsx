@@ -52,6 +52,18 @@ const MR = 16;
 const MT = 14;
 const MB = 42;
 
+/**
+ * Polska odmiana przez liczbę: 1 obiekt ma / 2–4 obiekty mają / 5+ obiektów ma.
+ * Wyjątek na 12–14, które mimo końcówki idą jak forma mnoga „obiektów".
+ */
+function clampedLabel(n: number): string {
+  const last = n % 10;
+  const lastTwo = n % 100;
+  if (n === 1) return "1 obiekt ma";
+  if (last >= 2 && last <= 4 && !(lastTwo >= 12 && lastTwo <= 14)) return `${n} obiekty mają`;
+  return `${n} obiektów ma`;
+}
+
 export function ScatterQuadrant({
   rows,
   ariaLabel,
@@ -69,7 +81,13 @@ export function ScatterQuadrant({
   const geom = useMemo(() => {
     const x = niceScale(Math.max(...points.map((p) => p.revenue), 0));
     const margins = points.map((p) => p.marginPct as number);
-    const rawLo = Math.min(0, ...margins);
+    // Skrajnie ujemne marże PRZYCINAMY do podłogi zamiast rozciągać pod nie oś.
+    // Obiekt z abonamentem 300 zł i przypisaną wartą wychodzi na −2600%, a jeden
+    // taki punkt spłaszczał cały wykres do kreski. Przycięte rysujemy przy dolnej
+    // krawędzi i liczymy w podpisie — informacja „głęboko pod kreską" zostaje,
+    // znika tylko bezużyteczna precyzja.
+    const FLOOR = -100;
+    const rawLo = Math.max(FLOOR, Math.min(0, ...margins));
     const rawHi = Math.max(10, ...margins);
     const lo = Math.floor(rawLo / 5) * 5 - 5;
     const hi = Math.ceil(rawHi / 5) * 5 + 5;
@@ -77,7 +95,8 @@ export function ScatterQuadrant({
     const ticks: number[] = [];
     for (let v = lo; v <= hi + 1e-9; v += step) ticks.push(v);
     const maxSetup = Math.max(...points.map((p) => p.setupCost ?? 0), 0);
-    return { x, lo, hi, ticks, maxSetup };
+    const clamped = margins.filter((m) => m < lo).length;
+    return { x, lo, hi, ticks, maxSetup, clamped };
   }, [points]);
 
   if (points.length < SCATTER_MIN_ROWS) {
@@ -190,6 +209,7 @@ export function ScatterQuadrant({
 
         {points.map((p) => {
           const margin = p.marginPct as number;
+          const isClamped = margin < geom.lo;
           // Promień po pierwiastku, bo oko czyta pole, nie średnicę.
           const r =
             geom.maxSetup > 0
@@ -199,10 +219,10 @@ export function ScatterQuadrant({
             <circle
               key={p.id}
               cx={toX(p.revenue)}
-              cy={toY(margin)}
+              cy={toY(isClamped ? geom.lo : margin)}
               r={Math.max(r, 5)}
               fill={margin < 0 ? COLOR_LOSS : COLOR_PROFIT}
-              fillOpacity={0.75}
+              fillOpacity={isClamped ? 0.35 : 0.75}
               // 2px biała obwódka rozdziela nachodzące na siebie bąble.
               stroke="#ffffff"
               strokeWidth={2}
@@ -243,6 +263,13 @@ export function ScatterQuadrant({
         <p className="text-xs text-amber-600">
           {missing} pozycji nie ma na wykresie — marża nieznana przy
           nieuzupełnionym koszcie.
+        </p>
+      )}
+      {geom.clamped > 0 && (
+        <p className="text-xs text-slate-500">
+          {clampedLabel(geom.clamped)} marżę poniżej {pct(geom.lo, 0)} —{" "}
+          {geom.clamped === 1 ? "pokazany" : "pokazane"} bladym punktem przy
+          dolnej krawędzi, dokładna wartość w dymku.
         </p>
       )}
     </div>

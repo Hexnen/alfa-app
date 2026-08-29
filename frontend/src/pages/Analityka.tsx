@@ -22,7 +22,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { usePerms } from "@/auth/permissions";
-import type { AnalyticsScope } from "@/lib/api";
+import type { AnalyticsScope, CostWindow } from "@/lib/api";
 import { KontrahenciView } from "@/components/analytics/views/KontrahenciView";
 import { ObiektyView } from "@/components/analytics/views/ObiektyView";
 import { HandlowcyView } from "@/components/analytics/views/HandlowcyView";
@@ -36,6 +36,20 @@ const SCOPE_LABELS: Record<AnalyticsScope, string> = {
   active: "Tylko aktywne",
   all: "Wszystkie, z archiwum",
 };
+
+/**
+ * Okno uśredniania kosztu OSOBOWEGO (ten z Kadr; koszt pozostały jest ręczny
+ * i oknem się nie rusza). Jeden miesiąc bywa wystrzałowy — premie, wyrównania,
+ * choroba — a dwanaście rozmywa sezon, więc domyślne są trzy: tak samo jak
+ * `DEFAULT_COST_WINDOW` w src/lib/object-personnel-cost.ts.
+ */
+const COST_WINDOW_LABELS: Record<CostWindow, string> = {
+  1: "ostatniego miesiąca",
+  3: "3 miesięcy",
+  12: "12 miesięcy",
+};
+
+const COST_WINDOWS: CostWindow[] = [1, 3, 12];
 
 /**
  * Pierwsza podzakładka, którą użytkownik naprawdę widzi.
@@ -66,13 +80,17 @@ export function Analityka() {
   // żeby przełączenie podzakładki ich nie kasowało — ten sam idiom co pasek
   // miesiąca w Kadrach.
   const [scope, setScope] = useState<AnalyticsScope>("current");
+  // Okno kosztu osobowego mieszka TU, a nie w widokach: przełączenie podzakładki
+  // nie może wracać do domyślnej trójki, bo trzy widoki mówią wtedy o różnych
+  // miesiącach i ich liczby przestają się do siebie odnosić.
+  const [costWindow, setCostWindow] = useState<CostWindow>(3);
   const [search, setSearch] = useState("");
   // Licznik zamiast callbacku: widoki nie muszą się rejestrować w powłoce,
   // wystarczy że mają go w zależnościach efektu.
   const [reloadKey, setReloadKey] = useState(0);
 
   const fallback = useMemo(() => firstVisibleTab(canView), [canView]);
-  const viewProps = { scope, search, reloadKey };
+  const viewProps = { scope, costWindow, search, reloadKey };
 
   // Walidacja PO wszystkich hookach — inaczej ich liczba zmieniałaby się
   // między renderami.
@@ -94,6 +112,25 @@ export function Analityka() {
             {(Object.keys(SCOPE_LABELS) as AnalyticsScope[]).map((s) => (
               <SelectItem key={s} value={s}>
                 {SCOPE_LABELS[s]}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+
+        <Select
+          value={String(costWindow)}
+          onValueChange={(v) => setCostWindow(Number(v) as CostWindow)}
+        >
+          <SelectTrigger
+            className="w-[260px]"
+            title="Z ilu ostatnich pełnych miesięcy uśredniamy koszt osobowy liczony z wypłat w Kadrach. Koszt pozostały (monitoring, sprzęt) jest ręczny i nie zależy od tego wyboru."
+          >
+            <SelectValue placeholder="Koszt osobowy z" />
+          </SelectTrigger>
+          <SelectContent>
+            {COST_WINDOWS.map((w) => (
+              <SelectItem key={w} value={String(w)}>
+                Koszt osobowy z: {COST_WINDOW_LABELS[w]}
               </SelectItem>
             ))}
           </SelectContent>

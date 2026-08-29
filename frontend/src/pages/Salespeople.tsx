@@ -10,6 +10,7 @@ import { usePerms } from "@/auth/permissions";
 import {
   Archive,
   ArchiveRestore,
+  BadgeCheck,
   Building2,
   Pencil,
   Plus,
@@ -22,6 +23,8 @@ import {
   createSalesperson,
   updateSalesperson,
   deleteSalesperson,
+  getHrEmployeeDirectory,
+  type HrEmployeeRef,
   type Salesperson,
   type SalespersonInput,
 } from "@/lib/api";
@@ -43,6 +46,8 @@ export function Salespeople() {
   const [view, setView] = useState<"active" | "archived">("active");
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<Salesperson | null>(null);
+  /** Kartoteka kadrowa — lista wyboru „Pracownik w kadrach" w formularzu. */
+  const [hrEmployees, setHrEmployees] = useState<HrEmployeeRef[]>([]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -54,6 +59,15 @@ export function Salespeople() {
     } finally {
       setLoading(false);
     }
+  }, []);
+
+  // Lista pracowników kadr jest niezależna od handlowców, więc ciągniemy ją raz.
+  // Brak uprawnień do Kadr nie może wywalić widoku — wtedy pole powiązania
+  // po prostu zostaje puste.
+  useEffect(() => {
+    getHrEmployeeDirectory()
+      .then((res) => setHrEmployees(res.data ?? []))
+      .catch(() => setHrEmployees([]));
   }, []);
 
   useEffect(() => {
@@ -128,6 +142,12 @@ export function Salespeople() {
               <th className="text-left py-3 px-2 font-medium">Telefon</th>
               <th className="text-left py-3 px-2 font-medium">E-mail</th>
               <th className="text-left py-3 px-2 font-medium">Region</th>
+              <th
+                className="text-left py-3 px-2 font-medium"
+                title="Powiązanie z kartoteką kadrową — koszt takiej osoby liczy się z jej wypłat, a nie z pola „Koszt mies.”"
+              >
+                Kadry
+              </th>
               <th className="text-right py-3 px-2 font-medium">Kontrahenci</th>
               <th
                 className="text-right py-3 px-2 font-medium"
@@ -141,7 +161,12 @@ export function Salespeople() {
               >
                 Portfel
               </th>
-              <th className="text-right py-3 px-2 font-medium">Koszt mies.</th>
+              <th
+                className="text-right py-3 px-2 font-medium"
+                title="Kwota netto. Dla osoby powiązanej z Kadrami liczona z jej wypłat — netto „na rękę”, bez składek pracodawcy."
+              >
+                Koszt mies.
+              </th>
               <th className="text-right py-3 px-2 font-medium">Prowizja</th>
               <th className="text-right py-3 px-2 font-medium">Akcje</th>
             </tr>
@@ -158,6 +183,19 @@ export function Salespeople() {
                 <td className="py-3 px-2">{s.phone || "-"}</td>
                 <td className="py-3 px-2">{s.email || "-"}</td>
                 <td className="py-3 px-2">{s.region || "-"}</td>
+                <td className="py-3 px-2">
+                  {s.employeeId ? (
+                    <span
+                      className="inline-flex items-center gap-1 text-xs"
+                      title={`Na liście płac: ${s.employeeName ?? "pracownik kadr"}`}
+                    >
+                      <BadgeCheck className="h-3.5 w-3.5 text-emerald-600" />
+                      {s.employeeName || "powiązany"}
+                    </span>
+                  ) : (
+                    <span className="text-muted-foreground">—</span>
+                  )}
+                </td>
                 <td className="py-3 px-2 text-right tabular-nums">
                   {s.contractorsCount ? (
                     <button
@@ -187,9 +225,18 @@ export function Salespeople() {
                 <td className="py-3 px-2 text-right tabular-nums">
                   {s.objectsMonthlyValue ? formatCurrency(s.objectsMonthlyValue) : "-"}
                 </td>
-                {/* Pusty koszt / prowizja = nieuzupełnione, nie 0 — stąd kreska. */}
+                {/* Pusty koszt / prowizja = nieuzupełnione, nie 0 — stąd kreska.
+                    Przy powiązaniu z kadrami ręczna kwota nie obowiązuje: koszt
+                    bierze się z wypłat, żeby nie policzyć osoby dwa razy. */}
                 <td className="py-3 px-2 text-right tabular-nums">
-                  {s.monthlyCost === null || s.monthlyCost === undefined ? (
+                  {s.employeeId ? (
+                    <span
+                      className="text-xs text-muted-foreground"
+                      title="Koszt liczony z wypłat tej osoby w Kadrach"
+                    >
+                      z Kadr
+                    </span>
+                  ) : s.monthlyCost === null || s.monthlyCost === undefined ? (
                     <span className="text-muted-foreground">—</span>
                   ) : (
                     formatCurrency(s.monthlyCost)
@@ -268,9 +315,13 @@ export function Salespeople() {
             className="pl-10"
           />
         </div>
+        {/* Jedno zdanie o konwencji na ekran zamiast dopisku przy każdej kwocie.
+            Uwaga o wypłatach jest tu istotna: koszt osoby z Kadr to kwota NA RĘKĘ,
+            bez składek pracodawcy, więc nie jest pełnym kosztem zatrudnienia. */}
         <p className="flex items-center gap-2 text-sm text-muted-foreground">
           <Users className="h-4 w-4" />
-          Opiekunowie przypisywani kontrahentom i obiektom
+          Opiekunowie przypisywani kontrahentom i obiektom · kwoty netto (bez VAT);
+          koszt osoby z Kadr to wypłata netto na rękę, bez składek pracodawcy
         </p>
         {editable && (
           <Button className="ml-auto" onClick={() => setFormOpen(true)}>
@@ -311,6 +362,7 @@ export function Salespeople() {
           onClose={closeForm}
           onSubmit={editing ? handleUpdate : handleCreate}
           salesperson={editing}
+          employees={hrEmployees}
         />
       )}
     </div>

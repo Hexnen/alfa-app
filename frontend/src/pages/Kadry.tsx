@@ -46,6 +46,8 @@ import {
   createHrObject,
   updateHrObject,
   deleteHrObject,
+  getHrObjectCatalog,
+  setHrObjectMapping,
   getHrContracts,
   createHrContract,
   updateHrContract,
@@ -64,6 +66,7 @@ import {
   type HrEmployee,
   type HrEmployeeInput,
   type HrObject,
+  type HrObjectRef,
   type HrContract,
   type HrContractInput,
   type HrMonthNorm,
@@ -127,6 +130,31 @@ function Th({
   );
 }
 
+/**
+ * Pozycje słownika kadrowego, które NIE są obiektem chronionym, tylko kosztem
+ * ogólnym firmy: techniczne (`#BIURO`, `#zlecenie`) i wspólne (`CMA` — centrum
+ * monitorowania obsługujące wszystkich klientów naraz). Mapowanie ich na
+ * pojedynczy obiekt zrzuciłoby cały koszt centrali na jednego klienta, więc
+ * zostają niezmapowane celowo.
+ */
+function overheadKind(name: string): "techniczna" | "ogolna" | null {
+  if (name.trim().startsWith("#")) return "techniczna";
+  if (name.trim().toUpperCase() === "CMA") return "ogolna";
+  return null;
+}
+
+/**
+ * Etykieta obiektu z kartoteki w liście wyboru. Sama nazwa nie wystarcza —
+ * kartoteka ma obiekty o bliźniaczych nazwach u różnych klientów, więc miasto
+ * i kontrahent są tu częścią identyfikacji, a nie ozdobą.
+ */
+const catalogLabel = (o: HrObjectRef) =>
+  [o.name, o.city, o.contractorName].filter(Boolean).join(" · ");
+
+/** Select w komórce tabeli — wygląd pól z formularzy Kadr, tylko niższy. */
+const TABLE_SELECT_CLS =
+  "h-8 w-full min-w-52 rounded-md border border-input bg-background px-2 py-1 text-xs";
+
 const KADRY_TABS = [
   "wynagrodzenia",
   "godziny",
@@ -158,6 +186,8 @@ export function Kadry() {
   const [office, setOffice] = useState<HrOfficeRow[]>([]);
   const [employees, setEmployees] = useState<HrEmployee[]>([]);
   const [objects, setObjects] = useState<HrObject[]>([]);
+  /** Kartoteka obiektów — lista wyboru przy mapowaniu pozycji kadrowych. */
+  const [objectCatalog, setObjectCatalog] = useState<HrObjectRef[]>([]);
   const [contracts, setContracts] = useState<HrContract[]>([]);
   /** Słownik spółek — źródło listy wyboru w umowie i podpowiedzi w biurze. */
   const [companies, setCompanies] = useState<Company[]>([]);
@@ -241,16 +271,18 @@ export function Kadry() {
   }, [year, month, hoursEditable]);
 
   const loadDictionaries = useCallback(async () => {
-    const [e, o, c, comp] = await Promise.all([
+    const [e, o, c, comp, cat] = await Promise.all([
       getHrEmployees(),
       getHrObjects(),
       getHrContracts(),
       getCompanies(),
+      getHrObjectCatalog(),
     ]);
     setEmployees(e.data ?? []);
     setObjects(o.data ?? []);
     setContracts(c.data ?? []);
     setCompanies(comp.data ?? []);
+    setObjectCatalog(cat.data ?? []);
   }, []);
 
   const loadNorms = useCallback(async () => {
@@ -288,6 +320,40 @@ export function Kadry() {
     () => employees.filter((e) => e.active),
     [employees],
   );
+
+  /**
+   * Pozycje kadrowe od najcięższych: mapuje się je ręcznie i po kolei, więc
+   * na górze mają stać te, na których wisi najwięcej godzin — to one przeniosą
+   * do Analityki największy kawałek kosztu osobowego.
+   */
+  const sortedObjects = useMemo(
+    () =>
+      [...objects].sort(
+        (a, b) =>
+          b.hoursTotal - a.hoursTotal || a.name.localeCompare(b.name, "pl"),
+      ),
+    [objects],
+  );
+
+  /**
+   * Postęp mapowania liczymy TYLKO z pozycji, które mają godziny i nie są
+   * kosztem ogólnym: pozycja bez godzin nic do Analityki nie wniesie, a
+   * #BIURO / CMA nie mają być mapowane — w mianowniku zaniżałyby wynik na stałe.
+   */
+  const mappingProgress = useMemo(() => {
+    const relevant = objects.filter(
+      (o) => o.hoursTotal > 0 && !overheadKind(o.name),
+    );
+    const mapped = relevant.filter((o) => o.objectId != null);
+    const sum = (list: HrObject[]) =>
+      list.reduce((acc, o) => acc + o.hoursTotal, 0);
+    return {
+      total: relevant.length,
+      mapped: mapped.length,
+      hoursTotal: sum(relevant),
+      hoursMapped: sum(mapped),
+    };
+  }, [objects]);
 
   // Kartoteka: umowy podpięte pod pracownika (wiersz rozwijany).
   const contractsByEmployee = useMemo(() => {
@@ -485,6 +551,17 @@ export function Kadry() {
       await loadDictionaries();
     } catch (err) {
       alert(err instanceof Error ? err.message : "Błąd usuwania");
+    }
+  };
+
+  /** Przypisanie pozycji kadrowej do obiektu z kartoteki (null = zdejmij). */
+  const handleObjectMapping = async (row: HrObject, objectId: number | null) => {
+    if (!editable) return;
+    try {
+      await setHrObjectMapping(row.id, objectId);
+      await loadDictionaries();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Błąd zapisu mapowania");
     }
   };
 
@@ -1655,13 +1732,67 @@ export function Kadry() {
               </div>
             )}
           </div>
+          {/* Postęp mapowania — od niego zależy, ile kosztu osobowego w ogóle
+              trafi do Analityki obiektów; niezmapowana pozycja zostaje kosztem
+              nieprzypisanym do nikogo. */}
+          <Card>
+            <CardContent className="space-y-2 p-4">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <span className="text-sm font-medium">
+                  Zmapowano {mappingProgress.mapped} z {mappingProgress.total}{" "}
+                  pozycji z godzinami
+                </span>
+                <span className="text-xs text-muted-foreground">
+                  {hrs(mappingProgress.hoursMapped)} z{" "}
+                  {hrs(mappingProgress.hoursTotal)} godz. trafi do kosztu
+                  obiektów w Analityce
+                </span>
+              </div>
+              <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+                <div
+                  className="h-full rounded-full bg-emerald-500 transition-all"
+                  style={{
+                    width: `${
+                      mappingProgress.total
+                        ? Math.round(
+                            (mappingProgress.mapped / mappingProgress.total) *
+                              100,
+                          )
+                        : 0
+                    }%`,
+                  }}
+                />
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Słownik kadrowy powstał niezależnie od kartoteki i nazwy się nie
+                pokrywają, więc powiązanie ustawia się ręcznie. Pozycje
+                techniczne (#BIURO, #zlecenie) i wspólne (CMA) zostaw
+                niezmapowane — to koszt ogólny firmy, nie koszt obiektu.
+              </p>
+            </CardContent>
+          </Card>
           <Card>
             <CardContent className="p-0">
               <table className="w-full text-sm">
                 <thead className="border-b bg-muted/50 text-xs uppercase tracking-wide text-muted-foreground">
                   <tr>
                     <Th tip="Nazwa obiektu (posterunku) — słownik do wpisów godzin">
-                      Obiekt
+                      Obiekt kadrowy
+                    </Th>
+                    <Th
+                      tip="Suma godzin wypracowanych na tej pozycji z całej historii — im więcej, tym ważniejsze mapowanie"
+                      className="text-right"
+                    >
+                      Godziny
+                    </Th>
+                    <Th
+                      tip="Ilu różnych pracowników kiedykolwiek księgowało godziny na tej pozycji"
+                      className="text-right"
+                    >
+                      Pracownicy
+                    </Th>
+                    <Th tip="Obiekt z kartoteki, na który przeniosą się wynagrodzenia z tej pozycji (Analityka → Obiekty)">
+                      Obiekt w kartotece
                     </Th>
                     <Th tip="Nieaktywny obiekt nie jest podpowiadany przy wpisywaniu godzin">
                       Status
@@ -1670,47 +1801,106 @@ export function Kadry() {
                   </tr>
                 </thead>
                 <tbody>
-                  {objects.map((r) => (
-                    <tr key={r.id} className="border-b hover:bg-accent/50">
-                      <td className="px-3 py-2 font-medium">{r.name}</td>
-                      <td className="px-3 py-2">
-                        <button
-                          type="button"
-                          onClick={() => handleObjectToggle(r)}
-                          disabled={!editable}
-                          className={cn(
-                            "inline-flex rounded-md px-2 py-0.5 text-xs font-medium",
-                            r.active
-                              ? "bg-emerald-100 text-emerald-700"
-                              : "bg-muted text-muted-foreground",
-                            !editable && "cursor-default",
-                          )}
-                        >
-                          {r.active ? "aktywny" : "nieaktywny"}
-                        </button>
-                      </td>
-                      <td className="px-3 py-2">
-                        {editable && (
-                          <div className="flex justify-end gap-1">
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              onClick={() => handleObjectRename(r)}
-                            >
-                              <Pencil className="h-4 w-4" />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              onClick={() => handleObjectDelete(r)}
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </Button>
-                          </div>
+                  {sortedObjects.map((r) => {
+                    const overhead = overheadKind(r.name);
+                    return (
+                      <tr
+                        key={r.id}
+                        className={cn(
+                          "border-b hover:bg-accent/50",
+                          overhead && "bg-muted/30 text-muted-foreground",
                         )}
-                      </td>
-                    </tr>
-                  ))}
+                      >
+                        <td className="px-3 py-2 font-medium">
+                          {r.name}
+                          {overhead && (
+                            <span className="ml-2 rounded bg-muted px-1.5 py-0.5 text-[11px] font-normal">
+                              {overhead === "techniczna"
+                                ? "pozycja techniczna"
+                                : "koszt wspólny"}
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums">
+                          {r.hoursTotal ? hrs(r.hoursTotal) : "—"}
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums">
+                          {r.employeesCount || "—"}
+                        </td>
+                        <td className="px-3 py-2">
+                          {overhead ? (
+                            <span
+                              className="text-xs italic"
+                              title="Koszt ogólny firmy — przypisanie go do jednego obiektu obciążyłoby jednego klienta kosztem wszystkich"
+                            >
+                              koszt ogólny, nie mapuj
+                            </span>
+                          ) : (
+                            <select
+                              className={TABLE_SELECT_CLS}
+                              value={r.objectId ?? ""}
+                              disabled={!editable}
+                              aria-label={`Obiekt w kartotece dla pozycji ${r.name}`}
+                              title={
+                                r.object
+                                  ? catalogLabel(r.object)
+                                  : "Wskaż obiekt z kartoteki, którego dotyczą godziny tej pozycji"
+                              }
+                              onChange={(e) =>
+                                handleObjectMapping(
+                                  r,
+                                  e.target.value ? Number(e.target.value) : null,
+                                )
+                              }
+                            >
+                              <option value="">— nie mapuj —</option>
+                              {objectCatalog.map((o) => (
+                                <option key={o.id} value={o.id}>
+                                  {catalogLabel(o)}
+                                </option>
+                              ))}
+                            </select>
+                          )}
+                        </td>
+                        <td className="px-3 py-2">
+                          <button
+                            type="button"
+                            onClick={() => handleObjectToggle(r)}
+                            disabled={!editable}
+                            className={cn(
+                              "inline-flex rounded-md px-2 py-0.5 text-xs font-medium",
+                              r.active
+                                ? "bg-emerald-100 text-emerald-700"
+                                : "bg-muted text-muted-foreground",
+                              !editable && "cursor-default",
+                            )}
+                          >
+                            {r.active ? "aktywny" : "nieaktywny"}
+                          </button>
+                        </td>
+                        <td className="px-3 py-2">
+                          {editable && (
+                            <div className="flex justify-end gap-1">
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => handleObjectRename(r)}
+                              >
+                                <Pencil className="h-4 w-4" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => handleObjectDelete(r)}
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </Button>
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </CardContent>

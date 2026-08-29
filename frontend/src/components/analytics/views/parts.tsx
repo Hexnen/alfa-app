@@ -5,11 +5,13 @@
  * Osobny plik od `./shared`, bo tam mieszka logika (hooki, komparatory,
  * formuły) — plik mieszający jedno z drugim psuje fast refresh.
  */
-import { ArrowDown, ArrowUp, ChevronsUpDown, Coins } from "lucide-react";
+import { Link } from "react-router-dom";
+import { ArrowDown, ArrowUp, ChevronsUpDown, Coins, Info } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import { EmptyState } from "@/components/analytics";
-import type { LoadState } from "./shared";
+import type { PersonnelInfo } from "@/lib/api";
+import { personnelNote, type LoadState } from "./shared";
 
 /**
  * Ekran zastępczy dla stanów innych niż „mamy dane”. Ponowną próbę robi
@@ -72,6 +74,64 @@ export function NoCostEmpty({ what }: { what: string }) {
       actionLabel="Uzupełnij koszty obiektów"
       actionHref="/objects?hasCost=0"
     />
+  );
+}
+
+/**
+ * Przypis pod kafelkami KPI: skąd wziął się koszt osobowy i w jakim sensie
+ * wszystkie kwoty są „netto".
+ *
+ * Dwie rzeczy, których nie wolno przemilczeć:
+ *  1. Bez mapowania `hr_objects.object_id` → obiekt koszt osobowy wynosi zero
+ *     i CAŁA ta funkcja milczy. Zero wygląda wtedy jak wynik („tani obiekt"),
+ *     a jest dziurą w danych — dlatego zamiast przypisu leci wtedy komunikat
+ *     z linkiem do miejsca, w którym można to naprawić.
+ *  2. „Netto" znaczy tu dwie różne rzeczy: strona handlowa jest bez VAT,
+ *     a wypłaty są „na rękę" — bez składek pracodawcy. Koszt osobowy jest więc
+ *     ZANIŻONY względem realnego kosztu zatrudnienia, a zysk i marża zawyżone.
+ *     Kto tego nie wie, podejmie decyzję na zawyżonej marży.
+ */
+export function PersonnelFootnote({ personnel }: { personnel: PersonnelInfo }) {
+  const mapped = personnel.mappedObjects > 0;
+
+  return (
+    <div className="space-y-1 px-1">
+      {mapped ? (
+        <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
+          <Info className="mt-0.5 h-3 w-3 shrink-0" />
+          <span>{personnelNote(personnel)}</span>
+        </p>
+      ) : (
+        <p className="flex items-start gap-1.5 text-xs text-amber-600">
+          <Info className="mt-0.5 h-3 w-3 shrink-0" />
+          <span>
+            Koszt osobowy nie jest liczony:{" "}
+            {personnel.hrObjectsTotal > 0
+              ? `żadna z ${personnel.hrObjectsTotal} pozycji kadrowych nie wskazuje obiektu z kartoteki`
+              : "w Kadrach nie ma jeszcze pozycji do zmapowania"}
+            , więc w koszcie widać wyłącznie kwoty wpisane ręcznie w obiektach.{" "}
+            <Link
+              to="/kadry/obiekty"
+              className="font-medium underline underline-offset-2 hover:text-amber-700"
+            >
+              zmapuj pozycje kadrowe
+            </Link>
+          </span>
+        </p>
+      )}
+      <p className="text-xs text-muted-foreground">
+        Kwoty handlowe (abonamenty, koszty, nakłady) są <strong>netto</strong> —
+        bez VAT.
+        {mapped && (
+          <>
+            {" "}
+            Koszt osobowy pochodzi z wypłat: to kwoty netto „na rękę", bez
+            składek pracodawcy, więc realny koszt zatrudnienia jest wyższy, a
+            zysk i marża odpowiednio zawyżone.
+          </>
+        )}
+      </p>
+    </div>
   );
 }
 

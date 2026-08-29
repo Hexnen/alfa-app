@@ -1,26 +1,49 @@
 import { Hono } from "hono";
 import { db, schema } from "../db/index.js";
-import { asc, desc, eq, ne, sql } from "drizzle-orm";
+import { asc, eq, ne, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { alias } from "drizzle-orm/sqlite-core";
+import {
+  computeEmployeeMonthlyCost,
+  computeObjectPersonnelCost,
+  parseCostWindow,
+  type CostWindow,
+  type PersonnelCostResult,
+} from "../lib/object-personnel-cost.js";
 
 /**
  * Analityka — trzy widoki TYLKO DO ODCZYTU nad tymi samymi danymi, co lista obiektów:
  * kontrahenci, obiekty i handlowcy w ujęciu przychód / koszt / zysk.
  *
  * Cały moduł stoi na jednym słowniku pojęć liczonym per obiekt:
- *   revenue = coalesce(monthly_value, 0)     — abonament
- *   cost    = coalesce(monthly_cost, 0)      — koszt obsługi
- *   profit  = revenue - cost
- *   hasCost = monthly_cost IS NOT NULL       — NULL to NIE zero, tylko „nikt nie wpisał”
- *   setup   = coalesce(setup_cost, 0)        — jednorazowe wdrożenie
- *   margin  = revenue > 0 ? profit / revenue * 100 : null
- *   payback = setup > 0 && profit > 0 ? ceil(setup / profit) : null  (w miesiącach)
- * Wszystko inne w tym pliku to agregat z tych pięciu liczb — jeśli coś się nie zgadza,
+ *   revenue       = coalesce(monthly_value, 0)          — abonament
+ *   personnelCost = koszt osobowy z Kadr (wypłaty × godziny na obiekcie)
+ *   otherCost     = coalesce(monthly_cost, 0)           — monitoring, sprzęt, abonamenty
+ *   cost          = personnelCost + otherCost           — KOSZT CAŁKOWITY
+ *   profit        = revenue - cost
+ *   hasCost       = monthly_cost IS NOT NULL || personnelCost > 0
+ *   setup         = coalesce(setup_cost, 0)             — jednorazowe wdrożenie
+ *   margin        = revenue > 0 ? profit / revenue * 100 : null
+ *   payback       = setup > 0 && profit > 0 ? ceil(setup / profit) : null  (w miesiącach)
+ * Wszystko inne w tym pliku to agregat z tych liczb — jeśli coś się nie zgadza,
  * błąd jest tutaj, a nie w trzech różnych zapytaniach.
  *
+ * KOSZTY SIĘ SKŁADAJĄ. `monthly_cost` znaczy „koszt POZOSTAŁY", czyli wszystko poza
+ * wynagrodzeniami; pensje załogi dokłada moduł src/lib/object-personnel-cost.ts.
+ * Nigdy jedno ZAMIAST drugiego — podmiana zaniżyłaby koszt obiektów fizycznej
+ * ochrony dokładnie o pensję ludzi, którzy na nich stoją.
+ *
+ * Kwoty osobowe są NETTO („na rękę") — aplikacja nie zna kosztu pracodawcy.
+ * Wraca to w odpowiedzi jako `totals.personnel.net`, żeby UI mogło to napisać.
+ *
  * Rozróżnienie NULL vs 0 przy koszcie niesie całą historię „pokrycia danymi”
- * (`coverage`): marża obiektu bez wpisanego kosztu jest NIEZNANA, a nie stuprocentowa.
+ * (`coverage`): marża obiektu bez ŻADNEGO znanego kosztu jest NIEZNANA, a nie
+ * stuprocentowa.
+ *
+ * Dlaczego agregaty liczymy w JS, a nie w SQL: koszt osobowy przychodzi z Kadr
+ * jako mapa w pamięci (godziny × wypłaty), więc do SQL-a nie ma jak go wstrzyknąć.
+ * Zamiast utrzymywać dwie prawdy, cała analityka stoi na JEDNYM zapytaniu o obiekty
+ * z zakresu (bez limitu, ~120 wierszy) i jednym przebiegu w JS.
  */
 const app = new Hono();
 
@@ -28,18 +51,6 @@ const app = new Hono();
 // tak samo jak na liście obiektów (src/routes/objects.ts:17-18).
 const objectSalesperson = alias(schema.salespeople, "object_salesperson");
 const contractorSalesperson = alias(schema.salespeople, "contractor_salesperson");
-
-/**
- * Reguła „czyj to obiekt”: własny handlowiec obiektu, a gdy go nie ma — opiekun
- * kontrahenta. JEDNA definicja na cały plik, żeby nie rozjechała się z filtrem listy
- * obiektów (src/routes/objects.ts:150-161) ani z tym, co widzi użytkownik w tabeli.
- *
- * Nazwy tabel piszemy DOSŁOWNIE (`objects.salesperson_id`, nie `${schema.objects.salespersonId}`):
- * drizzle 0.36 renderuje interpolowaną kolumnę wewnątrz szablonu `sql` bez kwalifikatora
- * tabeli, więc w podzapytaniu skorelowanym trafiłaby w kolumnę o tej samej nazwie
- * z zapytania nadrzędnego (patrz komentarz w src/routes/salespeople.ts:59-61).
- */
-export const EFFECTIVE_SALESPERSON = sql`coalesce(objects.salesperson_id, contractors.salesperson_id)`;
 
 export type AnalyticsScope = "current" | "active" | "all";
 
@@ -66,13 +77,54 @@ const SCOPE_WHERE: Record<AnalyticsScope, SQL | undefined> = {
   all: undefined,
 };
 
-// Ten sam warunek zapisany dosłownie — do wstrzyknięcia w podzapytania skorelowane
-// (tam alias drizzle by nie zadziałał, patrz EFFECTIVE_SALESPERSON).
+/**
+ * Ten sam warunek zapisany dosłownie — do wstrzyknięcia w podzapytania skorelowane.
+ *
+ * Nazwy tabel piszemy DOSŁOWNIE (`objects.status`, nie `${schema.objects.status}`):
+ * drizzle 0.36 renderuje interpolowaną kolumnę wewnątrz szablonu `sql` bez kwalifikatora
+ * tabeli, więc w podzapytaniu skorelowanym trafiłaby w kolumnę o tej samej nazwie
+ * z zapytania nadrzędnego (patrz komentarz w src/routes/salespeople.ts:59-61).
+ */
 const SCOPE_SQL: Record<AnalyticsScope, SQL> = {
   current: sql`objects.status <> 'inactive'`,
   active: sql`objects.status = 'active'`,
   all: sql`1 = 1`,
 };
+
+/**
+ * Reguła „czyj to obiekt”: własny handlowiec obiektu, a gdy go nie ma — opiekun
+ * kontrahenta. JEDNA definicja na cały plik, żeby nie rozjechała się z filtrem listy
+ * obiektów (src/routes/objects.ts:150-161) ani z tym, co widzi użytkownik w tabeli.
+ */
+function effectiveSalespersonId(row: {
+  objectSalesId: number | null;
+  contractorSalesId: number | null;
+}): number | null {
+  return row.objectSalesId ?? row.contractorSalesId;
+}
+
+/** Blok informacyjny o tym, SKĄD wziął się koszt osobowy — UI robi z niego przypis. */
+export interface PersonnelInfo {
+  costWindow: CostWindow;
+  monthsUsed: number;
+  months: Array<{ year: number; month: number }>;
+  mappedObjects: number;
+  hrObjectsTotal: number;
+  unmappedHoursShare: number;
+  net: true;
+}
+
+function personnelInfo(costWindow: CostWindow, p: PersonnelCostResult): PersonnelInfo {
+  return {
+    costWindow,
+    monthsUsed: p.monthsUsed,
+    months: p.months,
+    mappedObjects: p.mappedObjects,
+    hrObjectsTotal: p.hrObjectsTotal,
+    unmappedHoursShare: p.unmappedHoursShare,
+    net: true,
+  };
+}
 
 export interface AnalyticsTotals {
   objects: number;
@@ -80,12 +132,15 @@ export interface AnalyticsTotals {
   coverage: number;
   revenue: number;
   cost: number;
+  personnelCost: number;
+  otherCost: number;
   profit: number;
   margin: number | null;
   setupCost: number;
   arpo: number | null;
   unprofitable: number;
   noRevenue: number;
+  personnel: PersonnelInfo;
 }
 
 /**
@@ -107,33 +162,166 @@ function paybackOf(setup: number, profit: number): number | null {
   return setup > 0 && profit > 0 ? Math.ceil(setup / profit) : null;
 }
 
+/* ------------------------------------------------------------------ */
+/* Wspólny fundament: obiekty zakresu z policzonym kosztem całkowitym  */
+/* ------------------------------------------------------------------ */
+
+interface ObjectRow {
+  id: number;
+  name: string;
+  city: string | null;
+  type: string;
+  status: string;
+  contractorId: number | null;
+  contractorName: string | null;
+  contractorCity: string | null;
+  contractorActive: boolean | null;
+  companyName: string | null;
+  salesperson: {
+    id: number;
+    firstName: string | null;
+    lastName: string | null;
+    inherited: boolean;
+  } | null;
+  /** Efektywny opiekun (własny albo odziedziczony) — do rolek per handlowiec. */
+  effectiveSalespersonId: number | null;
+  contractorSalespersonId: number | null;
+  revenue: number;
+  personnelCost: number;
+  otherCost: number;
+  cost: number;
+  profit: number;
+  margin: number | null;
+  setupCost: number;
+  payback: number | null;
+  hasCost: boolean;
+}
+
 /**
- * Podsumowanie firmowe liczone ODDZIELNYM, NIEOGRANICZONYM zapytaniem po wszystkich
- * obiektach z zakresu. Nie wolno go składać z sumy zwróconych wierszy: te są przycięte
- * limitem, więc suma po nich po cichu zaniżałaby przychód całej firmy.
- * Ten sam blok trafia do wszystkich trzech endpointów — te same nazwy pól i ta sama liczba.
+ * Jedyne zapytanie o obiekty w całym module — ten sam zestaw złączeń, co lista
+ * obiektów (src/routes/objects.ts:190-223), bez stronicowania i BEZ limitu:
+ * limit tnie dopiero zwracany ranking, nigdy podstawę do podsumowań.
  */
-async function loadTotals(scope: AnalyticsScope): Promise<AnalyticsTotals> {
+async function loadObjectRows(
+  scope: AnalyticsScope,
+  personnel: PersonnelCostResult,
+): Promise<ObjectRow[]> {
   const rows = await db
     .select({
-      objects: sql<number>`count(*)`,
-      objectsWithCost: sql<number>`coalesce(sum(case when objects.monthly_cost is not null then 1 else 0 end), 0)`,
-      revenue: sql<number>`coalesce(sum(coalesce(objects.monthly_value, 0)), 0)`,
-      cost: sql<number>`coalesce(sum(coalesce(objects.monthly_cost, 0)), 0)`,
-      setupCost: sql<number>`coalesce(sum(coalesce(objects.setup_cost, 0)), 0)`,
-      // „Nierentowny" tylko wtedy, gdy koszt JEST znany — obiekt bez kosztu nie jest
-      // ani rentowny, ani nierentowny, jest nieopisany.
-      unprofitable: sql<number>`coalesce(sum(case when objects.monthly_cost is not null and coalesce(objects.monthly_value, 0) - coalesce(objects.monthly_cost, 0) < 0 then 1 else 0 end), 0)`,
-      noRevenue: sql<number>`coalesce(sum(case when objects.monthly_value is null or objects.monthly_value = 0 then 1 else 0 end), 0)`,
+      id: schema.objects.id,
+      name: schema.objects.name,
+      city: schema.objects.city,
+      type: schema.objects.type,
+      status: schema.objects.status,
+      contractorId: schema.objects.contractorId,
+      contractorName: schema.contractors.name,
+      contractorCity: schema.contractors.city,
+      contractorActive: schema.contractors.active,
+      contractorSalespersonId: schema.contractors.salespersonId,
+      companyName: schema.companies.name,
+      monthlyValue: schema.objects.monthlyValue,
+      monthlyCost: schema.objects.monthlyCost,
+      objectSetupCost: schema.objects.setupCost,
+      objectSalesId: objectSalesperson.id,
+      objectSalesFirstName: objectSalesperson.firstName,
+      objectSalesLastName: objectSalesperson.lastName,
+      contractorSalesId: contractorSalesperson.id,
+      contractorSalesFirstName: contractorSalesperson.firstName,
+      contractorSalesLastName: contractorSalesperson.lastName,
     })
     .from(schema.objects)
+    .leftJoin(schema.contractors, eq(schema.objects.contractorId, schema.contractors.id))
+    .leftJoin(schema.companies, eq(schema.companies.id, schema.objects.companyId))
+    .leftJoin(objectSalesperson, eq(objectSalesperson.id, schema.objects.salespersonId))
+    .leftJoin(contractorSalesperson, eq(contractorSalesperson.id, schema.contractors.salespersonId))
     .where(SCOPE_WHERE[scope]);
 
-  const r = rows[0];
-  const revenue = r?.revenue ?? 0;
-  const cost = r?.cost ?? 0;
-  const objects = r?.objects ?? 0;
-  const objectsWithCost = r?.objectsWithCost ?? 0;
+  return rows.map((r) => {
+    const revenue = r.monthlyValue ?? 0;
+    // Koszt osobowy z Kadr i koszt pozostały z kartoteki SUMUJĄ SIĘ.
+    const personnelCost = personnel.byObjectId.get(r.id) ?? 0;
+    const otherCost = r.monthlyCost ?? 0;
+    const cost = personnelCost + otherCost;
+    const profit = revenue - cost;
+    const setupCost = r.objectSetupCost ?? 0;
+    // Koszt 0 zł to informacja, NULL to jej brak — ale gdy z Kadr spłynęła choćby
+    // złotówka, koszt tego obiektu ZNAMY, nawet jeśli nikt nie wypełnił `monthly_cost`.
+    const hasCost = r.monthlyCost !== null || personnelCost > 0;
+    return {
+      id: r.id,
+      name: r.name,
+      city: r.city,
+      type: r.type,
+      status: r.status,
+      contractorId: r.contractorId,
+      contractorName: r.contractorName,
+      contractorCity: r.contractorCity,
+      contractorActive: r.contractorActive,
+      companyName: r.companyName,
+      // `inherited` mówi UI, że handlowiec jest odziedziczony po kontrahencie,
+      // a nie przypisany do samego obiektu (tak samo jak na liście obiektów).
+      salesperson: r.objectSalesId
+        ? {
+            id: r.objectSalesId,
+            firstName: r.objectSalesFirstName,
+            lastName: r.objectSalesLastName,
+            inherited: false,
+          }
+        : r.contractorSalesId
+          ? {
+              id: r.contractorSalesId,
+              firstName: r.contractorSalesFirstName,
+              lastName: r.contractorSalesLastName,
+              inherited: true,
+            }
+          : null,
+      effectiveSalespersonId: effectiveSalespersonId(r),
+      contractorSalespersonId: r.contractorSalespersonId,
+      revenue,
+      personnelCost,
+      otherCost,
+      cost,
+      profit,
+      margin: marginOf(revenue, profit, hasCost ? 1 : 0),
+      setupCost,
+      payback: paybackOf(setupCost, profit),
+      hasCost,
+    };
+  });
+}
+
+/**
+ * Podsumowanie firmowe liczone po WSZYSTKICH obiektach z zakresu. Nie wolno go składać
+ * z sumy zwróconych wierszy rankingu: te są przycięte limitem, więc suma po nich po cichu
+ * zaniżałaby przychód całej firmy. Dlatego `rows` przychodzi tu ZAWSZE nieprzycięte,
+ * a `.slice(limit)` dzieje się dopiero w endpoincie.
+ * Ten sam blok trafia do wszystkich trzech endpointów — te same nazwy pól i ta sama liczba.
+ */
+function loadTotals(
+  rows: ObjectRow[],
+  costWindow: CostWindow,
+  personnel: PersonnelCostResult,
+): AnalyticsTotals {
+  let revenue = 0;
+  let personnelCost = 0;
+  let otherCost = 0;
+  let setupCost = 0;
+  let objectsWithCost = 0;
+  let unprofitable = 0;
+  let noRevenue = 0;
+  for (const r of rows) {
+    revenue += r.revenue;
+    personnelCost += r.personnelCost;
+    otherCost += r.otherCost;
+    setupCost += r.setupCost;
+    if (r.hasCost) objectsWithCost += 1;
+    // „Nierentowny" tylko wtedy, gdy koszt JEST znany — obiekt bez kosztu nie jest
+    // ani rentowny, ani nierentowny, jest nieopisany.
+    if (r.hasCost && r.profit < 0) unprofitable += 1;
+    if (r.revenue === 0) noRevenue += 1;
+  }
+  const objects = rows.length;
+  const cost = personnelCost + otherCost;
   const profit = revenue - cost;
 
   return {
@@ -142,55 +330,121 @@ async function loadTotals(scope: AnalyticsScope): Promise<AnalyticsTotals> {
     coverage: objects > 0 ? objectsWithCost / objects : 0,
     revenue,
     cost,
+    personnelCost,
+    otherCost,
     profit,
     margin: marginOf(revenue, profit, objectsWithCost),
-    setupCost: r?.setupCost ?? 0,
+    setupCost,
     arpo: objects > 0 ? revenue / objects : null,
-    unprofitable: r?.unprofitable ?? 0,
-    noRevenue: r?.noRevenue ?? 0,
+    unprofitable,
+    noRevenue,
+    personnel: personnelInfo(costWindow, personnel),
   };
+}
+
+/** Wspólne wejście każdego endpointu: zakres, limit i okno uśredniania kosztu osobowego. */
+async function baseline(c: {
+  req: { query: (k: string) => string | undefined };
+}) {
+  const scope = parseScope(c.req.query("scope"));
+  const limit = parseLimit(c.req.query("limit"));
+  const costWindow = parseCostWindow(c.req.query("costWindow"));
+  const personnel = computeObjectPersonnelCost(costWindow);
+  const rows = await loadObjectRows(scope, personnel);
+  return { scope, limit, costWindow, personnel, rows, totals: loadTotals(rows, costWindow, personnel) };
 }
 
 /* ------------------------------------------------------------------ */
 /* GET /kontrahenci — ranking klientów wg zysku                        */
 /* ------------------------------------------------------------------ */
 app.get("/kontrahenci", async (c) => {
-  const scope = parseScope(c.req.query("scope"));
-  const limit = parseLimit(c.req.query("limit"));
+  const { scope, limit, costWindow, personnel, rows, totals } = await baseline(c);
 
-  const totals = await loadTotals(scope);
+  // Rolka po kontrahencie z tych samych wierszy obiektów — kontrahent bez obiektów
+  // w zakresie nie ma o czym opowiadać i po prostu się tu nie pojawia (dopchnąłby
+  // ranking wierszami z samymi zerami); liczymy go osobno, niżej.
+  interface ContractorAcc {
+    id: number;
+    name: string | null;
+    city: string | null;
+    active: boolean | null;
+    salespersonId: number | null;
+    objectsCount: number;
+    activeObjectsCount: number;
+    objectsWithCost: number;
+    revenue: number;
+    personnelCost: number;
+    otherCost: number;
+    setupCost: number;
+  }
+  const acc = new Map<number, ContractorAcc>();
+  for (const r of rows) {
+    if (r.contractorId == null) continue;
+    let a = acc.get(r.contractorId);
+    if (!a) {
+      a = {
+        id: r.contractorId,
+        name: r.contractorName,
+        city: r.contractorCity,
+        active: r.contractorActive,
+        salespersonId: r.contractorSalespersonId,
+        objectsCount: 0,
+        activeObjectsCount: 0,
+        objectsWithCost: 0,
+        revenue: 0,
+        personnelCost: 0,
+        otherCost: 0,
+        setupCost: 0,
+      };
+      acc.set(r.contractorId, a);
+    }
+    a.objectsCount += 1;
+    if (r.status === "active") a.activeObjectsCount += 1;
+    if (r.hasCost) a.objectsWithCost += 1;
+    a.revenue += r.revenue;
+    a.personnelCost += r.personnelCost;
+    a.otherCost += r.otherCost;
+    a.setupCost += r.setupCost;
+  }
 
-  const rows = await db
-    .select({
-      id: schema.contractors.id,
-      name: schema.contractors.name,
-      city: schema.contractors.city,
-      active: schema.contractors.active,
-      salespersonId: schema.salespeople.id,
-      salespersonFirstName: schema.salespeople.firstName,
-      salespersonLastName: schema.salespeople.lastName,
-      objectsCount: sql<number>`count(objects.id)`,
-      activeObjectsCount: sql<number>`coalesce(sum(case when objects.status = 'active' then 1 else 0 end), 0)`,
-      objectsWithCost: sql<number>`coalesce(sum(case when objects.monthly_cost is not null then 1 else 0 end), 0)`,
-      revenue: sql<number>`coalesce(sum(coalesce(objects.monthly_value, 0)), 0)`,
-      cost: sql<number>`coalesce(sum(coalesce(objects.monthly_cost, 0)), 0)`,
-      setupCost: sql<number>`coalesce(sum(coalesce(objects.setup_cost, 0)), 0)`,
+  // Handlowiec kontrahenta — tu bierzemy opiekuna z kartoteki klienta, bo wiersz
+  // dotyczy klienta, a nie pojedynczego obiektu (obiekt może mieć własnego).
+  const salespeople = await db.select().from(schema.salespeople);
+  const salespersonById = new Map(salespeople.map((s) => [s.id, s]));
+
+  const data = [...acc.values()]
+    .map((a) => {
+      const cost = a.personnelCost + a.otherCost;
+      const profit = a.revenue - cost;
+      const s = a.salespersonId != null ? salespersonById.get(a.salespersonId) : undefined;
+      return {
+        id: a.id,
+        name: a.name,
+        city: a.city,
+        active: a.active,
+        salesperson: s
+          ? { id: s.id, firstName: s.firstName, lastName: s.lastName }
+          : null,
+        objectsCount: a.objectsCount,
+        activeObjectsCount: a.activeObjectsCount,
+        objectsWithCost: a.objectsWithCost,
+        revenue: a.revenue,
+        cost,
+        personnelCost: a.personnelCost,
+        otherCost: a.otherCost,
+        profit,
+        margin: marginOf(a.revenue, profit, a.objectsWithCost),
+        setupCost: a.setupCost,
+        payback: paybackOf(a.setupCost, profit),
+        arpo: a.objectsCount > 0 ? a.revenue / a.objectsCount : null,
+      };
     })
-    .from(schema.contractors)
-    .leftJoin(schema.objects, eq(schema.objects.contractorId, schema.contractors.id))
-    // Handlowiec kontrahenta — tu bierzemy opiekuna z kartoteki klienta, bo wiersz
-    // dotyczy klienta, a nie pojedynczego obiektu (obiekt może mieć własnego).
-    .leftJoin(schema.salespeople, eq(schema.salespeople.id, schema.contractors.salespersonId))
-    .where(SCOPE_WHERE[scope])
-    .groupBy(schema.contractors.id)
-    // Kontrahent bez obiektów w zakresie nie ma o czym opowiadać, a dopchnąłby ranking
-    // wierszami z samymi zerami — przy tej wielkości bazy widać to od razu.
-    .having(sql`count(objects.id) > 0`)
-    .orderBy(
-      desc(sql`coalesce(sum(coalesce(objects.monthly_value, 0)), 0) - coalesce(sum(coalesce(objects.monthly_cost, 0)), 0)`),
-      asc(sql`lower(contractors.name)`)
+    .sort(
+      (x, y) =>
+        y.profit - x.profit ||
+        (x.name ?? "").toLowerCase().localeCompare((y.name ?? "").toLowerCase()),
     )
-    .limit(limit);
+    .slice(0, limit);
 
   // Ilu klientów wypadło z zestawienia, bo nie ma obiektów w tym zakresie —
   // liczymy osobno i bez limitu, żeby licznik nie zależał od przycięcia rankingu.
@@ -204,45 +458,16 @@ app.get("/kontrahenci", async (c) => {
       )`
     );
 
-  const data = rows.map((r) => {
-    const revenue = r.revenue ?? 0;
-    const cost = r.cost ?? 0;
-    const profit = revenue - cost;
-    const setupCost = r.setupCost ?? 0;
-    const objectsCount = r.objectsCount ?? 0;
-    return {
-      id: r.id,
-      name: r.name,
-      city: r.city,
-      active: r.active,
-      salesperson: r.salespersonId
-        ? {
-            id: r.salespersonId,
-            firstName: r.salespersonFirstName,
-            lastName: r.salespersonLastName,
-          }
-        : null,
-      objectsCount,
-      activeObjectsCount: r.activeObjectsCount ?? 0,
-      objectsWithCost: r.objectsWithCost ?? 0,
-      revenue,
-      cost,
-      profit,
-      margin: marginOf(revenue, profit, r.objectsWithCost ?? 0),
-      setupCost,
-      payback: paybackOf(setupCost, profit),
-      arpo: objectsCount > 0 ? revenue / objectsCount : null,
-    };
-  });
-
   return c.json({
     success: true,
     data: {
       scope,
+      costWindow,
       generatedAt: new Date().toISOString(),
       totals,
       rows: data,
       contractorsWithoutObjects: withoutRows[0]?.count ?? 0,
+      personnel: personnelInfo(costWindow, personnel),
     },
   });
 });
@@ -317,51 +542,15 @@ function marginBucketKey(margin: number | null, hasCost: boolean): string {
 }
 
 app.get("/obiekty", async (c) => {
-  const scope = parseScope(c.req.query("scope"));
-  const limit = parseLimit(c.req.query("limit"));
+  const { scope, limit, costWindow, personnel, rows, totals } = await baseline(c);
 
-  const totals = await loadTotals(scope);
-
-  // Ten sam zestaw złączeń, co lista obiektów (src/routes/objects.ts:190-223),
-  // tylko bez stronicowania — analityka pokazuje cały zakres naraz.
-  const rows = await db
-    .select({
-      id: schema.objects.id,
-      name: schema.objects.name,
-      city: schema.objects.city,
-      type: schema.objects.type,
-      status: schema.objects.status,
-      contractorId: schema.objects.contractorId,
-      contractorName: schema.contractors.name,
-      companyName: schema.companies.name,
-      monthlyValue: schema.objects.monthlyValue,
-      monthlyCost: schema.objects.monthlyCost,
-      objectSetupCost: schema.objects.setupCost,
-      objectSalesId: objectSalesperson.id,
-      objectSalesFirstName: objectSalesperson.firstName,
-      objectSalesLastName: objectSalesperson.lastName,
-      contractorSalesId: contractorSalesperson.id,
-      contractorSalesFirstName: contractorSalesperson.firstName,
-      contractorSalesLastName: contractorSalesperson.lastName,
-    })
-    .from(schema.objects)
-    .leftJoin(schema.contractors, eq(schema.objects.contractorId, schema.contractors.id))
-    .leftJoin(schema.companies, eq(schema.companies.id, schema.objects.companyId))
-    .leftJoin(objectSalesperson, eq(objectSalesperson.id, schema.objects.salespersonId))
-    .leftJoin(contractorSalesperson, eq(contractorSalesperson.id, schema.contractors.salespersonId))
-    .where(SCOPE_WHERE[scope])
-    .orderBy(
-      desc(sql`coalesce(objects.monthly_value, 0) - coalesce(objects.monthly_cost, 0)`),
-      asc(sql`lower(objects.name)`)
-    )
-    .limit(limit);
-
-  const data = rows.map((r) => {
-    const revenue = r.monthlyValue ?? 0;
-    const cost = r.monthlyCost ?? 0;
-    const profit = revenue - cost;
-    const setupCost = r.objectSetupCost ?? 0;
-    return {
+  // Sortowanie po zysku dzieje się w JS, a nie w SQL: zysk zawiera teraz koszt
+  // osobowy, którego baza nie zna, więc ORDER BY po `monthly_cost` układałby
+  // ranking wg nieaktualnej definicji.
+  const data = [...rows]
+    .sort((a, b) => b.profit - a.profit || a.name.toLowerCase().localeCompare(b.name.toLowerCase()))
+    .slice(0, limit)
+    .map((r) => ({
       id: r.id,
       name: r.name,
       city: r.city,
@@ -370,33 +559,18 @@ app.get("/obiekty", async (c) => {
       contractorId: r.contractorId,
       contractorName: r.contractorName,
       companyName: r.companyName,
-      // `inherited` mówi UI, że handlowiec jest odziedziczony po kontrahencie,
-      // a nie przypisany do samego obiektu (tak samo jak na liście obiektów).
-      salesperson: r.objectSalesId
-        ? {
-            id: r.objectSalesId,
-            firstName: r.objectSalesFirstName,
-            lastName: r.objectSalesLastName,
-            inherited: false,
-          }
-        : r.contractorSalesId
-          ? {
-              id: r.contractorSalesId,
-              firstName: r.contractorSalesFirstName,
-              lastName: r.contractorSalesLastName,
-              inherited: true,
-            }
-          : null,
-      revenue,
-      cost,
-      profit,
-      margin: marginOf(revenue, profit, r.monthlyCost !== null ? 1 : 0),
-      setupCost,
-      payback: paybackOf(setupCost, profit),
+      salesperson: r.salesperson,
+      revenue: r.revenue,
+      cost: r.cost,
+      personnelCost: r.personnelCost,
+      otherCost: r.otherCost,
+      profit: r.profit,
+      margin: r.margin,
+      setupCost: r.setupCost,
+      payback: r.payback,
       // Klucz całej opowieści o pokryciu: koszt 0 zł to informacja, NULL to jej brak.
-      hasCost: r.monthlyCost !== null,
-    };
-  });
+      hasCost: r.hasCost,
+    }));
 
   // Przekroje liczymy w JS z tych samych wierszy — kilkaset pozycji, więc drugie
   // zapytanie do bazy nic by nie dało poza kolejnym miejscem na rozjazd definicji.
@@ -426,6 +600,7 @@ app.get("/obiekty", async (c) => {
     success: true,
     data: {
       scope,
+      costWindow,
       generatedAt: new Date().toISOString(),
       totals,
       rows: data,
@@ -433,6 +608,7 @@ app.get("/obiekty", async (c) => {
       byStatus,
       byCompany,
       marginBuckets,
+      personnel: personnelInfo(costWindow, personnel),
     },
   });
 });
@@ -441,92 +617,83 @@ app.get("/obiekty", async (c) => {
 /* GET /handlowcy — rentowność portfela per opiekun                    */
 /* ------------------------------------------------------------------ */
 app.get("/handlowcy", async (c) => {
-  const scope = parseScope(c.req.query("scope"));
-  const limit = parseLimit(c.req.query("limit"));
+  const { scope, limit, costWindow, personnel, rows, totals } = await baseline(c);
 
-  const totals = await loadTotals(scope);
-  const scopePredicate = SCOPE_SQL[scope];
+  // Rolka portfela po EFEKTYWNYM opiekunie; klucz `null` to portfel niczyj.
+  interface Portfolio {
+    objectsCount: number;
+    objectsWithCost: number;
+    unprofitableObjects: number;
+    revenue: number;
+    personnelCost: number;
+    otherCost: number;
+    setupCost: number;
+  }
+  const empty = (): Portfolio => ({
+    objectsCount: 0,
+    objectsWithCost: 0,
+    unprofitableObjects: 0,
+    revenue: 0,
+    personnelCost: 0,
+    otherCost: 0,
+    setupCost: 0,
+  });
+  const portfolios = new Map<number | null, Portfolio>();
+  for (const r of rows) {
+    const key = r.effectiveSalespersonId;
+    let p = portfolios.get(key);
+    if (!p) portfolios.set(key, (p = empty()));
+    p.objectsCount += 1;
+    if (r.hasCost) p.objectsWithCost += 1;
+    if (r.hasCost && r.profit < 0) p.unprofitableObjects += 1;
+    p.revenue += r.revenue;
+    p.personnelCost += r.personnelCost;
+    p.otherCost += r.otherCost;
+    p.setupCost += r.setupCost;
+  }
 
   /**
    * Budujemy OD HANDLOWCÓW, nie od obiektów pogrupowanych po opiekunie: handlowiec
    * z pustym portfelem dalej kosztuje firmę i musi się pokazać w zestawieniu
    * (grupowanie po obiektach po prostu by go pominęło).
    *
-   * Każdy agregat to osobne podzapytanie skorelowane — ten sam idiom, co lista
-   * handlowców (src/routes/salespeople.ts:62-70), z dosłownymi nazwami tabel.
+   * `contractorsCount` liczymy po bezpośrednim FK — „ilu klientów prowadzi", tak jak
+   * na liście handlowców (src/routes/salespeople.ts:62-70), z dosłownymi nazwami tabel.
    */
-  const rows = await db
+  const salesRows = await db
     .select({
       salesperson: schema.salespeople,
-      // Kontrahenci liczeni po bezpośrednim FK — „ilu klientów prowadzi", tak jak dziś.
       contractorsCount: sql<number>`(
         select count(*) from contractors where contractors.salesperson_id = salespeople.id
-      )`,
-      objectsCount: sql<number>`(
-        select count(*) from objects
-        join contractors on contractors.id = objects.contractor_id
-        where ${EFFECTIVE_SALESPERSON} = salespeople.id and ${scopePredicate}
-      )`,
-      revenue: sql<number>`(
-        select coalesce(sum(objects.monthly_value), 0) from objects
-        join contractors on contractors.id = objects.contractor_id
-        where ${EFFECTIVE_SALESPERSON} = salespeople.id and ${scopePredicate}
-      )`,
-      objectsCost: sql<number>`(
-        select coalesce(sum(objects.monthly_cost), 0) from objects
-        join contractors on contractors.id = objects.contractor_id
-        where ${EFFECTIVE_SALESPERSON} = salespeople.id and ${scopePredicate}
-      )`,
-      setupCost: sql<number>`(
-        select coalesce(sum(objects.setup_cost), 0) from objects
-        join contractors on contractors.id = objects.contractor_id
-        where ${EFFECTIVE_SALESPERSON} = salespeople.id and ${scopePredicate}
-      )`,
-      objectsWithCost: sql<number>`(
-        select coalesce(sum(case when objects.monthly_cost is not null then 1 else 0 end), 0) from objects
-        join contractors on contractors.id = objects.contractor_id
-        where ${EFFECTIVE_SALESPERSON} = salespeople.id and ${scopePredicate}
-      )`,
-      unprofitableObjects: sql<number>`(
-        select coalesce(sum(case when coalesce(objects.monthly_value, 0) - coalesce(objects.monthly_cost, 0) < 0 then 1 else 0 end), 0) from objects
-        join contractors on contractors.id = objects.contractor_id
-        where ${EFFECTIVE_SALESPERSON} = salespeople.id and ${scopePredicate}
       )`,
     })
     .from(schema.salespeople)
     .orderBy(asc(sql`lower(salespeople.last_name)`), asc(schema.salespeople.firstName));
+
+  // Koszt własny handlowca POWIĄZANEGO z kartoteką kadrową bierze się z jego wypłat.
+  // Ręczny `salespeople.monthly_cost` jest wtedy IGNOROWANY (front go blokuje) —
+  // inaczej ten sam człowiek kosztowałby firmę dwa razy: raz w Kadrach, raz tutaj.
+  const employeeCost = computeEmployeeMonthlyCost(costWindow);
 
   /**
    * Portfel bez opiekuna — obiekty, dla których ani obiekt, ani jego kontrahent nie
    * mają handlowca. To przychód, którym nikt nie zarządza; wraca OSOBNYM polem, żeby
    * nigdy nie doklejał się po cichu do wyniku którejś z osób.
    */
-  const unassignedRows = await db
-    .select({
-      objectsCount: sql<number>`count(*)`,
-      revenue: sql<number>`coalesce(sum(objects.monthly_value), 0)`,
-      objectsCost: sql<number>`coalesce(sum(objects.monthly_cost), 0)`,
-      setupCost: sql<number>`coalesce(sum(objects.setup_cost), 0)`,
-      objectsWithCost: sql<number>`coalesce(sum(case when objects.monthly_cost is not null then 1 else 0 end), 0)`,
-      unprofitableObjects: sql<number>`coalesce(sum(case when coalesce(objects.monthly_value, 0) - coalesce(objects.monthly_cost, 0) < 0 then 1 else 0 end), 0)`,
-    })
-    .from(schema.objects)
-    .innerJoin(schema.contractors, eq(schema.contractors.id, schema.objects.contractorId))
-    .where(sql`${EFFECTIVE_SALESPERSON} is null and ${scopePredicate}`);
-
-  const u = unassignedRows[0];
-  const unassignedRevenue = u?.revenue ?? 0;
-  const unassignedCost = u?.objectsCost ?? 0;
-  const unassignedProfit = unassignedRevenue - unassignedCost;
+  const u = portfolios.get(null) ?? empty();
+  const unassignedCost = u.personnelCost + u.otherCost;
+  const unassignedProfit = u.revenue - unassignedCost;
   const unassigned = {
-    objectsCount: u?.objectsCount ?? 0,
-    objectsWithCost: u?.objectsWithCost ?? 0,
-    unprofitableObjects: u?.unprofitableObjects ?? 0,
-    revenue: unassignedRevenue,
+    objectsCount: u.objectsCount,
+    objectsWithCost: u.objectsWithCost,
+    unprofitableObjects: u.unprofitableObjects,
+    revenue: u.revenue,
     objectsCost: unassignedCost,
-    setupCost: u?.setupCost ?? 0,
+    objectsPersonnelCost: u.personnelCost,
+    objectsOtherCost: u.otherCost,
+    setupCost: u.setupCost,
     profit: unassignedProfit,
-    margin: marginOf(unassignedRevenue, unassignedProfit, u?.objectsWithCost ?? 0),
+    margin: marginOf(u.revenue, unassignedProfit, u.objectsWithCost),
   };
 
   /**
@@ -535,11 +702,21 @@ app.get("/handlowcy", async (c) => {
    *   contribution = marża portfela PRZED kosztem handlowca,
    *   profit       = to, co zostaje firmie po jego pensji i prowizji.
    */
-  const computed = rows.map((r) => {
+  const computed = salesRows.map((r) => {
     const s = r.salesperson;
-    const revenue = r.revenue ?? 0;
-    const objectsCost = r.objectsCost ?? 0;
-    const ownCost = s.monthlyCost ?? 0;
+    const p = portfolios.get(s.id) ?? empty();
+    const revenue = p.revenue;
+    const objectsCost = p.personnelCost + p.otherCost;
+
+    // Powiązanie z kadrami wygrywa z polem ręcznym — i mówimy o tym wprost,
+    // żeby front wiedział, co pokazać i które pole zablokować.
+    const linked = s.employeeId != null;
+    const ownCostSource: "kadry" | "reczny" = linked ? "kadry" : "reczny";
+    const ownCost = linked ? (employeeCost.get(s.employeeId!) ?? 0) : (s.monthlyCost ?? 0);
+    // Koszt własny ZNANY: powiązanego liczymy z wypłat (choćby wyszło 0 — to wynik,
+    // a nie brak danych), niepowiązanego tylko wtedy, gdy ktoś wpisał kwotę.
+    const ownCostKnown = linked || s.monthlyCost !== null;
+
     const commission = (revenue * (s.commissionRate ?? 0)) / 100;
     const contribution = revenue - objectsCost;
     const profit = contribution - ownCost - commission;
@@ -549,21 +726,27 @@ app.get("/handlowcy", async (c) => {
       lastName: s.lastName,
       region: s.region,
       active: s.active,
+      employeeId: s.employeeId,
       contractorsCount: r.contractorsCount ?? 0,
-      objectsCount: r.objectsCount ?? 0,
-      objectsWithCost: r.objectsWithCost ?? 0,
-      unprofitableObjects: r.unprofitableObjects ?? 0,
+      objectsCount: p.objectsCount,
+      objectsWithCost: p.objectsWithCost,
+      unprofitableObjects: p.unprofitableObjects,
       revenue,
       objectsCost,
-      setupCost: r.setupCost ?? 0,
+      objectsPersonnelCost: p.personnelCost,
+      objectsOtherCost: p.otherCost,
+      setupCost: p.setupCost,
       ownCost,
+      ownCostSource,
+      /** Kwota z pola ręcznego — front pokazuje ją wyszarzoną, gdy źródłem są kadry. */
+      manualMonthlyCost: s.monthlyCost,
       commissionRate: s.commissionRate,
       commission,
       contribution,
       profit,
       // Znany koszt to albo koszt któregoś obiektu, albo koszt własny handlowca —
       // wystarczy jedno, żeby zysk portfela przestał być samym przychodem.
-      margin: marginOf(revenue, profit, (r.objectsWithCost ?? 0) + (s.monthlyCost !== null ? 1 : 0)),
+      margin: marginOf(revenue, profit, p.objectsWithCost + (ownCostKnown ? 1 : 0)),
       // Ile złotówek przychodu przypada na złotówkę wydaną na handlowca.
       roi: ownCost + commission > 0 ? revenue / (ownCost + commission) : null,
     };
@@ -573,10 +756,12 @@ app.get("/handlowcy", async (c) => {
   // z tego samego powodu, co `totals`: obcięty ranking nie może zaniżać kosztów.
   // Archiwalni (`active = false`) też się liczą: archiwum to znacznik widoczności,
   // a nie informacja, że pensja przestała obciążać firmę — po zwolnieniu handlowca
-  // wyczyść mu `monthly_cost`.
-  const salespeopleCost = computed.reduce((acc, r) => acc + r.ownCost, 0);
-  const commission = computed.reduce((acc, r) => acc + r.commission, 0);
-  const salespeopleWithCost = rows.filter((r) => r.salesperson.monthlyCost !== null).length;
+  // wyczyść mu `monthly_cost` (albo zdejmij powiązanie z kadrami).
+  const salespeopleCost = computed.reduce((sum, r) => sum + r.ownCost, 0);
+  const commission = computed.reduce((sum, r) => sum + r.commission, 0);
+  const salespeopleWithCost = computed.filter(
+    (r) => r.ownCostSource === "kadry" || r.manualMonthlyCost !== null
+  ).length;
 
   const data = [...computed].sort((a, b) => b.profit - a.profit).slice(0, limit);
 
@@ -584,6 +769,7 @@ app.get("/handlowcy", async (c) => {
     success: true,
     data: {
       scope,
+      costWindow,
       generatedAt: new Date().toISOString(),
       totals: {
         ...totals,
@@ -591,11 +777,12 @@ app.get("/handlowcy", async (c) => {
         commission,
         // Zysk firmy po odjęciu kosztu pionu handlowego od marży na obiektach.
         netProfit: totals.profit - salespeopleCost - commission,
-        unassignedRevenue,
+        unassignedRevenue: u.revenue,
         salespeopleWithCost,
       },
       rows: data,
       unassigned,
+      personnel: personnelInfo(costWindow, personnel),
     },
   });
 });
