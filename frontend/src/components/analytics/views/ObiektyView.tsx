@@ -9,7 +9,13 @@
 import { useCallback, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Card, CardContent } from "@/components/ui/card";
-import { cn, objectTypeLabels, statusLabels } from "@/lib/utils";
+import {
+  cn,
+  objectServiceLabels,
+  objectServicesLabel,
+  objectServicesOf,
+  statusLabels,
+} from "@/lib/utils";
 import {
   getAnalyticsObjects,
   type AnalyticsObjectRow,
@@ -57,10 +63,23 @@ import {
 const load = (scope: AnalyticsScope, costWindow: CostWindow) =>
   getAnalyticsObjects({ scope, costWindow });
 
+/**
+ * Usługi wiersza analityki w kształcie, jakim posługuje się reszta frontu.
+ * Analityka nazywa je zwięźle (`services.cameras`), kartoteka po kolumnach bazy
+ * (`hasCameras`) — helpery etykiet mówią językiem kartoteki, więc tłumaczymy tu.
+ */
+const servicesOfRow = (r: AnalyticsObjectRow) => ({
+  hasCameras: r.services?.cameras,
+  cameraCount: r.services?.cameraCount,
+  hasSswin: r.services?.sswin,
+  hasVideoreception: r.services?.videoreception,
+  hasOfi: r.services?.ofi,
+});
+
 type SortKey =
   | "name"
   | "contractor"
-  | "type"
+  | "services"
   | "status"
   | "salesperson"
   | "revenue"
@@ -73,7 +92,7 @@ type SortKey =
 const DEFAULT_DIR: Record<SortKey, "asc" | "desc"> = {
   name: "asc",
   contractor: "asc",
-  type: "asc",
+  services: "asc",
   status: "asc",
   salesperson: "asc",
   revenue: "desc",
@@ -247,19 +266,36 @@ export function ObiektyView({
     return { entries: sorted, axisMax, counts, total: withSetup.length };
   }, [rows]);
 
-  /** Struktura wg typu ochrony — liczona z widocznych wierszy, nie z API. */
-  const byType = useMemo(() => {
-    const map = new Map<string, { revenue: number; cost: number; withCost: number; count: number }>();
+  /**
+   * Struktura wg USŁUG — liczona z widocznych wierszy, nie z API.
+   *
+   * Usługi nie są rozłączne: obiekt z kamerami i SSWiN-em wchodzi do OBU kubełków
+   * z pełnym przychodem i kosztem, więc udziały nie zsumują się do 100%. To nie
+   * błąd, tylko jedyny uczciwy sposób pokazania „ile pieniędzy przechodzi przez
+   * kamery” obok „ile przez SSWiN”; mówi o tym podpis wykresu.
+   *
+   * Obiekty bez ani jednej usługi mają własny kubełek — inaczej ich przychód
+   * zniknąłby z wykresu zamiast pokazać lukę w kartotece.
+   */
+  const byService = useMemo(() => {
+    const map = new Map<string, { label: string; revenue: number; cost: number; withCost: number; count: number }>();
     for (const r of rows) {
-      const cur = map.get(r.type) ?? { revenue: 0, cost: 0, withCost: 0, count: 0 };
-      cur.revenue += r.revenue;
-      cur.cost += r.hasCost ? r.cost : 0;
-      cur.withCost += r.hasCost ? 1 : 0;
-      cur.count += 1;
-      map.set(r.type, cur);
+      const keys = objectServicesOf(servicesOfRow(r));
+      const buckets: { key: string; label: string }[] =
+        keys.length > 0
+          ? keys.map((k) => ({ key: k, label: objectServiceLabels[k] }))
+          : [{ key: "none", label: "Brak usług" }];
+      for (const b of buckets) {
+        const cur = map.get(b.key) ?? { label: b.label, revenue: 0, cost: 0, withCost: 0, count: 0 };
+        cur.revenue += r.revenue;
+        cur.cost += r.hasCost ? r.cost : 0;
+        cur.withCost += r.hasCost ? 1 : 0;
+        cur.count += 1;
+        map.set(b.key, cur);
+      }
     }
     return [...map.entries()]
-      .map(([key, v]) => ({ key, label: objectTypeLabels[key] ?? key, ...v }))
+      .map(([key, v]) => ({ key, ...v }))
       .sort((a, b) => b.revenue - a.revenue);
   }, [rows]);
 
@@ -287,10 +323,10 @@ export function ObiektyView({
           return cmpText(a.name, b.name, dir);
         case "contractor":
           return cmpText(a.contractorName ?? "￿", b.contractorName ?? "￿", dir);
-        case "type":
+        case "services":
           return cmpText(
-            objectTypeLabels[a.type] ?? a.type,
-            objectTypeLabels[b.type] ?? b.type,
+            objectServicesLabel(servicesOfRow(a)),
+            objectServicesLabel(servicesOfRow(b)),
             dir
           );
         case "status":
@@ -519,11 +555,11 @@ export function ObiektyView({
       </ChartCard>
 
       <ChartCard
-        title="Struktura wg typu ochrony"
-        description="Ten sam podział dwa razy: górny pasek to przychód, dolny koszt. Segment szerszy na dole niż na górze zjada marżę."
+        title="Struktura wg usług"
+        description="Ten sam podział dwa razy: górny pasek to przychód, dolny koszt. Segment szerszy na dole niż na górze zjada marżę. UWAGA: usługi nie są rozłączne — obiekt z kamerami i SSWiN-em liczy się w obu segmentach, więc udziały nie sumują się do 100%."
         tableData={{
-          headers: ["Typ ochrony", "Obiekty", "Przychód", "Koszt", "Marża"],
-          rows: byType.map((t) => [
+          headers: ["Usługa", "Obiekty", "Przychód", "Koszt", "Marża"],
+          rows: byService.map((t) => [
             t.label,
             t.count,
             plnFull(t.revenue),
@@ -545,14 +581,14 @@ export function ObiektyView({
               Przychód
             </p>
             <ShareBar
-              segments={byType.map((t, i) => ({
+              segments={byService.map((t, i) => ({
                 key: t.key,
                 label: t.label,
                 value: t.revenue,
-                color: tintOf(COLOR_REVENUE, i, byType.length),
+                color: tintOf(COLOR_REVENUE, i, byService.length),
               }))}
               formatValue={plnFull}
-              ariaLabel="Udział typów ochrony w miesięcznym przychodzie"
+              ariaLabel="Udział usług w miesięcznym przychodzie"
             />
           </div>
           <div className="space-y-2">
@@ -560,14 +596,14 @@ export function ObiektyView({
               Koszt
             </p>
             <ShareBar
-              segments={byType.map((t, i) => ({
+              segments={byService.map((t, i) => ({
                 key: t.key,
                 label: t.label,
                 value: t.cost,
-                color: tintOf(COLOR_COST, i, byType.length),
+                color: tintOf(COLOR_COST, i, byService.length),
               }))}
               formatValue={plnFull}
-              ariaLabel="Udział typów ochrony w miesięcznym koszcie"
+              ariaLabel="Udział usług w miesięcznym koszcie"
               emptyLabel="koszty nieuzupełnione"
             />
           </div>
@@ -607,7 +643,14 @@ export function ObiektyView({
               <tr>
                 <SortHeader label="Obiekt" sortKey="name" active={sort === "name"} dir={dir} onToggle={toggleSort} />
                 <SortHeader label="Kontrahent" sortKey="contractor" active={sort === "contractor"} dir={dir} onToggle={toggleSort} />
-                <SortHeader label="Typ" sortKey="type" active={sort === "type"} dir={dir} onToggle={toggleSort} />
+                <SortHeader
+                  label="Usługi"
+                  sortKey="services"
+                  active={sort === "services"}
+                  dir={dir}
+                  onToggle={toggleSort}
+                  tip="Kamery, SSWiN, wideorecepcja i OFI są niezależne — obiekt może mieć kilka naraz"
+                />
                 <SortHeader label="Status" sortKey="status" active={sort === "status"} dir={dir} onToggle={toggleSort} />
                 <SortHeader
                   label="Handlowiec"
@@ -695,7 +738,7 @@ function ObjectRow({
         {row.city && <div className="text-xs text-muted-foreground">{row.city}</div>}
       </td>
       <td className="px-2 py-2 text-muted-foreground">{row.contractorName ?? DASH}</td>
-      <td className="px-2 py-2">{objectTypeLabels[row.type] ?? row.type}</td>
+      <td className="px-2 py-2">{objectServicesLabel(servicesOfRow(row), DASH)}</td>
       <td className="px-2 py-2 text-muted-foreground">
         {statusLabels[row.status] ?? row.status}
       </td>

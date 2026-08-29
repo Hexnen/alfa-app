@@ -33,7 +33,6 @@ import {
   type ObjectInput,
 } from "@/lib/api";
 import {
-  objectTypeLabels,
   installationTypeLabels,
   statusLabels,
   departmentLabels,
@@ -84,6 +83,17 @@ const parseCost = (v: string): number | null => {
   return Number.isFinite(n) ? n : null;
 };
 
+/**
+ * Liczba kamer z inputa. Pusty → `null`, czyli „usługa jest, ale nikt kamer nie
+ * policzył” — i to NIE jest zero. Bez liczby obiekt nie ma jak dostać wagi przy
+ * podziale kosztu centrum monitorowania, więc luka musi zostać luką.
+ */
+const parseCameraCount = (v: string): number | null => {
+  if (v.trim() === "") return null;
+  const n = parseInt(v, 10);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+};
+
 interface ObjectFormProps {
   open: boolean;
   onClose: () => void;
@@ -108,7 +118,13 @@ export function ObjectForm({
     name: object?.name || "",
     address: object?.address || "",
     city: object?.city || "",
-    type: object?.type || "monitoring",
+    // Usługi: cztery niezależne flagi. `?? null` przy liczbie kamer, nie `|| null`
+    // — zero kamer to świadomy wpis, a null znaczy „nikt nie policzył”.
+    hasCameras: object?.hasCameras ?? false,
+    cameraCount: object?.cameraCount ?? null,
+    hasSswin: object?.hasSswin ?? false,
+    hasVideoreception: object?.hasVideoreception ?? false,
+    hasOfi: object?.hasOfi ?? false,
     installationType: object?.installationType || "new",
     status: object?.status || "pending",
     department: object?.department || "sales",
@@ -332,25 +348,111 @@ export function ObjectForm({
                   "Z tych współrzędnych automat liczy kilometry biuro → obiekt. Puste pola uzupełni sam przy pierwszej kalkulacji."}
               </p>
             </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label htmlFor="type">Typ ochrony *</Label>
-                <Select
-                  value={formData.type}
-                  onValueChange={(value) => handleSelectChange("type", value)}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {Object.entries(objectTypeLabels).map(([value, label]) => (
-                      <SelectItem key={value} value={value}>
-                        {label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+            {/* USŁUGI — cztery niezależne przełączniki zamiast jednego „typu
+                ochrony”: na jednym obiekcie bywa i alarm, i kamery, i warta. */}
+            <div className="space-y-2">
+              <Label>Usługi na obiekcie</Label>
+              <div className="grid grid-cols-2 gap-2">
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 accent-primary"
+                    data-testid="object-has-cameras"
+                    checked={formData.hasCameras ?? false}
+                    onChange={(e) =>
+                      setFormData((prev) => ({
+                        ...prev,
+                        hasCameras: e.target.checked,
+                        // Wyłączona usługa nie może zostawić po sobie liczby kamer —
+                        // inaczej obiekt bez kamer wchodziłby z wagą do podziału kosztu.
+                        cameraCount: e.target.checked ? prev.cameraCount ?? null : null,
+                      }))
+                    }
+                  />
+                  Kamery
+                </label>
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 accent-primary"
+                    data-testid="object-has-sswin"
+                    checked={formData.hasSswin ?? false}
+                    onChange={(e) =>
+                      setFormData((prev) => ({ ...prev, hasSswin: e.target.checked }))
+                    }
+                  />
+                  SSWiN
+                </label>
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 accent-primary"
+                    data-testid="object-has-videoreception"
+                    checked={formData.hasVideoreception ?? false}
+                    onChange={(e) =>
+                      setFormData((prev) => ({
+                        ...prev,
+                        hasVideoreception: e.target.checked,
+                      }))
+                    }
+                  />
+                  Wideorecepcja
+                </label>
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 accent-primary"
+                    data-testid="object-has-ofi"
+                    checked={formData.hasOfi ?? false}
+                    onChange={(e) =>
+                      setFormData((prev) => ({ ...prev, hasOfi: e.target.checked }))
+                    }
+                  />
+                  OFI (ochrona fizyczna)
+                </label>
               </div>
+              <div className="flex items-center gap-2">
+                <Label
+                  htmlFor="cameraCount"
+                  className={!formData.hasCameras ? "text-muted-foreground" : undefined}
+                >
+                  Liczba kamer
+                </Label>
+                {/* Pole żyje tylko z zaznaczoną usługą, a puste zostaje `null`
+                    („usługa jest, nikt nie policzył”) — to NIE to samo, co 0 kamer.
+                    Bez liczby obiekt nie ma wagi w podziale kosztu centrum. */}
+                <Input
+                  id="cameraCount"
+                  data-testid="object-camera-count"
+                  type="number"
+                  min="0"
+                  step="1"
+                  disabled={!formData.hasCameras}
+                  className="w-36 tabular-nums"
+                  placeholder="nie policzono"
+                  value={formData.cameraCount ?? ""}
+                  onChange={(e) =>
+                    setFormData((prev) => ({
+                      ...prev,
+                      cameraCount: parseCameraCount(e.target.value),
+                    }))
+                  }
+                />
+                {formData.hasCameras && formData.cameraCount === null && (
+                  <span className="text-xs text-muted-foreground">
+                    ilość nieuzupełniona
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Od usług zależy sposób liczenia kosztu osobowego: OFI liczy się z
+                godzin pracowników tego obiektu, a kamery, SSWiN i wideorecepcja —
+                udziałem w koszcie centrum monitorowania.
+              </p>
+            </div>
+            {/* Typ instalacji, status i dział w jednym rzędzie — po wyjęciu
+                „typu ochrony” zostałby sam z pustą połową wiersza. */}
+            <div className="grid grid-cols-3 gap-4">
               <div className="space-y-2">
                 <Label htmlFor="installationType">Typ instalacji *</Label>
                 <Select
@@ -373,8 +475,6 @@ export function ObjectForm({
                   </SelectContent>
                 </Select>
               </div>
-            </div>
-            <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label htmlFor="status">Status</Label>
                 <Select

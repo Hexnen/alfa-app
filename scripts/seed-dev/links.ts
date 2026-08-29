@@ -110,12 +110,15 @@ export async function seedLinks(): Promise<LinksCounts> {
     .filter((h) => !isOverhead(h.name) && h.hours > 0 && h.objectId === null)
     .sort((a, b) => b.hours - a.hours);
 
-  // Obiekty-kandydaci: z ochroną fizyczną lub mieszaną, bo to tam wartę pełnią
-  // ludzie. Gdy takich brakuje, dobieramy zwykłe — to baza deweloperska.
+  // Obiekty-kandydaci: NAJPIERW te z ochroną fizyczną, bo tylko tam warta jest
+  // realnie pełniona przez ludzi i tylko tam alokacja wprost ma sens. Dozór
+  // wizyjny i SSWiN dostają koszt inną drogą — udziałem w puli centrum
+  // monitorowania — więc mapowanie na nie godzin ochroniarzy byłoby fikcją.
+  // (Wcześniej celowaliśmy w `type`, który jest wycofywany.)
   const physical = db
     .select({ id: schema.objects.id })
     .from(schema.objects)
-    .where(inArray(schema.objects.type, ["physical", "mixed"]))
+    .where(eq(schema.objects.hasOfi, true))
     .all()
     .map((o) => o.id);
   const fallback = db

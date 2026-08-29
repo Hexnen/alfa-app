@@ -81,7 +81,18 @@ export interface ObjectInput {
   name: string;
   address?: string;
   city?: string;
-  type: ObjectType;
+  /**
+   * @deprecated Zastąpione rozdzielnymi usługami niżej. Front go już nie wysyła;
+   * dopóki kolumna `objects.type` istnieje (NOT NULL), backend wylicza ją z usług.
+   */
+  type?: ObjectType;
+  /** USŁUGI OBIEKTU — niezależne, dowolny mix (patrz src/db/schema.ts). */
+  hasCameras?: boolean;
+  /** null = „usługa jest, ale kamer nikt nie policzył” — to NIE jest zero. */
+  cameraCount?: number | null;
+  hasSswin?: boolean;
+  hasVideoreception?: boolean;
+  hasOfi?: boolean;
   installationType: InstallationType;
   status?: ObjectStatus;
   department?: Department;
@@ -159,7 +170,17 @@ export interface OrderInput {
   contractorEmail?: string;
   contractorContactPerson?: string;
   // Additional object data when creating new
+  /**
+   * @deprecated Zastąpione usługami (`objectHas*`). Nadal akceptowane, bo publiczny
+   * formularz ZDW i starsi klienci API mogą je jeszcze przysyłać.
+   */
   objectType?: ObjectType;
+  /** Usługi zakładanego obiektu — patrz `ObjectInput` wyżej. */
+  objectHasCameras?: boolean;
+  objectCameraCount?: number | null;
+  objectHasSswin?: boolean;
+  objectHasVideoreception?: boolean;
+  objectHasOfi?: boolean;
   objectInstallationType?: InstallationType;
 }
 

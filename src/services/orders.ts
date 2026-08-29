@@ -2,6 +2,7 @@ import { db, schema } from "../db/index.js";
 import { eq } from "drizzle-orm";
 import type { OrderInput } from "../types/index.js";
 import { normalizeNIP, validateNIP } from "../utils/nip.js";
+import { legacyObjectType } from "../lib/object-services.js";
 import Database from "better-sqlite3";
 
 // Get raw SQLite instance for transactions
@@ -72,13 +73,14 @@ export async function createOrderFromInput(
     };
   }
 
-  // Validate object type and installation type if creating new object
-  if (body.createObject && (!body.objectType || !body.objectInstallationType)) {
+  // Typ instalacji jest wymagany przy zakładaniu obiektu. Usług NIE wymagamy:
+  // zlecenie bywa składane, zanim ktokolwiek wie, co finalnie na obiekcie stanie,
+  // a pusty zestaw usług jest widoczną luką w kartotece (lepszą niż zgadnięta usługa).
+  if (body.createObject && !body.objectInstallationType) {
     return {
       ok: false,
       status: 400,
-      error:
-        "Object type and installation type are required when creating a new object",
+      error: "Installation type is required when creating a new object",
     };
   }
 
@@ -163,9 +165,23 @@ export async function createOrderFromInput(
     // Step 2: Handle object (create new or use existing)
     if (body.createObject) {
       // Create new object
+      // Usługi obiektu przepisujemy ze zlecenia. Kolumna `type` jest @deprecated
+      // i wciąż NOT NULL, więc wyliczamy ją z tych samych usług (jawny objectType
+      // ze starszych klientów API ma pierwszeństwo).
+      const objectServices = {
+        hasCameras: body.objectHasCameras ?? false,
+        hasSswin: body.objectHasSswin ?? false,
+        hasVideoreception: body.objectHasVideoreception ?? false,
+        hasOfi: body.objectHasOfi ?? false,
+      };
+      // `?? null`, nie `|| null`: 0 kamer to wpis, null = „nikt nie policzył”.
+      const objectCameraCount = objectServices.hasCameras
+        ? body.objectCameraCount ?? null
+        : null;
+
       const insertObjectStmt = sqlite.prepare(`
-        INSERT INTO objects (contractor_id, name, address, city, type, installation_type, status, department, monthly_value, notes, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+        INSERT INTO objects (contractor_id, name, address, city, type, has_cameras, camera_count, has_sswin, has_videoreception, has_ofi, installation_type, status, department, monthly_value, notes, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
       `);
 
       const objectInsert = insertObjectStmt.run(
@@ -173,7 +189,12 @@ export async function createOrderFromInput(
         body.objectName,
         body.objectAddress || null,
         body.objectCity || null,
-        body.objectType,
+        body.objectType ?? legacyObjectType(objectServices),
+        objectServices.hasCameras ? 1 : 0,
+        objectCameraCount,
+        objectServices.hasSswin ? 1 : 0,
+        objectServices.hasVideoreception ? 1 : 0,
+        objectServices.hasOfi ? 1 : 0,
         body.objectInstallationType,
         "pending",
         "technical",
@@ -189,7 +210,8 @@ export async function createOrderFromInput(
         id: objectId,
         contractorId,
         name: body.objectName,
-        type: body.objectType,
+        ...objectServices,
+        cameraCount: objectCameraCount,
         status: "pending",
         department: "technical",
       });

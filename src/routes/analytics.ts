@@ -7,6 +7,8 @@ import {
   computeEmployeeMonthlyCost,
   computeObjectPersonnelCost,
   parseCostWindow,
+  serviceUnits,
+  type CmaAllocationInfo,
   type CostWindow,
   type EmployerCostInfo,
   type PersonnelCostBasis,
@@ -19,7 +21,11 @@ import {
  *
  * Cały moduł stoi na jednym słowniku pojęć liczonym per obiekt:
  *   revenue       = coalesce(monthly_value, 0)          — abonament
- *   personnelCost = koszt osobowy z Kadr (wypłaty × godziny na obiekcie)
+ *   personnelCost = personnelDirectCost + personnelCmaCost — koszt osobowy z Kadr
+ *   personnelDirectCost = wypłaty × godziny NA TYM obiekcie (ochrona fizyczna)
+ *   personnelCmaCost    = udział w koszcie centrum monitorowania, dzielonym po
+ *                         dozorowanych jednostkach (SSWiN 1, wideorecepcja 1, kamera 1/szt.)
+ *   serviceUnits  = jednostki obiektu, czyli jego waga w podziale CMA
  *   otherCost     = coalesce(monthly_cost, 0)           — monitoring, sprzęt, abonamenty
  *   cost          = personnelCost + otherCost           — KOSZT CAŁKOWITY
  *   profit        = revenue - cost
@@ -128,6 +134,12 @@ export interface PersonnelInfo {
   costBasis: PersonnelCostBasis;
   /** Audyt doliczonych składek — narzuty, rozkład wierszy, narzut wypadkowy. */
   employer: EmployerCostInfo;
+  /**
+   * Audyt podziału kosztu centrum monitorowania: ile wynosi pula, przez ile
+   * jednostek się dzieli i ile obiektów nie ma podanej liczby kamer (a więc dostaje
+   * ZANIŻONY udział). Front robi z tego przypis i listę braków do uzupełnienia.
+   */
+  cma: CmaAllocationInfo;
 }
 
 function personnelInfo(costWindow: CostWindow, p: PersonnelCostResult): PersonnelInfo {
@@ -140,6 +152,7 @@ function personnelInfo(costWindow: CostWindow, p: PersonnelCostResult): Personne
     unmappedHoursShare: p.unmappedHoursShare,
     costBasis: p.costBasis,
     employer: p.employer,
+    cma: p.cma,
   };
 }
 
@@ -150,6 +163,10 @@ export interface AnalyticsTotals {
   revenue: number;
   cost: number;
   personnelCost: number;
+  /** Składnik `personnelCost`: alokacja wprost z godzin na obiektach. */
+  personnelDirectCost: number;
+  /** Składnik `personnelCost`: udziały w koszcie centrum monitorowania. */
+  personnelCmaCost: number;
   otherCost: number;
   profit: number;
   margin: number | null;
@@ -183,12 +200,26 @@ function paybackOf(setup: number, profit: number): number | null {
 /* Wspólny fundament: obiekty zakresu z policzonym kosztem całkowitym  */
 /* ------------------------------------------------------------------ */
 
+/** Usługi obiektu w postaci, w jakiej wychodzą do UI — bez `type`, który odchodzi. */
+export interface ObjectServicesInfo {
+  sswin: boolean;
+  cameras: boolean;
+  /** NULL przy `cameras` = usługa jest, ale nikt nie policzył ilu kamer (≠ zero). */
+  cameraCount: number | null;
+  ofi: boolean;
+  videoreception: boolean;
+}
+
 interface ObjectRow {
   id: number;
   name: string;
   city: string | null;
+  /** @deprecated Zostaje do czasu usunięcia kolumny; przekroje idą po `services`. */
   type: string;
   status: string;
+  services: ObjectServicesInfo;
+  /** Waga obiektu w podziale kosztu CMA (SSWiN 1 + wideorecepcja 1 + kamery po 1). */
+  serviceUnits: number;
   contractorId: number | null;
   contractorName: string | null;
   contractorCity: string | null;
@@ -205,6 +236,8 @@ interface ObjectRow {
   contractorSalespersonId: number | null;
   revenue: number;
   personnelCost: number;
+  personnelDirectCost: number;
+  personnelCmaCost: number;
   otherCost: number;
   cost: number;
   profit: number;
@@ -230,6 +263,11 @@ async function loadObjectRows(
       city: schema.objects.city,
       type: schema.objects.type,
       status: schema.objects.status,
+      hasSswin: schema.objects.hasSswin,
+      hasCameras: schema.objects.hasCameras,
+      cameraCount: schema.objects.cameraCount,
+      hasOfi: schema.objects.hasOfi,
+      hasVideoreception: schema.objects.hasVideoreception,
       contractorId: schema.objects.contractorId,
       contractorName: schema.contractors.name,
       contractorCity: schema.contractors.city,
@@ -257,6 +295,11 @@ async function loadObjectRows(
     const revenue = r.monthlyValue ?? 0;
     // Koszt osobowy z Kadr i koszt pozostały z kartoteki SUMUJĄ SIĘ.
     const personnelCost = personnel.byObjectId.get(r.id) ?? 0;
+    // ...a sam koszt osobowy składa się z dwóch ścieżek, które też się SUMUJĄ:
+    // godzin przepracowanych na tym obiekcie i udziału w koszcie centrum
+    // monitorowania. Obiekt z OFI i kamerami dostaje jedno i drugie.
+    const personnelDirectCost = personnel.directByObjectId.get(r.id) ?? 0;
+    const personnelCmaCost = personnel.cmaShareByObjectId.get(r.id) ?? 0;
     const otherCost = r.monthlyCost ?? 0;
     const cost = personnelCost + otherCost;
     const profit = revenue - cost;
@@ -270,6 +313,22 @@ async function loadObjectRows(
       city: r.city,
       type: r.type,
       status: r.status,
+      services: {
+        sswin: r.hasSswin,
+        cameras: r.hasCameras,
+        cameraCount: r.cameraCount,
+        ofi: r.hasOfi,
+        videoreception: r.hasVideoreception,
+      },
+      // Jedna definicja wagi na całą aplikację — ta sama funkcja, którą podział
+      // puli liczy w src/lib/object-personnel-cost.ts. Front pokazuje tę liczbę
+      // obok udziału CMA, żeby było widać, DLACZEGO obiekt dostał tyle, ile dostał.
+      serviceUnits: serviceUnits({
+        hasSswin: r.hasSswin,
+        hasCameras: r.hasCameras,
+        cameraCount: r.cameraCount,
+        hasVideoreception: r.hasVideoreception,
+      }),
       contractorId: r.contractorId,
       contractorName: r.contractorName,
       contractorCity: r.contractorCity,
@@ -296,6 +355,8 @@ async function loadObjectRows(
       contractorSalespersonId: r.contractorSalespersonId,
       revenue,
       personnelCost,
+      personnelDirectCost,
+      personnelCmaCost,
       otherCost,
       cost,
       profit,
@@ -321,6 +382,8 @@ function loadTotals(
 ): AnalyticsTotals {
   let revenue = 0;
   let personnelCost = 0;
+  let personnelDirectCost = 0;
+  let personnelCmaCost = 0;
   let otherCost = 0;
   let setupCost = 0;
   let objectsWithCost = 0;
@@ -329,6 +392,8 @@ function loadTotals(
   for (const r of rows) {
     revenue += r.revenue;
     personnelCost += r.personnelCost;
+    personnelDirectCost += r.personnelDirectCost;
+    personnelCmaCost += r.personnelCmaCost;
     otherCost += r.otherCost;
     setupCost += r.setupCost;
     if (r.hasCost) objectsWithCost += 1;
@@ -348,6 +413,12 @@ function loadTotals(
     revenue,
     cost,
     personnelCost,
+    // Uwaga: suma udziałów CMA w zakresie NIE równa się całej puli — obiekt spoza
+    // zakresu (np. archiwalny w widoku „bieżące") swojego udziału tu nie wnosi,
+    // a obiekt „pending" nie ma go wcale. To celowe: mianownik jest stały, więc
+    // pula rozkłada się na dozorowane obiekty niezależnie od tego, co widać.
+    personnelDirectCost,
+    personnelCmaCost,
     otherCost,
     profit,
     margin: marginOf(revenue, profit, objectsWithCost),
@@ -391,6 +462,8 @@ app.get("/kontrahenci", async (c) => {
     objectsWithCost: number;
     revenue: number;
     personnelCost: number;
+    personnelDirectCost: number;
+    personnelCmaCost: number;
     otherCost: number;
     setupCost: number;
   }
@@ -410,6 +483,8 @@ app.get("/kontrahenci", async (c) => {
         objectsWithCost: 0,
         revenue: 0,
         personnelCost: 0,
+        personnelDirectCost: 0,
+        personnelCmaCost: 0,
         otherCost: 0,
         setupCost: 0,
       };
@@ -420,6 +495,8 @@ app.get("/kontrahenci", async (c) => {
     if (r.hasCost) a.objectsWithCost += 1;
     a.revenue += r.revenue;
     a.personnelCost += r.personnelCost;
+    a.personnelDirectCost += r.personnelDirectCost;
+    a.personnelCmaCost += r.personnelCmaCost;
     a.otherCost += r.otherCost;
     a.setupCost += r.setupCost;
   }
@@ -448,6 +525,10 @@ app.get("/kontrahenci", async (c) => {
         revenue: a.revenue,
         cost,
         personnelCost: a.personnelCost,
+        // Rozbicie kosztu osobowego klienta na obie ścieżki: ile płacimy ludziom
+        // stojącym na jego obiektach, a ile kosztuje nas dozorowanie go w centrum.
+        personnelDirectCost: a.personnelDirectCost,
+        personnelCmaCost: a.personnelCmaCost,
         otherCost: a.otherCost,
         profit,
         margin: marginOf(a.revenue, profit, a.objectsWithCost),
@@ -530,11 +611,68 @@ function bucketize<T extends BucketSource>(
   return [...out.values()];
 }
 
-// Stała kolejność przekrojów — ta sama, co przy sortowaniu listy obiektów
-// (src/routes/objects.ts:35-36): status ma naturalną kolejność procesu, typ —
-// kolejność polskich etykiet. Alfabet po wartościach z bazy nic tu nie znaczy.
-const TYPE_ORDER = ["alarm", "mixed", "monitoring", "physical"];
+// Stała kolejność przekroju po statusie — naturalna kolejność procesu, a nie
+// alfabet po wartościach z bazy (tak samo jak przy sortowaniu listy obiektów,
+// src/routes/objects.ts:35-36).
 const STATUS_ORDER = ["pending", "in_progress", "active", "inactive"];
+
+/**
+ * Przekrój po USŁUGACH — zastąpił dawny przekrój po `objects.type`, bo jeden wybór
+ * („monitoring" albo „physical") nie opisywał obiektu, na którym jest i alarm,
+ * i kamery, i warta.
+ *
+ * UWAGA: TO NIE JEST PODZIAŁ ROZŁĄCZNY. Obiekt z SSWiN-em i kamerami wpada do
+ * DWÓCH kubełków, więc suma `count` przekracza liczbę obiektów, a suma `revenue`
+ * przekracza przychód firmy. Tak ma być — pytanie brzmi „ile przychodu dotyka
+ * usługi X", a nie „jak podzielić firmę na rozłączne części". Nie „naprawiaj"
+ * tych sum: każda próba doprowadzenia ich do całości wymaga wymyślenia reguły,
+ * do którego jednego kubełka wrzucić obiekt z trzema usługami — czyli powrotu
+ * do `type`, od którego właśnie odchodzimy.
+ */
+const SERVICE_ORDER = ["ofi", "kamery", "sswin", "wideorecepcja"] as const;
+type ServiceKey = (typeof SERVICE_ORDER)[number];
+
+const SERVICE_LABELS: Record<ServiceKey, string> = {
+  ofi: "Ochrona fizyczna",
+  kamery: "Kamery",
+  sswin: "SSWiN",
+  wideorecepcja: "Wideorecepcja",
+};
+
+function servicesOf(s: ObjectServicesInfo): ServiceKey[] {
+  const out: ServiceKey[] = [];
+  if (s.ofi) out.push("ofi");
+  if (s.cameras) out.push("kamery");
+  if (s.sswin) out.push("sswin");
+  if (s.videoreception) out.push("wideorecepcja");
+  return out;
+}
+
+/**
+ * Kubełkowanie po usługach — wiersz trafia do KAŻDEGO kubełka swojej usługi.
+ * Kubełki puste zostają w odpowiedzi (count 0), żeby wykres nie przeskakiwał przy
+ * zmianie zakresu; obiekt bez ani jednej usługi nie pojawia się nigdzie.
+ */
+function bucketizeServices<T extends BucketSource & { services: ObjectServicesInfo }>(
+  rows: T[],
+): AnalyticsBucket[] {
+  const out = new Map<ServiceKey, AnalyticsBucket>(
+    SERVICE_ORDER.map((key) => [
+      key,
+      { key, label: SERVICE_LABELS[key], count: 0, revenue: 0, cost: 0, profit: 0 },
+    ]),
+  );
+  for (const row of rows) {
+    for (const key of servicesOf(row.services)) {
+      const b = out.get(key)!;
+      b.count += 1;
+      b.revenue += row.revenue;
+      b.cost += row.cost;
+      b.profit += row.profit;
+    }
+  }
+  return [...out.values()];
+}
 
 function inOrder(buckets: AnalyticsBucket[], order: string[]): AnalyticsBucket[] {
   return [...buckets].sort((a, b) => {
@@ -573,6 +711,8 @@ app.get("/obiekty", async (c) => {
       city: r.city,
       type: r.type,
       status: r.status,
+      services: r.services,
+      serviceUnits: r.serviceUnits,
       contractorId: r.contractorId,
       contractorName: r.contractorName,
       companyName: r.companyName,
@@ -580,6 +720,10 @@ app.get("/obiekty", async (c) => {
       revenue: r.revenue,
       cost: r.cost,
       personnelCost: r.personnelCost,
+      // Rozbicie kosztu osobowego — bez niego nie da się obronić kwoty na obiekcie
+      // bez ani jednego pracownika („skąd 120 zł, skoro nikt tam nie stoi?").
+      personnelDirectCost: r.personnelDirectCost,
+      personnelCmaCost: r.personnelCmaCost,
       otherCost: r.otherCost,
       profit: r.profit,
       margin: r.margin,
@@ -591,7 +735,7 @@ app.get("/obiekty", async (c) => {
 
   // Przekroje liczymy w JS z tych samych wierszy — kilkaset pozycji, więc drugie
   // zapytanie do bazy nic by nie dało poza kolejnym miejscem na rozjazd definicji.
-  const byType = inOrder(bucketize(data, (r) => r.type), TYPE_ORDER);
+  const byService = bucketizeServices(data);
   const byStatus = inOrder(bucketize(data, (r) => r.status), STATUS_ORDER);
   const byCompany = bucketize(
     data,
@@ -621,7 +765,8 @@ app.get("/obiekty", async (c) => {
       generatedAt: new Date().toISOString(),
       totals,
       rows: data,
-      byType,
+      // Przekrój po usługach NIE SUMUJE SIĘ do całości — patrz `bucketizeServices`.
+      byService,
       byStatus,
       byCompany,
       marginBuckets,

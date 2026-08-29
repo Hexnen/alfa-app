@@ -43,7 +43,7 @@ import type { Order, OrderInput, Contractor, CompanyData, ObjectRecord, ObjectHi
 import { getContractorObjects } from "@/lib/api";
 import { OBJECT_KINDS } from "@/lib/orderIntakeSteps";
 import { normalizeNIP, validateNIP } from "@/lib/nip";
-import { objectTypeLabels, installationTypeLabels, statusLabels } from "@/lib/utils";
+import { installationTypeLabels, statusLabels } from "@/lib/utils";
 
 interface OrderFormProps {
   open: boolean;
@@ -106,7 +106,11 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
     contractorPhone: "",
     contractorEmail: "",
     contractorContactPerson: "",
-    objectType: "monitoring",
+    objectHasCameras: false,
+    objectCameraCount: null,
+    objectHasSswin: false,
+    objectHasVideoreception: false,
+    objectHasOfi: false,
     objectInstallationType: "new",
   });
 
@@ -165,7 +169,14 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
         contractorPhone: "",
         contractorEmail: "",
         contractorContactPerson: "",
-        objectType: "monitoring",
+        // Usługi zakładanego obiektu podpowiadamy z samego zlecenia: montaż
+        // kamer i wideorecepcja są już w formularzu, więc nie każemy wpisywać
+        // tego drugi raz. SSWiN i OFI zlecenie ZDW opisuje, więc zostają puste.
+        objectHasCameras: order?.isCameraInstallation || false,
+        objectCameraCount: order?.cameraCount ?? null,
+        objectHasSswin: false,
+        objectHasVideoreception: order?.videoReception || false,
+        objectHasOfi: false,
         objectInstallationType: "new",
       });
       
@@ -301,8 +312,8 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
         setError("Podaj nazwę obiektu");
         return;
       }
-      if (!formData.objectType || !formData.objectInstallationType) {
-        setError("Wybierz typ ochrony i typ instalacji");
+      if (!formData.objectInstallationType) {
+        setError("Wybierz typ instalacji");
         return;
       }
     } else if (!formData.objectId) {
@@ -683,27 +694,97 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
                   
                   {createObject && !isEditing && (
                     <div className="grid grid-cols-2 gap-4">
+                      {/* Usługi zakładanego obiektu — cztery niezależne flagi
+                          zamiast jednego „typu ochrony”. Kamery i wideorecepcja
+                          są wstępnie zaznaczone z danych zlecenia, ale handlowiec
+                          może je poprawić: zlecenie opisuje montaż, a kartoteka
+                          to, co na obiekcie ostatecznie działa. */}
                       <div className="space-y-2">
-                        <Label>
-                          Typ ochrony <span className="text-red-500">*</span>
-                        </Label>
-                        <Select
-                          value={formData.objectType}
-                          onValueChange={(value) =>
-                            setFormData((prev) => ({ ...prev, objectType: value as OrderInput["objectType"] }))
-                          }
-                        >
-                          <SelectTrigger className="bg-white">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {Object.entries(objectTypeLabels).map(([value, label]) => (
-                              <SelectItem key={value} value={value}>
-                                {label}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
+                        <Label>Usługi na obiekcie</Label>
+                        <div className="grid grid-cols-2 gap-1.5">
+                          <label className="flex items-center gap-2 text-sm">
+                            <input
+                              type="checkbox"
+                              className="h-4 w-4 accent-indigo-600"
+                              checked={formData.objectHasCameras ?? false}
+                              onChange={(e) =>
+                                setFormData((prev) => ({
+                                  ...prev,
+                                  objectHasCameras: e.target.checked,
+                                  objectCameraCount: e.target.checked
+                                    ? prev.objectCameraCount ?? null
+                                    : null,
+                                }))
+                              }
+                            />
+                            Kamery
+                          </label>
+                          <label className="flex items-center gap-2 text-sm">
+                            <input
+                              type="checkbox"
+                              className="h-4 w-4 accent-indigo-600"
+                              checked={formData.objectHasSswin ?? false}
+                              onChange={(e) =>
+                                setFormData((prev) => ({ ...prev, objectHasSswin: e.target.checked }))
+                              }
+                            />
+                            SSWiN
+                          </label>
+                          <label className="flex items-center gap-2 text-sm">
+                            <input
+                              type="checkbox"
+                              className="h-4 w-4 accent-indigo-600"
+                              checked={formData.objectHasVideoreception ?? false}
+                              onChange={(e) =>
+                                setFormData((prev) => ({
+                                  ...prev,
+                                  objectHasVideoreception: e.target.checked,
+                                }))
+                              }
+                            />
+                            Wideorecepcja
+                          </label>
+                          <label className="flex items-center gap-2 text-sm">
+                            <input
+                              type="checkbox"
+                              className="h-4 w-4 accent-indigo-600"
+                              checked={formData.objectHasOfi ?? false}
+                              onChange={(e) =>
+                                setFormData((prev) => ({ ...prev, objectHasOfi: e.target.checked }))
+                              }
+                            />
+                            OFI (ochrona fizyczna)
+                          </label>
+                        </div>
+                        {/* Puste pole zostaje `null` — „kamery są, nikt ich nie
+                            policzył”, co nie jest tym samym, co zero kamer. */}
+                        <div className="flex items-center gap-2">
+                          <Label
+                            htmlFor="objectCameraCount"
+                            className={!formData.objectHasCameras ? "text-slate-400" : undefined}
+                          >
+                            Liczba kamer
+                          </Label>
+                          <Input
+                            id="objectCameraCount"
+                            type="number"
+                            min="0"
+                            step="1"
+                            disabled={!formData.objectHasCameras}
+                            className="w-24 bg-white tabular-nums"
+                            placeholder="nie policzono"
+                            value={formData.objectCameraCount ?? ""}
+                            onChange={(e) =>
+                              setFormData((prev) => ({
+                                ...prev,
+                                objectCameraCount:
+                                  e.target.value.trim() === ""
+                                    ? null
+                                    : Math.max(0, parseInt(e.target.value, 10) || 0),
+                              }))
+                            }
+                          />
+                        </div>
                       </div>
                       <div className="space-y-2">
                         <Label>

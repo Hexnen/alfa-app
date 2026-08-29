@@ -43,7 +43,9 @@ import {
   type ObjectInput,
 } from "@/lib/api";
 import {
-  objectTypeLabels,
+  objectServiceLabels,
+  objectServicesLabel,
+  type ObjectServiceKey,
   statusLabels,
   departmentLabels,
   formatCurrency,
@@ -71,7 +73,6 @@ const DEFAULT_DIR: Record<ObjectSortKey, "asc" | "desc"> = {
   name: "asc",
   contractor: "asc",
   city: "asc",
-  type: "asc",
   status: "asc",
   department: "asc",
   salesperson: "asc",
@@ -112,7 +113,10 @@ export function Objects() {
 
   const [statusFilter, setStatusFilter] = useState("all");
   const [departmentFilter, setDepartmentFilter] = useState("all");
-  const [typeFilter, setTypeFilter] = useState("all");
+  // Filtr po USŁUDZE, a nie po jednym „typie ochrony”: usługi nie są rozłączne,
+  // więc filtr wybiera obiekty MAJĄCE daną usługę — obiekt z kamerami i SSWiN-em
+  // widać pod obydwoma.
+  const [serviceFilter, setServiceFilter] = useState<ObjectServiceKey | "all">("all");
   const [contractorFilter, setContractorFilter] = useState<number | undefined>(undefined);
   const [salespersonFilter, setSalespersonFilter] = useState<number | "none" | undefined>(undefined);
   const [companyFilter, setCompanyFilter] = useState<number | "none" | undefined>(undefined);
@@ -178,7 +182,7 @@ export function Objects() {
         search: search || undefined,
         status: statusFilter !== "all" ? statusFilter : undefined,
         department: departmentFilter !== "all" ? departmentFilter : undefined,
-        type: typeFilter !== "all" ? typeFilter : undefined,
+        service: serviceFilter !== "all" ? serviceFilter : undefined,
         contractorId: contractorFilter,
         salespersonId: salespersonFilter,
         companyId: companyFilter,
@@ -208,7 +212,7 @@ export function Objects() {
     search,
     statusFilter,
     departmentFilter,
-    typeFilter,
+    serviceFilter,
     contractorFilter,
     salespersonFilter,
     companyFilter,
@@ -240,7 +244,7 @@ export function Objects() {
     companyFilter !== undefined ||
     statusFilter !== "all" ||
     departmentFilter !== "all" ||
-    typeFilter !== "all" ||
+    serviceFilter !== "all" ||
     contractorFilter !== undefined ||
     valueMode !== "all" ||
     minInput !== "" ||
@@ -250,7 +254,7 @@ export function Objects() {
     setSearchInput("");
     setStatusFilter("all");
     setDepartmentFilter("all");
-    setTypeFilter("all");
+    setServiceFilter("all");
     setContractorFilter(undefined);
     setSalespersonFilter(undefined);
     setCompanyFilter(undefined);
@@ -400,13 +404,16 @@ export function Objects() {
           </SelectContent>
         </Select>
 
-        <Select value={typeFilter} onValueChange={setTypeFilter}>
-          <SelectTrigger className="w-[170px]" data-testid="objects-filter-type">
-            <SelectValue placeholder="Typ" />
+        <Select
+          value={serviceFilter}
+          onValueChange={(v) => setServiceFilter(v as ObjectServiceKey | "all")}
+        >
+          <SelectTrigger className="w-[190px]" data-testid="objects-filter-service">
+            <SelectValue placeholder="Usługa" />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="all">Wszystkie typy</SelectItem>
-            {Object.entries(objectTypeLabels).map(([value, label]) => (
+            <SelectItem value="all">Wszystkie usługi</SelectItem>
+            {Object.entries(objectServiceLabels).map(([value, label]) => (
               <SelectItem key={value} value={value}>
                 {label}
               </SelectItem>
@@ -554,7 +561,10 @@ export function Objects() {
                     <SortHeader label="Nazwa" sortKey="name" />
                     <SortHeader label="Kontrahent" sortKey="contractor" />
                     <SortHeader label="Miasto" sortKey="city" />
-                    <SortHeader label="Typ" sortKey="type" />
+                    {/* Usługi to zbiór, a nie jedna wartość — nie ma po czym
+                        sortować, więc nagłówek jest zwykły (klucz `type`
+                        zniknął też z SORT_COLUMNS na backendzie). */}
+                    <th className="py-3 px-2 font-medium text-left">Usługi</th>
                     <SortHeader label="Status" sortKey="status" />
                     <SortHeader label="Dzial" sortKey="department" />
                     <SortHeader label="Spółka" sortKey="company" />
@@ -592,9 +602,10 @@ export function Objects() {
                         )}
                       </td>
                       <td className="py-3 px-2">{obj.city || "-"}</td>
-                      <td className="py-3 px-2">
-                        {objectTypeLabels[obj.type] || obj.type}
-                      </td>
+                      {/* „Kamery (ilość?)” = usługa jest, ale kamer nikt nie
+                          policzył; brak liczby ma być widać tak samo, jak kreska
+                          przy nieuzupełnionym koszcie. */}
+                      <td className="py-3 px-2">{objectServicesLabel(obj)}</td>
                       <td className="py-3 px-2">
                         <Badge variant={statusColors[obj.status]}>
                           {statusLabels[obj.status] || obj.status}

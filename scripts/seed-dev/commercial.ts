@@ -393,8 +393,42 @@ function planObjectsPerContractor(contractors: readonly number[]): Map<number, n
  * w którym ranking TOP-10 kontrahentów i histogram wartości wyglądają tak samo
  * dla każdego cięcia danych — czyli nie testują niczego.
  */
+/**
+ * Losowy zestaw usług w proporcjach dawnego pola `type`: przewaga samego dozoru
+ * wizyjnego, sporo alarmów, garść obiektów mieszanych i najmniej ochrony fizycznej.
+ * Zwraca też `type`, bo kolumna jest jeszcze NOT NULL — znika w osobnej migracji.
+ */
+function serviceMix(): {
+  hasCameras: boolean;
+  hasSswin: boolean;
+  hasOfi: boolean;
+  hasVideoreception: boolean;
+  type: "monitoring" | "mixed" | "alarm" | "physical";
+} {
+  const kind = weighted([
+    ["monitoring", 50],
+    ["mixed", 20],
+    ["alarm", 20],
+    ["physical", 10],
+  ] as const);
+  return {
+    hasCameras: kind === "monitoring" || kind === "mixed",
+    hasSswin: kind === "alarm" || kind === "mixed",
+    hasOfi: kind === "physical",
+    // Wideorecepcję dokłada moduł `services` — wybiera ją liczbą, nie losem.
+    hasVideoreception: false,
+    type: kind,
+  };
+}
+
 function monthlyValueSkewed(): number {
-  const v = 150 + Math.pow(rng(), 4) * 7850;
+  // Skala dobrana pod PRAWDZIWĄ listę płac w tej bazie (ok. 536 tys. zł netto
+  // miesięcznie, po narzucie składek ~860 tys.). Przy pierwotnym zakresie
+  // 150–8 000 zł łączny przychód wychodził 165 tys. i marża spadała do −43%:
+  // nie dlatego, że coś liczy się źle, tylko dlatego, że syntetyczny przychód
+  // zestawiony z realnymi wynagrodzeniami nie mógł się spiąć. Rozkład zostaje
+  // skośny (dużo małych obiektów, długi ogon) — rośnie tylko skala.
+  const v = 400 + Math.pow(rng(), 4) * 24600;
   return Math.round(v / 10) * 10;
 }
 
@@ -443,12 +477,14 @@ function insertObjects(
           name: chance(0.35) ? `${kind} ${city} — ${pick(OBJECT_SUFFIX)}` : `${kind} ${city}`,
           address: address(),
           city,
-          type: weighted([
-            ["monitoring", 50],
-            ["mixed", 20],
-            ["alarm", 20],
-            ["physical", 10],
-          ] as const),
+          // USŁUGI — od nich zależy, którą drogą liczy się koszt osobowy:
+          // OFI bierze godziny pracowników TEGO obiektu, a kamery/SSWiN/
+          // wideorecepcja udział w puli centrum monitorowania. Rozkład jak
+          // w dawnym polu `type`, tylko rozbity na niezależne flagi; ilość kamer
+          // uzupełnia moduł `services` (rozkładem z prawdziwego rejestru CMA).
+          ...serviceMix(),
+          // @deprecated — kolumna jest jeszcze NOT NULL, więc trzymamy ją spójną
+          // z usługami, dopóki nie zniknie ze schematu.
           installationType: chance(0.7) ? "new" : "takeover",
           status,
           department:

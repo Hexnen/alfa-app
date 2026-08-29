@@ -33,6 +33,7 @@ import { seedOperations, resetOperations } from "./seed-dev/operations.js";
 import { seedWarehouse, resetWarehouse } from "./seed-dev/warehouse.js";
 import { seedHr, resetHr } from "./seed-dev/hr.js";
 import { seedLinks, resetLinks } from "./seed-dev/links.js";
+import { seedServices, resetServices } from "./seed-dev/services.js";
 
 /** Ziarno losowości — stałe, żeby dwa uruchomienia dały tę samą bazę. */
 const SEED = 20260829;
@@ -49,6 +50,9 @@ const MODULES = [
   { name: "operations", label: "kalendarz, realizacje, protokoły, wyceny", run: seedOperations, undo: resetOperations },
   { name: "warehouse", label: "magazyn: towary, dokumenty, stany", run: seedWarehouse, undo: resetWarehouse },
   { name: "hr", label: "kadry: domknięcie roku", run: seedHr, undo: resetHr },
+  // Usługi muszą być przed `links`: dobór mapowania mierzy koszt osobowy, a ten
+  // zależy od liczby kamer (podział puli centrum monitorowania).
+  { name: "services", label: "usługi obiektów: kamery, wideorecepcja", run: seedServices, undo: resetServices },
   // Na końcu: wiąże pozycje kadrowe z obiektami i osoby z listą płac, więc
   // wymaga i obiektów (commercial), i danych płacowych (hr).
   { name: "links", label: "powiązania kartotek: kadry ↔ obiekty ↔ osoby", run: seedLinks, undo: resetLinks },

@@ -9,6 +9,11 @@
  * godziny na pozycjach niezmapowanych zostają kosztem ogólnym, że trzy okna uśredniania
  * dają przewidywalnie różne kwoty i że handlowiec powiązany z kartoteką kadrową ma koszt
  * własny z wypłat, a nie z pola ręcznego.
+ * Osobna sekcja pilnuje DRUGIEJ ŚCIEŻKI kosztu osobowego — udziału w koszcie centrum
+ * monitorowania: wagi usług (kamera po sztuce, SSWiN i wideorecepcja po jednym), tego
+ * że archiwalny obiekt nie rozcieńcza mianownika, że brak liczby kamer jest zgłaszany
+ * zamiast po cichu zaniżać koszt, że obie ścieżki się SUMUJĄ i że bez pozycji-puli
+ * mechanizm jest po prostu nieaktywny, a nie zepsuty.
  * Sprząta po sobie HARD (kadry + obiekty + kontrahenci + handlowcy + object_history),
  * także przy błędzie.
  *
@@ -83,11 +88,31 @@ function restoreMarkups() {
 const MK = { uop: 2, zlecenieZua: 1.5, zlecenieZza: 1.2, officeDefault: 1.8 };
 
 /**
+ * Pozycje kadrowe, którym test CHWILOWO zdjął `is_cma_pool` (żeby sprawdzić, że bez
+ * puli nic się nie sypie). Trzymamy ich id poza `main()`, bo gdyby test wywalił się
+ * w środku tej sekcji, produkcyjna pozycja „CMA" zostałaby wyłączona — a wtedy cała
+ * firma po cichu przestałaby rozdzielać koszt centrum.
+ */
+const disabledPools: number[] = [];
+
+function restoreCmaPools() {
+  if (!disabledPools.length) return;
+  db.update(schema.hrObjects)
+    .set({ isCmaPool: true })
+    .where(inArray(schema.hrObjects.id, disabledPools))
+    .run();
+  disabledPools.length = 0;
+}
+
+/**
  * Hard delete fikstur. Kolejność wymuszona kluczami obcymi: godziny i wypłaty przed
  * umowami, umowy przed pracownikami; obiekty przed kontrahentami; handlowcy na końcu,
  * bo dopiero po skasowaniu pracownika przestaje ich cokolwiek trzymać.
  */
 function cleanup() {
+  // NAJPIERW przywrócenie pul — kasowanie fikstur nie może zostawić wyłączonej
+  // produkcyjnej pozycji CMA.
+  restoreCmaPools();
   const empIds = db
     .select({ id: schema.hrEmployees.id })
     .from(schema.hrEmployees)
@@ -309,6 +334,81 @@ async function main() {
       { employeeId: emp.id, objectId: hroUnmapped.id, year: m1.year, month: m1.month, workedHours: 100 },
     ])
     .run();
+
+  /* --- Fikstury DRUGIEJ ŚCIEŻKI: udział w koszcie centrum monitorowania ----
+   * Osobny kontrahent, żeby liczniki obiektów K1..K4 wyżej dalej się zgadzały,
+   * i osobni pracownicy, żeby nie ruszyć podziału godzin pracownika z O8.
+   *
+   * Kwot puli NIE zakładamy z góry: w prawdziwej bazie jest już pozycja „CMA"
+   * z własnymi dyżurnymi, więc asercje sprawdzają RELACJE (obiekt z 4 kamerami
+   * dostaje dwa razy tyle, co obiekt z 2) i zgodność z `cma.perUnit` z API,
+   * a nie wymyśloną kwotę. Fikstura dokłada do puli własne 3 600 zł tylko po to,
+   * żeby pula była niezerowa nawet na pustej bazie.
+   */
+  const [c5] = db
+    .insert(schema.contractors)
+    .values({ name: `${PREFIX}Kontrahent5`, nip: `${PREFIX}5` })
+    .returning()
+    .all();
+  const cmaObj = (name: string, v: Partial<typeof schema.objects.$inferInsert>) =>
+    obj({ name: `${PREFIX}${name}`, contractorId: c5.id, monthlyValue: 0, ...v });
+
+  const oCam4 = cmaObj("CAM4", { hasCameras: true, cameraCount: 4 }); // 4 jednostki
+  const oCam2 = cmaObj("CAM2", { hasCameras: true, cameraCount: 2 }); // 2 jednostki
+  const oSswin = cmaObj("SSWIN", { hasSswin: true }); // 1 jednostka
+  const oVideo = cmaObj("WIDEO", { hasVideoreception: true }); // 1 jednostka
+  // Archiwalny — ma usługi, ale centrum go już nie dozoruje: 5 jednostek, które
+  // NIE mogą rozcieńczać kosztu obiektom, które wciąż są na monitoringu.
+  const oArch = cmaObj("ARCH", { hasCameras: true, cameraCount: 5, status: "inactive" });
+  // Kamery BEZ podanej liczby — waga tylko z SSWiN-u, a brak liczby zgłoszony osobno.
+  const oNoCount = cmaObj("BEZLICZBY", { hasCameras: true, cameraCount: null, hasSswin: true });
+  // OFI + SSWiN — obie ścieżki naraz: własna załoga PLUS udział w centrum.
+  const oBoth = cmaObj("OFICMA", { hasOfi: true, hasSswin: true });
+
+  // Pula centrum monitorowania — pozycja kadrowa bez wskazania obiektu.
+  const [hroCma] = db
+    .insert(schema.hrObjects)
+    .values({ name: `${PREFIX}CMA`, isCmaPool: true })
+    .returning()
+    .all();
+  // Pozycja zmapowana na obiekt OFI — stąd bierze się jego alokacja WPROST.
+  const [hroOfi] = db
+    .insert(schema.hrObjects)
+    .values({ name: `${PREFIX}POSTERUNEK_OFI`, objectId: oBoth.id })
+    .returning()
+    .all();
+
+  /** Pracownik z jedną umową, jedną wypłatą i wszystkimi godzinami na jednej pozycji. */
+  const singlePosition = (name: string, amount: number, hrObjectId: number) => {
+    const [e] = db
+      .insert(schema.hrEmployees)
+      .values({ fullName: `${PREFIX}${name}`, kind: "ochrona", active: true })
+      .returning()
+      .all();
+    const [ct] = db
+      .insert(schema.hrContracts)
+      .values({
+        employeeId: e.id,
+        company: comp.name,
+        contractType: "zlecenie",
+        zua: "tak",
+        mainChannel: "przelew",
+        bonusType: "brak",
+        active: true,
+      })
+      .returning()
+      .all();
+    db.insert(schema.hrPayroll)
+      .values({ contractId: ct.id, year: m1.year, month: m1.month, mainAmount: amount })
+      .run();
+    db.insert(schema.hrHours)
+      .values({ employeeId: e.id, objectId: hrObjectId, year: m1.year, month: m1.month, workedHours: 100 })
+      .run();
+    return e;
+  };
+  singlePosition("Dyzurny", 3600, hroCma.id); // cały koszt idzie do puli CMA
+  singlePosition("Ofi", 2000, hroOfi.id); // cały koszt idzie WPROST na oBoth
+
   clearPersonnelCostCache();
 
   // --- Handlowcy ----------------------------------------------------------
@@ -515,6 +615,130 @@ async function main() {
     info);
   ok("totals: kwoty opisane jako SZACOWANY KOSZT PRACODAWCY, a nie „na rękę”",
     info.costBasis === "employerCost" && info.employer?.applied === true, info);
+
+  /* --- Druga ścieżka: udział w koszcie centrum monitorowania (CMA) ---------
+   * Obiekt bez ochrony fizycznej nie ma „swoich" godzin, a mimo to kosztuje —
+   * jego sygnały odbiera dyżurny. Pula CMA dzieli się po dozorowanych jednostkach:
+   * SSWiN 1, wideorecepcja 1, każda kamera 1.
+   *
+   * Zakres `all`, bo jedna z fikstur jest archiwalna i musi być WIDOCZNA w wierszach,
+   * żeby dało się sprawdzić, że udziału NIE dostała.
+   */
+  const cmaCall = () => call("/obiekty?scope=all&costWindow=1");
+  const cmaView = await cmaCall();
+  const cma = cmaView.totals.personnel.cma;
+  const cmaRow = (n: string) => cmaView.rows.find((r: any) => r.name === `${PREFIX}${n}`);
+  /** Udziały to round2(perUnit × jednostki), więc porównania robimy z tolerancją grosza. */
+  const CENT = 0.011;
+
+  ok("cma: pula niezerowa i podzielona przez niezerowy mianownik",
+    cma.poolPositions >= 1 && cma.pool > 0 && cma.units > 0, cma);
+  ok("cma: perUnit = pula / jednostki", near(cma.perUnit, round2(cma.pool / cma.units), CENT), cma);
+
+  // (a) kamery liczą się po jednej za sztukę
+  ok("4 kamery dostają dokładnie dwa razy tyle, co 2 kamery",
+    near(cmaRow("CAM4")?.personnelCmaCost, 2 * cmaRow("CAM2")?.personnelCmaCost, CENT),
+    { cam4: cmaRow("CAM4")?.personnelCmaCost, cam2: cmaRow("CAM2")?.personnelCmaCost });
+  ok("CAM4: jednostki = 4, udział = 4 × perUnit",
+    cmaRow("CAM4")?.serviceUnits === 4 && near(cmaRow("CAM4")?.personnelCmaCost, 4 * cma.perUnit, CENT),
+    cmaRow("CAM4"));
+
+  // (b) SSWiN i wideorecepcja po JEDNYM
+  ok("SSWiN = 1 jednostka = perUnit",
+    cmaRow("SSWIN")?.serviceUnits === 1 && near(cmaRow("SSWIN")?.personnelCmaCost, cma.perUnit, CENT),
+    cmaRow("SSWIN"));
+  ok("Wideorecepcja waży tyle samo, co SSWiN",
+    cmaRow("WIDEO")?.serviceUnits === 1 &&
+      near(cmaRow("WIDEO")?.personnelCmaCost, cmaRow("SSWIN")?.personnelCmaCost),
+    { wideo: cmaRow("WIDEO")?.personnelCmaCost, sswin: cmaRow("SSWIN")?.personnelCmaCost });
+
+  // (c) archiwalny NIE wchodzi do mianownika — nie dostaje udziału i nie rozcieńcza
+  //     kosztu pozostałym. Zmianę statusu robimy BEZ czyszczenia cache'u: odcisk
+  //     musi obejmować tabelę `objects`, inaczej wynik by się nie odświeżył.
+  ok("Archiwalny: ma 5 jednostek, ale udziału w CMA nie dostaje",
+    cmaRow("ARCH")?.serviceUnits === 5 && cmaRow("ARCH")?.personnelCmaCost === 0, cmaRow("ARCH"));
+  db.update(schema.objects).set({ status: "active" }).where(eq(schema.objects.id, oArch.id)).run();
+  const revived = await cmaCall();
+  const revivedRow = revived.rows.find((r: any) => r.name === `${PREFIX}ARCH`);
+  ok("Po odarchiwizowaniu jego 5 jednostek WCHODZI do mianownika",
+    revived.totals.personnel.cma.units === cma.units + 5 && revivedRow?.personnelCmaCost > 0,
+    { before: cma.units, after: revived.totals.personnel.cma.units });
+  ok("...a większy mianownik obniża udział pozostałym obiektom",
+    revived.rows.find((r: any) => r.name === `${PREFIX}SSWIN`)?.personnelCmaCost <
+      cmaRow("SSWIN")?.personnelCmaCost,
+    { before: cmaRow("SSWIN")?.personnelCmaCost });
+  db.update(schema.objects).set({ status: "inactive" }).where(eq(schema.objects.id, oArch.id)).run();
+
+  // (d) kamery BEZ podanej liczby — brak wagi za kamery, ale zgłoszony osobno
+  ok("Kamery bez liczby: waga tylko z SSWiN-u (1), a nie z kamer",
+    cmaRow("BEZLICZBY")?.serviceUnits === 1 &&
+      near(cmaRow("BEZLICZBY")?.personnelCmaCost, cma.perUnit, CENT),
+    cmaRow("BEZLICZBY"));
+  ok("Brak liczby kamer jest RAPORTOWANY, a nie połykany",
+    cma.objectsMissingCameraCount >= 1, cma);
+  db.update(schema.objects).set({ cameraCount: 3 }).where(eq(schema.objects.id, oNoCount.id)).run();
+  const counted = await cmaCall(); // znowu bez clearPersonnelCostCache()
+  const countedRow = counted.rows.find((r: any) => r.name === `${PREFIX}BEZLICZBY`);
+  ok("Uzupełnienie liczby kamer podnosi wagę do 4 i zdejmuje obiekt z listy braków",
+    countedRow?.serviceUnits === 4 &&
+      counted.totals.personnel.cma.objectsMissingCameraCount === cma.objectsMissingCameraCount - 1 &&
+      countedRow?.personnelCmaCost > cmaRow("BEZLICZBY")?.personnelCmaCost,
+    { units: countedRow?.serviceUnits, missing: counted.totals.personnel.cma.objectsMissingCameraCount });
+  db.update(schema.objects).set({ cameraCount: null }).where(eq(schema.objects.id, oNoCount.id)).run();
+
+  // (e) obie ścieżki SIĘ SUMUJĄ, a nie zastępują
+  const both = cmaRow("OFICMA");
+  ok("OFI: alokacja wprost = 2 000 (cała wypłata pracownika tego obiektu)",
+    near(both?.personnelDirectCost, 2000), both);
+  ok("OFI + SSWiN: do tego dochodzi udział w CMA za 1 jednostkę",
+    near(both?.personnelCmaCost, cma.perUnit, CENT) && both?.personnelCmaCost > 0, both);
+  ok("Koszt osobowy = alokacja wprost + udział CMA (suma, nie podmiana)",
+    near(both?.personnelCost, both?.personnelDirectCost + both?.personnelCmaCost, CENT) &&
+      both?.personnelCost > 2000,
+    both);
+  ok("Obiekt bez usług CMA (O8) nie dostaje udziału, ale ma alokację wprost",
+    cmaRow("O8")?.personnelCmaCost === 0 && cmaRow("O8")?.personnelDirectCost > 0, cmaRow("O8"));
+
+  // (f) przekrój po usługach — kubełki NIE są rozłączne
+  const svc = (k: string) => cmaView.byService.find((b: any) => b.key === k);
+  ok("byService ma cztery stałe kubełki (ofi, kamery, sswin, wideorecepcja)",
+    cmaView.byService.length === 4 &&
+      ["ofi", "kamery", "sswin", "wideorecepcja"].every((k) => svc(k) !== undefined),
+    cmaView.byService?.map((b: any) => b.key));
+  ok("Obiekt z dwiema usługami wpada do DWÓCH kubełków (podział nierozłączny)",
+    (svc("sswin")?.count ?? 0) >= 3 && (svc("kamery")?.count ?? 0) >= 4 && (svc("ofi")?.count ?? 0) >= 1,
+    cmaView.byService);
+
+  // (g) rozbicie w rolce kontrahenta
+  const ksCma = await call("/kontrahenci?scope=all&costWindow=1");
+  const k5 = ksCma.rows.find((r: any) => r.name === `${PREFIX}Kontrahent5`);
+  ok("K5: rolka kontrahenta niesie obie ścieżki i ich sumę",
+    near(k5?.personnelCost, k5?.personnelDirectCost + k5?.personnelCmaCost, CENT) &&
+      k5?.personnelCmaCost > 0 && near(k5?.personnelDirectCost, 2000),
+    k5);
+
+  // (h) brak pozycji z is_cma_pool → mechanizm nieaktywny, nic się nie psuje
+  const poolIds = db
+    .select({ id: schema.hrObjects.id })
+    .from(schema.hrObjects)
+    .where(eq(schema.hrObjects.isCmaPool, true))
+    .all()
+    .map((r) => r.id);
+  disabledPools.push(...poolIds);
+  db.update(schema.hrObjects).set({ isCmaPool: false }).where(inArray(schema.hrObjects.id, poolIds)).run();
+  const noPool = await cmaCall(); // i znowu: odcisk ma to złapać sam
+  const npInfo = noPool.totals.personnel.cma;
+  const npRow = (n: string) => noPool.rows.find((r: any) => r.name === `${PREFIX}${n}`);
+  ok("Bez pozycji-puli: pool = 0, perUnit = 0, żadnych udziałów — i zero wyjątków",
+    npInfo.poolPositions === 0 && npInfo.pool === 0 && npInfo.perUnit === 0 &&
+      npRow("CAM4")?.personnelCmaCost === 0 && npRow("SSWIN")?.personnelCmaCost === 0,
+    npInfo);
+  ok("Bez puli koszt obiektu OFI to sama alokacja wprost (2 000)",
+    near(npRow("OFICMA")?.personnelCost, 2000), npRow("OFICMA"));
+  ok("Bez puli mianownik dalej się liczy — jest co dzielić, gdy pula wróci",
+    npInfo.units === cma.units && npInfo.objectsInDenominator === cma.objectsInDenominator, npInfo);
+  restoreCmaPools();
+  clearPersonnelCostCache();
 
   /* --- Składki pracodawcy -------------------------------------------------
    * Od tego miejsca narzuty są RÓŻNE (MK), więc każda kwota kosztu osobowego to

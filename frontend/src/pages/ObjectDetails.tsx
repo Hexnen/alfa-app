@@ -69,7 +69,7 @@ import {
   type WorkflowTransition,
 } from "@/lib/api";
 import {
-  objectTypeLabels,
+  objectServicesLabel,
   installationTypeLabels,
   statusLabels,
   departmentLabels,
@@ -342,8 +342,11 @@ export function ObjectDetails() {
                 <dd>{object.city || "-"}</dd>
               </div>
               <div>
-                <dt className="text-sm text-muted-foreground">Typ ochrony</dt>
-                <dd>{objectTypeLabels[object.type]}</dd>
+                {/* Usługi zamiast jednego „typu ochrony” — jedna pozycja za
+                    jedną, więc dwukolumnowa siatka `<dl>` zostaje parzysta.
+                    „Kamery (ilość?)” = usługa jest, ale kamer nikt nie policzył. */}
+                <dt className="text-sm text-muted-foreground">Usługi</dt>
+                <dd>{objectServicesLabel(object)}</dd>
               </div>
               <div>
                 <dt className="text-sm text-muted-foreground">Typ instalacji</dt>

@@ -207,7 +207,12 @@ export function OrderIntakeForm({ onCreated }: OrderIntakeFormProps) {
       status: "new",
       createContractor: true,
       createObject: true,
-      objectType: "monitoring",
+      // Usługi obiektu bierzemy z tego, co zgłaszający sam zaznaczył — dawne
+      // sztywne „monitoring” dopisywało obiektowi usługę, której nikt nie
+      // potwierdził. SSWiN i OFI uzupełnia handlowiec w kartotece.
+      objectHasCameras: form.isCameraInstallation,
+      objectCameraCount: num(form.cameraCount) ?? null,
+      objectHasVideoreception: form.videoReception,
       objectInstallationType: "new",
     };
 

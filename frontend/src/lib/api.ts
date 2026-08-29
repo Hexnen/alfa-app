@@ -1,3 +1,7 @@
+// Klucze usług obiektu mają jedno źródło prawdy — słownik etykiet w utils.
+// (utils nic z api nie importuje, więc zależność jest jednokierunkowa.)
+import type { ObjectServiceKey } from "./utils";
+
 const API_BASE = "/api";
 
 interface ApiResponse<T> {
@@ -109,7 +113,6 @@ export type ObjectSortKey =
   | "name"
   | "contractor"
   | "city"
-  | "type"
   | "status"
   | "department"
   | "salesperson"
@@ -143,7 +146,11 @@ export async function getObjects(params?: {
   search?: string;
   status?: string;
   department?: string;
-  type?: string;
+  /**
+   * Filtr po USŁUDZE: obiekty MAJĄCE daną usługę. Podział nie jest rozłączny —
+   * obiekt z kamerami i SSWiN-em wpada do obu filtrów.
+   */
+  service?: ObjectServiceKey;
   contractorId?: number;
   /** Widełki wartości miesięcznej (obiekt bez kwoty nigdy w nie nie wpada). */
   minValue?: number;
@@ -170,7 +177,7 @@ export async function getObjects(params?: {
   if (params?.search) searchParams.set("search", params.search);
   if (params?.status) searchParams.set("status", params.status);
   if (params?.department) searchParams.set("department", params.department);
-  if (params?.type) searchParams.set("type", params.type);
+  if (params?.service) searchParams.set("service", params.service);
   if (params?.contractorId) searchParams.set("contractorId", String(params.contractorId));
   if (params?.minValue !== undefined) searchParams.set("minValue", String(params.minValue));
   if (params?.maxValue !== undefined) searchParams.set("maxValue", String(params.maxValue));
@@ -356,7 +363,23 @@ export interface ObjectRecord {
   name: string;
   address: string | null;
   city: string | null;
+  /**
+   * @deprecated Zastąpione rozdzielnymi usługami (`hasCameras` + `cameraCount`,
+   * `hasSswin`, `hasVideoreception`, `hasOfi`). Backend jeszcze je zwraca, ale
+   * front go NIE czyta — kolumna zniknie z bazy osobną migracją.
+   */
   type: "monitoring" | "physical" | "alarm" | "mixed";
+  /**
+   * USŁUGI ŚWIADCZONE NA OBIEKCIE — niezależne, dowolny mix. Decydują o tym,
+   * którym kluczem liczy się koszt osobowy: OFI z godzin pracowników obiektu,
+   * reszta udziałem w koszcie centrum monitorowania.
+   */
+  hasCameras: boolean;
+  /** null przy `hasCameras` = usługa jest, ale nikt nie policzył kamer — to NIE zero. */
+  cameraCount: number | null;
+  hasSswin: boolean;
+  hasVideoreception: boolean;
+  hasOfi: boolean;
   installationType: "new" | "takeover";
   status: "pending" | "in_progress" | "active" | "inactive";
   department: "sales" | "technical" | "accounting";
@@ -396,7 +419,13 @@ export interface ObjectInput {
   name: string;
   address?: string;
   city?: string;
-  type: "monitoring" | "physical" | "alarm" | "mixed";
+  /** Usługi obiektu; backend dolicza z nich sposób liczenia kosztu osobowego. */
+  hasCameras?: boolean;
+  /** null = „usługa jest, ale kamer nikt nie policzył” (a nie zero kamer). */
+  cameraCount?: number | null;
+  hasSswin?: boolean;
+  hasVideoreception?: boolean;
+  hasOfi?: boolean;
   installationType: "new" | "takeover";
   status?: "pending" | "in_progress" | "active" | "inactive";
   department?: "sales" | "technical" | "accounting";
@@ -551,7 +580,13 @@ export interface OrderInput {
   contractorEmail?: string;
   contractorContactPerson?: string;
   // Additional object data when creating new
-  objectType?: "monitoring" | "physical" | "alarm" | "mixed";
+  /** Usługi zakładanego obiektu (zamiast dawnego jednego „typu ochrony”). */
+  objectHasCameras?: boolean;
+  /** null/undefined = usługa jest, ale kamer nikt nie policzył. */
+  objectCameraCount?: number | null;
+  objectHasSswin?: boolean;
+  objectHasVideoreception?: boolean;
+  objectHasOfi?: boolean;
   objectInstallationType?: "new" | "takeover";
 }
 
@@ -4786,7 +4821,21 @@ export interface AnalyticsObjectRow {
   id: number;
   name: string;
   city: string | null;
-  type: "monitoring" | "physical" | "alarm" | "mixed";
+  /**
+   * Usługi obiektu — z nich składa się kolumna „Usługi” i przekrój po usługach.
+   * Analityka ma własne, zwięzłe nazwy pól (src/routes/analytics.ts →
+   * `ObjectServicesInfo`); kartoteka trzyma je jako `hasCameras` itd.
+   */
+  services?: {
+    sswin: boolean;
+    cameras: boolean;
+    /** null przy `cameras` = usługa jest, ale kamer nikt nie policzył (≠ zero). */
+    cameraCount: number | null;
+    ofi: boolean;
+    videoreception: boolean;
+  };
+  /** Waga obiektu w podziale kosztu centrum monitorowania (SSWiN + wideorecepcja + kamery). */
+  serviceUnits?: number;
   status: "pending" | "in_progress" | "active" | "inactive";
   contractorId: number;
   contractorName: string | null;
@@ -4813,7 +4862,11 @@ export interface AnalyticsObjectRow {
 
 export interface AnalyticsObjectsData extends AnalyticsEnvelope {
   rows: AnalyticsObjectRow[];
-  byType: AnalyticsBucket[];
+  /**
+   * Przekrój po usługach. NIE SUMUJE SIĘ do całości: obiekt z kamerami i SSWiN-em
+   * wchodzi do obu kubełków, a obiekt bez ani jednej usługi — do żadnego.
+   */
+  byService: AnalyticsBucket[];
   byStatus: AnalyticsBucket[];
   byCompany: AnalyticsBucket[];
   /** Zawsze 6 pozycji: „<0%”, „0–20”, „20–40”, „40–60”, „60%+”, „brak danych”. */

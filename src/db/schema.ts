@@ -71,9 +71,35 @@ export const objects = sqliteTable("objects", {
   name: text("name").notNull(),
   address: text("address"),
   city: text("city"),
+  /**
+   * @deprecated Zastąpione rozdzielnymi usługami (hasSswin / hasCameras +
+   * cameraCount / hasOfi / hasVideoreception). Jeden wybór nie opisywał obiektu,
+   * na którym jest i alarm, i kamery, i warta — a od tego zależy, którym kluczem
+   * liczy się koszt. Kolumna znika w osobnej migracji, gdy nic jej już nie czyta.
+   */
   type: text("type", {
     enum: ["monitoring", "physical", "alarm", "mixed"],
   }).notNull(),
+  /**
+   * USŁUGI ŚWIADCZONE NA OBIEKCIE — niezależne od siebie, dowolny mix.
+   * Decydują o tym, którym kluczem liczy się koszt osobowy:
+   *  - ochrona fizyczna (OFI) → koszt wprost z godzin pracowników TEGO obiektu,
+   *  - SSWiN / kamery / wideorecepcja → udział w koszcie centrum monitorowania,
+   *    dzielonym po wszystkich dozorowanych jednostkach w firmie.
+   */
+  hasSswin: integer("has_sswin", { mode: "boolean" }).default(false).notNull(),
+  hasCameras: integer("has_cameras", { mode: "boolean" }).default(false).notNull(),
+  /**
+   * Liczba kamer. NULL przy `hasCameras` = usługa jest, ale nikt nie policzył ilu —
+   * i to NIE to samo, co zero. Taki obiekt nie ma jak wejść do podziału kosztu CMA
+   * (nie znamy jego wagi), więc jest zgłaszany jako brak danych, dokładnie tak samo
+   * jak nieuzupełniony koszt.
+   */
+  cameraCount: integer("camera_count"),
+  hasOfi: integer("has_ofi", { mode: "boolean" }).default(false).notNull(),
+  hasVideoreception: integer("has_videoreception", { mode: "boolean" })
+    .default(false)
+    .notNull(),
   installationType: text("installation_type", {
     enum: ["new", "takeover"],
   }).notNull(),
@@ -1061,6 +1087,14 @@ export const hrObjects = sqliteTable("hr_objects", {
   objectId: integer("object_id").references(() => objects.id, {
     onDelete: "set null",
   }),
+  /**
+   * Pozycja jest PULĄ CENTRUM MONITOROWANIA. Jej koszt nie należy do żadnego
+   * pojedynczego obiektu — rozdziela się po wszystkich dozorowanych jednostkach
+   * (SSWiN, wideorecepcja i każda kamera liczą się po jednym). Domyślnie false;
+   * w praktyce ustawia się to na jednej pozycji („CMA", 31 tys. godzin).
+   * Wyklucza się z `objectId`: pula nie wskazuje obiektu.
+   */
+  isCmaPool: integer("is_cma_pool", { mode: "boolean" }).default(false).notNull(),
   active: integer("active", { mode: "boolean" }).default(true).notNull(),
   createdAt: text("created_at")
     .default(sql`(datetime('now'))`)

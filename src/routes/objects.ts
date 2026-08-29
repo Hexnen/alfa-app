@@ -10,6 +10,7 @@ import type {
   ObjectStatus,
   Department,
 } from "../types/index.js";
+import { legacyObjectType } from "../lib/object-services.js";
 
 const app = new Hono();
 
@@ -19,10 +20,33 @@ const objectSalesperson = alias(schema.salespeople, "object_salesperson");
 const contractorSalesperson = alias(schema.salespeople, "contractor_salesperson");
 
 /**
- * Sortowanie listy obiektów. Klucze `type`, `status` i `department` układamy CASE-em,
+ * Filtr po USŁUDZE (`?service=`). Usługi nie są rozłączne — obiekt z kamerami
+ * i SSWiN-em wpada do obu filtrów — więc filtr wybiera obiekty MAJĄCE daną usługę,
+ * a nie „obiekty tego typu”. Klucze są te same, co etykiety na froncie
+ * (frontend/src/lib/utils.ts → objectServiceLabels).
+ */
+const SERVICE_COLUMNS = {
+  kamery: schema.objects.hasCameras,
+  sswin: schema.objects.hasSswin,
+  wideorecepcja: schema.objects.hasVideoreception,
+  ofi: schema.objects.hasOfi,
+} as const;
+
+type ServiceKey = keyof typeof SERVICE_COLUMNS;
+
+function isServiceKey(v: string): v is ServiceKey {
+  return Object.prototype.hasOwnProperty.call(SERVICE_COLUMNS, v);
+}
+
+/**
+ * Sortowanie listy obiektów. Klucze `status` i `department` układamy CASE-em,
  * bo alfabetyczne sortowanie wartości z bazy ("active", "in_progress"…) nie ma dla
- * użytkownika sensu: status ma naturalną kolejność procesu, a typ i dział sortujemy
+ * użytkownika sensu: status ma naturalną kolejność procesu, a dział sortujemy
  * w kolejności polskich etykiet z frontu (frontend/src/lib/utils.ts).
+ *
+ * Nie ma klucza po usługach: usługi to zbiór, a nie jedna wartość — nie da się
+ * ich ustawić w porządek, który cokolwiek znaczy. Kolumna „Usługi” na liście
+ * jest więc nieklikalna.
  *
  * `monthly_value`, `monthly_cost` i wyliczony z nich zysk bywają puste („brak abonamentu”,
  * „koszt nieuzupełniony”) — puste zawsze lądują na końcu, niezależnie od kierunku, żeby nie
@@ -32,7 +56,6 @@ const SORT_COLUMNS = {
   name: sql`lower(${schema.objects.name})`,
   contractor: sql`lower(coalesce(${schema.contractors.name}, ''))`,
   city: sql`lower(coalesce(${schema.objects.city}, ''))`,
-  type: sql`case ${schema.objects.type} when 'alarm' then 0 when 'mixed' then 1 when 'monitoring' then 2 when 'physical' then 3 else 4 end`,
   status: sql`case ${schema.objects.status} when 'pending' then 0 when 'in_progress' then 1 when 'active' then 2 when 'inactive' then 3 else 4 end`,
   department: sql`case ${schema.objects.department} when 'sales' then 0 when 'accounting' then 1 when 'technical' then 2 else 3 end`,
   company: sql`lower(coalesce(${schema.companies.name}, 'zzzz'))`,
@@ -64,7 +87,7 @@ app.get("/", async (c) => {
   const search = c.req.query("search");
   const status = c.req.query("status");
   const department = c.req.query("department");
-  const type = c.req.query("type");
+  const service = c.req.query("service");
   const contractorId = c.req.query("contractorId");
   const minValue = numberParam(c.req.query("minValue"));
   const maxValue = numberParam(c.req.query("maxValue"));
@@ -108,10 +131,10 @@ app.get("/", async (c) => {
     conditions.push(eq(schema.objects.department, department as Department));
   }
 
-  if (type) {
-    conditions.push(
-      eq(schema.objects.type, type as "monitoring" | "physical" | "alarm" | "mixed")
-    );
+  // Nieznany klucz usługi po prostu nie nakłada filtru (tak samo jak nieznany
+  // klucz sortowania) — literówka w URL-u nie może zwracać pustej listy.
+  if (service && isServiceKey(service)) {
+    conditions.push(eq(SERVICE_COLUMNS[service], true));
   }
 
   if (contractorId) {
@@ -354,7 +377,16 @@ app.post("/", async (c) => {
         name: body.name,
         address: body.address,
         city: body.city,
-        type: body.type,
+        // Kolumna `type` jest @deprecated i wciąż NOT NULL, więc wyliczamy ją
+        // z usług; jawnie podana wartość (starsi klienci API) ma pierwszeństwo.
+        type: body.type ?? legacyObjectType(body),
+        hasCameras: body.hasCameras ?? false,
+        // `?? null` zamiast `|| null`: 0 kamer to świadomy wpis, a null znaczy
+        // „usługa jest, ale nikt ich nie policzył” i tak ma zostać zapisane.
+        cameraCount: body.hasCameras ? body.cameraCount ?? null : null,
+        hasSswin: body.hasSswin ?? false,
+        hasVideoreception: body.hasVideoreception ?? false,
+        hasOfi: body.hasOfi ?? false,
         installationType: body.installationType,
         status: body.status || "pending",
         department: body.department || "sales",
@@ -416,10 +448,28 @@ app.put("/:id", async (c) => {
 
     if (!existing) return null;
 
+    // Gdy edycja rusza usługi, przeliczamy razem z nimi @deprecated `type` —
+    // dopóki kolumna istnieje i ktoś ją czyta (analityka), nie może zostać
+    // z wartością sprzed zmiany usług.
+    const touchesServices =
+      body.hasCameras !== undefined ||
+      body.hasSswin !== undefined ||
+      body.hasVideoreception !== undefined ||
+      body.hasOfi !== undefined;
+    const services = {
+      hasCameras: body.hasCameras ?? existing.hasCameras,
+      hasSswin: body.hasSswin ?? existing.hasSswin,
+      hasVideoreception: body.hasVideoreception ?? existing.hasVideoreception,
+      hasOfi: body.hasOfi ?? existing.hasOfi,
+    };
+
     const updated = tx
       .update(schema.objects)
       .set({
         ...body,
+        // Wyłączona usługa nie zostawia po sobie liczby kamer.
+        ...(body.hasCameras === false ? { cameraCount: null } : {}),
+        ...(touchesServices ? { type: legacyObjectType(services) } : {}),
         updatedAt: new Date().toISOString(),
       })
       .where(eq(schema.objects.id, id))

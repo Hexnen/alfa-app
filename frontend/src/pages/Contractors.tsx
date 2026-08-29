@@ -38,7 +38,7 @@ import {
   type ContractorInput,
   type ObjectWithContractor,
 } from "@/lib/api";
-import { formatCurrency, objectTypeLabels, statusLabels } from "@/lib/utils";
+import { formatCurrency, objectServicesLabel, statusLabels } from "@/lib/utils";
 
 const statusColors: Record<string, "warning" | "info" | "success" | "secondary"> = {
   pending: "warning",
@@ -457,7 +457,7 @@ export function Contractors() {
                                         Miasto
                                       </th>
                                       <th className="py-1 px-2 text-left font-medium">
-                                        Typ
+                                        Usługi
                                       </th>
                                       <th className="py-1 px-2 text-left font-medium">
                                         Status
@@ -486,7 +486,7 @@ export function Contractors() {
                                         </td>
                                         <td className="py-1.5 px-2">{o.city || "-"}</td>
                                         <td className="py-1.5 px-2">
-                                          {objectTypeLabels[o.type] || o.type}
+                                          {objectServicesLabel(o)}
                                         </td>
                                         <td className="py-1.5 px-2">
                                           <Badge variant={statusColors[o.status]}>
