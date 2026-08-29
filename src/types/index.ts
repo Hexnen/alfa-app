@@ -86,6 +86,10 @@ export interface ObjectInput {
   status?: ObjectStatus;
   department?: Department;
   monthlyValue?: number;
+  /** Miesięczny koszt obsługi obiektu (null = nieuzupełniony, to NIE jest zero). */
+  monthlyCost?: number | null;
+  /** Jednorazowy koszt uruchomienia (null = nieuzupełniony, to NIE jest zero). */
+  setupCost?: number | null;
   notes?: string;
   /** Handlowiec prowadzący obiekt (null = opiekun kontrahenta). */
   salespersonId?: number | null;

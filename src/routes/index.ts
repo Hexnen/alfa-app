@@ -29,6 +29,7 @@ import adminCompanyRoutes from "./admin-company.js";
 import assistantRoutes from "./assistant.js";
 import calendarRoutes, { calendarPublicRoutes } from "./calendar.js";
 import activityRoutes from "./activity.js";
+import analyticsRoutes from "./analytics.js";
 import { requireAuth, requireAssistantAccess, tabPermissionGuard } from "../middleware/auth.js";
 import { db, schema } from "../db/index.js";
 import { sql, eq } from "drizzle-orm";
@@ -199,5 +200,9 @@ api.route("/monitoring", monitoringRoutes);
 api.route("/monitored-objects", monitoredObjectsRoutes);
 api.route("/hr", hrRoutes);
 api.route("/warehouse", warehouseRoutes);
+// Analityka finansowa — montowana TUTAJ, czyli poniżej api.use("*", tabPermissionGuard).
+// W bloku nad strażnikiem (obok /calendar czy /company-lookup) wystawiłaby przychody,
+// koszty i wynagrodzenia handlowców każdemu zalogowanemu użytkownikowi.
+api.route("/analytics", analyticsRoutes);
 
 export default api;

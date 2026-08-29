@@ -115,6 +115,8 @@ export type ObjectSortKey =
   | "salesperson"
   | "company"
   | "value"
+  | "cost"
+  | "profit"
   | "created";
 
 /** Lista obiektów + podsumowanie CAŁEGO wyniku filtrowania (nie tylko strony). */
@@ -129,6 +131,12 @@ export interface ObjectsResponse extends PaginatedResponse<ObjectWithContractor>
   totalMonthlyValue: number;
   /** Ile z nich ma niezerowy abonament. */
   withMonthlyValue: number;
+  /** Suma kosztów miesięcznych (puste liczone jak 0 — patrz withMonthlyCost). */
+  totalMonthlyCost: number;
+  /** Ile obiektów ma UZUPEŁNIONY koszt. Puste ≠ 0 zł, więc bez tej liczby marża kłamie. */
+  withMonthlyCost: number;
+  /** Suma jednorazowych kosztów instalacji. */
+  totalSetupCost: number;
 }
 
 export async function getObjects(params?: {
@@ -142,6 +150,11 @@ export async function getObjects(params?: {
   maxValue?: number;
   /** "1" = tylko z abonamentem, "0" = tylko bez. */
   hasValue?: "1" | "0";
+  /** Widełki kosztu miesięcznego (obiekt bez kosztu nigdy w nie nie wpada). */
+  minCost?: number;
+  maxCost?: number;
+  /** "1" = tylko z uzupełnionym kosztem, "0" = tylko nieuzupełnione. */
+  hasCost?: "1" | "0";
   /** Zakładka: bieżące (wszystko poza „nieaktywny”) albo archiwalne. */
   scope?: "current" | "archived";
   /** Id handlowca albo "none" = obiekty bez opiekuna. */
@@ -162,6 +175,9 @@ export async function getObjects(params?: {
   if (params?.minValue !== undefined) searchParams.set("minValue", String(params.minValue));
   if (params?.maxValue !== undefined) searchParams.set("maxValue", String(params.maxValue));
   if (params?.hasValue) searchParams.set("hasValue", params.hasValue);
+  if (params?.minCost !== undefined) searchParams.set("minCost", String(params.minCost));
+  if (params?.maxCost !== undefined) searchParams.set("maxCost", String(params.maxCost));
+  if (params?.hasCost) searchParams.set("hasCost", params.hasCost);
   if (params?.scope) searchParams.set("scope", params.scope);
   if (params?.salespersonId !== undefined) searchParams.set("salespersonId", String(params.salespersonId));
   if (params?.companyId !== undefined) searchParams.set("companyId", String(params.companyId));
@@ -299,12 +315,18 @@ export interface Contractor {
   activeObjectsCount?: number;
   /** Suma wartości miesięcznych obiektów tego kontrahenta. */
   objectsMonthlyValue?: number;
+  /** Suma kosztów miesięcznych jego obiektów (puste liczone jak 0). */
+  objectsMonthlyCost?: number;
+  /** Suma jednorazowych kosztów instalacji jego obiektów. */
+  objectsSetupCost?: number;
 }
 
 /** Lista kontrahentów + podsumowanie całego wyniku filtrowania. */
 export interface ContractorsResponse extends PaginatedResponse<Contractor> {
   totalObjects: number;
   totalMonthlyValue: number;
+  totalMonthlyCost: number;
+  totalSetupCost: number;
   /** Liczniki zakładek „Aktualni” / „Archiwalni” przy bieżącej szukajce. */
   activeCount: number;
   archivedCount: number;
@@ -339,6 +361,10 @@ export interface ObjectRecord {
   status: "pending" | "in_progress" | "active" | "inactive";
   department: "sales" | "technical" | "accounting";
   monthlyValue: number | null;
+  /** Miesięczny koszt obsługi. null = NIEUZUPEŁNIONY, co nie znaczy 0 zł. */
+  monthlyCost: number | null;
+  /** Jednorazowy koszt instalacji / wdrożenia. */
+  setupCost: number | null;
   notes: string | null;
   /**
    * Współrzędne obiektu (kalkulacja dystansu biuro → obiekt). Uzupełniane
@@ -375,6 +401,10 @@ export interface ObjectInput {
   status?: "pending" | "in_progress" | "active" | "inactive";
   department?: "sales" | "technical" | "accounting";
   monthlyValue?: number;
+  /** Koszt miesięczny; null czyści wartość („nieuzupełniony”). */
+  monthlyCost?: number | null;
+  /** Jednorazowy koszt instalacji; null czyści wartość. */
+  setupCost?: number | null;
   notes?: string;
   /** Ignorowane przez starszy backend — bezpieczne do wysłania zawsze. */
   latitude?: number | null;
@@ -1354,13 +1384,22 @@ export interface Salesperson {
   phone: string | null;
   email: string | null;
   region: string | null;
+  /** Ile handlowiec kosztuje firmę miesięcznie. null = nieuzupełniony. */
+  monthlyCost: number | null;
+  /** Prowizja w % od przychodu portfela (0–100). null = brak prowizji. */
+  commissionRate: number | null;
   notes: string | null;
   active: boolean;
   /** Liczone przez API: ilu kontrahentów i ile obiektów prowadzi. */
   contractorsCount?: number;
   objectsCount?: number;
-  /** Suma abonamentów obiektów przypisanych wprost do handlowca. */
+  /**
+   * Portfel handlowca: obiekty przypisane wprost ORAZ odziedziczone po kontrahencie —
+   * ta sama reguła, co na liście obiektów i w Analityce.
+   */
   objectsMonthlyValue?: number;
+  objectsMonthlyCost?: number;
+  objectsSetupCost?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -1371,6 +1410,10 @@ export interface SalespersonInput {
   phone?: string;
   email?: string;
   region?: string;
+  /** Koszt miesięczny handlowca; null czyści wartość. */
+  monthlyCost?: number | null;
+  /** Prowizja w % (0–100); null czyści wartość. Backend odrzuca spoza zakresu. */
+  commissionRate?: number | null;
   notes?: string;
   active?: boolean;
 }
@@ -2252,6 +2295,7 @@ export async function deleteMonitoringPhoto(photoId: number) {
 // Kadry — pracownicy, obiekty, normy, godziny, umowy, wynagrodzenia, biuro
 // ---------------------------------------------------------------------------
 
+/** Rodzaj rozliczenia pracownika: ochrona = umowy kadrowe, biuro = zestawienie biura. */
 export type HrEmployeeKind = "ochrona" | "biuro";
 
 export interface HrEmployee {
@@ -4487,3 +4531,200 @@ export const errStatus = (e: unknown): number | undefined =>
 
 /** Czy błąd oznacza „backend nie ma jeszcze tego endpointu". */
 export const isMissingEndpoint = (e: unknown): boolean => errStatus(e) === 404;
+
+// ---------------------------------------------------------------------------
+// Analityka — przychód / koszt / zysk w trzech przekrojach
+// ---------------------------------------------------------------------------
+//
+// Wszystkie trzy widoki mówią tym samym słownikiem faktów, liczonym w
+// src/routes/analytics.ts:
+//   revenue = coalesce(monthly_value, 0)     cost = coalesce(monthly_cost, 0)
+//   profit  = revenue - cost                 margin = profit / revenue * 100
+// Kluczowe rozróżnienie: koszt NULL znaczy „nieuzupełniony”, a nie 0 zł.
+// Sumy traktują go jak zero, ale `objectsWithCost` / `coverage` mówią, na ilu
+// obiektach ta arytmetyka w ogóle się opiera — bez tego marża kłamie.
+
+/** Zakres danych: bieżące (bez archiwum), tylko aktywne, albo wszystko. */
+export type AnalyticsScope = "current" | "active" | "all";
+
+export interface AnalyticsTotals {
+  objects: number;
+  /** Ile obiektów ma UZUPEŁNIONY koszt (monthly_cost IS NOT NULL). */
+  objectsWithCost: number;
+  /** objectsWithCost / objects, 0..1 — „na ilu obiektach opiera się marża”. */
+  coverage: number;
+  revenue: number;
+  cost: number;
+  profit: number;
+  /** Procent; null gdy przychód = 0 (marża byłaby dzieleniem przez zero). */
+  margin: number | null;
+  setupCost: number;
+  /** Średni przychód na obiekt; null gdy brak obiektów. */
+  arpo: number | null;
+  /** Obiekty z uzupełnionym kosztem i ujemnym zyskiem. */
+  unprofitable: number;
+  noRevenue: number;
+}
+
+/** Kubełek zestawienia (wg typu, statusu, spółki, przedziału marży). */
+export interface AnalyticsBucket {
+  key: string;
+  /** Gotowa etykieta z backendu; brak = front zna własną (label mapy z utils). */
+  label?: string;
+  count: number;
+  revenue: number;
+  cost: number;
+  profit: number;
+}
+
+/** Wspólna koperta odpowiedzi wszystkich trzech widoków. */
+interface AnalyticsEnvelope {
+  scope: AnalyticsScope;
+  generatedAt: string;
+  totals: AnalyticsTotals;
+}
+
+export interface AnalyticsContractorRow {
+  id: number;
+  name: string;
+  city: string | null;
+  active: boolean;
+  salesperson: { id: number; firstName: string; lastName: string } | null;
+  objectsCount: number;
+  activeObjectsCount: number;
+  objectsWithCost: number;
+  revenue: number;
+  cost: number;
+  profit: number;
+  margin: number | null;
+  setupCost: number;
+  /** Miesiące zwrotu z instalacji; null = brak nakładu albo zysk <= 0. */
+  payback: number | null;
+  arpo: number | null;
+}
+
+export interface AnalyticsContractorsData extends AnalyticsEnvelope {
+  rows: AnalyticsContractorRow[];
+  /** Kontrahenci bez ani jednego obiektu — poza rankingami, ale warto o nich wiedzieć. */
+  contractorsWithoutObjects: number;
+}
+
+export interface AnalyticsObjectRow {
+  id: number;
+  name: string;
+  city: string | null;
+  type: "monitoring" | "physical" | "alarm" | "mixed";
+  status: "pending" | "in_progress" | "active" | "inactive";
+  contractorId: number;
+  contractorName: string | null;
+  companyName: string | null;
+  salesperson: {
+    id: number;
+    firstName: string;
+    lastName: string;
+    /** true = opiekun kontrahenta, obiekt nie ma własnego handlowca. */
+    inherited: boolean;
+  } | null;
+  revenue: number;
+  cost: number;
+  profit: number;
+  margin: number | null;
+  setupCost: number;
+  payback: number | null;
+  /** false = koszt nieuzupełniony; marża i zysk są wtedy nieznane, nie zerowe. */
+  hasCost: boolean;
+}
+
+export interface AnalyticsObjectsData extends AnalyticsEnvelope {
+  rows: AnalyticsObjectRow[];
+  byType: AnalyticsBucket[];
+  byStatus: AnalyticsBucket[];
+  byCompany: AnalyticsBucket[];
+  /** Zawsze 6 pozycji: „<0%”, „0–20”, „20–40”, „40–60”, „60%+”, „brak danych”. */
+  marginBuckets: AnalyticsBucket[];
+}
+
+export interface AnalyticsSalespersonRow {
+  id: number;
+  firstName: string;
+  lastName: string;
+  region: string | null;
+  active: boolean;
+  contractorsCount: number;
+  objectsCount: number;
+  objectsWithCost: number;
+  unprofitableObjects: number;
+  revenue: number;
+  objectsCost: number;
+  setupCost: number;
+  /** Koszt własny handlowca (wynagrodzenie, auto, telefon). */
+  ownCost: number;
+  commissionRate: number | null;
+  commission: number;
+  /** Marża portfela PRZED kosztem handlowca: revenue - objectsCost. */
+  contribution: number;
+  /** contribution - ownCost - commission. */
+  profit: number;
+  margin: number | null;
+  /** Ile złotych przychodu na złotówkę kosztu handlowca; < 1 = nie zarabia na siebie. */
+  roi: number | null;
+}
+
+/** Portfel bez opiekuna — przychód, którego nikt nie prowadzi. */
+export interface AnalyticsUnassigned {
+  objectsCount: number;
+  objectsWithCost: number;
+  unprofitableObjects: number;
+  revenue: number;
+  objectsCost: number;
+  setupCost: number;
+  profit: number;
+  margin: number | null;
+}
+
+export interface AnalyticsSalespeopleData extends AnalyticsEnvelope {
+  totals: AnalyticsTotals & {
+    salespeopleCost: number;
+    commission: number;
+    netProfit: number;
+    unassignedRevenue: number;
+    salespeopleWithCost: number;
+  };
+  rows: AnalyticsSalespersonRow[];
+  unassigned: AnalyticsUnassigned;
+}
+
+function analyticsQuery(params?: { scope?: AnalyticsScope; limit?: number }) {
+  const sp = new URLSearchParams();
+  if (params?.scope) sp.set("scope", params.scope);
+  if (params?.limit) sp.set("limit", String(params.limit));
+  const q = sp.toString();
+  return q ? `?${q}` : "";
+}
+
+export async function getAnalyticsContractors(params?: {
+  scope?: AnalyticsScope;
+  limit?: number;
+}) {
+  return request<ApiResponse<AnalyticsContractorsData>>(
+    `/analytics/kontrahenci${analyticsQuery(params)}`
+  );
+}
+
+export async function getAnalyticsObjects(params?: {
+  scope?: AnalyticsScope;
+  limit?: number;
+}) {
+  return request<ApiResponse<AnalyticsObjectsData>>(
+    `/analytics/obiekty${analyticsQuery(params)}`
+  );
+}
+
+export async function getAnalyticsSalespeople(params?: {
+  scope?: AnalyticsScope;
+  limit?: number;
+}) {
+  return request<ApiResponse<AnalyticsSalespeopleData>>(
+    `/analytics/handlowcy${analyticsQuery(params)}`
+  );
+}

@@ -63,6 +63,7 @@ app.get("/", async (c) => {
   // Zakładki: "1" = aktualni, "0" = archiwalni, brak parametru = wszyscy.
   const activeParam = c.req.query("active");
   const salespersonParam = c.req.query("salespersonId");
+  const companyParam = c.req.query("companyId");
   const searchClause = search
     ? or(
         like(schema.contractors.name, `%${search}%`),
@@ -83,7 +84,17 @@ app.get("/", async (c) => {
       : salespersonParam
         ? eq(schema.contractors.salespersonId, parseInt(salespersonParam))
         : undefined;
-  const parts = [searchClause, activeClause, salespersonClause].filter(Boolean);
+  // Spółka nie jest atrybutem kontrahenta tylko jego obiektów, więc filtr znaczy
+  // „ma PRZYNAJMNIEJ JEDEN obiekt w tej spółce" ("none" = obiekt bez przypisanej
+  // spółki). EXISTS zamiast warunku na dołączonej tabeli, żeby nie okroić agregatów
+  // liczonych po GROUP BY — kontrahent nadal pokazuje sumy z całego swojego portfela.
+  const companyClause =
+    companyParam === "none"
+      ? sql`exists (select 1 from objects o_company where o_company.contractor_id = contractors.id and o_company.company_id is null)`
+      : companyParam
+        ? sql`exists (select 1 from objects o_company where o_company.contractor_id = contractors.id and o_company.company_id = ${parseInt(companyParam)})`
+        : undefined;
+  const parts = [searchClause, activeClause, salespersonClause, companyClause].filter(Boolean);
   const whereClause = parts.length > 1 ? and(...parts) : parts[0];
 
   const rows = await db
@@ -98,6 +109,8 @@ app.get("/", async (c) => {
       objectsCount: sql<number>`count(${schema.objects.id})`,
       activeObjectsCount: sql<number>`sum(case when ${schema.objects.status} = 'active' then 1 else 0 end)`,
       objectsMonthlyValue: sql<number>`coalesce(sum(${schema.objects.monthlyValue}), 0)`,
+      objectsMonthlyCost: sql<number>`coalesce(sum(${schema.objects.monthlyCost}), 0)`,
+      objectsSetupCost: sql<number>`coalesce(sum(${schema.objects.setupCost}), 0)`,
     })
     .from(schema.contractors)
     .leftJoin(schema.objects, eq(schema.objects.contractorId, schema.contractors.id))
@@ -120,6 +133,8 @@ app.get("/", async (c) => {
     .select({
       objects: sql<number>`count(${schema.objects.id})`,
       value: sql<number>`coalesce(sum(${schema.objects.monthlyValue}), 0)`,
+      monthlyCost: sql<number>`coalesce(sum(${schema.objects.monthlyCost}), 0)`,
+      setupCost: sql<number>`coalesce(sum(${schema.objects.setupCost}), 0)`,
     })
     .from(schema.contractors)
     .leftJoin(schema.objects, eq(schema.objects.contractorId, schema.contractors.id))
@@ -143,6 +158,8 @@ app.get("/", async (c) => {
       objectsCount: r.objectsCount ?? 0,
       activeObjectsCount: r.activeObjectsCount ?? 0,
       objectsMonthlyValue: r.objectsMonthlyValue ?? 0,
+      objectsMonthlyCost: r.objectsMonthlyCost ?? 0,
+      objectsSetupCost: r.objectsSetupCost ?? 0,
     })),
     total,
     page,
@@ -150,6 +167,8 @@ app.get("/", async (c) => {
     totalPages: Math.ceil(total / pageSize),
     totalObjects: totalsResult[0].objects ?? 0,
     totalMonthlyValue: totalsResult[0].value ?? 0,
+    totalMonthlyCost: totalsResult[0].monthlyCost ?? 0,
+    totalSetupCost: totalsResult[0].setupCost ?? 0,
     activeCount: tabsResult[0].active ?? 0,
     archivedCount: tabsResult[0].archived ?? 0,
   });

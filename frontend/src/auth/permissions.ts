@@ -18,6 +18,12 @@ export const TABS: TabDef[] = [
   { key: "spolki", label: "Spółki", group: "Ogólne" },
   { key: "contracts", label: "Umowy", group: "Ogólne" },
   { key: "orders", label: "Zlecenia", group: "Ogólne" },
+  // Analityka — widoki finansowe (przychód/koszt/zysk). Każda podzakładka ma
+  // WŁASNY klucz, bo pokazują dane o różnej wrażliwości (rentowność klientów,
+  // obiektów i wynagrodzenia handlowców) i nadaje się je nadawać osobno.
+  { key: "analityka/kontrahenci", label: "Kontrahenci", group: "Analityka" },
+  { key: "analityka/obiekty", label: "Obiekty", group: "Analityka" },
+  { key: "analityka/handlowcy", label: "Handlowcy", group: "Analityka" },
   { key: "kadry/wynagrodzenia", label: "Wynagrodzenia", group: "Kadry" },
   { key: "kadry/godziny", label: "Godziny", group: "Kadry" },
   // Pracownicy = kartoteka osób razem z umowami (dawne "kadry/umowy");

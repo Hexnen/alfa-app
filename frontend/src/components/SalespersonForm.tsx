@@ -33,6 +33,8 @@ export function SalespersonForm({
     phone: salesperson?.phone || "",
     email: salesperson?.email || "",
     region: salesperson?.region || "",
+    monthlyCost: salesperson?.monthlyCost ?? null,
+    commissionRate: salesperson?.commissionRate ?? null,
     notes: salesperson?.notes || "",
     active: salesperson?.active ?? true,
   });
@@ -108,6 +110,46 @@ export function SalespersonForm({
               value={formData.region}
               onChange={(e) => setField("region", e.target.value)}
             />
+          </div>
+
+          <div className="space-y-2">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="salesperson-monthly-cost">Koszt miesięczny (PLN)</Label>
+                {/* Puste pole to „nieuzupełniony”, więc `null`, a nie 0 zł. */}
+                <Input
+                  id="salesperson-monthly-cost"
+                  data-testid="salesperson-monthly-cost"
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  className="tabular-nums"
+                  value={formData.monthlyCost ?? ""}
+                  onChange={(e) =>
+                    setField("monthlyCost", e.target.value === "" ? null : Number(e.target.value))
+                  }
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="salesperson-commission">Prowizja (%)</Label>
+                <Input
+                  id="salesperson-commission"
+                  data-testid="salesperson-commission"
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  max="100"
+                  className="tabular-nums"
+                  value={formData.commissionRate ?? ""}
+                  onChange={(e) =>
+                    setField("commissionRate", e.target.value === "" ? null : Number(e.target.value))
+                  }
+                />
+              </div>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Wynagrodzenie, auto, telefon — używane w Analityce do liczenia zysku portfela.
+            </p>
           </div>
 
           <div className="space-y-2">

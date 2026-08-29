@@ -77,6 +77,8 @@ const DEFAULT_DIR: Record<ObjectSortKey, "asc" | "desc"> = {
   salesperson: "asc",
   company: "asc",
   value: "desc",
+  cost: "desc",
+  profit: "desc",
   created: "desc",
 };
 
@@ -85,7 +87,13 @@ export function Objects() {
   const { canEdit } = usePerms();
   const editable = canEdit("objects");
   const [objects, setObjects] = useState<ObjectWithContractor[]>([]);
-  const [summary, setSummary] = useState({ total: 0, value: 0, withValue: 0 });
+  const [summary, setSummary] = useState({
+    total: 0,
+    value: 0,
+    withValue: 0,
+    cost: 0,
+    withCost: 0,
+  });
   const [contractors, setContractors] = useState<Contractor[]>([]);
   const [salespeople, setSalespeople] = useState<Salesperson[]>([]);
   const [companies, setCompanies] = useState<Company[]>([]);
@@ -187,6 +195,8 @@ export function Objects() {
         total: res.total,
         value: res.totalMonthlyValue ?? 0,
         withValue: res.withMonthlyValue ?? 0,
+        cost: res.totalMonthlyCost ?? 0,
+        withCost: res.withMonthlyCost ?? 0,
       });
       setTabCounts({ current: res.currentCount ?? 0, archived: res.archivedCount ?? 0 });
     } catch (error) {
@@ -324,6 +334,13 @@ export function Objects() {
     if (summary.withValue > 0) {
       parts.push(`suma abonamentów ${formatCurrency(summary.value)} / mies.`);
       parts.push(`z abonamentem: ${summary.withValue}`);
+    }
+    // Koszty pokazujemy tylko, gdy ktoś je w ogóle uzupełnił — inaczej „zysk”
+    // byłby po prostu przepisaną sumą abonamentów i wprowadzał w błąd.
+    if (summary.withCost > 0) {
+      parts.push(`koszty ${formatCurrency(summary.cost)}`);
+      parts.push(`zysk ${formatCurrency(summary.value - summary.cost)}`);
+      parts.push(`koszt uzupełniony: ${summary.withCost}`);
     }
     return parts.join(" · ");
   }, [summary]);
@@ -540,6 +557,8 @@ export function Objects() {
                     <SortHeader label="Spółka" sortKey="company" />
                     <SortHeader label="Handlowiec" sortKey="salesperson" />
                     <SortHeader label="Wartosc mies." sortKey="value" align="right" />
+                    <SortHeader label="Koszt mies." sortKey="cost" align="right" />
+                    <SortHeader label="Zysk mies." sortKey="profit" align="right" />
                     <th className="text-right py-3 px-2 font-medium">Akcje</th>
                   </tr>
                 </thead>
@@ -616,6 +635,34 @@ export function Objects() {
                       </td>
                       <td className="py-3 px-2 text-right tabular-nums">
                         {formatCurrency(obj.monthlyValue)}
+                      </td>
+                      {/* Brak kosztu to „nieuzupełniony”, a nie 0 zł — stąd kreska
+                          zamiast kwoty i pusty zysk zamiast całego abonamentu. */}
+                      <td className="py-3 px-2 text-right tabular-nums">
+                        {obj.monthlyCost === null ? (
+                          <span className="text-muted-foreground">—</span>
+                        ) : (
+                          formatCurrency(obj.monthlyCost)
+                        )}
+                      </td>
+                      <td className="py-3 px-2 text-right tabular-nums">
+                        {obj.monthlyCost === null ? (
+                          <span className="text-muted-foreground">—</span>
+                        ) : (
+                          (() => {
+                            const profit = (obj.monthlyValue ?? 0) - obj.monthlyCost;
+                            return (
+                              <span
+                                className={cn(
+                                  profit > 0 && "text-emerald-700",
+                                  profit < 0 && "text-red-600"
+                                )}
+                              >
+                                {formatCurrency(profit)}
+                              </span>
+                            );
+                          })()
+                        )}
                       </td>
                       <td className="py-3 px-2">
                         <div className="flex items-center justify-end gap-2">

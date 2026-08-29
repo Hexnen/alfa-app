@@ -438,11 +438,13 @@ export function Contractors() {
                               ) : (
                                 <table className="w-full table-fixed text-sm">
                                   <colgroup>
-                                    <col className="w-[38%]" />
-                                    <col className="w-[15%]" />
-                                    <col className="w-[15%]" />
-                                    <col className="w-[16%]" />
-                                    <col className="w-[16%]" />
+                                    <col className="w-[32%]" />
+                                    <col className="w-[12%]" />
+                                    <col className="w-[12%]" />
+                                    <col className="w-[14%]" />
+                                    <col className="w-[10%]" />
+                                    <col className="w-[10%]" />
+                                    <col className="w-[10%]" />
                                   </colgroup>
                                   <thead>
                                     <tr className="text-xs uppercase tracking-wide text-muted-foreground">
@@ -460,6 +462,12 @@ export function Contractors() {
                                       </th>
                                       <th className="py-1 px-2 text-right font-medium">
                                         Abonament
+                                      </th>
+                                      <th className="py-1 px-2 text-right font-medium">
+                                        Koszt
+                                      </th>
+                                      <th className="py-1 px-2 text-right font-medium">
+                                        Zysk
                                       </th>
                                     </tr>
                                   </thead>
@@ -486,6 +494,23 @@ export function Contractors() {
                                         <td className="py-1.5 px-2 text-right tabular-nums">
                                           {formatCurrency(o.monthlyValue)}
                                         </td>
+                                        {/* Brak kosztu = nieuzupełniony, nie 0 zł. */}
+                                        <td className="py-1.5 px-2 text-right tabular-nums">
+                                          {o.monthlyCost === null ? (
+                                            <span className="text-muted-foreground">—</span>
+                                          ) : (
+                                            formatCurrency(o.monthlyCost)
+                                          )}
+                                        </td>
+                                        <td className="py-1.5 px-2 text-right tabular-nums">
+                                          {o.monthlyCost === null ? (
+                                            <span className="text-muted-foreground">—</span>
+                                          ) : (
+                                            formatCurrency(
+                                              (o.monthlyValue ?? 0) - o.monthlyCost
+                                            )
+                                          )}
+                                        </td>
                                       </tr>
                                     ))}
                                     <tr className="border-t">
@@ -504,6 +529,20 @@ export function Contractors() {
                                           )
                                         )}{" "}
                                         / mies.
+                                      </td>
+                                      <td className="py-1.5 px-2 text-right font-medium tabular-nums">
+                                        {formatCurrency(
+                                          rows.reduce((a, o) => a + (o.monthlyCost ?? 0), 0)
+                                        )}
+                                      </td>
+                                      <td className="py-1.5 px-2 text-right font-medium tabular-nums">
+                                        {formatCurrency(
+                                          rows.reduce(
+                                            (a, o) =>
+                                              a + (o.monthlyValue ?? 0) - (o.monthlyCost ?? 0),
+                                            0
+                                          )
+                                        )}
                                       </td>
                                     </tr>
                                   </tbody>

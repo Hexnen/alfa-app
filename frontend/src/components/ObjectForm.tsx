@@ -37,6 +37,7 @@ import {
   installationTypeLabels,
   statusLabels,
   departmentLabels,
+  formatCurrency,
 } from "@/lib/utils";
 
 /**
@@ -72,6 +73,17 @@ const parseCoord = (v: string): number | null => {
   return Number.isFinite(n) ? n : null;
 };
 
+/**
+ * Kwota kosztu z inputa. Pusty → `null`, czyli „nieuzupełniony” — i tylko `null`
+ * potrafi wyczyścić koszt po stronie backendu (`undefined` wypada z JSON-a,
+ * więc stara wartość by została). 0 zł to świadomy wpis, nie brak danych.
+ */
+const parseCost = (v: string): number | null => {
+  if (v.trim() === "") return null;
+  const n = parseFloat(v.replace(",", "."));
+  return Number.isFinite(n) ? n : null;
+};
+
 interface ObjectFormProps {
   open: boolean;
   onClose: () => void;
@@ -101,6 +113,8 @@ export function ObjectForm({
     status: object?.status || "pending",
     department: object?.department || "sales",
     monthlyValue: object?.monthlyValue || undefined,
+    monthlyCost: object?.monthlyCost ?? null,
+    setupCost: object?.setupCost ?? null,
     salespersonId: object?.salespersonId ?? null,
     companyId: object?.companyId ?? null,
     notes: object?.notes || "",
@@ -161,6 +175,25 @@ export function ObjectForm({
   };
 
   const addressLine = [formData.address, formData.city].map((s) => (s || "").trim()).filter(Boolean).join(", ");
+
+  /**
+   * Podpowiedź pod parą „wartość / koszt”. Pusty koszt to brak danych, a nie 0 zł
+   * — wtedy marży nie da się policzyć i mówimy o tym wprost.
+   */
+  const marginHint = (() => {
+    const value = formData.monthlyValue;
+    const cost = formData.monthlyCost;
+    if (cost === null || cost === undefined) return "Marża: — (uzupełnij koszt)";
+    if (value === null || value === undefined) return "Marża: — (uzupełnij wartość miesięczną)";
+    const profit = value - cost;
+    const pct = value > 0 ? Math.round((profit / value) * 100) : null;
+    let text = `Marża: ${formatCurrency(profit)}${pct !== null ? ` (${pct}%)` : ""}`;
+    const setup = formData.setupCost;
+    if (setup !== null && setup !== undefined && profit > 0) {
+      text += ` · zwrot instalacji: ${Math.ceil(setup / profit)} mies.`;
+    }
+    return text;
+  })();
 
   const runGeocode = async () => {
     if (!addressLine) return;
@@ -442,15 +475,56 @@ export function ObjectForm({
               </p>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="monthlyValue">Wartosc miesieczna (PLN)</Label>
-              <Input
-                id="monthlyValue"
-                name="monthlyValue"
-                type="number"
-                step="0.01"
-                value={formData.monthlyValue || ""}
-                onChange={handleChange}
-              />
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label htmlFor="monthlyValue">Wartość miesięczna (PLN)</Label>
+                  <Input
+                    id="monthlyValue"
+                    name="monthlyValue"
+                    type="number"
+                    step="0.01"
+                    value={formData.monthlyValue || ""}
+                    onChange={handleChange}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="monthlyCost">Koszt miesięczny (PLN)</Label>
+                  {/* `?? ""` zamiast `|| ""` — 0 zł to świadomy wpis („obiekt nic
+                      nie kosztuje”), a `|| ""` zamieniałby go w puste pole. */}
+                  <Input
+                    id="monthlyCost"
+                    name="monthlyCost"
+                    data-testid="object-monthly-cost"
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    className="tabular-nums"
+                    value={formData.monthlyCost ?? ""}
+                    onChange={(e) =>
+                      setFormData((prev) => ({ ...prev, monthlyCost: parseCost(e.target.value) }))
+                    }
+                  />
+                </div>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="setupCost">Koszt instalacji / wdrożenia (PLN, jednorazowo)</Label>
+                <Input
+                  id="setupCost"
+                  name="setupCost"
+                  data-testid="object-setup-cost"
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  className="tabular-nums"
+                  value={formData.setupCost ?? ""}
+                  onChange={(e) =>
+                    setFormData((prev) => ({ ...prev, setupCost: parseCost(e.target.value) }))
+                  }
+                />
+              </div>
+              <p className="text-xs text-muted-foreground" data-testid="object-margin-hint">
+                {marginHint}
+              </p>
             </div>
             <div className="space-y-2">
               <Label htmlFor="notes">Uwagi</Label>

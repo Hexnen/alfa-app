@@ -17,6 +17,7 @@ import { ContractDetails } from "./pages/ContractDetails";
 import { Orders } from "./pages/Orders";
 import { Technical } from "./pages/Technical";
 import { Kadry } from "./pages/Kadry";
+import { Analityka, AnalitykaRedirect } from "./pages/Analityka";
 import { Monitoring } from "./pages/Monitoring";
 import { Templates } from "./pages/Templates";
 import { Warehouse } from "./pages/Warehouse";
@@ -100,6 +101,10 @@ function AuthedApp() {
             element={<Navigate to="/kadry/wynagrodzenia" replace />}
           />
           <Route path="/kadry/:tab" element={<Kadry />} />
+          {/* Analityka: goły adres trafia na pierwszą podzakładkę, którą
+              użytkownik naprawdę widzi (patrz AnalitykaRedirect). */}
+          <Route path="/analityka" element={<AnalitykaRedirect />} />
+          <Route path="/analityka/:tab" element={<Analityka />} />
           <Route path="/ofi" element={<Ofi />} />
           <Route path="/cma" element={<Navigate to="/cma/raporty" replace />} />
           <Route path="/cma/raporty" element={<CmaReports />} />

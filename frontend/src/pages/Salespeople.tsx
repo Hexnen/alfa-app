@@ -131,11 +131,18 @@ export function Salespeople() {
               <th className="text-right py-3 px-2 font-medium">Kontrahenci</th>
               <th
                 className="text-right py-3 px-2 font-medium"
-                title="Obiekty przypisane wprost do handlowca — bez tych, które dziedziczą opiekuna po kontrahencie"
+                title="Obiekty handlowca — własne oraz te, które dziedziczą go po kontrahencie"
               >
                 Obiekty
               </th>
-              <th className="text-right py-3 px-2 font-medium">Abonament</th>
+              <th
+                className="text-right py-3 px-2 font-medium"
+                title="Suma abonamentów z obiektów handlowca (własnych i odziedziczonych po kontrahencie)"
+              >
+                Portfel
+              </th>
+              <th className="text-right py-3 px-2 font-medium">Koszt mies.</th>
+              <th className="text-right py-3 px-2 font-medium">Prowizja</th>
               <th className="text-right py-3 px-2 font-medium">Akcje</th>
             </tr>
           </thead>
@@ -179,6 +186,21 @@ export function Salespeople() {
                 </td>
                 <td className="py-3 px-2 text-right tabular-nums">
                   {s.objectsMonthlyValue ? formatCurrency(s.objectsMonthlyValue) : "-"}
+                </td>
+                {/* Pusty koszt / prowizja = nieuzupełnione, nie 0 — stąd kreska. */}
+                <td className="py-3 px-2 text-right tabular-nums">
+                  {s.monthlyCost === null || s.monthlyCost === undefined ? (
+                    <span className="text-muted-foreground">—</span>
+                  ) : (
+                    formatCurrency(s.monthlyCost)
+                  )}
+                </td>
+                <td className="py-3 px-2 text-right tabular-nums">
+                  {s.commissionRate === null || s.commissionRate === undefined ? (
+                    <span className="text-muted-foreground">—</span>
+                  ) : (
+                    `${s.commissionRate}%`
+                  )}
                 </td>
                 <td className="py-3 px-2">
                   <div className="flex items-center justify-end gap-2">

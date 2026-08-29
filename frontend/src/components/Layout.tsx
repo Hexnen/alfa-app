@@ -8,6 +8,7 @@ import {
   FileText,
   ClipboardList,
   Cctv,
+  TrendingUp,
   Wrench,
   IdCard,
   FolderKanban,
@@ -99,6 +100,31 @@ const topLevel: NavItem[] = [
 // Main sections. Their sub-tabs live directly in the sidebar (not on the
 // sub-page) — each child navigates to its own URL.
 const sections: NavItem[] = [
+  {
+    // Analityka stoi przed Kadrami, bo odpowiada na pytanie zadawane
+    // najczęściej i jako pierwsze: ile z tego zostaje.
+    name: "Analityka",
+    href: "/analityka",
+    icon: TrendingUp,
+    desc: "Przychody, koszty, zysk i wskaźniki",
+    children: [
+      {
+        name: "Kontrahenci",
+        href: "/analityka/kontrahenci",
+        desc: "Rentowność klientów — kto realnie zarabia",
+      },
+      {
+        name: "Obiekty",
+        href: "/analityka/obiekty",
+        desc: "Marża i zwrot z instalacji obiekt po obiekcie",
+      },
+      {
+        name: "Handlowcy",
+        href: "/analityka/handlowcy",
+        desc: "Portfel, koszt własny i prowizja każdego handlowca",
+      },
+    ],
+  },
   {
     name: "Kadry",
     href: "/kadry",

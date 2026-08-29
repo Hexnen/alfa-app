@@ -73,6 +73,14 @@ export const objects = sqliteTable("objects", {
     .default("sales")
     .notNull(),
   monthlyValue: real("monthly_value"),
+  /**
+   * Miesięczny koszt obsługi obiektu (zł/mies.). NULL = nieuzupełniony, i to NIE
+   * to samo, co 0 zł — Analityka liczy pokrycie danymi kosztowymi po tej różnicy,
+   * a marża obiektu bez kosztu jest nieznana, nie stuprocentowa.
+   */
+  monthlyCost: real("monthly_cost"),
+  /** Jednorazowy koszt instalacji / wdrożenia (zł). NULL = nieuzupełniony. */
+  setupCost: real("setup_cost"),
   notes: text("notes"),
   // Współrzędne obiektu (WGS84). NULL = jeszcze nieustalone; uzupełniane leniwie
   // geokoderem przy pierwszej kalkulacji dystansu (src/lib/geo.ts) albo ręcznie
@@ -603,6 +611,10 @@ export const salespeople = sqliteTable("salespeople", {
   email: text("email"),
   /** Region / obszar działania — czysty opis, bez słownika. */
   region: text("region"),
+  /** Ile handlowiec kosztuje firmę miesięcznie (wynagrodzenie, auto, telefon). NULL = nieuzupełniony. */
+  monthlyCost: real("monthly_cost"),
+  /** Prowizja w % od przychodu prowadzonego portfela (0–100). NULL = brak prowizji. */
+  commissionRate: real("commission_rate"),
   notes: text("notes"),
   active: integer("active", { mode: "boolean" }).default(true).notNull(),
   createdAt: text("created_at")

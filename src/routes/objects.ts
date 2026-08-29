@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { db, schema } from "../db/index.js";
 import { eq, ne, like, or, and, sql, asc, desc, gte, lte } from "drizzle-orm";
+import type { SQL } from "drizzle-orm";
 import { alias } from "drizzle-orm/sqlite-core";
 import type {
   ObjectInput,
@@ -23,8 +24,9 @@ const contractorSalesperson = alias(schema.salespeople, "contractor_salesperson"
  * użytkownika sensu: status ma naturalną kolejność procesu, a typ i dział sortujemy
  * w kolejności polskich etykiet z frontu (frontend/src/lib/utils.ts).
  *
- * `monthly_value` bywa NULL („brak abonamentu”) — puste zawsze lądują na końcu,
- * niezależnie od kierunku, żeby nie zajmowały pierwszej strony przy sortowaniu rosnąco.
+ * `monthly_value`, `monthly_cost` i wyliczony z nich zysk bywają puste („brak abonamentu”,
+ * „koszt nieuzupełniony”) — puste zawsze lądują na końcu, niezależnie od kierunku, żeby nie
+ * zajmowały pierwszej strony przy sortowaniu rosnąco (patrz NULLS_LAST niżej).
  */
 const SORT_COLUMNS = {
   name: sql`lower(${schema.objects.name})`,
@@ -37,6 +39,10 @@ const SORT_COLUMNS = {
   // Handlowiec obiektu, a gdy go nie ma — opiekun kontrahenta (tak samo pokazuje to lista).
   salesperson: sql`lower(coalesce(${objectSalesperson.lastName}, ${contractorSalesperson.lastName}, 'zzzz'))`,
   value: sql`${schema.objects.monthlyValue}`,
+  cost: sql`${schema.objects.monthlyCost}`,
+  // Nazwy kolumn piszemy DOSŁOWNIE, bo coalesce z dwóch kolumn tej samej tabeli
+  // i tak nie skorzysta z aliasu drizzle — a zapis kwalifikowany jest jednoznaczny.
+  profit: sql`coalesce(objects.monthly_value, 0) - coalesce(objects.monthly_cost, 0)`,
   created: sql`${schema.objects.createdAt}`,
 } as const;
 
@@ -64,6 +70,10 @@ app.get("/", async (c) => {
   const maxValue = numberParam(c.req.query("maxValue"));
   // "1" = tylko obiekty z abonamentem, "0" = tylko bez; brak parametru = wszystkie.
   const hasValue = c.req.query("hasValue");
+  const minCost = numberParam(c.req.query("minCost"));
+  const maxCost = numberParam(c.req.query("maxCost"));
+  // "1" = tylko obiekty z uzupełnionym kosztem, "0" = tylko nieuzupełnione.
+  const hasCost = c.req.query("hasCost");
   // Zakładki listy: "current" = wszystko poza statusem „nieaktywny", "archived" = tylko on.
   // Brak parametru (albo "all") = obie zakładki naraz, tak jak działało to wcześniej.
   // "none" = obiekty bez handlowca (ani własnego, ani z kontrahenta).
@@ -122,6 +132,21 @@ app.get("/", async (c) => {
     conditions.push(sql`${schema.objects.monthlyValue} is null or ${schema.objects.monthlyValue} = 0`);
   }
 
+  // Koszt miesięczny: te same widełki, ale „ma koszt” to wyłącznie IS NOT NULL —
+  // koszt 0 zł jest uzupełnioną informacją (obiekt nic nie kosztuje), a NULL znaczy
+  // „nikt jeszcze nie wpisał” i nie może udawać stuprocentowej marży.
+  if (minCost !== undefined) {
+    conditions.push(gte(schema.objects.monthlyCost, minCost));
+  }
+  if (maxCost !== undefined) {
+    conditions.push(lte(schema.objects.monthlyCost, maxCost));
+  }
+  if (hasCost === "1") {
+    conditions.push(sql`${schema.objects.monthlyCost} is not null`);
+  } else if (hasCost === "0") {
+    conditions.push(sql`${schema.objects.monthlyCost} is null`);
+  }
+
   if (salespersonParam === "none") {
     conditions.push(
       sql`${schema.objects.salespersonId} is null and ${schema.contractors.salespersonId} is null`
@@ -153,14 +178,19 @@ app.get("/", async (c) => {
   if (scopeCondition) conditions.push(scopeCondition);
   const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
 
-  // Puste kwoty na koniec listy w OBU kierunkach — inaczej sortowanie rosnąco po wartości
-  // pokazywałoby najpierw obiekty bez abonamentu.
+  // Puste kwoty na koniec listy w OBU kierunkach — inaczej sortowanie rosnąco po wartości,
+  // koszcie czy zysku pokazywałoby najpierw obiekty bez wpisanych kwot. Przy zysku „puste”
+  // to dopiero brak OBU składników: sam brak kosztu wciąż mówi coś o przychodzie.
+  const NULLS_LAST: Partial<Record<ObjectSortKey, SQL>> = {
+    value: sql`case when objects.monthly_value is null then 1 else 0 end`,
+    cost: sql`case when objects.monthly_cost is null then 1 else 0 end`,
+    profit: sql`case when objects.monthly_value is null and objects.monthly_cost is null then 1 else 0 end`,
+  };
   const column = SORT_COLUMNS[sort];
   const direction = dir === "desc" ? desc : asc;
-  const orderBy =
-    sort === "value"
-      ? [sql`case when ${schema.objects.monthlyValue} is null then 1 else 0 end`, direction(column), asc(schema.objects.name)]
-      : [direction(column), asc(schema.objects.name)];
+  const orderBy = NULLS_LAST[sort]
+    ? [NULLS_LAST[sort]!, direction(column), asc(schema.objects.name)]
+    : [direction(column), asc(schema.objects.name)];
 
   const objects = await db
     .select({
@@ -204,6 +234,11 @@ app.get("/", async (c) => {
       count: sql<number>`count(*)`,
       sum: sql<number | null>`sum(${schema.objects.monthlyValue})`,
       withValue: sql<number>`sum(case when ${schema.objects.monthlyValue} is not null and ${schema.objects.monthlyValue} > 0 then 1 else 0 end)`,
+      sumCost: sql<number | null>`sum(${schema.objects.monthlyCost})`,
+      sumSetup: sql<number | null>`sum(${schema.objects.setupCost})`,
+      // Licznik uzupełnionych kosztów — front musi wiedzieć, na ilu obiektach opiera się
+      // suma kosztów, żeby nie pokazywać marży policzonej z połowy danych jako pewnej.
+      withCost: sql<number>`sum(case when objects.monthly_cost is not null then 1 else 0 end)`,
     })
     .from(schema.objects)
     .leftJoin(
@@ -248,6 +283,9 @@ app.get("/", async (c) => {
     dir,
     totalMonthlyValue: summary.sum ?? 0,
     withMonthlyValue: summary.withValue ?? 0,
+    totalMonthlyCost: summary.sumCost ?? 0,
+    totalSetupCost: summary.sumSetup ?? 0,
+    withMonthlyCost: summary.withCost ?? 0,
     scope,
     currentCount: scopeRows[0].current ?? 0,
     archivedCount: scopeRows[0].archived ?? 0,
@@ -321,6 +359,10 @@ app.post("/", async (c) => {
         status: body.status || "pending",
         department: body.department || "sales",
         monthlyValue: body.monthlyValue,
+        // Lista pól jest tu wypisana jawnie (bez spreadu body), więc każdy nowy
+        // atrybut trzeba dopisać — inaczej edycja go zapisuje, a zakładanie gubi.
+        monthlyCost: body.monthlyCost ?? null,
+        setupCost: body.setupCost ?? null,
         notes: body.notes,
         companyId: body.companyId ?? null,
         salespersonId: body.salespersonId ?? null,

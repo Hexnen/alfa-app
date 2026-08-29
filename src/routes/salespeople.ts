@@ -11,7 +11,27 @@ const app = new Hono();
  * (src/routes/technicians.ts): miękkie archiwum przez `active`, kasowanie tylko
  * dla nieprzypisanych. Lista zwraca od razu liczbę przypisanych kontrahentów
  * i obiektów, żeby zakładka „Handlowcy” nie musiała dociągać ich osobno.
+ *
+ * Portfel handlowca (liczba obiektów i sumy kwot) liczymy według reguły EFEKTYWNEJ —
+ * handlowiec obiektu, a gdy go nie ma, opiekun kontrahenta — czyli tak samo, jak
+ * dopasowuje to lista obiektów (src/routes/objects.ts). Liczenie po samym
+ * objects.salesperson_id pokazywało portfele bliskie zeru, bo obiekty rzadko mają
+ * własnego handlowca — dziedziczą go po kontrahencie.
  */
+/** Wartownik dla kwoty, której nie da się sparsować — odróżnia śmieć od pustego pola. */
+const INVALID = Symbol("invalid-amount");
+
+/** Kwota z formularza: brak / pusty string → null (nieuzupełnione), śmieć → INVALID. */
+function parseAmount(raw: unknown): number | null | typeof INVALID {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw === "number") return Number.isFinite(raw) ? raw : INVALID;
+  if (typeof raw !== "string") return INVALID;
+  const trimmed = raw.trim();
+  if (trimmed === "") return null;
+  const n = Number(trimmed.replace(",", "."));
+  return Number.isFinite(n) ? n : INVALID;
+}
+
 function parseBody(body: Record<string, unknown>): {
   data?: Partial<NewSalesperson>;
   error?: string;
@@ -21,6 +41,24 @@ function parseBody(body: Record<string, unknown>): {
   if (!lastName) return { error: "Nazwisko jest wymagane" };
   const email = typeof body.email === "string" ? body.email.trim() : "";
   if (email && !email.includes("@")) return { error: "Nieprawidłowy adres e-mail" };
+
+  // Kwoty rozdzielamy na „nieuzupełnione" (null) i „wpisane" — null to nie zero,
+  // bo handlowiec bez wpisanego kosztu nie jest handlowcem darmowym.
+  const monthlyCost = parseAmount(body.monthlyCost);
+  if (monthlyCost === INVALID) return { error: "Koszt miesięczny musi być liczbą" };
+  if (monthlyCost !== null && monthlyCost < 0) {
+    return { error: "Koszt miesięczny nie może być ujemny" };
+  }
+  const commissionRate = parseAmount(body.commissionRate);
+  // Prowizję odrzucamy zamiast przycinać do zakresu — po cichu poprawiona stawka
+  // rozjechałaby się z tym, co użytkownik widzi w formularzu.
+  if (
+    commissionRate === INVALID ||
+    (commissionRate !== null && (commissionRate < 0 || commissionRate > 100))
+  ) {
+    return { error: "Prowizja musi być z zakresu 0–100%" };
+  }
+
   return {
     data: {
       firstName,
@@ -30,11 +68,17 @@ function parseBody(body: Record<string, unknown>): {
       region: typeof body.region === "string" ? body.region.trim() : "",
       notes: typeof body.notes === "string" ? body.notes : "",
       active: body.active === undefined ? true : Boolean(body.active),
+      monthlyCost,
+      commissionRate,
     },
   };
 }
 
-/** Ilu kontrahentów i ile obiektów wisi na handlowcu (do etykiet i blokady kasowania). */
+/**
+ * Ilu kontrahentów i ile obiektów wisi na handlowcu (do etykiet i blokady kasowania).
+ * Świadomie liczymy po BEZPOŚREDNIM kluczu obcym, nie po regule efektywnej z listy:
+ * blokada kasowania pyta o realne przypisania, które trzeba przepiąć, a nie o portfel.
+ */
 function assignmentsOf(id: number) {
   const contractors = db
     .select({ count: sql<number>`count(*)` })
@@ -62,11 +106,27 @@ app.get("/", async (c) => {
       contractorsCount: sql<number>`(
         select count(*) from contractors where contractors.salesperson_id = salespeople.id
       )`,
+      // Portfel liczymy regułą efektywną: własny handlowiec obiektu, a gdy go nie ma —
+      // opiekun kontrahenta. Stąd JOIN na contractors w każdym z podzapytań.
       objectsCount: sql<number>`(
-        select count(*) from objects where objects.salesperson_id = salespeople.id
+        select count(*) from objects
+        join contractors on contractors.id = objects.contractor_id
+        where coalesce(objects.salesperson_id, contractors.salesperson_id) = salespeople.id
       )`,
       objectsMonthlyValue: sql<number>`(
-        select coalesce(sum(monthly_value), 0) from objects where objects.salesperson_id = salespeople.id
+        select coalesce(sum(objects.monthly_value), 0) from objects
+        join contractors on contractors.id = objects.contractor_id
+        where coalesce(objects.salesperson_id, contractors.salesperson_id) = salespeople.id
+      )`,
+      objectsMonthlyCost: sql<number>`(
+        select coalesce(sum(objects.monthly_cost), 0) from objects
+        join contractors on contractors.id = objects.contractor_id
+        where coalesce(objects.salesperson_id, contractors.salesperson_id) = salespeople.id
+      )`,
+      objectsSetupCost: sql<number>`(
+        select coalesce(sum(objects.setup_cost), 0) from objects
+        join contractors on contractors.id = objects.contractor_id
+        where coalesce(objects.salesperson_id, contractors.salesperson_id) = salespeople.id
       )`,
     })
     .from(schema.salespeople)
@@ -79,6 +139,8 @@ app.get("/", async (c) => {
       contractorsCount: r.contractorsCount ?? 0,
       objectsCount: r.objectsCount ?? 0,
       objectsMonthlyValue: r.objectsMonthlyValue ?? 0,
+      objectsMonthlyCost: r.objectsMonthlyCost ?? 0,
+      objectsSetupCost: r.objectsSetupCost ?? 0,
     }));
 
   return c.json({ success: true, data });

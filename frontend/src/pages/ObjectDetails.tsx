@@ -285,6 +285,16 @@ export function ObjectDetails() {
   const currentWorkflowKey = `${object.status}-${object.department}`;
   const availableTransitions = workflowOptions[currentWorkflowKey] || [];
 
+  // Ekonomia obiektu. `monthlyCost === null` znaczy „nikt tego nie uzupełnił”,
+  // więc zysku ani marży nie liczymy — inaczej każdy pusty obiekt miałby 100%.
+  const monthlyCost = object.monthlyCost ?? null;
+  const setupCost = object.setupCost ?? null;
+  const monthlyProfit = monthlyCost === null ? null : (object.monthlyValue ?? 0) - monthlyCost;
+  const marginPct =
+    monthlyProfit === null || !object.monthlyValue
+      ? null
+      : Math.round((monthlyProfit / object.monthlyValue) * 100);
+
   const actionLabels: Record<string, string> = {
     created: "Utworzono",
     updated: "Zaktualizowano",
@@ -353,6 +363,65 @@ export function ObjectDetails() {
                 </dt>
                 <dd className="font-medium">
                   {formatCurrency(object.monthlyValue)}
+                </dd>
+              </div>
+              {/* Koszty: pusty koszt to „nieuzupełniony”, a nie 0 zł — dlatego
+                  zamiast kwoty i 100% marży pokazujemy kreskę. Cztery pozycje,
+                  żeby siatka `grid-cols-2` została parzysta. */}
+              <div>
+                <dt className="text-sm text-muted-foreground">Koszt miesięczny</dt>
+                <dd className="font-medium">
+                  {monthlyCost === null ? (
+                    <span className="text-muted-foreground">—</span>
+                  ) : (
+                    formatCurrency(monthlyCost)
+                  )}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-sm text-muted-foreground">Zysk miesięczny</dt>
+                <dd className="font-medium">
+                  {monthlyProfit === null ? (
+                    <span className="text-muted-foreground">—</span>
+                  ) : (
+                    <>
+                      <span
+                        className={cn(
+                          monthlyProfit > 0 && "text-emerald-700",
+                          monthlyProfit < 0 && "text-red-600"
+                        )}
+                      >
+                        {formatCurrency(monthlyProfit)}
+                      </span>
+                      {marginPct !== null && (
+                        <span className="block text-xs font-normal text-muted-foreground">
+                          (marża {marginPct}%)
+                        </span>
+                      )}
+                    </>
+                  )}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-sm text-muted-foreground">Koszt instalacji</dt>
+                <dd className="font-medium">
+                  {setupCost === null ? (
+                    <span className="text-muted-foreground">—</span>
+                  ) : (
+                    formatCurrency(setupCost)
+                  )}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-sm text-muted-foreground">Okres zwrotu</dt>
+                <dd className="font-medium">
+                  {setupCost === null || monthlyProfit === null ? (
+                    <span className="text-muted-foreground">—</span>
+                  ) : monthlyProfit <= 0 ? (
+                    <span className="text-red-600">nigdy</span>
+                  ) : (
+                    `${Math.ceil(setupCost / monthlyProfit)} mies.`
+                  )}
                 </dd>
               </div>
               {object.notes && (

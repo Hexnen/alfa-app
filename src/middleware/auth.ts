@@ -61,6 +61,13 @@ const API_TAB_MAP: { prefix: string; tabs: string[] }[] = [
   { prefix: "/objects", tabs: ["objects"] },
   { prefix: "/contracts", tabs: ["contracts"] },
   { prefix: "/orders", tabs: ["orders"] },
+  // Analityka — TRZY OSOBNE wpisy, a nie jeden { prefix: "/analytics", tabs: [wszystkie trzy] }.
+  // maxLevel() bierze NAJWYŻSZY poziom spośród wypisanych zakładek, więc wspólny wpis
+  // byłby dziurą: ktoś z samą „analityka/obiekty" czytałby też rentowność klientów
+  // i wynagrodzenia handlowców. Każdy widok pilnuje wyłącznie swojego klucza.
+  { prefix: "/analytics/kontrahenci", tabs: ["analityka/kontrahenci"] },
+  { prefix: "/analytics/obiekty", tabs: ["analityka/obiekty"] },
+  { prefix: "/analytics/handlowcy", tabs: ["analityka/handlowcy"] },
   // Kadry — jedno API dla wszystkich podzakładek; kontrola per-podzakładka
   // (ukrywanie + read-only) odbywa się na froncie, backend pilnuje modułu.
   {
