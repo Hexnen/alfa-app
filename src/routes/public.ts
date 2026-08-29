@@ -4,6 +4,8 @@ import { eq } from "drizzle-orm";
 import type { OrderInput, ApiResponse } from "../types/index.js";
 import { normalizeNIP, validateNIP } from "../utils/nip.js";
 import { createOrderFromInput } from "../services/orders.js";
+import { lookupCompanyByNip, isMfError } from "../lib/mf-whitelist.js";
+import { createRateLimiter, clientIp } from "../lib/rate-limit.js";
 
 const app = new Hono();
 
@@ -46,6 +48,72 @@ interface PublicOrderIntake {
 function isNonEmpty(value: unknown): boolean {
   return typeof value === "string" && value.trim().length > 0;
 }
+
+// ---------------------------------------------------------------------------
+// Wyszukiwarka firm dla formularza publicznego
+// ---------------------------------------------------------------------------
+
+/**
+ * Limit per IP: 5 zapytań na 5 minut. Wypełniając formularz, człowiek sprawdza
+ * jeden NIP (rzadziej dwa) — pięć prób z zapasem starcza, a bot nie zdąży
+ * przemielić wykazu MF spod naszego adresu.
+ */
+const publicLookupPerIp = createRateLimiter({ limit: 5, windowMs: 5 * 60_000 });
+
+/**
+ * Limit globalny dla całej trasy. `X-Forwarded-For` da się podrobić, więc sam
+ * limit per IP nie zatrzymałby uporczywego bota — ten sufit zatrzyma.
+ */
+const publicLookupGlobal = createRateLimiter({ limit: 120, windowMs: 5 * 60_000 });
+
+// Dane firmy po NIP z wykazu VAT MF — dla anonimowego formularza ZDW.
+// Bez autoryzacji (trasa montowana przed requireAuth), więc mocno limitowana.
+app.get("/company-lookup/nip/:nip", async (c) => {
+  const nip = normalizeNIP(c.req.param("nip"));
+
+  // Walidacja przed limitem: literówka w NIP-ie nie może zjadać puli zapytań.
+  if (!validateNIP(nip)) {
+    return c.json<ApiResponse<null>>(
+      { success: false, error: "Nieprawidłowy NIP (błędna suma kontrolna)" },
+      400
+    );
+  }
+
+  if (!publicLookupPerIp.check(clientIp(c)) || !publicLookupGlobal.check("all")) {
+    return c.json<ApiResponse<null>>(
+      {
+        success: false,
+        error: "Za dużo zapytań do wykazu firm — spróbuj ponownie za kilka minut",
+      },
+      429
+    );
+  }
+
+  const result = await lookupCompanyByNip(nip);
+
+  if (isMfError(result)) {
+    return c.json<ApiResponse<null>>({ success: false, error: result.error }, 502);
+  }
+
+  // Formularz publiczny dostaje tylko to, co potrzebne do wypełnienia pól —
+  // rachunków bankowych i danych rejestrowych nie ma po co wystawiać anonimowo.
+  const company = result.company
+    ? {
+        nip: result.company.nip,
+        name: result.company.name,
+        address: result.company.address,
+        postalCode: result.company.postalCode,
+        city: result.company.city,
+        statusVat: result.company.statusVat,
+        date: result.company.date,
+      }
+    : null;
+
+  return c.json<ApiResponse<{ found: boolean; company: typeof company }>>({
+    success: true,
+    data: { found: result.found, company },
+  });
+});
 
 // Public order intake — creates a real CRM order from an external form.
 // No authentication (mounted before requireAuth). CRM-linking policy is

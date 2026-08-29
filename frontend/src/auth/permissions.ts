@@ -14,6 +14,8 @@ export interface TabDef {
 export const TABS: TabDef[] = [
   { key: "contractors", label: "Kontrahenci", group: "Ogólne" },
   { key: "objects", label: "Obiekty", group: "Ogólne" },
+  { key: "handlowcy", label: "Handlowcy", group: "Ogólne" },
+  { key: "spolki", label: "Spółki", group: "Ogólne" },
   { key: "contracts", label: "Umowy", group: "Ogólne" },
   { key: "orders", label: "Zlecenia", group: "Ogólne" },
   { key: "kadry/wynagrodzenia", label: "Wynagrodzenia", group: "Kadry" },

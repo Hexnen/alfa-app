@@ -5,36 +5,43 @@ import type {
   WarehouseDocType,
   WarehouseType,
 } from "@/lib/api";
+import type { PillTone } from "@/lib/calendar-labels";
 
-/** Etykiety i kolory badge'y typów dokumentów magazynowych. */
+/**
+ * Etykiety i tony pigułek magazynu. Ton trafia do `pillClass()` z
+ * calendar-labels — ten sam kształt i ta sama paleta (jasna + ciemna) co
+ * badge'e kalendarza i realizacji.
+ */
 export const DOC_TYPE_META: Record<
   WarehouseDocType,
-  { label: string; badge: string }
+  { label: string; tone: PillTone }
 > = {
-  PZ: { label: "PZ — przyjęcie", badge: "bg-emerald-100 text-emerald-700" },
-  WZ: { label: "WZ — wydanie zewn.", badge: "bg-orange-100 text-orange-700" },
-  RW: { label: "RW — zużycie wewn.", badge: "bg-sky-100 text-sky-700" },
-  MM: { label: "MM — przesunięcie", badge: "bg-violet-100 text-violet-700" },
+  PZ: { label: "PZ — przyjęcie", tone: "emerald" },
+  WZ: { label: "WZ — wydanie zewn.", tone: "orange" },
+  RW: { label: "RW — zużycie wewn.", tone: "sky" },
+  MM: { label: "MM — przesunięcie", tone: "violet" },
 };
 
 export const DOC_STATUS_META: Record<
   WarehouseDocStatus,
-  { label: string; badge: string }
+  { label: string; tone: PillTone }
 > = {
-  draft: { label: "Szkic", badge: "bg-amber-100 text-amber-700" },
-  confirmed: { label: "Zatwierdzony", badge: "bg-emerald-100 text-emerald-700" },
-  cancelled: { label: "Anulowany", badge: "bg-red-100 text-red-700" },
+  // Szkic szary jak „Wykonane”/„Protokół (szkic)” w kalendarzu — bursztyn
+  // rezerwujemy na to, co wymaga reakcji.
+  draft: { label: "Szkic", tone: "neutral" },
+  confirmed: { label: "Zatwierdzony", tone: "emerald" },
+  cancelled: { label: "Anulowany", tone: "red" },
 };
 
 export const WAREHOUSE_TYPE_META: Record<
   WarehouseType,
-  { label: string; badge: string }
+  { label: string; tone: PillTone }
 > = {
-  main: { label: "Główny", badge: "bg-emerald-100 text-emerald-700" },
-  vehicle: { label: "Pojazd", badge: "bg-sky-100 text-sky-700" },
-  employee: { label: "Pracownik", badge: "bg-violet-100 text-violet-700" },
-  site: { label: "Obiekt", badge: "bg-orange-100 text-orange-700" },
-  other: { label: "Inny", badge: "bg-muted text-muted-foreground" },
+  main: { label: "Główny", tone: "emerald" },
+  vehicle: { label: "Pojazd", tone: "sky" },
+  employee: { label: "Pracownik", tone: "violet" },
+  site: { label: "Obiekt", tone: "orange" },
+  other: { label: "Inny", tone: "muted" },
 };
 
 /** Standardowe jednostki podpowiadane w formularzach. */

@@ -3,6 +3,7 @@ import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 import { Textarea } from "./ui/textarea";
+import { NIPField } from "./NIPField";
 import {
   Dialog,
   DialogContent,
@@ -139,29 +140,31 @@ export function TechnicianForm({
             />
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label htmlFor="tech-company">Firma</Label>
-              <Input
-                id="tech-company"
-                value={formData.company || ""}
-                onChange={(e) =>
-                  setFormData((p) => ({ ...p, company: e.target.value }))
-                }
-                placeholder="np. Serwis-Tech sp. z o.o."
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="tech-nip">NIP</Label>
-              <Input
-                id="tech-nip"
-                value={formData.nip || ""}
-                onChange={(e) =>
-                  setFormData((p) => ({ ...p, nip: e.target.value }))
-                }
-                placeholder="np. 1234567890"
-              />
-            </div>
+          {/* NIP technika (zwykle podwykonawca na własnej działalności) — po wpisaniu
+              wyszukiwarka podpowiada nazwę firmy z wykazu VAT MF. Bazy kontrahentów
+              nie sprawdzamy: technik to nie klient, a dostępu do tego modułu może nie być. */}
+          <NIPField
+            value={formData.nip || ""}
+            onChange={(nip) => setFormData((p) => ({ ...p, nip }))}
+            onCompanyFound={(company) =>
+              setFormData((p) => ({ ...p, company: company.name || p.company }))
+            }
+            label="NIP"
+            required={false}
+            checkExisting={false}
+            id="tech-nip"
+          />
+
+          <div className="space-y-2">
+            <Label htmlFor="tech-company">Firma</Label>
+            <Input
+              id="tech-company"
+              value={formData.company || ""}
+              onChange={(e) =>
+                setFormData((p) => ({ ...p, company: e.target.value }))
+              }
+              placeholder="np. Serwis-Tech sp. z o.o."
+            />
           </div>
 
           <div className="space-y-2">

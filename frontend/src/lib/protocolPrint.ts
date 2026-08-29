@@ -9,7 +9,7 @@ const esc = (s: string | null | undefined) =>
 const WORK_TYPES: { key: string; label: string }[] = [
   { key: "serwis", label: "SERWIS" },
   { key: "montaz", label: "MONTAŻ" },
-  { key: "wizja", label: "WIZJA LOKALNA" },
+  { key: "wizja", label: "WIZJA" },
   { key: "inne", label: "INNE" },
 ];
 

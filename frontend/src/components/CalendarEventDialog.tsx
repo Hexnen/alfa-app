@@ -12,6 +12,7 @@ import {
   AlertTriangle,
   ArrowRight,
   Building2,
+  Calculator,
   Check,
   ChevronDown,
   ChevronLeft,
@@ -62,6 +63,7 @@ import {
   calendarApi,
   getObjects,
   getProtocols,
+  getQuotes,
   getRealizations,
   getTechnicians,
   type ActivityEntry,
@@ -70,6 +72,7 @@ import {
   type CalendarEvent,
   type CalendarEventInput,
   type CalendarEventProtocol,
+  type CalendarEventQuote,
   type CalendarEventRealization,
   type CalendarEventStatus,
   type CalendarEventType,
@@ -78,6 +81,7 @@ import {
   type CalendarSeriesScope,
   type ObjectWithContractor,
   type Protocol,
+  type Quote,
   type Realization,
   type Technician,
   type TechnicianAvailability,
@@ -97,6 +101,7 @@ import {
   EVENT_TYPE_META,
   EVENT_TYPE_ORDER,
   PROTOCOL_BADGE_META,
+  QUOTE_BADGE_META,
   SERIES_FREQ_META,
   billingApplies,
   billingBadgeClass,
@@ -113,6 +118,9 @@ import {
   protocolBadgeClass,
   protocolBadgeKind,
   protocolHref,
+  quoteBadgeClass,
+  quoteBadgeKind,
+  quoteHref,
   REALIZATION_BADGE_META,
   REALIZATION_KIND_LABEL,
   realizationApplies,
@@ -198,6 +206,8 @@ interface FormState {
   billing: CalendarBilling | null;
   /** Jawnie przypięty protokół (null = brak / protokół realizacji wyliczany przez backend). */
   protocolId: number | null;
+  /** Jawnie przypięta wycena (null = brak / wycena realizacji wyliczana przez backend). */
+  quoteId: number | null;
   /** Powiązana realizacja (null = brak / do utworzenia automatem). */
   realizationId: number | null;
   /** `true` = realizacja ręcznie odpięta — automat jej nie odtworzy. */
@@ -254,6 +264,7 @@ function buildInitial(
       technicianIds: event.technicians.map((t) => t.id),
       billing: event.billing ?? null,
       protocolId: event.protocolId ?? null,
+      quoteId: event.quoteId ?? null,
       realizationId: event.realizationId ?? null,
       realizationOptout: event.realizationOptout ?? false,
       recFreq: "",
@@ -289,6 +300,7 @@ function buildInitial(
     technicianIds: prefill?.technicianIds ? [...prefill.technicianIds] : [],
     billing: null,
     protocolId: null,
+    quoteId: null,
     realizationId: null,
     realizationOptout: false,
     recFreq: isKons ? "quarterly" : "",
@@ -317,6 +329,7 @@ function toInput(f: FormState): CalendarEventInput {
     technicianIds: f.technicianIds,
     billing: billingApplies(f.type) ? f.billing : null,
     protocolId: billingApplies(f.type) ? f.protocolId : null,
+    quoteId: billingApplies(f.type) ? f.quoteId : null,
     realizationId: realizationApplies(f.type) ? f.realizationId : null,
     realizationOptout: realizationApplies(f.type) ? f.realizationOptout : false,
   };
@@ -903,6 +916,162 @@ function RealizationPicker({
   );
 }
 
+/** Pełny rekord wyceny (`/quotes`) → skrót używany w dialogu. */
+function toEventQuote(q: Quote): CalendarEventQuote {
+  const filledItems = q.items.filter((i) => {
+    const n = parseFloat(String(i.qty).replace(",", "."));
+    return Number.isFinite(n) && n > 0;
+  }).length;
+  return { id: q.id, number: q.number, date: q.date, total: q.total, filledItems };
+}
+
+/** Wybór wyceny z listy (szukajka z debounce ~250 ms; bez filtra — ostatnie 50). */
+function QuotePicker({ onPick, disabled }: { onPick: (q: Quote) => void; disabled?: boolean }) {
+  const [openList, setOpenList] = useState(false);
+  const [q, setQ] = useState("");
+  const [items, setItems] = useState<Quote[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [active, setActive] = useState(0);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!openList) return;
+    let cancelled = false;
+    setLoading(true);
+    const t = window.setTimeout(() => {
+      getQuotes(undefined, undefined, { q: q.trim() || undefined, limit: 50 })
+        .then((res) => {
+          if (cancelled) return;
+          setItems(res.data || []);
+          setActive(0);
+        })
+        .catch(() => {
+          if (!cancelled) setItems([]);
+        })
+        .finally(() => {
+          if (!cancelled) setLoading(false);
+        });
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(t);
+    };
+  }, [openList, q]);
+
+  useEffect(() => {
+    if (!openList) return;
+    const onDoc = (e: MouseEvent) => {
+      if (!wrapRef.current?.contains(e.target as Node)) setOpenList(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    window.setTimeout(() => inputRef.current?.focus(), 0);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [openList]);
+
+  const pick = (item: Quote) => {
+    onPick(item);
+    setOpenList(false);
+    setQ("");
+  };
+
+  return (
+    <div ref={wrapRef} className="relative">
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        disabled={disabled}
+        aria-expanded={openList}
+        aria-controls="cal-quote-list"
+        data-testid="quote-pick"
+        onClick={() => setOpenList((v) => !v)}
+      >
+        <Calculator className="mr-1 h-4 w-4" /> Wybierz wycenę…
+      </Button>
+      {openList && (
+        <div className="absolute left-0 z-20 mt-1 w-full min-w-[20rem] max-w-[28rem] rounded-md border bg-popover p-1.5 text-sm shadow-md sm:w-[26rem]">
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              ref={inputRef}
+              role="combobox"
+              aria-expanded={openList}
+              aria-controls="cal-quote-list"
+              aria-autocomplete="list"
+              aria-label="Szukaj wyceny"
+              data-testid="quote-search"
+              value={q}
+              placeholder="Numer, obiekt, adres…"
+              className="h-9 pl-8"
+              onChange={(e) => setQ(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "ArrowDown") {
+                  e.preventDefault();
+                  setActive((a) => Math.min(a + 1, items.length - 1));
+                } else if (e.key === "ArrowUp") {
+                  e.preventDefault();
+                  setActive((a) => Math.max(a - 1, 0));
+                } else if (e.key === "Enter" && items[active]) {
+                  e.preventDefault();
+                  pick(items[active]);
+                } else if (e.key === "Escape") {
+                  e.stopPropagation();
+                  setOpenList(false);
+                }
+              }}
+            />
+          </div>
+          <ul id="cal-quote-list" role="listbox" className="mt-1 max-h-64 overflow-y-auto">
+            {loading && items.length === 0 ? (
+              <li className="flex items-center gap-2 px-2 py-1.5 text-xs text-muted-foreground">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" /> Szukam…
+              </li>
+            ) : items.length === 0 ? (
+              <li className="px-2 py-1.5 text-xs text-muted-foreground">Brak wycen.</li>
+            ) : (
+              items.map((item, i) => {
+                const ref = toEventQuote(item);
+                const kind = ref.filledItems > 0 ? "filled" : "draft";
+                return (
+                  <li
+                    key={item.id}
+                    role="option"
+                    aria-selected={i === active}
+                    data-testid={`quote-option-${item.id}`}
+                    onMouseEnter={() => setActive(i)}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      pick(item);
+                    }}
+                    className={cn(
+                      "flex cursor-pointer items-center gap-2 rounded px-2 py-1.5",
+                      i === active && "bg-accent text-accent-foreground"
+                    )}
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="truncate font-medium tabular-nums">{item.number}</span>
+                        <span className="text-xs text-muted-foreground">{fmtLong(item.date, true)}</span>
+                      </div>
+                      <div className="truncate text-xs text-muted-foreground">
+                        {[item.site, item.address].filter(Boolean).join(" · ") || "—"}
+                      </div>
+                    </div>
+                    <span className={cn(quoteBadgeClass(kind), "shrink-0 tabular-nums")}>
+                      {realizationMoney(item.total)}
+                    </span>
+                  </li>
+                );
+              })
+            )}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Historia (oś czasu)
 // — agregacja wpisów z jednej operacji, grupowanie po dniu
@@ -1451,6 +1620,8 @@ export function CalendarEventDialog({
   const [pickedProtocol, setPickedProtocol] = useState<CalendarEventProtocol | null>(null);
   /** Realizacja wybrana z listy w tej sesji edycji (podgląd przed zapisem). */
   const [pickedRealization, setPickedRealization] = useState<CalendarEventRealization | null>(null);
+  /** Wycena wybrana z listy w tej sesji edycji (podgląd przed zapisem). */
+  const [pickedQuote, setPickedQuote] = useState<CalendarEventQuote | null>(null);
   const [technicians, setTechnicians] = useState<Technician[]>([]);
   const [objects, setObjects] = useState<ObjectWithContractor[]>([]);
   const [history, setHistory] = useState<ActivityEntry[]>([]);
@@ -1468,6 +1639,7 @@ export function CalendarEventDialog({
     repeat: mode === "create" && !!init.recFreq,
     notes: mode !== "create" || !!init.description,
     protocol: mode !== "create" && !!(init.protocolId || event?.protocol),
+    quote: mode !== "create" && !!(init.quoteId || event?.quote),
     realization: mode !== "create" && !!(init.realizationId || event?.realization || init.realizationOptout),
     journal: true,
     firstNote: false,
@@ -1605,6 +1777,21 @@ export function CalendarEventDialog({
   /** Odpięto protokół przypięty jawnie — po zapisie backend wróci do protokołu realizacji lub braku. */
   const protocolUnpinned = !!event && event.protocolId != null && form.protocolId == null;
 
+  /** Wycena widoczna w formularzu: wybrana z listy / przypięta / z realizacji (gdy nic nie przypięto). */
+  const formQuote: CalendarEventQuote | null =
+    form.quoteId != null
+      ? pickedQuote?.id === form.quoteId
+        ? pickedQuote
+        : event?.quote?.id === form.quoteId
+          ? event.quote
+          : null
+      : event && event.quoteId == null
+        ? (event.quote ?? null)
+        : null;
+  const quoteFromRealization = !!formQuote && form.quoteId == null;
+  /** Odpięto wycenę przypiętą jawnie — po zapisie backend wróci do wyceny realizacji lub braku. */
+  const quoteUnpinned = !!event && event.quoteId != null && form.quoteId == null;
+
   const showRealization = realizationApplies(form.type);
   /** Realizacja widoczna w formularzu: wybrana z listy albo przypięta do wydarzenia. */
   const formRealization: CalendarEventRealization | null =
@@ -1685,6 +1872,7 @@ export function CalendarEventDialog({
       if (!billingApplies(type)) {
         next.billing = null;
         next.protocolId = null;
+        next.quoteId = null;
       }
       if (!realizationApplies(type)) next.realizationId = null;
       if (type === "urlop") {
@@ -2180,6 +2368,37 @@ export function CalendarEventDialog({
                     <span className="text-xs text-muted-foreground">
                       {kind === "final" ? "podpisany" : "szkic"}
                       {event.protocolId == null ? " · z realizacji" : ""}
+                    </span>
+                  </span>
+                ) : (
+                  badge
+                );
+              })()}
+            </dd>
+            <dt className="flex items-center gap-1.5 text-muted-foreground">
+              <Calculator className="h-3.5 w-3.5" /> Wycena
+            </dt>
+            <dd>
+              {(() => {
+                const kind = quoteBadgeKind(event);
+                if (!kind) return <span className="text-muted-foreground">nie dotyczy</span>;
+                const meta = QUOTE_BADGE_META[kind];
+                const I = meta.icon;
+                const badge = (
+                  <span className={quoteBadgeClass(kind)}>
+                    <I className="h-3.5 w-3.5" />
+                    {meta.label(event.quote?.number)}
+                  </span>
+                );
+                return event.quote ? (
+                  <span className="inline-flex flex-wrap items-center gap-2">
+                    <Link to={quoteHref(event.quote.id)} className="hover:underline">
+                      {badge}
+                    </Link>
+                    <span className="text-xs text-muted-foreground">
+                      <span className="tabular-nums">{realizationMoney(event.quote.total)}</span>
+                      {event.quote.filledItems === 0 ? " · szkic z cennika" : ""}
+                      {event.quoteId == null ? " · z realizacji" : ""}
                     </span>
                   </span>
                 ) : (
@@ -2751,6 +2970,106 @@ export function CalendarEventDialog({
                   onPick={(p) => {
                     setPickedProtocol(toEventProtocol(p));
                     set("protocolId", p.id);
+                  }}
+                />
+              </div>
+            );
+          })()}
+        </Section>
+      )}
+
+      {/* Wycena — dokument „za ile”; powstaje automatycznie dla prac płatnych */}
+      {showBilling && (
+        <Section
+          id="sec-quote"
+          icon={Calculator}
+          title="Wycena"
+          open={openSec.quote}
+          onToggle={() => toggleSec("quote")}
+          summary={
+            formQuote
+              ? `${formQuote.number}${quoteFromRealization ? " (z realizacji)" : ""}`
+              : quoteUnpinned
+                ? "odpięto"
+                : form.billing === "paid"
+                  ? mode === "create"
+                    ? "powstanie automatycznie"
+                    : "brak"
+                  : "nie dotyczy"
+          }
+        >
+          {(() => {
+            const kind = quoteBadgeKind({ type: form.type, status: form.status, billing: form.billing, quote: formQuote });
+            const meta = kind ? QUOTE_BADGE_META[kind] : null;
+            const KindIcon = meta?.icon ?? Calculator;
+            return (
+              <div className="space-y-2">
+                {formQuote ? (
+                  <div
+                    data-testid="quote-linked"
+                    className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/40 px-2.5 py-1.5 text-sm"
+                  >
+                    <span className={quoteBadgeClass(kind ?? "draft")}>
+                      <KindIcon className="h-3.5 w-3.5" />
+                      {formQuote.number}
+                    </span>
+                    <span className="text-xs text-muted-foreground">
+                      {fmtLong(formQuote.date, true)} ·{" "}
+                      <span className="tabular-nums">{realizationMoney(formQuote.total)}</span>
+                      {formQuote.filledItems === 0 ? " · szkic z cennika" : ""}
+                      {quoteFromRealization ? " · z realizacji" : ""}
+                    </span>
+                    <span className="ml-auto flex items-center gap-2">
+                      <Link
+                        to={quoteHref(formQuote.id)}
+                        className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                      >
+                        <ExternalLink className="h-3.5 w-3.5" /> Otwórz wycenę
+                      </Link>
+                      {!quoteFromRealization && (
+                        <button
+                          type="button"
+                          data-testid="quote-unpin"
+                          onClick={() => {
+                            set("quoteId", null);
+                            setPickedQuote(null);
+                          }}
+                          className="inline-flex items-center gap-1 rounded px-1 py-0.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        >
+                          <Unlink className="h-3.5 w-3.5" /> Odepnij
+                        </button>
+                      )}
+                    </span>
+                  </div>
+                ) : kind === "missing" ? (
+                  <div className="flex flex-wrap items-center gap-2 text-xs">
+                    <span className={quoteBadgeClass("missing")}>
+                      <KindIcon className="h-3.5 w-3.5" />
+                      {meta?.label()}
+                    </span>
+                    <span className="text-muted-foreground">
+                      {quoteUnpinned
+                        ? "Odpięto — po zapisie wróci wycena realizacji (jeśli istnieje) albo pozostanie brak."
+                        : mode === "create"
+                          ? "Praca płatna — wycena powstanie razem z realizacją, z pozycjami z cennika technika."
+                          : "Praca płatna bez wyceny — wybierz z listy albo włącz automat w Administracja → Kalendarz."}
+                    </span>
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    {form.billing !== "paid"
+                      ? "Wycena dotyczy tylko prac płatnych — dla gwarancji i prac darmowych nie powstaje."
+                      : quoteUnpinned
+                        ? "Odpięto. Po zapisie wydarzenie dostanie wycenę realizacji (jeśli istnieje) albo zostanie bez wyceny."
+                        : mode === "create"
+                          ? "Praca płatna — wycena powstanie razem z realizacją, z pozycjami z cennika technika."
+                          : "Brak przypiętej wyceny. Jeśli wydarzenie ma realizację, jej wycena pojawi się tu automatycznie."}
+                  </p>
+                )}
+                <QuotePicker
+                  onPick={(q) => {
+                    setPickedQuote(toEventQuote(q));
+                    set("quoteId", q.id);
                   }}
                 />
               </div>

@@ -3,6 +3,8 @@ import {
   LayoutDashboard,
   Users,
   Building2,
+  BriefcaseBusiness,
+  Landmark,
   FileText,
   ClipboardList,
   Cctv,
@@ -23,12 +25,15 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import { cn } from "@/lib/utils";
 import { Button } from "./ui/button";
+import { tip } from "./ui/tooltip";
 import { useAuth } from "@/auth/AuthProvider";
 import { usePerms, TABS } from "@/auth/permissions";
 
 type NavChild = {
   name: string;
   href: string;
+  /** Podpis zakładki (ten sam co nagłówek strony) — dymek nad etykietą sekcji. */
+  desc?: string;
   // Optional custom active matcher (needed when sibling paths overlap, e.g.
   // "/orders" is a prefix of "/orders/formularz").
   isActive?: (pathname: string) => boolean;
@@ -39,19 +44,39 @@ type NavItem = {
   name: string;
   href: string;
   icon: LucideIcon;
+  /** Podpis sekcji (ten sam co nagłówek strony) — dymek nad etykietą sekcji. */
+  desc?: string;
   children?: NavChild[];
 };
 
 // Standalone entries shown at the top of the sidebar.
 const topLevel: NavItem[] = [
-  { name: "Dashboard", href: "/", icon: LayoutDashboard },
-  { name: "Kontrahenci", href: "/contractors", icon: Users },
-  { name: "Obiekty", href: "/objects", icon: Building2 },
-  { name: "Umowy", href: "/contracts", icon: FileText },
+  { name: "Dashboard", href: "/", icon: LayoutDashboard, desc: "Podsumowanie i statystyki systemu" },
+  {
+    name: "Kontrahenci",
+    href: "/contractors",
+    icon: Users,
+    desc: "Baza klientów i firm współpracujących",
+  },
+  { name: "Obiekty", href: "/objects", icon: Building2, desc: "Chronione obiekty i lokalizacje" },
+  {
+    name: "Handlowcy",
+    href: "/handlowcy",
+    icon: BriefcaseBusiness,
+    desc: "Opiekunowie handlowi kontrahentów i obiektów",
+  },
+  {
+    name: "Spółki",
+    href: "/spolki",
+    icon: Landmark,
+    desc: "Spółki grupy — słownik wspólny z kadrami",
+  },
+  { name: "Umowy", href: "/contracts", icon: FileText, desc: "Umowy serwisowe i monitoringu" },
   {
     name: "Zlecenia",
     href: "/orders",
     icon: ClipboardList,
+    desc: "Zlecenia instalacji i montażu systemów",
     children: [
       {
         name: "Lista zleceń",
@@ -64,6 +89,7 @@ const topLevel: NavItem[] = [
       {
         name: "Formularz",
         href: "/orders/formularz",
+        desc: "Przyjęcie nowego zlecenia zdalnego dozoru wideo",
         isActive: (p) => p.startsWith("/orders/formularz"),
       },
     ],
@@ -77,6 +103,7 @@ const sections: NavItem[] = [
     name: "Kadry",
     href: "/kadry",
     icon: IdCard,
+    desc: "Godziny, wynagrodzenia i zestawienia dla księgowości",
     children: [
       { name: "Wynagrodzenia", href: "/kadry/wynagrodzenia" },
       { name: "Godziny", href: "/kadry/godziny" },
@@ -91,32 +118,78 @@ const sections: NavItem[] = [
     name: "CMA",
     href: "/cma",
     icon: Cctv,
+    desc: "Centrum monitorowania alarmów",
     children: [
-      { name: "Raporty", href: "/cma/raporty" },
-      { name: "Trendy", href: "/cma/trendy" },
-      { name: "Braki kamer", href: "/cma/braki-kamer" },
-      { name: "Ustawienia", href: "/cma/ustawienia" },
+      { name: "Raporty", href: "/cma/raporty", desc: "Raporty z przeglądu kamer" },
+      { name: "Trendy", href: "/cma/trendy", desc: "Trendy z zaimportowanych raportów" },
+      { name: "Braki kamer", href: "/cma/braki-kamer", desc: "Aktualne braki obrazu z kamer" },
+      { name: "Ustawienia", href: "/cma/ustawienia", desc: "Ustawienia poczty i importu raportów" },
     ],
   },
   {
     name: "Techniczny",
     href: "/technical",
     icon: Wrench,
+    desc: "Realizacje, protokoły, wyceny i cennik",
     children: [
-      { name: "Kalendarz", href: "/technical/kalendarz" },
-      { name: "Realizacje", href: "/technical/realizacje" },
-      { name: "Protokoły", href: "/technical/protokoly" },
-      { name: "Wyceny", href: "/technical/wyceny" },
-      { name: "Cennik", href: "/technical/cennik" },
-      { name: "Technicy", href: "/technical/technicy" },
-      { name: "Obiekty", href: "/technical/obiekty" },
-      { name: "Magazyn", href: "/technical/magazyn" },
-      { name: "Projekty", href: "/technical/projekty" },
-      { name: "Szablony", href: "/technical/szablony" },
+      {
+        name: "Kalendarz",
+        href: "/technical/kalendarz",
+        desc: "Serwisy, montaże, wizje i konserwacje działu technicznego",
+      },
+      { name: "Realizacje", href: "/technical/realizacje", desc: "Wykonane prace z godzinami, materiałami i kilometrami" },
+      { name: "Protokoły", href: "/technical/protokoly", desc: "Protokoły odbioru i serwisu do realizacji" },
+      { name: "Wyceny", href: "/technical/wyceny", desc: "Wyceny prac i materiałów dla kontrahentów" },
+      { name: "Cennik", href: "/technical/cennik", desc: "Cenniki usług i materiałów przypisane technikom" },
+      { name: "Technicy", href: "/technical/technicy", desc: "Technicy, stawki i przypisania" },
+      { name: "Obiekty", href: "/technical/obiekty", desc: "Obiekty obsługiwane przez dział techniczny" },
+      { name: "Magazyn", href: "/technical/magazyn", desc: "Dokumenty PZ/WZ/RW/MM i stany magazynowe" },
+      { name: "Projekty", href: "/technical/projekty", desc: "Projekty i oferty systemów CCTV" },
+      { name: "Szablony", href: "/technical/szablony", desc: "Modele kamer i szablony wyposażenia" },
     ],
   },
-  { name: "OFI", href: "/ofi", icon: FolderKanban },
+  {
+    name: "OFI",
+    href: "/ofi",
+    icon: FolderKanban,
+    desc: "Obszary funkcjonalne — sekcja w przygotowaniu",
+  },
 ];
+
+// Sekcja administracyjna — renderowana tylko dla adminów, ale trzymana obok
+// reszty nawigacji, żeby etykieta aktualnej zakładki znała jej podzakładki.
+const adminSection: NavItem = {
+  name: "Administracja",
+  href: "/admin/users",
+  icon: Shield,
+  desc: "Konta, uprawnienia i ustawienia systemu",
+  children: [
+    {
+      name: "Użytkownicy",
+      href: "/admin/users",
+      icon: Users,
+      desc: "Zakładanie kont i dostęp do podzakładek (brak / podgląd / edycja)",
+    },
+    {
+      name: "Kalendarz",
+      href: "/admin/kalendarz",
+      icon: CalendarCog,
+      desc: "Reguły przenoszenia wydarzeń kalendarza do rejestru Realizacji",
+    },
+    {
+      name: "Firma",
+      href: "/admin/firma",
+      icon: Building2,
+      desc: "Adres biura, stawki i zakres automatu liczącego realizacje",
+    },
+    {
+      name: "Asystent AI",
+      href: "/admin/asystent",
+      icon: Sparkles,
+      desc: "Dostawca modelu, zachowanie, reguły planowania, dostęp i zużycie",
+    },
+  ],
+};
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -276,6 +349,42 @@ export function Layout({ children }: LayoutProps) {
     location.pathname.startsWith(item.href + "/") ||
     (item.children?.some(isChildActive) ?? false);
 
+  // Nazwa aktualnej zakładki wraz z podzakładką ("Kadry: Godziny") —
+  // pokazujemy ją na dole sidebara zamiast nazwy systemu.
+  const currentTab = useMemo(() => {
+    const all = [
+      ...visibleTopLevel,
+      ...visibleSections,
+      ...(perms.isAdmin ? [adminSection] : []),
+    ];
+    const hit = all
+      .filter(isSectionActive)
+      // Najbardziej szczegółowe dopasowanie wygrywa (np. /objects nad "/").
+      .sort((a, b) => b.href.length - a.href.length)[0];
+    if (!hit) return null;
+    const child = hit.children?.find(isChildActive);
+    return {
+      name: child ? `${hit.name}: ${child.name}` : hit.name,
+      // Podzakładka ma pierwszeństwo — opis sekcji jest wtedy zbyt ogólny.
+      desc: child?.desc ?? hit.desc ?? null,
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.pathname, visibleTopLevel, visibleSections, perms.isAdmin]);
+
+  // Pionowy napis w pasku ikon: writing-mode + obrót o 180° (czytany z dołu do
+  // góry); will-change/geometricPrecision wymuszają rasteryzację w pełnej
+  // rozdzielczości, bez nich obrócony tekst wygląda na rozpikselowany.
+  const vertical =
+    "max-h-[40vh] overflow-hidden text-ellipsis whitespace-nowrap [writing-mode:vertical-rl] rotate-180 [will-change:transform] [backface-visibility:hidden] [text-rendering:geometricPrecision]";
+
+  // Dymek nad etykietą: pełna nazwa (bywa przycięta) + podpis zakładki.
+  const tabTip = currentTab && (
+    <span className="block">
+      <span className="block font-semibold text-foreground">{currentTab.name}</span>
+      {currentTab.desc && <span className="mt-0.5 block">{currentTab.desc}</span>}
+    </span>
+  );
+
   // A section is expanded when the user toggled it, otherwise it auto-opens
   // whenever the current route lives inside it.
   const isGroupOpen = (item: NavItem) =>
@@ -429,7 +538,7 @@ export function Layout({ children }: LayoutProps) {
       {/* Sidebar */}
       <aside
         className={cn(
-          "fixed inset-y-0 left-0 z-50 flex w-64 transform flex-col bg-card border-r transition-[transform,width] duration-200 ease-in-out lg:translate-x-0",
+          "fixed inset-y-0 left-0 z-50 flex w-64 transform flex-col overflow-hidden bg-card border-r transition-[transform,width] duration-200 ease-in-out lg:translate-x-0",
           collapsed && "lg:w-16",
           sidebarOpen ? "translate-x-0" : "-translate-x-full"
         )}
@@ -471,7 +580,10 @@ export function Layout({ children }: LayoutProps) {
         </div>
         <nav
           className={cn(
-            "flex flex-1 flex-col gap-1 overflow-y-auto",
+            // overflow-x-hidden: przy rozwijaniu menu pozycje dostają pełną
+            // szerokość od razu, a sidebar dopiero się rozsuwa — bez tego przez
+            // te 200 ms nav pokazuje poziomy pasek przewijania.
+            "flex min-w-0 flex-1 flex-col gap-1 overflow-y-auto overflow-x-hidden",
             rail ? "items-center px-2 py-4" : "p-4"
           )}
         >
@@ -484,22 +596,48 @@ export function Layout({ children }: LayoutProps) {
           {perms.isAdmin && (
             <>
               <div className="my-2 w-full border-t" />
-              {renderNavItem({
-                name: "Administracja",
-                href: "/admin/users",
-                icon: Shield,
-                children: [
-                  { name: "Użytkownicy", href: "/admin/users", icon: Users },
-                  { name: "Kalendarz", href: "/admin/kalendarz", icon: CalendarCog },
-                  { name: "Firma", href: "/admin/firma", icon: Building2 },
-                  { name: "Asystent AI", href: "/admin/asystent", icon: Sparkles },
-                ],
-              })}
+              {renderNavItem(adminSection)}
             </>
           )}
         </nav>
 
-        {/* Bottom bar: system name + user + logout (moved from the top bar) */}
+        {/* Aktualna zakładka — tylko w pasku ikon (pionowo), docelowo NAD linią
+            stopki. Kontener rośnie (grid 0fr→1fr), a treść jedzie z dołu do
+            zera, więc napis wygląda, jakby wysuwał się spod linii. Pokazanie
+            czeka na koniec zwężania sidebara — inaczej napis mignąłby jeszcze
+            w szerokim menu. */}
+        {currentTab && (
+          <div
+            className={cn(
+              "grid w-full overflow-hidden transition-[grid-template-rows,opacity] duration-200 ease-in-out",
+              rail ? "grid-rows-[1fr] opacity-100 delay-200" : "grid-rows-[0fr] opacity-0"
+            )}
+            aria-hidden={!rail}
+          >
+            <div className="overflow-hidden">
+              <div
+                className={cn(
+                  "flex cursor-default select-none justify-center gap-1 px-1 pb-3 transition-transform duration-200 ease-out",
+                  rail ? "translate-y-0 delay-200" : "translate-y-full"
+                )}
+                {...tip(tabTip, { side: "right" })}
+              >
+                <span className={cn(vertical, "text-xl font-semibold uppercase tracking-wide text-foreground")}>
+                  {currentTab.name}
+                </span>
+                {currentTab.desc && (
+                  // Opis bywa dłuższy niż wysokość paska — tnie go ellipsis,
+                  // pełna treść zostaje w dymku.
+                  <span className={cn(vertical, "text-[0.7rem] leading-none text-muted-foreground")}>
+                    {currentTab.desc}
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Bottom bar: user + logout */}
         {rail ? (
           <div className="flex flex-col items-center border-t p-2">
             <Button
@@ -514,10 +652,7 @@ export function Layout({ children }: LayoutProps) {
           </div>
         ) : (
           <div className="border-t p-4">
-            <div className="text-sm font-semibold leading-snug">
-              System Wdrozen Obiektow Ochrony
-            </div>
-            <div className="mt-2 flex items-center justify-between gap-2 text-sm">
+            <div className="flex items-center justify-between gap-2 text-sm">
               <span className="text-muted-foreground min-w-0 truncate">
                 {user ? user.displayName || user.email : ""}
               </span>
@@ -578,7 +713,7 @@ export function Layout({ children }: LayoutProps) {
       {/* Main content */}
       <div
         className={cn(
-          "transition-[padding] duration-200 ease-in-out",
+          "overflow-x-clip transition-[padding] duration-200 ease-in-out",
           collapsed ? "lg:pl-16" : "lg:pl-64"
         )}
       >
@@ -592,13 +727,11 @@ export function Layout({ children }: LayoutProps) {
           >
             <Menu className="h-5 w-5" />
           </Button>
-          <h1 className="text-lg font-semibold">
-            System Wdrozen Obiektow Ochrony
-          </h1>
+          <h1 className="text-lg font-semibold">{currentTab?.name ?? ""}</h1>
         </header>
 
         {/* Page content */}
-        <main className="p-4 lg:p-6">{children}</main>
+        <main className="px-3 pb-3 pt-2 lg:px-4 lg:pb-3 lg:pt-2">{children}</main>
       </div>
     </div>
   );

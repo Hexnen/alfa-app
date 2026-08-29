@@ -9,6 +9,8 @@ import { Layout } from "./components/Layout";
 import { Dashboard } from "./pages/Dashboard";
 import { Contractors } from "./pages/Contractors";
 import { Objects } from "./pages/Objects";
+import { Salespeople } from "./pages/Salespeople";
+import { Spolki } from "./pages/Spolki";
 import { ObjectDetails } from "./pages/ObjectDetails";
 import { Contracts } from "./pages/Contracts";
 import { ContractDetails } from "./pages/ContractDetails";
@@ -68,6 +70,8 @@ function AuthedApp() {
         <Route path="/contractors" element={<Contractors />} />
         <Route path="/objects" element={<Objects />} />
         <Route path="/objects/:id" element={<ObjectDetails />} />
+        <Route path="/handlowcy" element={<Salespeople />} />
+        <Route path="/spolki" element={<Spolki />} />
         <Route path="/contracts" element={<Contracts />} />
         <Route path="/contracts/:id" element={<ContractDetails />} />
         <Route path="/orders" element={<Orders />} />

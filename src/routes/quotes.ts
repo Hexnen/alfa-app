@@ -5,7 +5,13 @@ import { eq, and, like, desc, asc } from "drizzle-orm";
 import { ensureDefaultListId } from "./pricelist.js";
 import type { ApiResponse } from "../types/index.js";
 import { PRICE_ITEM_KINDS } from "../db/schema.js";
-import type { Quote } from "../db/schema.js";
+import type { CalendarEvent, Quote, Realization } from "../db/schema.js";
+import { buildQuotePrefill } from "../lib/quote-prefill.js";
+import { buildProtocolPrefill, parseProtocolItems } from "../lib/protocol-prefill.js";
+import { matchPriceItem, resolveHourRate, resolveKmRate } from "../lib/price-match.js";
+import { getCompanyConfig } from "../lib/company-config.js";
+import { logActivity, type ActivityUser } from "../lib/activity-log.js";
+import type { PriceItem } from "../db/schema.js";
 
 const app = new Hono();
 
@@ -28,6 +34,80 @@ async function nextQuoteNumber(date: string): Promise<string> {
     return Number.isFinite(n) && n > max ? n : max;
   }, 0);
   return `${prefix}${String(maxSeq + 1).padStart(3, "0")}`;
+}
+
+// Typ transakcji drizzle/better-sqlite3 — pozwala współdzielić helpery między db i tx.
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+/**
+ * Kolejny numer wyceny w miesiącu: W/RRRR/MM/NNN — synchronicznie, w obrębie
+ * transakcji. Odpowiednik `nextProtocolNumberSync`: alokacja numeru i insert muszą
+ * być atomowe, inaczej równoległe zapisy kolidują na UNIQUE(number).
+ */
+export function nextQuoteNumberSync(tx: Tx, date: string): string {
+  const prefix = `W/${date.slice(0, 4)}/${date.slice(5, 7)}/`;
+  const existing = tx
+    .select({ number: schema.quotes.number })
+    .from(schema.quotes)
+    .where(like(schema.quotes.number, `${prefix}%`))
+    .all();
+  const maxSeq = existing.reduce((max, r) => {
+    const n = parseInt(r.number.slice(prefix.length));
+    return Number.isFinite(n) && n > max ? n : max;
+  }, 0);
+  return `${prefix}${String(maxSeq + 1).padStart(3, "0")}`;
+}
+
+/**
+ * Tworzy wycenę (szkic) dla PŁATNEJ realizacji i zwraca ją. Pozycje, adres i datę
+ * daje `buildQuotePrefill` (wydarzenie → obiekt → kontrahent → cennik technika).
+ * Idempotentne po `realization_id` — powtórne wywołanie dla tej samej realizacji
+ * zwraca `undefined` (sprawdzamy to zapytaniem, bo indeks `quotes_realization_id_uidx`
+ * jest częściowy, a takiego celu SQLite nie przyjmuje w klauzuli ON CONFLICT).
+ *
+ * `event` przekazuje wołający, który tworzy realizację z wydarzenia: `calendar_events
+ * .realization_id` jest wtedy jeszcze puste, więc wydarzenia nie dałoby się odszukać.
+ */
+export function createQuoteForRealizationSync(
+  tx: Tx,
+  r: Realization,
+  event?: CalendarEvent | null
+) {
+  const existing = tx
+    .select({ id: schema.quotes.id })
+    .from(schema.quotes)
+    .where(eq(schema.quotes.realizationId, r.id))
+    .get();
+  if (existing) return undefined;
+
+  const { values } = buildQuotePrefill(tx, r, { event });
+  return tx
+    .insert(schema.quotes)
+    .values({
+      number: nextQuoteNumberSync(tx, values.date),
+      date: values.date,
+      site: values.site,
+      address: values.address,
+      items: JSON.stringify(values.items),
+      realizationId: r.id,
+    })
+    .returning()
+    .get();
+}
+
+/**
+ * Wycena „nietknięta” — żadna pozycja nie ma wpisanej ilości, więc automat może ją
+ * usunąć (zmiana rozliczenia z płatnego, anulowanie wydarzenia). Wycena z choćby
+ * jedną ilością to praca człowieka: zostaje.
+ */
+export function isQuoteUntouched(q: Pick<Quote, "items">): boolean {
+  let items: QuoteItem[] = [];
+  try {
+    items = JSON.parse(q.items);
+  } catch {
+    return true;
+  }
+  return !items.some((i) => num(i.qty) > 0);
 }
 
 const num = (v: unknown) => {
@@ -129,7 +209,18 @@ app.get("/", async (c) => {
     query = query.where(like(schema.quotes.date, `${year}-%`)) as typeof query;
   }
 
-  const rows = await query.orderBy(desc(schema.quotes.date), desc(schema.quotes.id));
+  let rows = await query.orderBy(desc(schema.quotes.date), desc(schema.quotes.id));
+
+  // ?q= — szukajka (numer / obiekt / adres / data), ?limit= — np. lista w dialogu kalendarza
+  const q = (c.req.query("q") || "").trim().toLowerCase();
+  if (q) {
+    rows = rows.filter((r) =>
+      [r.number, r.site, r.address, r.date].some((v) => v != null && String(v).toLowerCase().includes(q))
+    );
+  }
+  const limit = Number(c.req.query("limit"));
+  if (Number.isInteger(limit) && limit > 0) rows = rows.slice(0, limit);
+
   return c.json({ success: true, data: rows.map(withComputed) });
 });
 
@@ -292,8 +383,185 @@ app.delete("/:id", async (c) => {
     );
   }
 
+  // Najpierw zdejmujemy jawne przypięcia w kalendarzu — FK `calendar_events.quote_id`
+  // powstał przez ALTER TABLE, więc nie wszędzie ma ON DELETE SET NULL.
+  await db
+    .update(schema.calendarEvents)
+    .set({ quoteId: null })
+    .where(eq(schema.calendarEvents.quoteId, id));
   await db.delete(schema.quotes).where(eq(schema.quotes.id, id));
   return c.json<ApiResponse<null>>({ success: true, message: "Wycena usunięta" });
 });
 
 export default app;
+
+// ---------------------------------------------------------------------------
+// Wycena z protokołu
+// ---------------------------------------------------------------------------
+
+/**
+ * Pozycje wyceny wyliczone z PROTOKOŁU (a nie ze zrzutu całego cennika):
+ *   - materiały: pozycje protokołu z podaną ilością, wycenione po cenniku technika
+ *     (+ narzut `company.material_markup`); pozycja bez odpowiednika w cenniku wchodzi
+ *     z pustą ceną i ostrzeżeniem — lepiej, żeby człowiek ją zobaczył, niż zniknęła,
+ *   - robocizna: godziny z protokołu × stawka RBH (schodkowa „pierwsza/kolejna”, gdy
+ *     cennik ją rozbija), a gdy cennik nie ma pozycji RBH — `company.rate_hour`,
+ *   - dojazd: km z protokołu × stawka KM z cennika albo `company.rate_km`.
+ *
+ * Nic nie zapisuje. Zwraca też ostrzeżenia — trafiają do activity_log i do odpowiedzi API.
+ */
+export function quoteItemsFromProtocol(
+  dbx: typeof db | Tx,
+  realization: Realization,
+  protocol: { number: string; items: string; actualHours: number; actualKm: number }
+): { items: QuoteItem[]; warnings: string[] } {
+  const { values } = getCompanyConfig();
+  const warnings: string[] = [];
+  const items: QuoteItem[] = [];
+
+  const { context } = buildProtocolPrefill(dbx, realization);
+  const priceList = context.priceList;
+  const priceItems: PriceItem[] = priceList
+    ? dbx
+        .select()
+        .from(schema.priceList)
+        .where(and(eq(schema.priceList.priceListId, priceList.id), eq(schema.priceList.active, true)))
+        .orderBy(asc(schema.priceList.position), asc(schema.priceList.id))
+        .all()
+    : [];
+  const materials = priceItems.filter((i) => i.kind === "material");
+  const money = (n: number) => String(Math.round(n * 100) / 100);
+  const qty = (n: number) => String(Math.round(n * 100) / 100);
+
+  // --- materiały z protokołu -------------------------------------------------
+  for (const it of parseProtocolItems(protocol.items)) {
+    const amount = num(it.qty);
+    if (!(amount > 0) || !it.name.trim()) continue;
+    const match = matchPriceItem(it.name, materials);
+    if (!match) {
+      warnings.push(
+        `Materiał „${it.name}” — brak pozycji rodzaju „materiał”${
+          priceList ? ` w cenniku „${priceList.name}”` : ""
+        }; cena do uzupełnienia.`
+      );
+      items.push({ name: it.name, qty: qty(amount), unit: it.unit, price: "" });
+      continue;
+    }
+    const price = match.price * (1 + values.materialMarkup / 100);
+    items.push({ name: match.name, qty: qty(amount), unit: match.unit || it.unit, price: money(price) });
+  }
+
+  // --- robocizna -------------------------------------------------------------
+  if (protocol.actualHours > 0) {
+    const rate = resolveHourRate(priceItems, values);
+    if (!rate) {
+      warnings.push(
+        "Brak stawki RBH: cennik nie ma pozycji usługowej z jednostką RBH, a `Stawka za roboczogodzinę` w ustawieniach firmy jest zerowa."
+      );
+    } else if (rate.mode === "tiered") {
+      items.push({ name: rate.firstName, qty: "1", unit: "RBH", price: money(rate.first) });
+      const rest = Math.round(Math.max(0, protocol.actualHours - 1) * 100) / 100;
+      if (rest > 0) {
+        items.push({ name: rate.nextName, qty: qty(rest), unit: "RBH", price: money(rate.next) });
+      }
+    } else {
+      items.push({
+        name: rate.mode === "flat" ? rate.itemName : "Robocizna",
+        qty: qty(protocol.actualHours),
+        unit: "RBH",
+        price: money(rate.rate),
+      });
+    }
+  }
+
+  // --- dojazd ----------------------------------------------------------------
+  if (protocol.actualKm > 0) {
+    const kmRate = resolveKmRate(priceItems, values);
+    if (!kmRate) {
+      warnings.push("Brak stawki za km: cennik nie ma pozycji usługowej KM, a `Stawka za kilometr` jest zerowa.");
+    } else {
+      items.push({
+        name: kmRate.itemName ?? "Dojazd",
+        qty: qty(protocol.actualKm),
+        unit: "km",
+        price: money(kmRate.rate),
+      });
+    }
+  }
+
+  return { items, warnings };
+}
+
+export type QuoteRefreshStatus = "updated" | "no_quote" | "no_protocol" | "touched" | "empty";
+
+export interface QuoteRefreshOutcome {
+  status: QuoteRefreshStatus;
+  quoteId?: number;
+  number?: string;
+  items?: QuoteItem[];
+  warnings: string[];
+}
+
+/**
+ * Przelicza wycenę realizacji z jej protokołu — wołane po podpisaniu protokołu.
+ *
+ * Wycena, w której ktoś wpisał choć jedną ilość, jest pracą człowieka i zostaje nietknięta
+ * (`isQuoteUntouched` — ta sama zasada, co przy usuwaniu wyceny przez automat kalendarza).
+ * Wyceny nie tworzymy: jeśli realizacja jej nie ma (praca gwarancyjna/darmowa albo wyłączone
+ * `calendar.auto_quote`), nie ma czego odświeżać.
+ */
+export function refreshQuoteFromProtocolSync(
+  tx: Tx,
+  realizationId: number,
+  user: ActivityUser
+): QuoteRefreshOutcome {
+  const quote = tx
+    .select()
+    .from(schema.quotes)
+    .where(eq(schema.quotes.realizationId, realizationId))
+    .get();
+  if (!quote) return { status: "no_quote", warnings: [] };
+  if (!isQuoteUntouched(quote)) {
+    return { status: "touched", quoteId: quote.id, number: quote.number, warnings: [] };
+  }
+
+  const protocol = tx
+    .select()
+    .from(schema.protocols)
+    .where(eq(schema.protocols.realizationId, realizationId))
+    .get();
+  if (!protocol) return { status: "no_protocol", quoteId: quote.id, number: quote.number, warnings: [] };
+
+  const realization = tx
+    .select()
+    .from(schema.realizations)
+    .where(eq(schema.realizations.id, realizationId))
+    .get();
+  if (!realization) return { status: "no_protocol", quoteId: quote.id, number: quote.number, warnings: [] };
+
+  const { items, warnings } = quoteItemsFromProtocol(tx, realization, protocol);
+  if (items.length === 0) {
+    return { status: "empty", quoteId: quote.id, number: quote.number, warnings };
+  }
+
+  tx.update(schema.quotes)
+    .set({ items: JSON.stringify(items), updatedAt: new Date().toISOString() })
+    .where(eq(schema.quotes.id, quote.id))
+    .run();
+
+  logActivity(tx, {
+    entityType: "quote",
+    entityId: quote.id,
+    user,
+    action: "updated",
+    field: "items",
+    oldValue: null,
+    newValue: JSON.stringify(items.map((i) => i.name)),
+    summary: `Wyceniono z protokołu ${protocol.number}: ${items.length} ${
+      items.length === 1 ? "pozycja" : "pozycji"
+    }${warnings.length > 0 ? ` (${warnings.length} do sprawdzenia)` : ""}`,
+    summarySuffix: "(przez automat)",
+  });
+
+  return { status: "updated", quoteId: quote.id, number: quote.number, items, warnings };
+}

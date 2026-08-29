@@ -1,6 +1,8 @@
 import { useState } from "react";
 import {
+  lookupPublicCompanyByNip,
   submitPublicOrderIntake,
+  type PublicCompanyData,
   type PublicOrderIntakeInput,
 } from "@/lib/api";
 import { autoFormatNIP, normalizeNIP, validateNIP } from "@/lib/nip";
@@ -57,7 +59,15 @@ export function PublicOrderForm() {
   const [error, setError] = useState<string | null>(null);
   const [orderNumber, setOrderNumber] = useState<string | null>(null);
 
+  // Wyszukiwarka firm po NIP (wykaz VAT MF). Trasa publiczna jest ostro
+  // limitowana, więc pytamy wyłącznie po kliknięciu przycisku.
+  const [company, setCompany] = useState<PublicCompanyData | null>(null);
+  const [companyLoading, setCompanyLoading] = useState(false);
+  const [companyMsg, setCompanyMsg] = useState<string | null>(null);
+
   const wizard = useOrderIntakeWizard(form);
+
+  const nipReady = validateNIP(form.payerNip);
 
   const set = <K extends keyof OrderIntakeFormState>(
     key: K,
@@ -68,6 +78,34 @@ export function PublicOrderForm() {
     (key: keyof OrderIntakeFormState) =>
     (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
       set(key, e.target.value as OrderIntakeFormState[typeof key]);
+
+  const handleCompanyLookup = async () => {
+    if (!nipReady || companyLoading) return;
+    setCompanyLoading(true);
+    setCompany(null);
+    setCompanyMsg(null);
+    try {
+      const res = await lookupPublicCompanyByNip(normalizeNIP(form.payerNip));
+      if (res.data?.found && res.data.company) {
+        const found = res.data.company;
+        setCompany(found);
+        // Nazwę wstawiamy od razu — po to użytkownik kliknął.
+        if (found.name) set("payerName", found.name);
+      } else {
+        setCompanyMsg(
+          "Nie znaleziono firmy o tym NIP w wykazie VAT — wpisz nazwę ręcznie."
+        );
+      }
+    } catch (err) {
+      setCompanyMsg(
+        err instanceof Error
+          ? err.message
+          : "Nie udało się pobrać danych firmy — wpisz nazwę ręcznie."
+      );
+    } finally {
+      setCompanyLoading(false);
+    }
+  };
 
   const scrollToTop = () =>
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -275,16 +313,47 @@ export function PublicOrderForm() {
                   <div className="zdw-grid2">
                     <div>
                       <label className="zdw-label">NIP Płatnika {req}</label>
-                      <input
-                        className="zdw-input"
-                        value={autoFormatNIP(form.payerNip)}
-                        onChange={(e) =>
-                          set("payerNip", normalizeNIP(e.target.value))
-                        }
-                        placeholder="123-456-78-90"
-                        inputMode="numeric"
-                        maxLength={13}
-                      />
+                      <div className="zdw-lookup">
+                        <input
+                          className="zdw-input"
+                          value={autoFormatNIP(form.payerNip)}
+                          onChange={(e) => {
+                            set("payerNip", normalizeNIP(e.target.value));
+                            setCompany(null);
+                            setCompanyMsg(null);
+                          }}
+                          placeholder="123-456-78-90"
+                          inputMode="numeric"
+                          maxLength={13}
+                        />
+                        <button
+                          type="button"
+                          className="zdw-lookup-btn"
+                          onClick={handleCompanyLookup}
+                          disabled={!nipReady || companyLoading}
+                          title="Pobierz nazwę firmy z wykazu podatników VAT"
+                        >
+                          {companyLoading ? "Szukam…" : "Pobierz dane"}
+                        </button>
+                      </div>
+                      {company && (
+                        <p className="zdw-lookup-note">
+                          {[
+                            company.address,
+                            [company.postalCode, company.city]
+                              .filter(Boolean)
+                              .join(" "),
+                          ]
+                            .filter(Boolean)
+                            .join(", ")}
+                          {company.statusVat
+                            ? ` • VAT: ${company.statusVat}`
+                            : ""}
+                        </p>
+                      )}
+                      {companyMsg && (
+                        <p className="zdw-lookup-note warn">{companyMsg}</p>
+                      )}
                     </div>
                     <div>
                       <label className="zdw-label">Nazwa płatnika {req}</label>

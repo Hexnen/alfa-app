@@ -145,6 +145,18 @@ export interface ProtocolRef {
   workDate: string;
 }
 
+/** Skrót wyceny wydarzenia (jawnie przypięty `quoteId` albo wycena realizacji). */
+export interface QuoteRef {
+  id: number;
+  number: string;
+  /** Data wyceny (YYYY-MM-DD). */
+  date: string;
+  /** Suma netto pozycji (ilość × cena). */
+  total: number;
+  /** Liczba pozycji z wpisaną ilością — 0 = wycena pusta (szkic z cennika). */
+  filledItems: number;
+}
+
 export interface CalendarEventJson {
   id: number;
   type: CalendarEventType;
@@ -170,6 +182,10 @@ export interface CalendarEventJson {
   protocolId: number | null;
   /** Wyliczone: protokół z `protocolId`, a gdy brak — protokół realizacji (`realizationId`). */
   protocol: ProtocolRef | null;
+  /** Jawnie przypięta wycena (NULL → wycena realizacji, jeśli jest). */
+  quoteId: number | null;
+  /** Wyliczone: wycena z `quoteId`, a gdy brak — wycena realizacji (`realizationId`). */
+  quote: QuoteRef | null;
   seriesId: number | null;
   series: SeriesRef | null;
   technicians: TechnicianRef[];
@@ -194,6 +210,33 @@ export interface Note {
   text: string;
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * Suma netto i liczba wypełnionych pozycji wyceny z JSON-a `quotes.items`
+ * (`[{name, qty, unit, price}]`; ilość i cena bywają tekstem z przecinkiem).
+ * Ta sama arytmetyka co `withComputed` w src/routes/quotes.ts.
+ */
+function quoteTotals(raw: string): { total: number; filledItems: number } {
+  let items: { qty?: unknown; price?: unknown }[] = [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) items = parsed;
+  } catch {
+    return { total: 0, filledItems: 0 };
+  }
+  const num = (v: unknown) => {
+    const n = typeof v === "string" ? parseFloat(v.replace(",", ".")) : Number(v);
+    return Number.isFinite(n) ? n : 0;
+  };
+  let total = 0;
+  let filledItems = 0;
+  for (const i of items) {
+    const qty = num(i.qty);
+    if (qty > 0) filledItems++;
+    total += qty * num(i.price);
+  }
+  return { total: Math.round(total * 100) / 100, filledItems };
 }
 
 export function noteOfRow(r: CalendarEventNote): Note {
@@ -327,6 +370,26 @@ export function loadEvents(dbx: DbOrTx, ids: number[]): CalendarEventJson[] {
     }
   }
 
+  // Wyceny: jawne (quote_id) + z realizacji (realization_id → quotes.realization_id), jedno zapytanie.
+  const quoteIds = [...new Set(rows.map((r) => r.ev.quoteId).filter((x): x is number => x != null))];
+  const quoteById = new Map<number, QuoteRef>();
+  const quoteByReal = new Map<number, QuoteRef>();
+  if (quoteIds.length > 0 || realIds.length > 0) {
+    const qConds = [];
+    if (quoteIds.length) qConds.push(inArray(schema.quotes.id, quoteIds));
+    if (realIds.length) qConds.push(inArray(schema.quotes.realizationId, realIds));
+    const qRows = dbx
+      .select({ id: schema.quotes.id, realizationId: schema.quotes.realizationId, number: schema.quotes.number, date: schema.quotes.date, items: schema.quotes.items })
+      .from(schema.quotes)
+      .where(qConds.length === 1 ? qConds[0] : sql`${qConds[0]} OR ${qConds[1]}`)
+      .all();
+    for (const q of qRows) {
+      const ref: QuoteRef = { id: q.id, number: q.number, date: q.date, ...quoteTotals(q.items) };
+      quoteById.set(q.id, ref);
+      if (q.realizationId != null) quoteByReal.set(q.realizationId, ref);
+    }
+  }
+
   const notesCount = notesCountByEvent(dbx, ids);
   const label = (email: string | null, name: string | null) => (email == null ? null : (name || "").trim() || email);
 
@@ -353,6 +416,8 @@ export function loadEvents(dbx: DbOrTx, ids: number[]): CalendarEventJson[] {
       billing: e.billing,
       protocolId: e.protocolId,
       protocol: (e.protocolId != null ? protoById.get(e.protocolId) : null) ?? (e.realizationId != null ? protoByReal.get(e.realizationId) : null) ?? null,
+      quoteId: e.quoteId,
+      quote: (e.quoteId != null ? quoteById.get(e.quoteId) : null) ?? (e.realizationId != null ? quoteByReal.get(e.realizationId) : null) ?? null,
       seriesId: e.seriesId,
       series: e.seriesId != null ? (seriesById.get(e.seriesId) ?? null) : null,
       technicians: techByEvent.get(e.id) ?? [],

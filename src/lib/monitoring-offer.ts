@@ -1,6 +1,6 @@
 // Generator oferty monitoringu — jeden samodzielny plik HTML do wysyłki:
 // interaktywny plan kamer (Leaflet + Esri) z projektu designera, osadzone
-// (base64) zdjęcia z wizji lokalnej i edytowalne sekcje tekstowe.
+// (base64) zdjęcia z wizji i edytowalne sekcje tekstowe.
 // Przepisane 1:1 z oferta-template.html + generuj-oferte.ps1
 // (monitoring-system-aluzyjna25.zip); tam działało to jako skrypt PowerShell.
 import type { MonitoringPhoto, MonitoringProject } from "../db/schema.js";
@@ -9,7 +9,7 @@ import type { MonitoringPhoto, MonitoringProject } from "../db/schema.js";
 export interface OfferFields {
   kicker: string; // nagłówek nad tytułem
   subtitle: string; // podtytuł (domyślnie adres)
-  visitDate: string; // data wizji lokalnej
+  visitDate: string; // data wizji
   purpose: string; // cel opracowania
   contact: string; // kontakt na obiekcie
   summary: string; // "W skrócie" — jedna pozycja na linię
@@ -19,7 +19,7 @@ export interface OfferFields {
 }
 
 export const DEFAULT_OFFER: OfferFields = {
-  kicker: "Wizja lokalna — materiał do wyceny (dział techniczny)",
+  kicker: "Wizja — materiał do wyceny (dział techniczny)",
   subtitle: "",
   visitDate: "",
   purpose: "wycena kosztów przez dział techniczny",
@@ -75,7 +75,7 @@ export function renderOffer(
   }
 
   const meta = [
-    o.visitDate && `<span>Wizja lokalna: <b>${esc(o.visitDate)}</b></span>`,
+    o.visitDate && `<span>Wizja: <b>${esc(o.visitDate)}</b></span>`,
     o.purpose && `<span>Cel: <b>${esc(o.purpose)}</b></span>`,
     o.contact && `<span>Kontakt na obiekcie: <b>${esc(o.contact)}</b></span>`,
   ]

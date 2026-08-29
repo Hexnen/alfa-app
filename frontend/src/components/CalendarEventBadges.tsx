@@ -2,6 +2,7 @@ import { ExternalLink } from "lucide-react";
 import { Link } from "react-router-dom";
 import type {
   CalendarBilling,
+  CalendarEventQuote,
   CalendarEventRealization,
   CalendarEventStatus,
   CalendarEventType,
@@ -9,6 +10,7 @@ import type {
 import {
   BILLING_META,
   PROTOCOL_BADGE_META,
+  QUOTE_BADGE_META,
   REALIZATION_BADGE_META,
   billingBadgeClass,
   billingTip,
@@ -16,6 +18,10 @@ import {
   protocolBadgeKind,
   protocolHref,
   protocolTip,
+  quoteBadgeClass,
+  quoteBadgeKind,
+  quoteHref,
+  quoteTip,
   realizationBadgeClass,
   realizationBadgeKind,
   realizationHref,
@@ -235,6 +241,82 @@ export function RealizationMark({ event, className }: { event: RealizationBadgeE
   return (
     <m.icon
       data-testid="realization-mark"
+      data-kind={kind}
+      className={cn("h-3 w-3 shrink-0", m.tone, className)}
+      aria-label={flat(label)}
+      {...markTip(label)}
+    />
+  );
+}
+
+export interface QuoteBadgeEvent {
+  type: CalendarEventType | string;
+  status?: CalendarEventStatus | string;
+  billing?: CalendarBilling | null;
+  quote?: CalendarEventQuote | null;
+}
+
+/**
+ * Pigułka wyceny: zielona (ma wpisane ilości), szara (szkic z cennika),
+ * bursztynowa „Brak wyceny” (tylko praca płatna). Nic nie renderuje, gdy
+ * `quoteBadgeKind` = null. `link` — dodaje link „Otwórz” do modułu Wyceny.
+ */
+export function QuoteBadge({
+  event,
+  compact,
+  link,
+  className,
+}: {
+  event: QuoteBadgeEvent;
+  compact?: boolean;
+  link?: boolean;
+  className?: string;
+}) {
+  const kind = quoteBadgeKind(event);
+  if (!kind) return null;
+  const m = QUOTE_BADGE_META[kind];
+  const num = event.quote?.number ?? undefined;
+  const badge = (
+    <span
+      data-testid="quote-badge"
+      data-kind={kind}
+      {...markTip(quoteTip(event))}
+      className={cn(quoteBadgeClass(kind), compact && "px-1.5 py-px text-[10px]", className)}
+    >
+      <m.icon className={compact ? "h-3 w-3" : "h-3.5 w-3.5"} aria-hidden />
+      {compact && kind !== "missing" ? (num ?? "Wycena") : m.label(num)}
+    </span>
+  );
+  if (link && kind !== "missing" && event.quote) {
+    return (
+      <span className="inline-flex items-center gap-1">
+        {badge}
+        <Link
+          to={quoteHref(event.quote.id)}
+          onClick={(e) => e.stopPropagation()}
+          className="inline-flex items-center gap-0.5 text-xs font-medium text-primary hover:underline"
+          data-testid="quote-open-link"
+        >
+          Otwórz <ExternalLink className="h-3 w-3" aria-hidden />
+        </Link>
+      </span>
+    );
+  }
+  return badge;
+}
+
+/**
+ * Sam znacznik wyceny (ikona + tooltip) — do wąskich kontekstów (siatka, karty).
+ * Nic nie renderuje, gdy `quoteBadgeKind` = null.
+ */
+export function QuoteMark({ event, className }: { event: QuoteBadgeEvent; className?: string }) {
+  const kind = quoteBadgeKind(event);
+  if (!kind) return null;
+  const m = QUOTE_BADGE_META[kind];
+  const label = quoteTip(event) ?? m.label(event.quote?.number ?? undefined);
+  return (
+    <m.icon
+      data-testid="quote-mark"
       data-kind={kind}
       className={cn("h-3 w-3 shrink-0", m.tone, className)}
       aria-label={flat(label)}

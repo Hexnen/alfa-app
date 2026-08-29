@@ -635,7 +635,8 @@
 
 /* ---- Tablica ---- */
 .alfa-board-col-body {
-  max-height: calc(100vh - 21rem);
+  /* Bez nagłówka strony (tytuł żyje w menu) kolumny sięgają wyżej. */
+  max-height: calc(100vh - 17rem);
   min-height: 8rem;
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -643,7 +644,7 @@
 }
 @media (max-width: 767px) {
   .alfa-board-col-body {
-    max-height: calc(100vh - 17rem);
+    max-height: calc(100vh - 13rem);
   }
 }
 

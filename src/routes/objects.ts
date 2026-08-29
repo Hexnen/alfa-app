@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { db, schema } from "../db/index.js";
-import { eq, like, or, and, sql } from "drizzle-orm";
+import { eq, ne, like, or, and, sql, asc, desc, gte, lte } from "drizzle-orm";
+import { alias } from "drizzle-orm/sqlite-core";
 import type {
   ObjectInput,
   WorkflowTransition,
@@ -11,6 +12,47 @@ import type {
 
 const app = new Hono();
 
+// Handlowiec obiektu i handlowiec jego kontrahenta to ta sama tabela w dwóch rolach,
+// więc druga rola wchodzi do zapytania pod aliasem.
+const objectSalesperson = alias(schema.salespeople, "object_salesperson");
+const contractorSalesperson = alias(schema.salespeople, "contractor_salesperson");
+
+/**
+ * Sortowanie listy obiektów. Klucze `type`, `status` i `department` układamy CASE-em,
+ * bo alfabetyczne sortowanie wartości z bazy ("active", "in_progress"…) nie ma dla
+ * użytkownika sensu: status ma naturalną kolejność procesu, a typ i dział sortujemy
+ * w kolejności polskich etykiet z frontu (frontend/src/lib/utils.ts).
+ *
+ * `monthly_value` bywa NULL („brak abonamentu”) — puste zawsze lądują na końcu,
+ * niezależnie od kierunku, żeby nie zajmowały pierwszej strony przy sortowaniu rosnąco.
+ */
+const SORT_COLUMNS = {
+  name: sql`lower(${schema.objects.name})`,
+  contractor: sql`lower(coalesce(${schema.contractors.name}, ''))`,
+  city: sql`lower(coalesce(${schema.objects.city}, ''))`,
+  type: sql`case ${schema.objects.type} when 'alarm' then 0 when 'mixed' then 1 when 'monitoring' then 2 when 'physical' then 3 else 4 end`,
+  status: sql`case ${schema.objects.status} when 'pending' then 0 when 'in_progress' then 1 when 'active' then 2 when 'inactive' then 3 else 4 end`,
+  department: sql`case ${schema.objects.department} when 'sales' then 0 when 'accounting' then 1 when 'technical' then 2 else 3 end`,
+  company: sql`lower(coalesce(${schema.companies.name}, 'zzzz'))`,
+  // Handlowiec obiektu, a gdy go nie ma — opiekun kontrahenta (tak samo pokazuje to lista).
+  salesperson: sql`lower(coalesce(${objectSalesperson.lastName}, ${contractorSalesperson.lastName}, 'zzzz'))`,
+  value: sql`${schema.objects.monthlyValue}`,
+  created: sql`${schema.objects.createdAt}`,
+} as const;
+
+export type ObjectSortKey = keyof typeof SORT_COLUMNS;
+
+function isSortKey(v: string): v is ObjectSortKey {
+  return Object.prototype.hasOwnProperty.call(SORT_COLUMNS, v);
+}
+
+/** Liczba z query stringa; puste/śmieci → undefined (filtr się nie nakłada). */
+function numberParam(raw: string | undefined): number | undefined {
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const n = Number(raw.replace(",", "."));
+  return Number.isFinite(n) ? n : undefined;
+}
+
 // Get all objects with filtering
 app.get("/", async (c) => {
   const search = c.req.query("search");
@@ -18,6 +60,20 @@ app.get("/", async (c) => {
   const department = c.req.query("department");
   const type = c.req.query("type");
   const contractorId = c.req.query("contractorId");
+  const minValue = numberParam(c.req.query("minValue"));
+  const maxValue = numberParam(c.req.query("maxValue"));
+  // "1" = tylko obiekty z abonamentem, "0" = tylko bez; brak parametru = wszystkie.
+  const hasValue = c.req.query("hasValue");
+  // Zakładki listy: "current" = wszystko poza statusem „nieaktywny", "archived" = tylko on.
+  // Brak parametru (albo "all") = obie zakładki naraz, tak jak działało to wcześniej.
+  // "none" = obiekty bez handlowca (ani własnego, ani z kontrahenta).
+  const salespersonParam = c.req.query("salespersonId");
+  // "none" = obiekty bez przypisanej spółki.
+  const companyParam = c.req.query("companyId");
+  const scope = c.req.query("scope") === "archived" ? "archived" : c.req.query("scope") === "current" ? "current" : "all";
+  const sortRaw = c.req.query("sort") || "name";
+  const sort: ObjectSortKey = isSortKey(sortRaw) ? sortRaw : "name";
+  const dir = c.req.query("dir") === "desc" ? "desc" : "asc";
   const page = parseInt(c.req.query("page") || "1");
   const pageSize = parseInt(c.req.query("pageSize") || "20");
   const offset = (page - 1) * pageSize;
@@ -52,41 +108,149 @@ app.get("/", async (c) => {
     conditions.push(eq(schema.objects.contractorId, parseInt(contractorId)));
   }
 
+  // Wartość miesięczna: widełki i „ma / nie ma abonamentu”. Obiekt bez kwoty (NULL)
+  // nigdy nie wpada w widełki — brak wartości to nie jest zero.
+  if (minValue !== undefined) {
+    conditions.push(gte(schema.objects.monthlyValue, minValue));
+  }
+  if (maxValue !== undefined) {
+    conditions.push(lte(schema.objects.monthlyValue, maxValue));
+  }
+  if (hasValue === "1") {
+    conditions.push(sql`${schema.objects.monthlyValue} is not null and ${schema.objects.monthlyValue} > 0`);
+  } else if (hasValue === "0") {
+    conditions.push(sql`${schema.objects.monthlyValue} is null or ${schema.objects.monthlyValue} = 0`);
+  }
+
+  if (salespersonParam === "none") {
+    conditions.push(
+      sql`${schema.objects.salespersonId} is null and ${schema.contractors.salespersonId} is null`
+    );
+  } else if (salespersonParam) {
+    const sid = parseInt(salespersonParam);
+    // Dopasowanie na tej samej zasadzie, co wyświetlanie: własny handlowiec obiektu,
+    // a gdy go nie ma — opiekun kontrahenta.
+    conditions.push(
+      sql`coalesce(${schema.objects.salespersonId}, ${schema.contractors.salespersonId}) = ${sid}`
+    );
+  }
+
+  if (companyParam === "none") {
+    conditions.push(sql`${schema.objects.companyId} is null`);
+  } else if (companyParam) {
+    conditions.push(eq(schema.objects.companyId, parseInt(companyParam)));
+  }
+
+  // Warunki BEZ zakładki — z nich liczymy liczniki obu zakładek, żeby pokazywały,
+  // ile jest pozycji przy aktualnych filtrach, a nie ile jest w ogóle.
+  const baseClause = conditions.length > 0 ? and(...conditions) : undefined;
+  const scopeCondition =
+    scope === "archived"
+      ? eq(schema.objects.status, "inactive")
+      : scope === "current"
+        ? ne(schema.objects.status, "inactive")
+        : undefined;
+  if (scopeCondition) conditions.push(scopeCondition);
   const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+
+  // Puste kwoty na koniec listy w OBU kierunkach — inaczej sortowanie rosnąco po wartości
+  // pokazywałoby najpierw obiekty bez abonamentu.
+  const column = SORT_COLUMNS[sort];
+  const direction = dir === "desc" ? desc : asc;
+  const orderBy =
+    sort === "value"
+      ? [sql`case when ${schema.objects.monthlyValue} is null then 1 else 0 end`, direction(column), asc(schema.objects.name)]
+      : [direction(column), asc(schema.objects.name)];
 
   const objects = await db
     .select({
       object: schema.objects,
       contractor: schema.contractors,
+      company: {
+        id: schema.companies.id,
+        name: schema.companies.name,
+        active: schema.companies.active,
+      },
+      objectSales: {
+        id: objectSalesperson.id,
+        firstName: objectSalesperson.firstName,
+        lastName: objectSalesperson.lastName,
+        active: objectSalesperson.active,
+      },
+      contractorSales: {
+        id: contractorSalesperson.id,
+        firstName: contractorSalesperson.firstName,
+        lastName: contractorSalesperson.lastName,
+        active: contractorSalesperson.active,
+      },
     })
     .from(schema.objects)
     .leftJoin(
       schema.contractors,
       eq(schema.objects.contractorId, schema.contractors.id)
     )
+    .leftJoin(schema.companies, eq(schema.companies.id, schema.objects.companyId))
+    .leftJoin(objectSalesperson, eq(objectSalesperson.id, schema.objects.salespersonId))
+    .leftJoin(contractorSalesperson, eq(contractorSalesperson.id, schema.contractors.salespersonId))
     .where(whereClause)
+    .orderBy(...orderBy)
     .limit(pageSize)
     .offset(offset);
 
-  const countQuery = db
-    .select({ count: sql<number>`count(*)` })
-    .from(schema.objects);
+  // Podsumowanie liczymy dla CAŁEGO wyniku filtrowania (nie tylko bieżącej strony) —
+  // front pokazuje je pod tabelą jako „N obiektów · suma abonamentów”.
+  const summaryRows = await db
+    .select({
+      count: sql<number>`count(*)`,
+      sum: sql<number | null>`sum(${schema.objects.monthlyValue})`,
+      withValue: sql<number>`sum(case when ${schema.objects.monthlyValue} is not null and ${schema.objects.monthlyValue} > 0 then 1 else 0 end)`,
+    })
+    .from(schema.objects)
+    .leftJoin(
+      schema.contractors,
+      eq(schema.objects.contractorId, schema.contractors.id)
+    )
+    .where(whereClause);
+  const summary = summaryRows[0];
+  const total = summary.count;
 
-  const countResult = whereClause
-    ? await countQuery.where(whereClause)
-    : await countQuery;
-  const total = countResult[0].count;
+  const scopeRows = await db
+    .select({
+      archived: sql<number>`sum(case when ${schema.objects.status} = 'inactive' then 1 else 0 end)`,
+      current: sql<number>`sum(case when ${schema.objects.status} = 'inactive' then 0 else 1 end)`,
+    })
+    .from(schema.objects)
+    .leftJoin(
+      schema.contractors,
+      eq(schema.objects.contractorId, schema.contractors.id)
+    )
+    .where(baseClause);
 
   return c.json({
     success: true,
     data: objects.map((o) => ({
       ...o.object,
       contractor: o.contractor,
+      company: o.company?.id ? o.company : null,
+      // `inherited` mówi UI, że handlowiec jest odziedziczony po kontrahencie,
+      // a nie przypisany do samego obiektu.
+      salesperson: o.objectSales?.id
+        ? { ...o.objectSales, inherited: false }
+        : o.contractorSales?.id
+          ? { ...o.contractorSales, inherited: true }
+          : null,
     })),
     total,
     page,
     pageSize,
     totalPages: Math.ceil(total / pageSize),
+    sort,
+    dir,
+    totalMonthlyValue: summary.sum ?? 0,
+    withMonthlyValue: summary.withValue ?? 0,
+    scope,
+    currentCount: scopeRows[0].current ?? 0,
+    archivedCount: scopeRows[0].archived ?? 0,
   });
 });
 
@@ -158,6 +322,8 @@ app.post("/", async (c) => {
         department: body.department || "sales",
         monthlyValue: body.monthlyValue,
         notes: body.notes,
+        companyId: body.companyId ?? null,
+        salespersonId: body.salespersonId ?? null,
       })
       .returning()
       .all();

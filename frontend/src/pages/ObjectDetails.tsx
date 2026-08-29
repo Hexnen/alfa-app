@@ -34,7 +34,7 @@ import {
   Send,
 } from "lucide-react";
 import { CalendarEventDialog, type CalendarDialogMode } from "@/components/CalendarEventDialog";
-import { BillingBadge, ProtocolBadge, RealizationBadge } from "@/components/CalendarEventBadges";
+import { BillingBadge, ProtocolBadge, QuoteBadge, RealizationBadge } from "@/components/CalendarEventBadges";
 import {
   EVENT_STATUS_META,
   EVENT_TYPE_META,
@@ -915,6 +915,7 @@ function ObjectEventList({
                     )}
                     <BillingBadge billing={ev.billing} compact />
                     <ProtocolBadge event={ev} compact link />
+                    <QuoteBadge event={ev} compact link />
                     <RealizationBadge event={ev} compact link />
                   </div>
                   <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">

@@ -58,18 +58,23 @@ export async function getStats() {
 // Contractors
 export async function getContractors(params?: {
   search?: string;
+  /** Zakładka: "1" = aktualni, "0" = archiwalni, brak = wszyscy. */
+  active?: "1" | "0";
+  /** Id handlowca albo "none" = kontrahenci bez opiekuna. */
+  salespersonId?: number | "none";
   page?: number;
   pageSize?: number;
 }) {
   const searchParams = new URLSearchParams();
   if (params?.search) searchParams.set("search", params.search);
+  if (params?.active) searchParams.set("active", params.active);
+  if (params?.salespersonId !== undefined) searchParams.set("salespersonId", String(params.salespersonId));
+  if (params?.companyId !== undefined) searchParams.set("companyId", String(params.companyId));
   if (params?.page) searchParams.set("page", String(params.page));
   if (params?.pageSize) searchParams.set("pageSize", String(params.pageSize));
 
   const query = searchParams.toString();
-  return request<PaginatedResponse<Contractor>>(
-    `/contractors${query ? `?${query}` : ""}`
-  );
+  return request<ContractorsResponse>(`/contractors${query ? `?${query}` : ""}`);
 }
 
 export async function getContractor(id: number) {
@@ -97,12 +102,52 @@ export async function deleteContractor(id: number) {
 }
 
 // Objects
+/** Klucze sortowania listy obiektów — te same, co CASE-y w src/routes/objects.ts. */
+export type ObjectSortKey =
+  | "name"
+  | "contractor"
+  | "city"
+  | "type"
+  | "status"
+  | "department"
+  | "salesperson"
+  | "company"
+  | "value"
+  | "created";
+
+/** Lista obiektów + podsumowanie CAŁEGO wyniku filtrowania (nie tylko strony). */
+export interface ObjectsResponse extends PaginatedResponse<ObjectWithContractor> {
+  sort: ObjectSortKey;
+  dir: "asc" | "desc";
+  scope: "current" | "archived" | "all";
+  /** Liczniki zakładek przy bieżących filtrach. */
+  currentCount: number;
+  archivedCount: number;
+  /** Suma wartości miesięcznych obiektów spełniających filtry. */
+  totalMonthlyValue: number;
+  /** Ile z nich ma niezerowy abonament. */
+  withMonthlyValue: number;
+}
+
 export async function getObjects(params?: {
   search?: string;
   status?: string;
   department?: string;
   type?: string;
   contractorId?: number;
+  /** Widełki wartości miesięcznej (obiekt bez kwoty nigdy w nie nie wpada). */
+  minValue?: number;
+  maxValue?: number;
+  /** "1" = tylko z abonamentem, "0" = tylko bez. */
+  hasValue?: "1" | "0";
+  /** Zakładka: bieżące (wszystko poza „nieaktywny”) albo archiwalne. */
+  scope?: "current" | "archived";
+  /** Id handlowca albo "none" = obiekty bez opiekuna. */
+  salespersonId?: number | "none";
+  /** Id spółki albo "none" = obiekty bez przypisanej spółki. */
+  companyId?: number | "none";
+  sort?: ObjectSortKey;
+  dir?: "asc" | "desc";
   page?: number;
   pageSize?: number;
 }) {
@@ -112,13 +157,18 @@ export async function getObjects(params?: {
   if (params?.department) searchParams.set("department", params.department);
   if (params?.type) searchParams.set("type", params.type);
   if (params?.contractorId) searchParams.set("contractorId", String(params.contractorId));
+  if (params?.minValue !== undefined) searchParams.set("minValue", String(params.minValue));
+  if (params?.maxValue !== undefined) searchParams.set("maxValue", String(params.maxValue));
+  if (params?.hasValue) searchParams.set("hasValue", params.hasValue);
+  if (params?.scope) searchParams.set("scope", params.scope);
+  if (params?.salespersonId !== undefined) searchParams.set("salespersonId", String(params.salespersonId));
+  if (params?.sort) searchParams.set("sort", params.sort);
+  if (params?.dir) searchParams.set("dir", params.dir);
   if (params?.page) searchParams.set("page", String(params.page));
   if (params?.pageSize) searchParams.set("pageSize", String(params.pageSize));
 
   const query = searchParams.toString();
-  return request<PaginatedResponse<ObjectWithContractor>>(
-    `/objects${query ? `?${query}` : ""}`
-  );
+  return request<ObjectsResponse>(`/objects${query ? `?${query}` : ""}`);
 }
 
 export async function getObject(id: number) {
@@ -229,8 +279,32 @@ export interface Contractor {
   email: string | null;
   contactPerson: string | null;
   notes: string | null;
+  // Dane z wykazu VAT MF (wyszukiwarka firm po NIP).
+  regon?: string | null;
+  krs?: string | null;
+  vatStatus?: string | null;
+  vatCheckedAt?: string | null;
   createdAt: string;
   updatedAt: string;
+  /** Kontrahent bieżący (true) albo archiwalny (false). */
+  active: boolean;
+  /** Opiekun handlowy (null = nieprzypisany). */
+  salespersonId?: number | null;
+  salesperson?: SalespersonRef | null;
+  // Podsumowanie obiektów kontrahenta (liczy je GET /contractors; brak = starsze API).
+  objectsCount?: number;
+  activeObjectsCount?: number;
+  /** Suma wartości miesięcznych obiektów tego kontrahenta. */
+  objectsMonthlyValue?: number;
+}
+
+/** Lista kontrahentów + podsumowanie całego wyniku filtrowania. */
+export interface ContractorsResponse extends PaginatedResponse<Contractor> {
+  totalObjects: number;
+  totalMonthlyValue: number;
+  /** Liczniki zakładek „Aktualni” / „Archiwalni” przy bieżącej szukajce. */
+  activeCount: number;
+  archivedCount: number;
 }
 
 export interface ContractorInput {
@@ -243,6 +317,12 @@ export interface ContractorInput {
   email?: string;
   contactPerson?: string;
   notes?: string;
+  regon?: string;
+  krs?: string;
+  vatStatus?: string;
+  vatCheckedAt?: string;
+  active?: boolean;
+  salespersonId?: number | null;
 }
 
 export interface ObjectRecord {
@@ -263,12 +343,19 @@ export interface ObjectRecord {
    */
   latitude?: number | null;
   longitude?: number | null;
+  /** Handlowiec przypisany wprost do obiektu (null = dziedziczy po kontrahencie). */
+  salespersonId?: number | null;
+  /** Spółka grupy obsługująca obiekt. */
+  companyId?: number | null;
   createdAt: string;
   updatedAt: string;
 }
 
 export interface ObjectWithContractor extends ObjectRecord {
   contractor: Contractor | null;
+  /** Handlowiec obiektu, a gdy go nie ma — opiekun kontrahenta (`inherited: true`). */
+  salesperson?: SalespersonRef | null;
+  company?: CompanyRef | null;
 }
 
 export interface ObjectWithDetails extends ObjectWithContractor {
@@ -289,6 +376,10 @@ export interface ObjectInput {
   /** Ignorowane przez starszy backend — bezpieczne do wysłania zawsze. */
   latitude?: number | null;
   longitude?: number | null;
+  /** Handlowiec obiektu; null = dziedziczy opiekuna kontrahenta. */
+  salespersonId?: number | null;
+  /** Spółka grupy obsługująca obiekt. */
+  companyId?: number | null;
 }
 
 export interface WorkflowTransition {
@@ -431,6 +522,36 @@ export interface OrderInput {
   objectInstallationType?: "new" | "takeover";
 }
 
+// --- Wyszukiwarka firm (wykaz podatników VAT MF) ---
+
+/** Dane firmy pobrane z wykazu MF po NIP. */
+export interface CompanyData {
+  nip: string;
+  name: string;
+  address: string;
+  postalCode: string;
+  city: string;
+  regon: string;
+  krs: string;
+  /** "Czynny" | "Zwolniony" | "Niezarejestrowany" | null (MF nie podał). */
+  statusVat: "Czynny" | "Zwolniony" | "Niezarejestrowany" | null;
+  accountNumbers: string[];
+  rawAddress: string;
+  /** Dzień, na który MF zwrócił dane ("YYYY-MM-DD"). */
+  date: string;
+}
+
+/**
+ * Szuka firmy po NIP w wykazie VAT MF. Rzuca Error ze `status` 502, gdy rejestr
+ * nie odpowiada — UI ma wtedy pokazać ostrzeżenie, a nie blokować formularza.
+ */
+export async function lookupCompanyByNip(nip: string, refresh = false) {
+  const query = refresh ? "?refresh=1" : "";
+  return request<ApiResponse<{ found: boolean; company: CompanyData | null; cached: boolean; source: string }>>(
+    `/company-lookup/nip/${nip}${query}`
+  );
+}
+
 // Check contractor by NIP
 export async function checkContractorByNIP(nip: string) {
   return request<ApiResponse<{ exists: boolean; normalizedNip: string } & Partial<Contractor>>>(`/contractors/by-nip/${nip}`);
@@ -522,6 +643,28 @@ export interface PublicOrderIntakeInput {
   interventionGroup?: boolean;
   videoReception?: boolean;
   installationStartDate?: string;
+}
+
+/** Dane firmy dostępne dla formularza publicznego (węższe niż w panelu). */
+export interface PublicCompanyData {
+  nip: string;
+  name: string;
+  address: string;
+  postalCode: string;
+  city: string;
+  statusVat: "Czynny" | "Zwolniony" | "Niezarejestrowany" | null;
+  date: string;
+}
+
+/**
+ * Wyszukiwarka firm dla anonimowego formularza ZDW. Trasa jest ostro limitowana
+ * (5 zapytań na 5 minut z jednego adresu), więc wołamy ją tylko na żądanie
+ * użytkownika — nigdy automatycznie przy pisaniu.
+ */
+export async function lookupPublicCompanyByNip(nip: string) {
+  return request<ApiResponse<{ found: boolean; company: PublicCompanyData | null }>>(
+    `/public/company-lookup/nip/${nip}`
+  );
 }
 
 export async function submitPublicOrderIntake(data: PublicOrderIntakeInput) {
@@ -1198,6 +1341,158 @@ export async function deleteTechnician(id: number) {
 }
 
 // ---------------------------------------------------------------------------
+// Handlowcy (opiekunowie kontrahentów i obiektów)
+// ---------------------------------------------------------------------------
+
+export interface Salesperson {
+  id: number;
+  firstName: string;
+  lastName: string;
+  phone: string | null;
+  email: string | null;
+  region: string | null;
+  notes: string | null;
+  active: boolean;
+  /** Liczone przez API: ilu kontrahentów i ile obiektów prowadzi. */
+  contractorsCount?: number;
+  objectsCount?: number;
+  /** Suma abonamentów obiektów przypisanych wprost do handlowca. */
+  objectsMonthlyValue?: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SalespersonInput {
+  firstName: string;
+  lastName: string;
+  phone?: string;
+  email?: string;
+  region?: string;
+  notes?: string;
+  active?: boolean;
+}
+
+/** Skrót handlowca dołączany do kontrahenta i obiektu. */
+export interface SalespersonRef {
+  id: number;
+  firstName: string;
+  lastName: string;
+  active: boolean;
+  /** Tylko przy obiekcie: true = handlowiec odziedziczony po kontrahencie. */
+  inherited?: boolean;
+}
+
+export function salespersonName(s: SalespersonRef | Salesperson | null | undefined): string {
+  if (!s) return "—";
+  return `${s.firstName} ${s.lastName}`.trim();
+}
+
+export async function getSalespeople(onlyActive = false) {
+  return request<ApiResponse<Salesperson[]>>(
+    `/salespeople${onlyActive ? "?active=true" : ""}`
+  );
+}
+
+export async function createSalesperson(data: SalespersonInput) {
+  return request<ApiResponse<Salesperson>>("/salespeople", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateSalesperson(id: number, data: Partial<SalespersonInput>) {
+  return request<ApiResponse<Salesperson>>(`/salespeople/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteSalesperson(id: number) {
+  return request<ApiResponse<null>>(`/salespeople/${id}`, { method: "DELETE" });
+}
+
+// ---------------------------------------------------------------------------
+// Spółki grupy (słownik wspólny z kadrami)
+// ---------------------------------------------------------------------------
+
+export interface Company {
+  id: number;
+  /** Skrót używany w kadrach („ALFA S”, „GUARD 21”) — klucz zgodności z arkuszem WYNAGRODZENIA. */
+  name: string;
+  fullName: string | null;
+  nip: string | null;
+  // Dane z wykazu VAT MF (uzupełniane wyszukiwarką po NIP).
+  regon: string | null;
+  krs: string | null;
+  address: string | null;
+  postalCode: string | null;
+  city: string | null;
+  vatStatus: string | null;
+  vatCheckedAt: string | null;
+  notes: string | null;
+  active: boolean;
+  /** Liczone przez API. */
+  objectsCount?: number;
+  objectsMonthlyValue?: number;
+  /** Ile umów w kadrach wskazuje na tę spółkę (po nazwie). */
+  contractsCount?: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CompanyInput {
+  name: string;
+  fullName?: string;
+  nip?: string;
+  regon?: string;
+  krs?: string;
+  address?: string;
+  postalCode?: string;
+  city?: string;
+  vatStatus?: string;
+  vatCheckedAt?: string;
+  notes?: string;
+  active?: boolean;
+}
+
+/** Skrót spółki dołączany do obiektu. */
+export interface CompanyRef {
+  id: number;
+  name: string;
+  active: boolean;
+}
+
+export async function getCompanies(onlyActive = false) {
+  return request<ApiResponse<Company[]>>(`/companies${onlyActive ? "?active=true" : ""}`);
+}
+
+export async function createCompany(data: CompanyInput) {
+  return request<ApiResponse<Company>>("/companies", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateCompany(id: number, data: Partial<CompanyInput>) {
+  return request<ApiResponse<Company>>(`/companies/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+}
+
+/** Sprawdzenie spółki w wykazie VAT MF po jej NIP-ie i zapis pobranych danych. */
+export async function lookupCompanyInMf(id: number, refresh = false) {
+  return request<ApiResponse<Company> & { message?: string }>(
+    `/companies/${id}/lookup${refresh ? "?refresh=1" : ""}`,
+    { method: "POST" }
+  );
+}
+
+export async function deleteCompany(id: number) {
+  return request<ApiResponse<null>>(`/companies/${id}`, { method: "DELETE" });
+}
+
+// ---------------------------------------------------------------------------
 // Cennik usług serwisowych
 // ---------------------------------------------------------------------------
 
@@ -1539,8 +1834,10 @@ export interface ProtocolSuggestion {
   /** „kalendarz" | „obiekt" | „kontrahent" | „cennik" | „realizacja". */
   source: string;
   detail: string;
-  /** true = pole puste, można podstawić bez pytania; false = nadpisze istniejącą wartość. */
+  /** true = pole puste, można podstawić bez pytania; false = nadpisze wartość albo jest szacunkiem. */
   confident: boolean;
+  /** true = wartość szacowana (norma dnia dla wydarzenia całodniowego) — zawsze do potwierdzenia. */
+  assumed?: boolean;
 }
 
 export interface ProtocolPrefillContext {
@@ -1602,6 +1899,8 @@ export interface Quote {
   address: string;
   items: QuoteItem[];
   total: number;
+  /** Realizacja, z której powstała wycena (null = wycena wolnostojąca). */
+  realizationId?: number | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -1613,10 +1912,16 @@ export interface QuoteInput {
   items?: QuoteItem[];
 }
 
-export async function getQuotes(year?: number, month?: number) {
+export async function getQuotes(
+  year?: number,
+  month?: number,
+  opts: { q?: string; limit?: number } = {}
+) {
   const params = new URLSearchParams();
   if (year) params.set("year", String(year));
   if (month) params.set("month", String(month));
+  if (opts.q) params.set("q", opts.q);
+  if (opts.limit) params.set("limit", String(opts.limit));
   const query = params.toString();
   return request<ApiResponse<Quote[]>>(`/quotes${query ? `?${query}` : ""}`);
 }
@@ -2660,6 +2965,21 @@ export interface CalendarEventRealization {
   total: number;
 }
 
+/**
+ * Skrót wyceny przypiętej do wydarzenia (jawnie `quoteId` albo wycena realizacji).
+ * Powstaje automatycznie dla prac PŁATNYCH — patrz src/lib/calendar-realizations.ts.
+ */
+export interface CalendarEventQuote {
+  id: number;
+  number: string;
+  /** YYYY-MM-DD */
+  date: string;
+  /** Suma netto pozycji (ilość × cena). */
+  total: number;
+  /** Liczba pozycji z wpisaną ilością — 0 = wycena pusta (szkic z cennika). */
+  filledItems: number;
+}
+
 export type CalendarSeriesFreq =
   | "weekly"
   | "monthly"
@@ -2713,6 +3033,10 @@ export interface CalendarEvent {
   protocol?: CalendarEventProtocol | null;
   /** Skrót realizacji z `realizationId`. Brak pola = starszy backend. */
   realization?: CalendarEventRealization | null;
+  /** Jawnie przypięta wycena (null → wycena realizacji, jeśli jest). */
+  quoteId?: number | null;
+  /** Wyliczone przez backend: wycena z `quoteId` albo z realizacji. */
+  quote?: CalendarEventQuote | null;
   /** `true` = realizacja została ręcznie odpięta; automat jej nie odtworzy. */
   realizationOptout: boolean;
   technicians: CalendarEventTechnician[];
@@ -2773,6 +3097,8 @@ export interface CalendarEventInput {
   billing?: CalendarBilling | null;
   /** Jawnie przypięty protokół (null = odepnij → protokół realizacji / brak). */
   protocolId?: number | null;
+  /** Jawnie przypięta wycena (null = odepnij → wycena realizacji / brak). */
+  quoteId?: number | null;
   technicianIds: number[];
   recurrence?: CalendarRecurrenceInput | null;
 }
@@ -3700,6 +4026,8 @@ export interface CalendarSettingsValues {
   realizationTypes: string[];
   /** Czy edycja wydarzenia aktualizuje powiązaną realizację. */
   realizationSync: boolean;
+  /** Czy dla płatnego wydarzenia powstaje wycena (razem z realizacją i protokołem). */
+  autoQuote: boolean;
 }
 
 export type CalendarSettingsField = keyof CalendarSettingsValues;
@@ -3735,6 +4063,8 @@ export interface AdminCalendarBackfillCreated {
   eventId: number;
   realizationId: number;
   protocolNumber: string | null;
+  /** Numer wyceny — tylko prace płatne (null = wycena nie powstała). */
+  quoteNumber?: string | null;
 }
 export interface AdminCalendarBackfillSkipped {
   eventId: number;
@@ -3752,6 +4082,10 @@ export interface AdminCalendarBackfillResult {
   created?: AdminCalendarBackfillCreated[] | number;
   /** Pominięte (mają już realizację / typ nieobjęty / błąd). */
   skipped: AdminCalendarBackfillSkipped[] | number;
+  /** Płatne wydarzenia z realizacją, ale bez wyceny (starszy backend nie zwraca pola). */
+  quoteCandidates?: number;
+  /** Wyceny faktycznie utworzone (brak w trybie `dryRun`). */
+  quotesCreated?: number;
 }
 
 /** Liczność pola wyniku backfillu — lista albo gotowa liczba. */
@@ -3933,6 +4267,8 @@ export interface CompanySettingsValues {
   /** null = współrzędne nieustalone (geokoder ich jeszcze nie policzył). */
   officeLat: number | null;
   officeLng: number | null;
+  /** Norma dnia roboczego (godz.) — szacunek godzin dla wydarzenia całodniowego. */
+  workDayHours: number;
   /** Stawka sprzedaży za roboczogodzinę (netto). */
   rateHour: number;
   /** Koszt wewnętrzny roboczogodziny. */

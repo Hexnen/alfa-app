@@ -495,29 +495,25 @@ export function Kadry() {
     return <Navigate to="/kadry/wynagrodzenia" replace />;
   }
 
-  return (
-    <div className="space-y-6">
-      {!editable && <ReadOnlyBanner className="mb-4" />}
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-          <h1 className="text-2xl font-bold">Kadry</h1>
-          <p className="text-muted-foreground">
-            Godziny, wynagrodzenia i zestawienia dla księgowości
-          </p>
-        </div>
-        <div className="flex items-center gap-1">
-          <Button variant="outline" size="icon" onClick={() => shiftMonth(-1)}>
-            <ChevronLeft className="h-4 w-4" />
-          </Button>
-          <span className="min-w-[150px] text-center font-medium">
-            {MONTH_NAMES[month - 1]} {year}
-          </span>
-          <Button variant="outline" size="icon" onClick={() => shiftMonth(1)}>
-            <ChevronRight className="h-4 w-4" />
-          </Button>
-        </div>
-      </div>
+  // Wybór miesiąca dotyczy całej zakładki — wstawiamy go w pasek narzędzi
+  // każdej podzakładki, zamiast zajmować osobny rząd nad kaflami.
+  const monthNav = (
+    <div className="flex items-center gap-1">
+      <Button variant="outline" size="icon" onClick={() => shiftMonth(-1)}>
+        <ChevronLeft className="h-4 w-4" />
+      </Button>
+      <span className="min-w-[150px] text-center font-medium">
+        {MONTH_NAMES[month - 1]} {year}
+      </span>
+      <Button variant="outline" size="icon" onClick={() => shiftMonth(1)}>
+        <ChevronRight className="h-4 w-4" />
+      </Button>
+    </div>
+  );
 
+  return (
+    <div className="space-y-3">
+      {!editable && <ReadOnlyBanner className="mb-4" />}
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
         {tiles.map((t) => (
           <Card key={t.label} title={t.tip} className="cursor-help">
@@ -537,7 +533,8 @@ export function Kadry() {
       <Tabs value={tab}>
         {/* ==================== WYNAGRODZENIA ==================== */}
         <TabsContent value="wynagrodzenia" className="space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-3">
+            {monthNav}
             <Input
               value={payrollFilter}
               onChange={(e) => setPayrollFilter(e.target.value)}
@@ -546,6 +543,7 @@ export function Kadry() {
             />
             <Button
               variant="outline"
+              className="ml-auto"
               onClick={() => printHrStatement(payroll, year, month)}
             >
               <Printer className="mr-2 h-4 w-4" />
@@ -793,7 +791,8 @@ export function Kadry() {
 
         {/* ==================== GODZINY ==================== */}
         <TabsContent value="godziny" className="space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-3">
+            {monthNav}
             <Input
               value={hoursFilter}
               onChange={(e) => setHoursFilter(e.target.value)}
@@ -802,6 +801,7 @@ export function Kadry() {
             />
             {editable && (
               <Button
+                className="ml-auto"
                 onClick={() => {
                   setHoursEdit(null);
                   setHoursFormOpen(true);
@@ -971,9 +971,11 @@ export function Kadry() {
 
         {/* ==================== BIURO ==================== */}
         <TabsContent value="biuro" className="space-y-4">
-          {editable && (
-            <div className="flex justify-end">
+          <div className="flex flex-wrap items-center gap-3">
+            {monthNav}
+            {editable && (
               <Button
+                className="ml-auto"
                 onClick={() => {
                   setOfficeEdit(null);
                   setOfficeFormOpen(true);
@@ -982,8 +984,8 @@ export function Kadry() {
                 <Plus className="mr-2 h-4 w-4" />
                 Dodaj wpis biura
               </Button>
-            </div>
-          )}
+            )}
+          </div>
           <Card>
             <CardContent className="overflow-x-auto p-0">
               <table className="w-full min-w-[1080px] text-sm">
@@ -1158,9 +1160,11 @@ export function Kadry() {
 
         {/* ==================== UMOWY ==================== */}
         <TabsContent value="umowy" className="space-y-4">
-          {editable && (
-            <div className="flex justify-end">
+          <div className="flex flex-wrap items-center gap-3">
+            {monthNav}
+            {editable && (
               <Button
+                className="ml-auto"
                 onClick={() => {
                   setContractEdit(null);
                   setContractFormOpen(true);
@@ -1169,8 +1173,8 @@ export function Kadry() {
                 <Plus className="mr-2 h-4 w-4" />
                 Dodaj umowę
               </Button>
-            </div>
-          )}
+            )}
+          </div>
           <Card>
             <CardContent className="overflow-x-auto p-0">
               <table className="w-full min-w-[960px] text-sm">
@@ -1290,9 +1294,11 @@ export function Kadry() {
 
         {/* ==================== PRACOWNICY ==================== */}
         <TabsContent value="pracownicy" className="space-y-4">
-          {editable && (
-            <div className="flex justify-end">
+          <div className="flex flex-wrap items-center gap-3">
+            {monthNav}
+            {editable && (
               <Button
+                className="ml-auto"
                 onClick={() => {
                   setEmployeeEdit(null);
                   setEmployeeFormOpen(true);
@@ -1301,8 +1307,8 @@ export function Kadry() {
                 <Plus className="mr-2 h-4 w-4" />
                 Dodaj pracownika
               </Button>
-            </div>
-          )}
+            )}
+          </div>
           <Card>
             <CardContent className="overflow-x-auto p-0">
               <table className="w-full min-w-[640px] text-sm">
@@ -1391,20 +1397,23 @@ export function Kadry() {
 
         {/* ==================== OBIEKTY ==================== */}
         <TabsContent value="obiekty" className="space-y-4">
-          {editable && (
-            <div className="flex max-w-md gap-2">
-              <Input
-                value={newObjectName}
-                onChange={(e) => setNewObjectName(e.target.value)}
-                placeholder="Nazwa nowego obiektu…"
-                onKeyDown={(e) => e.key === "Enter" && handleObjectAdd()}
-              />
-              <Button onClick={handleObjectAdd} disabled={!newObjectName.trim()}>
-                <Plus className="mr-2 h-4 w-4" />
-                Dodaj
-              </Button>
-            </div>
-          )}
+          <div className="flex flex-wrap items-center gap-3">
+            {monthNav}
+            {editable && (
+              <div className="ml-auto flex max-w-md gap-2">
+                <Input
+                  value={newObjectName}
+                  onChange={(e) => setNewObjectName(e.target.value)}
+                  placeholder="Nazwa nowego obiektu…"
+                  onKeyDown={(e) => e.key === "Enter" && handleObjectAdd()}
+                />
+                <Button onClick={handleObjectAdd} disabled={!newObjectName.trim()}>
+                  <Plus className="mr-2 h-4 w-4" />
+                  Dodaj
+                </Button>
+              </div>
+            )}
+          </div>
           <Card>
             <CardContent className="p-0">
               <table className="w-full text-sm">
@@ -1469,6 +1478,7 @@ export function Kadry() {
 
         {/* ==================== NORMY ==================== */}
         <TabsContent value="normy" className="space-y-4">
+          <div className="flex flex-wrap items-center gap-3">{monthNav}</div>
           <Card>
             <CardContent className="p-0">
               <table className="w-full max-w-2xl text-sm">

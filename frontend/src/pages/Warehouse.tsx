@@ -43,6 +43,7 @@ import {
   totalStockFor,
   warehouseLabel,
 } from "@/components/warehouse/warehouseShared";
+import { pillClass } from "@/lib/calendar-labels";
 
 const alertError = (err: unknown, fallback: string) =>
   window.alert(err instanceof Error ? err.message : fallback);
@@ -420,34 +421,32 @@ export function Warehouse() {
     "flex h-10 rounded-md border border-input bg-background px-3 py-2 text-sm";
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       {!editable && <ReadOnlyBanner className="mb-4" />}
 
-      {/* Nagłówek + akcje główne */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-2xl font-bold">Magazyn</h1>
-        {editable && (
-          <div className="flex flex-wrap gap-2">
-            <Button onClick={() => openDocForm("PZ")}>
-              <PackagePlus className="mr-1 h-4 w-4" /> Przyjmij dostawę (PZ)
-            </Button>
-            <Button variant="outline" onClick={() => openDocForm("issue")}>
-              <PackageMinus className="mr-1 h-4 w-4" /> Wydaj
-            </Button>
-            <Button variant="outline" onClick={() => openDocForm("MM")}>
-              <ArrowLeftRight className="mr-1 h-4 w-4" /> Przesuń (MM)
-            </Button>
-          </div>
-        )}
-      </div>
-
       <Tabs value={tab} onValueChange={setTab}>
-        <TabsList>
-          <TabsTrigger value="stany">Stany</TabsTrigger>
-          <TabsTrigger value="dokumenty">Dokumenty</TabsTrigger>
-          <TabsTrigger value="towary">Towary</TabsTrigger>
-          <TabsTrigger value="magazyny">Magazyny</TabsTrigger>
-        </TabsList>
+        {/* Zakładki i akcje główne dzielą jeden rząd */}
+        <div className="flex flex-wrap items-center gap-3">
+          <TabsList>
+            <TabsTrigger value="stany">Stany</TabsTrigger>
+            <TabsTrigger value="dokumenty">Dokumenty</TabsTrigger>
+            <TabsTrigger value="towary">Towary</TabsTrigger>
+            <TabsTrigger value="magazyny">Magazyny</TabsTrigger>
+          </TabsList>
+          {editable && (
+            <div className="ml-auto flex flex-wrap gap-2">
+              <Button onClick={() => openDocForm("PZ")}>
+                <PackagePlus className="mr-1 h-4 w-4" /> Przyjmij dostawę (PZ)
+              </Button>
+              <Button variant="outline" onClick={() => openDocForm("issue")}>
+                <PackageMinus className="mr-1 h-4 w-4" /> Wydaj
+              </Button>
+              <Button variant="outline" onClick={() => openDocForm("MM")}>
+                <ArrowLeftRight className="mr-1 h-4 w-4" /> Przesuń (MM)
+              </Button>
+            </div>
+          )}
+        </div>
 
         {/* ------------------------------ STANY ------------------------------ */}
         <TabsContent value="stany" className="space-y-3">
@@ -544,7 +543,7 @@ export function Warehouse() {
                                 {fmtQty(total)} {item.unit}
                               </span>
                               {low && (
-                                <span className="ml-2 rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700">
+                                <span className={pillClass("red", { className: "ml-2" })}>
                                   niski stan
                                 </span>
                               )}
@@ -559,7 +558,9 @@ export function Warehouse() {
                                   entries.map((e) => (
                                     <span
                                       key={e.warehouseId}
-                                      className="rounded-full bg-muted px-2 py-0.5 text-xs"
+                                      className={pillClass("muted", {
+                                        className: "font-normal",
+                                      })}
                                     >
                                       {warehouseChipLabel(e.warehouseId)}:{" "}
                                       {fmtQty(e.quantity)}
@@ -704,14 +705,12 @@ export function Warehouse() {
                           >
                             <td className="px-3 py-2 font-medium">
                               {doc.docNumber || (
-                                <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700">
-                                  szkic
-                                </span>
+                                <span className={pillClass("neutral")}>szkic</span>
                               )}
                             </td>
                             <td className="px-3 py-2">
                               <span
-                                className={`rounded-full px-2 py-0.5 text-xs font-medium ${typeMeta.badge}`}
+                                className={pillClass(typeMeta.tone)}
                               >
                                 {doc.docType}
                               </span>
@@ -732,7 +731,7 @@ export function Warehouse() {
                             </td>
                             <td className="px-3 py-2">
                               <span
-                                className={`rounded-full px-2 py-0.5 text-xs font-medium ${statusMeta.badge}`}
+                                className={pillClass(statusMeta.tone)}
                               >
                                 {statusMeta.label}
                               </span>
@@ -845,14 +844,10 @@ export function Warehouse() {
                           <td className="px-3 py-2">
                             <div className="flex flex-wrap gap-1">
                               {item.isAsset && (
-                                <span className="rounded-full bg-violet-100 px-2 py-0.5 text-xs font-medium text-violet-700">
-                                  zwrotny
-                                </span>
+                                <span className={pillClass("violet")}>zwrotny</span>
                               )}
                               {item.isArchived && (
-                                <span className="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
-                                  archiwum
-                                </span>
+                                <span className={pillClass("muted")}>archiwum</span>
                               )}
                             </div>
                           </td>
@@ -980,7 +975,11 @@ export function Warehouse() {
                             <td className="px-3 py-2 font-medium">
                               {wh.name}
                               {wh.isArchived && (
-                                <span className="ml-2 rounded-full bg-muted px-2 py-0.5 text-xs font-normal text-muted-foreground">
+                                <span
+                                  className={pillClass("muted", {
+                                    className: "ml-2 font-normal",
+                                  })}
+                                >
                                   archiwum
                                 </span>
                               )}
@@ -990,7 +989,7 @@ export function Warehouse() {
                             </td>
                             <td className="px-3 py-2">
                               <span
-                                className={`rounded-full px-2 py-0.5 text-xs font-medium ${typeMeta.badge}`}
+                                className={pillClass(typeMeta.tone)}
                               >
                                 {typeMeta.label}
                               </span>

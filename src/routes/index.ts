@@ -6,7 +6,10 @@ import historyRoutes from "./history.js";
 import ordersRoutes from "./orders.js";
 import realizationsRoutes from "./realizations.js";
 import companyRoutes from "./company.js";
+import companyLookupRoutes from "./company-lookup.js";
 import techniciansRoutes from "./technicians.js";
+import salespeopleRoutes from "./salespeople.js";
+import companiesRoutes from "./companies.js";
 import pricelistRoutes from "./pricelist.js";
 import cameraModelsRoutes from "./camera-models.js";
 import protocolsRoutes from "./protocols.js";
@@ -73,6 +76,11 @@ api.use("*", tabPermissionGuard);
 // /activity nie jest w API_TAB_MAP — historia obiektu czytelna dla każdego zalogowanego.
 api.route("/calendar", calendarRoutes);
 api.route("/activity", activityRoutes);
+
+// --- WYSZUKIWARKA FIRM (wykaz VAT MF) — poza API_TAB_MAP: korzystają z niej
+// formularze kontrahentów, techników i zleceń, a dane pochodzą z publicznego
+// rejestru, więc wystarczy zalogowana sesja (limit zapytań w samej trasie).
+api.route("/company-lookup", companyLookupRoutes);
 
 // Dashboard statistics
 api.get("/stats", async (c) => {
@@ -179,6 +187,8 @@ api.route("/realizations", realizationsRoutes);
 // Dane firmy tylko do odczytu dla zalogowanych (znacznik biura na mapach).
 api.route("/company", companyRoutes);
 api.route("/technicians", techniciansRoutes);
+api.route("/salespeople", salespeopleRoutes);
+api.route("/companies", companiesRoutes);
 api.route("/pricelist", pricelistRoutes);
 api.route("/camera-models", cameraModelsRoutes);
 api.route("/protocols", protocolsRoutes);

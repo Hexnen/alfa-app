@@ -80,6 +80,12 @@ export interface CompanySettingsValues {
   /** Współrzędne biura; null = wyliczane geokoderem z adresu przy każdej kalkulacji. */
   officeLat: number | null;
   officeLng: number | null;
+  /**
+   * Norma dnia roboczego (godz.) — długość, jaką automat PROPONUJE dla wydarzenia całodniowego,
+   * które nie ma godzin. Nigdy nie zapisuje się sama: wchodzi wyłącznie jako sugestia
+   * w „Uzupełnij z danych” protokołu (src/lib/protocol-prefill.ts).
+   */
+  workDayHours: number;
   /** Stawka netto za roboczogodzinę (zł/RBH) — fallback, gdy cennik nie ma pozycji RBH. */
   rateHour: number;
   /** Wewnętrzny koszt roboczogodziny (zł/h) → realizations.hourlyCost. */
@@ -112,6 +118,7 @@ export const COMPANY_DEFAULTS: CompanySettingsValues = {
   officePostcode: "",
   officeLat: null,
   officeLng: null,
+  workDayHours: 8,
   rateHour: 0,
   hourlyCost: 0,
   rateKm: 0,
@@ -300,6 +307,7 @@ export const COMPANY_FIELDS: { [K in CompanySettingField]: CompanyFieldDef<Compa
   officePostcode: stringField("company.office_postcode", "Kod pocztowy biura", 12),
   officeLat: coordField("company.office_lat", "Szerokość geograficzna biura", "latitude", 90),
   officeLng: coordField("company.office_lng", "Długość geograficzna biura", "longitude", 180),
+  workDayHours: numberField("company.work_day_hours", "Norma dnia roboczego", { min: 0, max: 24, unit: "godz./dzień" }),
   rateHour: numberField("company.rate_hour", "Stawka za roboczogodzinę", { min: 0, max: 100000, unit: "zł/RBH" }),
   hourlyCost: numberField("company.hourly_cost", "Koszt roboczogodziny", { min: 0, max: 100000, unit: "zł/h" }),
   rateKm: numberField("company.rate_km", "Stawka za kilometr", { min: 0, max: 1000, unit: "zł/km" }),

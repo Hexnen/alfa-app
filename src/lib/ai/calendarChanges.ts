@@ -369,6 +369,7 @@ function inputBodyOf(e: CalendarEventJson): Record<string, unknown> {
     realizationOptout: e.realizationOptout,
     billing: e.billing,
     protocolId: e.protocolId,
+    quoteId: e.quoteId,
     technicianIds: e.technicians.map((t) => t.id),
     recurrence: null,
   };

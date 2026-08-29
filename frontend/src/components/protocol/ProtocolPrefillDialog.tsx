@@ -85,7 +85,8 @@ export function ProtocolPrefillDialog({
     setPicked((p) => (p.includes(field) ? p.filter((f) => f !== field) : [...p, field]));
 
   const suggestions = preview?.suggestions ?? [];
-  const conflicts = suggestions.filter((s) => !s.confident).length;
+  const conflicts = suggestions.filter((s) => !s.confident && !s.assumed).length;
+  const assumed = suggestions.filter((s) => s.assumed).length;
   const ctx = preview?.context ?? null;
 
   const apply = async () => {
@@ -183,6 +184,7 @@ export function ProtocolPrefillDialog({
                 Zaznaczono <strong className="tabular-nums text-foreground">{picked.length}</strong> z{" "}
                 {suggestions.length}
                 {conflicts > 0 && ` · ${conflicts} nadpisze obecną wartość`}
+                {assumed > 0 && ` · ${assumed} to szacunek do potwierdzenia`}
               </>
             )}
           </p>
@@ -221,7 +223,9 @@ function SuggestionRow({
   disabled?: boolean;
   onToggle: () => void;
 }) {
-  const conflict = !s.confident;
+  // Szacunek (godziny z normy dnia) nie nadpisuje niczego — ma własną, łagodniejszą pigułkę.
+  const assumed = !!s.assumed;
+  const conflict = !s.confident && !assumed;
   return (
     <li>
       <label
@@ -261,6 +265,14 @@ function SuggestionRow({
                 {...tip("Pole ma już inną wartość — zaznacz świadomie, żeby ją nadpisać")}
               >
                 nadpisze
+              </span>
+            )}
+            {assumed && (
+              <span
+                className="rounded-full bg-slate-500/20 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide text-slate-700 dark:text-slate-200"
+                {...tip("Wartość wyliczona z normy dnia, a nie z terminu — potwierdź albo popraw ręcznie")}
+              >
+                szacunek
               </span>
             )}
           </div>

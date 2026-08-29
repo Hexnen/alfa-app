@@ -10,7 +10,6 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Building2,
   Calculator,
   Loader2,
   Map as MapIcon,
@@ -204,8 +203,7 @@ export function AdminCompany() {
 
   if (loadError) {
     return (
-      <div className="space-y-4">
-        <PageHeader />
+      <div className="space-y-3">
         <ErrorBox>{loadError}</ErrorBox>
         <Button
           variant="outline"
@@ -222,8 +220,7 @@ export function AdminCompany() {
   }
   if (!settings) {
     return (
-      <div className="space-y-4">
-        <PageHeader />
+      <div className="space-y-3">
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
           <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> Wczytywanie ustawień…
         </div>
@@ -243,9 +240,7 @@ export function AdminCompany() {
   )}`;
 
   return (
-    <div className="space-y-6 pb-24">
-      <PageHeader />
-
+    <div className="space-y-3 pb-24">
       {unavailable && (
         <div
           className="rounded-md border bg-muted/40 px-3 py-2 text-sm text-muted-foreground"
@@ -396,9 +391,28 @@ export function AdminCompany() {
       <SectionCard
         id="stawki"
         title="Stawki domyślne"
-        description="Używane, gdy technik nie ma własnej pozycji w cenniku. Kwoty netto."
+        description="Używane, gdy technik nie ma własnej pozycji w cenniku. Kwoty netto. Norma dnia dotyczy wydarzeń całodniowych."
       >
         <div className="grid gap-4 sm:grid-cols-3">
+          <Field
+            id="company-work-day-hours"
+            label="Norma dnia roboczego"
+            source={source("workDayHours")}
+            dirty={isDirty("workDayHours")}
+            description="Ile godzin proponować dla wydarzenia całodniowego (dni × norma). Wyłącznie sugestia w „Uzupełnij z danych” protokołu — sama się nie wpisuje."
+          >
+            <Input
+              id="company-work-day-hours"
+              data-testid="company-work-day-hours"
+              type="number"
+              step="0.25"
+              min="0"
+              max="24"
+              className="tabular-nums"
+              value={val("workDayHours")}
+              onChange={(e) => setField("workDayHours", parseFloat(e.target.value) || 0)}
+            />
+          </Field>
           <Field
             id="company-rate-hour"
             label="Stawka za roboczogodzinę"
@@ -708,15 +722,3 @@ export function AdminCompany() {
   );
 }
 
-function PageHeader() {
-  return (
-    <div>
-      <h1 className="flex items-center gap-2 text-2xl font-bold">
-        <Building2 className="h-6 w-6" /> Firma
-      </h1>
-      <p className="text-sm text-muted-foreground">
-        Adres biura, stawki i zakres automatu — dane, z których realizacje liczą godziny, materiały i kilometry.
-      </p>
-    </div>
-  );
-}

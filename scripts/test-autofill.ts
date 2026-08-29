@@ -155,6 +155,14 @@ function cleanup() {
     db.delete(schema.activityLog)
       .where(and(eq(schema.activityLog.entityType, "realization"), inArray(schema.activityLog.entityId, realizationIds)))
       .run();
+    // Wyceny prac płatnych (src/lib/calendar-realizations.ts) — przed realizacjami:
+    // FK `quotes.realization_id` dodany przez ALTER TABLE nie ma ON DELETE CASCADE
+    // w bazach sprzed migracji 0043.
+    const quoteIds = db.select({ id: schema.quotes.id }).from(schema.quotes).where(inArray(schema.quotes.realizationId, realizationIds)).all().map((q) => q.id);
+    if (quoteIds.length) {
+      db.update(schema.calendarEvents).set({ quoteId: null }).where(inArray(schema.calendarEvents.quoteId, quoteIds)).run();
+      db.delete(schema.quotes).where(inArray(schema.quotes.id, quoteIds)).run();
+    }
     db.delete(schema.realizations).where(inArray(schema.realizations.id, realizationIds)).run();
   }
   db.delete(schema.calendarEvents).where(like(schema.calendarEvents.title, `${PREFIX}%`)).run();

@@ -67,6 +67,13 @@ export interface ContractorInput {
   email?: string;
   contactPerson?: string;
   notes?: string;
+  // Uzupełniane automatycznie z wykazu VAT MF (wyszukiwarka firm po NIP).
+  regon?: string;
+  krs?: string;
+  vatStatus?: string;
+  vatCheckedAt?: string;
+  /** Opiekun handlowy (null = bez przypisania). */
+  salespersonId?: number | null;
 }
 
 export interface ObjectInput {
@@ -80,6 +87,10 @@ export interface ObjectInput {
   department?: Department;
   monthlyValue?: number;
   notes?: string;
+  /** Handlowiec prowadzący obiekt (null = opiekun kontrahenta). */
+  salespersonId?: number | null;
+  /** Spółka grupy obsługująca obiekt (null = nieprzypisana). */
+  companyId?: number | null;
 }
 
 export interface ContractInput {

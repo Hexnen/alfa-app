@@ -158,7 +158,7 @@ app.get("/:id/offer", async (c) => {
   return c.html(html);
 });
 
-// --- Zdjęcia z wizji lokalnej (do galerii w ofercie) ---
+// --- Zdjęcia z wizji (do galerii w ofercie) ---
 
 app.get("/:id/photos", async (c) => {
   const id = parseInt(c.req.param("id"));

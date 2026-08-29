@@ -3,7 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Card, CardContent } from "@/components/ui/card";
+import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -103,26 +103,19 @@ export function Monitoring() {
   };
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-          <h1 className="text-3xl font-bold">Projekty — CCTV</h1>
-          <p className="text-muted-foreground">
-            Projekty i oferty systemów CCTV
-          </p>
-        </div>
-        {editable && (
-          <Button onClick={() => openForm(null)}>
-            <Plus className="h-4 w-4 mr-2" />
-            Nowy projekt
-          </Button>
-        )}
-      </div>
-
+    <div className="space-y-3">
       {!editable && <ReadOnlyBanner className="mb-4" />}
 
       <Card>
-        <CardContent className="pt-6">
+        {editable && (
+          <CardHeader className="flex flex-row items-center justify-end p-3">
+            <Button onClick={() => openForm(null)}>
+              <Plus className="h-4 w-4 mr-2" />
+              Nowy projekt
+            </Button>
+          </CardHeader>
+        )}
+        <CardContent className={editable ? "p-2 pt-0" : "p-2"}>
           {loading ? (
             <div className="text-center py-8">Ładowanie...</div>
           ) : projects.length === 0 ? (
@@ -273,7 +266,7 @@ export function Monitoring() {
                 value={notes}
                 onChange={(e) => setNotes(e.target.value)}
                 rows={5}
-                placeholder="kontakt, stan obecny, ustalenia z wizji lokalnej..."
+                placeholder="kontakt, stan obecny, ustalenia z wizji..."
               />
             </div>
           </div>

@@ -18,6 +18,7 @@ import {
   fmtQty,
   warehouseLabel,
 } from "./warehouseShared";
+import { pillClass } from "@/lib/calendar-labels";
 
 interface WarehouseDocumentDetailsProps {
   open: boolean;
@@ -143,12 +144,12 @@ export function WarehouseDocumentDetails({
           <DialogTitle className="flex flex-wrap items-center gap-2">
             <span>{doc.docNumber || "Szkic dokumentu"}</span>
             <span
-              className={`rounded-full px-2 py-0.5 text-xs font-medium ${typeMeta.badge}`}
+              className={pillClass(typeMeta.tone)}
             >
               {typeMeta.label}
             </span>
             <span
-              className={`rounded-full px-2 py-0.5 text-xs font-medium ${statusMeta.badge}`}
+              className={pillClass(statusMeta.tone)}
             >
               {statusMeta.label}
             </span>

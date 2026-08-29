@@ -23,6 +23,11 @@ import {
   adminCompanyApi,
   errStatus,
   getContractors,
+  getSalespeople,
+  salespersonName,
+  getCompanies,
+  type Company,
+  type Salesperson,
   type Contractor,
   type ObjectRecord,
   type ObjectInput,
@@ -84,6 +89,8 @@ export function ObjectForm({
 }: ObjectFormProps) {
   const [loading, setLoading] = useState(false);
   const [contractors, setContractors] = useState<Contractor[]>([]);
+  const [salespeople, setSalespeople] = useState<Salesperson[]>([]);
+  const [companies, setCompanies] = useState<Company[]>([]);
   const [formData, setFormData] = useState<ObjectInput>({
     contractorId: object?.contractorId || preselectedContractorId || 0,
     name: object?.name || "",
@@ -94,6 +101,8 @@ export function ObjectForm({
     status: object?.status || "pending",
     department: object?.department || "sales",
     monthlyValue: object?.monthlyValue || undefined,
+    salespersonId: object?.salespersonId ?? null,
+    companyId: object?.companyId ?? null,
     notes: object?.notes || "",
     latitude: object?.latitude ?? null,
     longitude: object?.longitude ?? null,
@@ -107,6 +116,13 @@ export function ObjectForm({
       getContractors({ pageSize: 1000 }).then((res) => {
         setContractors(res.data);
       });
+      // Archiwalnych nie proponujemy, ale zostawiamy tego, który już jest przypisany.
+      getSalespeople()
+        .then((res) => setSalespeople(res.data ?? []))
+        .catch(() => setSalespeople([]));
+      getCompanies()
+        .then((res) => setCompanies(res.data ?? []))
+        .catch(() => setCompanies([]));
     }
   }, [open]);
 
@@ -364,6 +380,66 @@ export function ObjectForm({
                   </SelectContent>
                 </Select>
               </div>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="object-company">Spółka</Label>
+              <Select
+                value={formData.companyId ? String(formData.companyId) : "none"}
+                onValueChange={(value) =>
+                  setFormData((p) => ({
+                    ...p,
+                    companyId: value === "none" ? null : parseInt(value),
+                  }))
+                }
+              >
+                <SelectTrigger id="object-company" data-testid="object-company">
+                  <SelectValue placeholder="Bez spółki" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">Bez spółki</SelectItem>
+                  {companies
+                    .filter((co) => co.active || co.id === formData.companyId)
+                    .map((co) => (
+                      <SelectItem key={co.id} value={String(co.id)}>
+                        {co.name}
+                        {!co.active ? " (archiwalna)" : ""}
+                      </SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                Spółka grupy obsługująca obiekt — ten sam słownik, co w kadrach.
+              </p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="object-salesperson">Handlowiec</Label>
+              <Select
+                value={formData.salespersonId ? String(formData.salespersonId) : "inherit"}
+                onValueChange={(value) =>
+                  setFormData((p) => ({
+                    ...p,
+                    salespersonId: value === "inherit" ? null : parseInt(value),
+                  }))
+                }
+              >
+                <SelectTrigger id="object-salesperson" data-testid="object-salesperson">
+                  <SelectValue placeholder="Opiekun kontrahenta" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="inherit">Jak u kontrahenta</SelectItem>
+                  {salespeople
+                    .filter((sp) => sp.active || sp.id === formData.salespersonId)
+                    .map((sp) => (
+                      <SelectItem key={sp.id} value={String(sp.id)}>
+                        {salespersonName(sp)}
+                        {!sp.active ? " (archiwalny)" : ""}
+                      </SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                Puste = obiekt dziedziczy opiekuna przypisanego kontrahentowi.
+              </p>
             </div>
             <div className="space-y-2">
               <Label htmlFor="monthlyValue">Wartosc miesieczna (PLN)</Label>

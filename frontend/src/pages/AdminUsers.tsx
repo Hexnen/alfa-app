@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { Shield, UserPlus, Trash2, KeyRound, Save } from "lucide-react";
+import { UserPlus, Trash2, KeyRound, Save } from "lucide-react";
 import {
   getAdminUsers,
   getAdminTabs,
@@ -102,7 +102,7 @@ function PermissionMatrix({
   };
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       {groups.map(([group, items]) => (
         <div key={group} className="rounded-lg border">
           <div className="flex items-center justify-between border-b bg-muted/40 px-3 py-2">
@@ -169,28 +169,7 @@ export function AdminUsers() {
     setError(e instanceof Error ? e.message : String(e));
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-          <h1 className="text-2xl font-bold flex items-center gap-2">
-            <Shield className="h-6 w-6" /> Administracja — użytkownicy
-          </h1>
-          <p className="text-sm text-muted-foreground">
-            Zakładanie kont i dostęp do podzakładek (brak / podgląd / edycja).
-          </p>
-        </div>
-        <Button
-          onClick={() => {
-            setCreating(true);
-            setSelectedId(null);
-            setError(null);
-            setNotice(null);
-          }}
-        >
-          <UserPlus className="h-4 w-4 mr-1" /> Nowy użytkownik
-        </Button>
-      </div>
-
+    <div className="space-y-3">
       {error && (
         <div className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           {error}
@@ -205,6 +184,20 @@ export function AdminUsers() {
       <div className="grid gap-4 lg:grid-cols-[280px_1fr]">
         {/* Lista użytkowników */}
         <div className="rounded-lg border divide-y h-fit">
+          <div className="p-2">
+            <Button
+              className="w-full"
+              size="sm"
+              onClick={() => {
+                setCreating(true);
+                setSelectedId(null);
+                setError(null);
+                setNotice(null);
+              }}
+            >
+              <UserPlus className="h-4 w-4 mr-1" /> Nowy użytkownik
+            </Button>
+          </div>
           {users.length === 0 && (
             <div className="p-3 text-sm text-muted-foreground">Brak kont.</div>
           )}

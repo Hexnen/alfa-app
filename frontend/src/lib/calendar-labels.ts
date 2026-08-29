@@ -2,6 +2,7 @@ import {
   ArrowRightLeft,
   Banknote,
   Building2,
+  Calculator,
   FileCheck2,
   FileX,
   Gift,
@@ -29,6 +30,7 @@ import type {
   ActivityEntry,
   CalendarBilling,
   CalendarEvent,
+  CalendarEventQuote,
   CalendarEventRealization,
   CalendarEventStatus,
   CalendarEventType,
@@ -83,7 +85,7 @@ export const EVENT_TYPE_META: Record<CalendarEventType, EventTypeMeta> = {
     cssVar: "--cal-montaz",
   },
   wizja: {
-    label: "Wizja lokalna",
+    label: "Wizja",
     icon: Eye,
     chip: "border-violet-500/50 text-violet-700 dark:text-violet-300",
     chipActive: "bg-violet-500 border-violet-500 text-white",
@@ -172,7 +174,61 @@ export const STATUS_BADGE_DARK: Record<CalendarEventStatus, string> = {
 
 /** Pełna klasa badge'a statusu (pigułka + kolory jasne/ciemne). */
 export function statusBadgeClass(s: CalendarEventStatus): string {
-  return cn("inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium", EVENT_STATUS_META[s]?.badge);
+  return cn(pillClass("neutral"), EVENT_STATUS_META[s]?.badge);
+}
+
+// ---------------------------------------------------------------------------
+// Pigułki (pills) — wspólny kształt badge'y w całym dziale technicznym
+// ---------------------------------------------------------------------------
+
+/**
+ * Tony pigułek: jeden zestaw kolorów jasny/ciemny dla wszystkich zakładek
+ * Technicznego (realizacje, protokoły, magazyn, technicy). Dzięki temu badge
+ * poza kalendarzem wygląda dokładnie tak samo jak status czy rozliczenie
+ * wydarzenia — i nie znika w trybie ciemnym (klasa `bg-*-100` bez wariantu
+ * `dark:` daje ciemny tekst na jasnym tle tylko w jednym motywie).
+ */
+export type PillTone =
+  | "sky"
+  | "emerald"
+  | "amber"
+  | "violet"
+  | "orange"
+  | "indigo"
+  | "teal"
+  | "rose"
+  | "red"
+  | "neutral"
+  | "muted";
+
+export const PILL_TONE: Record<PillTone, string> = {
+  sky: "bg-sky-100 text-sky-800 dark:bg-sky-500/20 dark:text-sky-200",
+  emerald: "bg-emerald-100 text-emerald-800 dark:bg-emerald-500/20 dark:text-emerald-200",
+  amber: "bg-amber-100 text-amber-800 dark:bg-amber-500/20 dark:text-amber-200",
+  violet: "bg-violet-100 text-violet-800 dark:bg-violet-500/20 dark:text-violet-200",
+  orange: "bg-orange-100 text-orange-800 dark:bg-orange-500/20 dark:text-orange-200",
+  indigo: "bg-indigo-100 text-indigo-800 dark:bg-indigo-500/20 dark:text-indigo-200",
+  teal: "bg-teal-100 text-teal-800 dark:bg-teal-500/20 dark:text-teal-200",
+  rose: "bg-rose-100 text-rose-800 dark:bg-rose-500/20 dark:text-rose-200",
+  red: "bg-red-100 text-red-800 dark:bg-red-500/20 dark:text-red-200",
+  neutral: "bg-slate-200 text-slate-700 dark:bg-slate-500/25 dark:text-slate-200",
+  muted: "bg-muted text-muted-foreground",
+};
+
+/**
+ * Pigułka o tym samym kształcie co badge statusu/rozliczenia w kalendarzu.
+ * `compact` = wersja do gęstych tabel (jak `ProtocolBadge compact`).
+ */
+export function pillClass(
+  tone: PillTone,
+  opts?: { compact?: boolean; className?: string }
+): string {
+  return cn(
+    "inline-flex items-center gap-1 whitespace-nowrap rounded-full font-medium",
+    opts?.compact ? "px-1.5 py-px text-[10px]" : "px-2 py-0.5 text-xs",
+    PILL_TONE[tone],
+    opts?.className
+  );
 }
 
 /** Kolory typów jako klasy Tailwind — do pasków/ikon poza Calendar.css (dialog, karta obiektu). */
@@ -676,7 +732,7 @@ export const billingLabel = (b: string | null | undefined): string =>
 
 /** Pełna klasa badge'a rozliczenia (pigułka + kolory jasne/ciemne). */
 export function billingBadgeClass(b: CalendarBilling): string {
-  return cn("inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium", BILLING_META[b]?.badge);
+  return cn(pillClass("neutral"), BILLING_META[b]?.badge);
 }
 
 /** Typy, dla których rozliczenie nie ma sensu (pole ukryte, zawsze null). */
@@ -729,7 +785,7 @@ export const PROTOCOL_BADGE_META: Record<
 
 /** Pełna klasa badge'a protokołu. */
 export function protocolBadgeClass(kind: ProtocolBadgeKind): string {
-  return cn("inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium", PROTOCOL_BADGE_META[kind].badge);
+  return cn(pillClass("neutral"), PROTOCOL_BADGE_META[kind].badge);
 }
 
 /** Deep-link do protokołu w module Protokoły (Technical.tsx obsługuje ?protocol=ID). */
@@ -832,7 +888,7 @@ export const REALIZATION_BADGE_META: Record<
 
 /** Pełna klasa badge'a realizacji. */
 export function realizationBadgeClass(kind: RealizationBadgeKind): string {
-  return cn("inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium", REALIZATION_BADGE_META[kind].badge);
+  return cn(pillClass("neutral"), REALIZATION_BADGE_META[kind].badge);
 }
 
 /** Kwota realizacji w formacie PLN (badge / podgląd). */
@@ -845,6 +901,82 @@ export const realizationMoney = (v: number | null | undefined): string => plnFmt
  */
 export const realizationHref = (id: number, date?: string | null): string =>
   `/technical/realizacje?realization=${id}${date ? `&date=${date.slice(0, 10)}` : ""}`;
+
+// ---------------------------------------------------------------------------
+// Wyceny wydarzeń — dokument „za ile” dla prac PŁATNYCH
+// ---------------------------------------------------------------------------
+
+export type QuoteBadgeKind = "filled" | "draft" | "missing";
+
+/**
+ * Stan wyceny dla badge'a: `filled` (ma wpisane ilości, zielony), `draft` (szkic
+ * z cennika, szary), `missing` (bursztynowy „Brak wyceny” — TYLKO praca płatna,
+ * objęta realizacją i już WYKONANA; dopóki jest zaplanowana, brak wyceny nie jest
+ * niczym niepokojącym). null = nic nie pokazuj (gwarancja, darmowe, urlop, biuro…).
+ */
+export function quoteBadgeKind(e: {
+  type: CalendarEventType | string;
+  status?: CalendarEventStatus | string;
+  billing?: CalendarBilling | null;
+  quote?: CalendarEventQuote | null;
+}): QuoteBadgeKind | null {
+  if (e.quote) return e.quote.filledItems > 0 ? "filled" : "draft";
+  if (e.billing === "paid" && e.status === "done" && realizationApplies(e.type)) return "missing";
+  return null;
+}
+
+export const QUOTE_BADGE_META: Record<
+  QuoteBadgeKind,
+  { icon: LucideIcon; badge: string; /** Kolor samej ikony — kompaktowy znacznik. */ tone: string; label: (num?: string) => string }
+> = {
+  filled: {
+    icon: Calculator,
+    badge: "bg-emerald-100 text-emerald-800 dark:bg-emerald-500/20 dark:text-emerald-200",
+    tone: "text-emerald-600 dark:text-emerald-300",
+    label: (num) => `Wycena ${num ?? ""}`.trim(),
+  },
+  draft: {
+    icon: Calculator,
+    badge: "bg-slate-200 text-slate-700 dark:bg-slate-500/25 dark:text-slate-200",
+    tone: "text-slate-500 dark:text-slate-300",
+    label: (num) => `Wycena ${num ?? ""}`.trim(),
+  },
+  missing: {
+    icon: FileX,
+    badge: "bg-amber-100 text-amber-800 dark:bg-amber-500/20 dark:text-amber-200",
+    tone: "text-amber-600 dark:text-amber-400",
+    label: () => "Brak wyceny",
+  },
+};
+
+/** Pełna klasa badge'a wyceny. */
+export function quoteBadgeClass(kind: QuoteBadgeKind): string {
+  return cn(pillClass("neutral"), QUOTE_BADGE_META[kind].badge);
+}
+
+/** Deep-link do wyceny w module Techniczny (Technical.tsx obsługuje ?quote=ID). */
+export const quoteHref = (id: number): string => `/technical/wyceny?quote=${id}`;
+
+/**
+ * Tooltip znacznika wyceny:
+ *   „Wycena W/2026/03/004 — 1 200,00 zł (2 poz.)”
+ *   „Wycena W/2026/03/004 — szkic z cennika, bez wpisanych ilości”
+ *   „Brak wyceny — praca płatna, wycena nie została utworzona”
+ */
+export function quoteTip(e: {
+  type: CalendarEventType | string;
+  status?: CalendarEventStatus | string;
+  billing?: CalendarBilling | null;
+  quote?: CalendarEventQuote | null;
+}): string | null {
+  const kind = quoteBadgeKind(e);
+  if (!kind) return null;
+  if (kind === "missing") return "Brak wyceny — praca płatna i wykonana, wycena nie została utworzona";
+  const num = e.quote?.number ? `Wycena ${e.quote.number}` : "Wycena";
+  if (kind === "draft") return `${num} — szkic z cennika, bez wpisanych ilości`;
+  const q = e.quote!;
+  return `${num} — ${realizationMoneyExact(q.total)} (${pluralPl(q.filledItems, "pozycja", "pozycje", "pozycji")})`;
+}
 
 /** Deep-link do wydarzenia w kalendarzu (Calendar.tsx obsługuje ?event=ID&date=). */
 export const calendarEventHref = (id: number, startAt?: string | null): string =>

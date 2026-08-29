@@ -70,7 +70,7 @@ export const isRealizationBilling = (v: unknown): v is RealizationBilling =>
 export const REALIZATION_WORK_TYPE_LABELS: Record<RealizationWorkType, string> = {
   serwis: "Serwis",
   montaz: "Montaż",
-  wizja: "Wizja lokalna",
+  wizja: "Wizja",
   demontaz: "Demontaż",
   konserwacja: "Konserwacja",
   inne: "Inne",

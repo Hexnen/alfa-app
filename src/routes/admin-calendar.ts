@@ -134,7 +134,7 @@ app.put("/settings", async (c) => {
 
 /**
  * POST /backfill-realizations { dryRun: boolean, from?: "YYYY-MM-DD" }
- * → { candidates, created?, skipped }. Tryb zapisu tworzy realizacje niezależnie od
+ * → { candidates, created?, skipped, quoteCandidates, quotesCreated? }. Tryb zapisu tworzy realizacje niezależnie od
  * `calendar.auto_realization` (świadoma akcja admina), ale respektuje listę objętych typów.
  */
 app.post("/backfill-realizations", async (c) => {
@@ -150,15 +150,20 @@ app.post("/backfill-realizations", async (c) => {
   try {
     const result: BackfillResult = db.transaction((tx) => {
       const r = runBackfill(tx, { user }, { from, dryRun });
-      if (!dryRun && (r.created?.length ?? 0) > 0) {
+      const madeQuotes = r.quotesCreated ?? 0;
+      if (!dryRun && ((r.created?.length ?? 0) > 0 || madeQuotes > 0)) {
+        const parts = [
+          r.created?.length ? `realizacje dla ${r.created.length} wydarzeń` : null,
+          madeQuotes ? `${madeQuotes} wycen prac płatnych` : null,
+        ].filter(Boolean);
         logActivity(tx, {
           entityType: "app_settings",
           entityId: 0,
           user,
           action: "updated",
           field: "calendar.backfill_realizations",
-          newValue: r.created!.length,
-          summary: `Uzupełniono realizacje dla ${r.created!.length} wydarzeń kalendarza${from ? ` (od ${from})` : ""}`,
+          newValue: (r.created?.length ?? 0) + madeQuotes,
+          summary: `Uzupełniono ${parts.join(" i ")} w kalendarzu${from ? ` (od ${from})` : ""}`,
         });
       }
       return r;

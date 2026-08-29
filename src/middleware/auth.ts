@@ -82,6 +82,10 @@ const API_TAB_MAP: { prefix: string; tabs: string[] }[] = [
   { prefix: "/quotes", tabs: ["technical/wyceny"] },
   { prefix: "/pricelist", tabs: ["technical/cennik"] },
   { prefix: "/technicians", tabs: ["technical/technicy", "technical/kalendarz"] },
+  // Handlowcy: własna zakładka, ale listę czytają też formularze kontrahenta i obiektu.
+  { prefix: "/salespeople", tabs: ["handlowcy", "contractors", "objects"] },
+  // Spółki: własna zakładka; listę czyta też formularz obiektu i kadry.
+  { prefix: "/companies", tabs: ["spolki", "objects", "kadry/wynagrodzenia"] },
   { prefix: "/monitored-objects", tabs: ["technical/obiekty"] },
   { prefix: "/monitoring", tabs: ["technical/projekty"] },
   { prefix: "/camera-models", tabs: ["technical/szablony"] },

@@ -9,12 +9,14 @@ import { AUTOFILL_SHORT_LABELS, autofillAfterProtocolSigned } from "../lib/reali
 import {
   buildProtocolPrefill,
   isProtocolPrefillField,
+  prefillInsertValues,
   prefillPatch,
   PROTOCOL_PREFILL_LABELS,
   protocolPrefillSuggestions,
   type ProtocolPrefillField,
 } from "../lib/protocol-prefill.js";
 import { logActivity } from "../lib/activity-log.js";
+import { refreshQuoteFromProtocolSync } from "./quotes.js";
 
 const app = new Hono();
 
@@ -69,7 +71,10 @@ export function createProtocolForRealizationSync(
   r: Realization,
   event?: CalendarEvent | null
 ) {
-  const { values } = buildProtocolPrefill(tx, r, { event });
+  const prefill = buildProtocolPrefill(tx, r, { event });
+  // Szacunki (godziny z normy dnia dla wydarzenia całodniowego) nie wchodzą do dokumentu —
+  // czekają jako sugestia w „Uzupełnij z danych”.
+  const values = prefillInsertValues(prefill);
   return tx
     .insert(schema.protocols)
     .values({
@@ -637,10 +642,31 @@ app.post("/:id/sign", async (c) => {
     }
   }
 
+  // Podpisany protokół jest źródłem prawdy dla wyceny: przeliczamy jej pozycje z materiałów,
+  // godzin i km protokołu — ale tylko wtedy, gdy wycena istnieje i nikt jej jeszcze nie ruszał.
+  // Jak wyżej: każdy błąd połykamy, podpis jest już zapisany.
+  let quote: { number: string; items: number; warnings: string[]; message: string } | null = null;
+  if (realizationId != null) {
+    try {
+      const res = db.transaction((tx) => refreshQuoteFromProtocolSync(tx, realizationId, getUser(c)));
+      if (res.status === "updated" && res.number && res.items) {
+        quote = {
+          number: res.number,
+          items: res.items.length,
+          warnings: res.warnings,
+          message: `wyceniono ${res.items.length} ${res.items.length === 1 ? "pozycję" : "pozycji"} w wycenie ${res.number}`,
+        };
+      }
+    } catch (err) {
+      console.error("Przeliczenie wyceny z protokołu nie powiodło się:", err);
+    }
+  }
+
+  const parts = [autofill?.message, quote?.message].filter(Boolean);
   return c.json({
     success: true,
-    data: { ...withParsedItems(outcome.data), autofill },
-    message: autofill ? `Protokół podpisany — ${autofill.message}` : "Protokół podpisany",
+    data: { ...withParsedItems(outcome.data), autofill, quote },
+    message: parts.length > 0 ? `Protokół podpisany — ${parts.join("; ")}` : "Protokół podpisany",
   });
 });
 

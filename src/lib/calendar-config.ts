@@ -37,6 +37,11 @@ export interface CalendarSettingsValues {
   realizationTypes: CalendarEventType[];
   /** Czy edycja wydarzenia aktualizuje powiązaną (niezafakturowaną) realizację. */
   realizationSync: boolean;
+  /**
+   * Czy dla PŁATNEGO wydarzenia (billing = paid) powstaje wycena — razem z realizacją
+   * i protokołem. Zmiana rozliczenia na gwarancyjne/darmowe kasuje pustą wycenę.
+   */
+  autoQuote: boolean;
 }
 
 export type CalendarSettingField = keyof CalendarSettingsValues;
@@ -46,6 +51,7 @@ export const CALENDAR_DEFAULTS: CalendarSettingsValues = {
   autoRealization: "on_create",
   realizationTypes: DEFAULT_REALIZATION_TYPES,
   realizationSync: true,
+  autoQuote: true,
 };
 
 export interface CalendarFieldDef<T> {
@@ -125,10 +131,26 @@ const realizationSyncField: CalendarFieldDef<boolean> = {
   format: (v) => (v ? "tak" : "nie"),
 };
 
+const autoQuoteField: CalendarFieldDef<boolean> = {
+  dbKey: "calendar.auto_quote",
+  label: "Wycena dla płatnych",
+  type: "boolean",
+  validate: (v) => (typeof v === "boolean" ? null : "Wycena dla płatnych: oczekiwano true/false"),
+  parse: (raw) => {
+    const v = raw.trim().toLowerCase();
+    if (v === "1" || v === "true") return true;
+    if (v === "0" || v === "false") return false;
+    return undefined;
+  },
+  serialize: (v) => (v ? "1" : "0"),
+  format: (v) => (v ? "tak" : "nie"),
+};
+
 export const CALENDAR_FIELDS: { [K in CalendarSettingField]: CalendarFieldDef<CalendarSettingsValues[K]> } = {
   autoRealization: autoRealizationField,
   realizationTypes: realizationTypesField,
   realizationSync: realizationSyncField,
+  autoQuote: autoQuoteField,
 };
 
 export const CALENDAR_FIELD_NAMES = Object.keys(CALENDAR_FIELDS) as CalendarSettingField[];

@@ -22,6 +22,23 @@ export const contractors = sqliteTable("contractors", {
   email: text("email"),
   contactPerson: text("contact_person"),
   notes: text("notes"),
+  // Dane z wykazu VAT MF (biała lista) — uzupełniane przez wyszukiwarkę firm.
+  regon: text("regon"),
+  krs: text("krs"),
+  // "Czynny" / "Zwolniony" / "Niezarejestrowany"; NULL = nigdy nie weryfikowano.
+  vatStatus: text("vat_status"),
+  // Data ostatniego sprawdzenia w wykazie ("YYYY-MM-DD").
+  vatCheckedAt: text("vat_checked_at"),
+  /**
+   * Kontrahent bieżący (true) albo archiwalny (false) — ta sama konwencja, co przy
+   * technikach: nic nie kasujemy, tylko chowamy z zakładki „Aktualni”. Historia
+   * (obiekty, zlecenia, protokoły) zostaje nienaruszona.
+   */
+  active: integer("active", { mode: "boolean" }).default(true).notNull(),
+  /** Opiekun handlowy klienta (NULL = nieprzypisany). */
+  salespersonId: integer("salesperson_id").references(() => salespeople.id, {
+    onDelete: "set null",
+  }),
   createdAt: text("created_at")
     .default(sql`(datetime('now'))`)
     .notNull(),
@@ -62,6 +79,18 @@ export const objects = sqliteTable("objects", {
   // z formularza obiektu — z nich liczy się dystans biuro → obiekt.
   latitude: real("latitude"),
   longitude: real("longitude"),
+  /** Spółka grupy, która obsługuje/fakturuje obiekt (NULL = nieprzypisana). */
+  companyId: integer("company_id").references(() => companies.id, {
+    onDelete: "set null",
+  }),
+  /**
+   * Handlowiec prowadzący ten obiekt. NULL = obowiązuje opiekun kontrahenta
+   * (`contractors.salesperson_id`); obiekt nadpisuje przypisanie tylko wtedy,
+   * gdy ktoś świadomie wskaże kogoś innego.
+   */
+  salespersonId: integer("salesperson_id").references(() => salespeople.id, {
+    onDelete: "set null",
+  }),
   createdAt: text("created_at")
     .default(sql`(datetime('now'))`)
     .notNull(),
@@ -560,6 +589,70 @@ export const technicians = sqliteTable("technicians", {
 export type Technician = typeof technicians.$inferSelect;
 export type NewTechnician = typeof technicians.$inferInsert;
 
+/**
+ * Handlowcy — słownik opiekunów handlowych, prowadzony jak technicy (miękkie
+ * archiwum przez `active`, bez kasowania historii). Do handlowca przypisuje się
+ * kontrahenta (opiekun klienta) i pojedynczy obiekt (`objects.salesperson_id`),
+ * bo bywa, że konkretną lokalizację prowadzi kto inny niż całą firmę.
+ */
+export const salespeople = sqliteTable("salespeople", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  firstName: text("first_name").default("").notNull(),
+  lastName: text("last_name").default("").notNull(),
+  phone: text("phone"),
+  email: text("email"),
+  /** Region / obszar działania — czysty opis, bez słownika. */
+  region: text("region"),
+  notes: text("notes"),
+  active: integer("active", { mode: "boolean" }).default(true).notNull(),
+  createdAt: text("created_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+  updatedAt: text("updated_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+});
+
+export type Salesperson = typeof salespeople.$inferSelect;
+export type NewSalesperson = typeof salespeople.$inferInsert;
+
+/**
+ * Spółki grupy (ALFA, ALFA S, CONTROL, GUARD n, TRUST n…) — słownik wspólny dla kadr
+ * i obiektów. `name` jest KLUCZEM zgodności z modułem wynagrodzeń, gdzie spółka jest
+ * trzymana jako tekst (`hr_contracts.company`, `hr_office_payroll.company`); zmiana
+ * nazwy w słowniku przepisuje te wiersze, żeby jedno nie odjechało od drugiego.
+ */
+export const companies = sqliteTable("companies", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  /** Skrót używany w kadrach, np. „ALFA S”, „GUARD 21”. Unikalny. */
+  name: text("name").notNull().unique(),
+  /** Pełna nazwa prawna (z wykazu VAT MF albo wpisana ręcznie). */
+  fullName: text("full_name"),
+  nip: text("nip"),
+  // Dane z wykazu VAT MF — uzupełniane tą samą wyszukiwarką, co przy kontrahentach
+  // (src/lib/mf-whitelist.ts). NULL = nigdy nie sprawdzano.
+  regon: text("regon"),
+  krs: text("krs"),
+  address: text("address"),
+  postalCode: text("postal_code"),
+  city: text("city"),
+  /** "Czynny" / "Zwolniony" / "Niezarejestrowany". */
+  vatStatus: text("vat_status"),
+  /** Dzień sprawdzenia w wykazie ("YYYY-MM-DD"). */
+  vatCheckedAt: text("vat_checked_at"),
+  notes: text("notes"),
+  active: integer("active", { mode: "boolean" }).default(true).notNull(),
+  createdAt: text("created_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+  updatedAt: text("updated_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+});
+
+export type Company = typeof companies.$inferSelect;
+export type NewCompany = typeof companies.$inferInsert;
+
 // Cenniki (grupy pozycji). Zawsze dokładnie jeden ma isDefault=1 — to „cennik
 // główny", z którego startują wyceny bez kontekstu technika i który przejmuje
 // pozycje po usuniętym cenniku.
@@ -704,20 +797,39 @@ export type NewProtocol = typeof protocols.$inferInsert;
 // Wyceny usług serwisowych — wg wzoru "20260610 wycena" (tabela pozycji
 // z cennika + sprzęt; suma = ilość × cena, liczona w API/froncie).
 // items to JSON [{name, qty, unit, price}].
-export const quotes = sqliteTable("quotes", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  number: text("number").notNull().unique(), // np. W/2026/07/001
-  date: text("date").notNull(), // YYYY-MM-DD
-  site: text("site").default("").notNull(), // Obiekt
-  address: text("address").default("").notNull(), // Adres
-  items: text("items").default("[]").notNull(),
-  createdAt: text("created_at")
-    .default(sql`(datetime('now'))`)
-    .notNull(),
-  updatedAt: text("updated_at")
-    .default(sql`(datetime('now'))`)
-    .notNull(),
-});
+// Dla PŁATNYCH prac z kalendarza wycena powstaje automatycznie razem z realizacją
+// i protokołem (src/lib/calendar-realizations.ts) — stąd `realization_id`.
+export const quotes = sqliteTable(
+  "quotes",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    number: text("number").notNull().unique(), // np. W/2026/07/001
+    date: text("date").notNull(), // YYYY-MM-DD
+    site: text("site").default("").notNull(), // Obiekt
+    address: text("address").default("").notNull(), // Adres
+    items: text("items").default("[]").notNull(),
+    /**
+     * Realizacja, do której należy wycena (1:1, jak protokół). NULL = wycena
+     * wolnostojąca: utworzona ręcznie w module Wyceny albo sprzed powiązania
+     * wycen z kalendarzem.
+     */
+    realizationId: integer("realization_id").references(() => realizations.id, {
+      onDelete: "cascade",
+    }),
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+    updatedAt: text("updated_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+  },
+  (t) => ({
+    // Realizacja ↔ wycena 1:1 (indeks częściowy — wiele wycen bez realizacji jest OK).
+    realizationIdIdx: uniqueIndex("quotes_realization_id_uidx")
+      .on(t.realizationId)
+      .where(sql`realization_id IS NOT NULL`),
+  })
+);
 
 export type Quote = typeof quotes.$inferSelect;
 export type NewQuote = typeof quotes.$inferInsert;
@@ -744,7 +856,7 @@ export const monitoringProjects = sqliteTable("monitoring_projects", {
 export type MonitoringProject = typeof monitoringProjects.$inferSelect;
 export type NewMonitoringProject = typeof monitoringProjects.$inferInsert;
 
-// Zdjęcia z wizji lokalnej do oferty monitoringu — przeskalowane w przeglądarce
+// Zdjęcia z wizji do oferty monitoringu — przeskalowane w przeglądarce
 // (max 1500 px, JPEG ~80%) i zapisane jako data-URL, osadzane potem w HTML oferty.
 export const monitoringPhotos = sqliteTable("monitoring_photos", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -1298,6 +1410,10 @@ export const calendarEvents = sqliteTable(
     billing: text("billing", { enum: CALENDAR_BILLINGS }),
     // Jawnie przypięty protokół; gdy NULL — protokół realizacji (realization_id → protocols.realization_id).
     protocolId: integer("protocol_id").references(() => protocols.id, {
+      onDelete: "set null",
+    }),
+    // Jawnie przypięta wycena; gdy NULL — wycena realizacji (realization_id → quotes.realization_id).
+    quoteId: integer("quote_id").references(() => quotes.id, {
       onDelete: "set null",
     }),
     createdBy: integer("created_by").references(() => users.id, {

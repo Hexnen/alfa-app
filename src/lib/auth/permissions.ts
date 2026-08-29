@@ -21,6 +21,8 @@ export const TABS: TabDef[] = [
   // Zakładki najwyższego poziomu
   { key: "contractors", label: "Kontrahenci", group: "Ogólne" },
   { key: "objects", label: "Obiekty", group: "Ogólne" },
+  { key: "handlowcy", label: "Handlowcy", group: "Ogólne" },
+  { key: "spolki", label: "Spółki", group: "Ogólne" },
   { key: "contracts", label: "Umowy", group: "Ogólne" },
   { key: "orders", label: "Zlecenia", group: "Ogólne" },
   // Kadry

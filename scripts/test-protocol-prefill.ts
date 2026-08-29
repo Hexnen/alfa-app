@@ -18,13 +18,24 @@
  * daty w 2029-09 — poza danymi produkcyjnymi. Sprząta po sobie HARD, także przy błędzie.
  */
 import { Hono } from "hono";
-import { and, eq, inArray, like } from "drizzle-orm";
+import { and, asc, eq, inArray, like } from "drizzle-orm";
 import { db, schema } from "../src/db/index.js";
 import protocols, { createProtocolForRealizationSync } from "../src/routes/protocols.js";
 import { buildProtocolPrefill, DEFAULT_ITEMS } from "../src/lib/protocol-prefill.js";
 import type { CalendarEvent, Realization, User } from "../src/db/schema.js";
 
 let failures = 0;
+
+/**
+ * Kanarek „dane produkcyjne nietknięte”: najstarsza realizacja istniejąca PRZED testem.
+ * Wcześniej było tu twarde `id === 1`, ale baza demonstracyjna numeruje realizacje od nowa.
+ */
+const canaryRealizationId: number | null =
+  db
+    .select({ id: schema.realizations.id })
+    .from(schema.realizations)
+    .orderBy(asc(schema.realizations.id))
+    .get()?.id ?? null;
 function ok(label: string, cond: boolean, extra?: unknown) {
   console.log(`${cond ? "OK  " : "FAIL"} ${label}${cond ? "" : `\n     got: ${JSON.stringify(extra)}`}`);
   if (!cond) failures++;
@@ -557,7 +568,12 @@ async function main(fx: Fixtures) {
     prodRealizations,
     nowRealizations,
   });
-  ok("realizacja #1 (produkcyjna) nadal istnieje", !!db.select().from(schema.realizations).where(eq(schema.realizations.id, 1)).get());
+  ok(
+    "realizacja sprzed testu nadal istnieje",
+    canaryRealizationId === null ||
+      !!db.select().from(schema.realizations).where(eq(schema.realizations.id, canaryRealizationId)).get(),
+    canaryRealizationId
+  );
 }
 
 const fixtures = seed();

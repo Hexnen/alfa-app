@@ -404,16 +404,8 @@ export function CmaSettings() {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-3">
       {!editable && <ReadOnlyBanner className="mb-4" />}
-
-      {/* Header */}
-      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <h1 className="text-3xl font-bold text-slate-900">CMA</h1>
-        <p className="text-slate-500">
-          Centrum monitorowania alarmów - ustawienia poczty
-        </p>
-      </div>
 
       {loading ? (
         <div className="text-center py-16 text-slate-500">

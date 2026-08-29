@@ -20,7 +20,7 @@ export class ApiError extends Error {
 export const TYPE_LABELS: Record<CalendarEventType, string> = {
   serwis: "Serwis",
   montaz: "Montaż",
-  wizja: "Wizja lokalna",
+  wizja: "Wizja",
   demontaz: "Demontaż",
   biuro: "Biuro",
   przygotowanie: "Przygotowanie",

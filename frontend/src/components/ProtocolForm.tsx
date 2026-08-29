@@ -13,6 +13,8 @@ import {
 import { Printer, Plus, Trash2, PenLine, Wand2 } from "lucide-react";
 import { printProtocol } from "@/lib/protocolPrint";
 import { SignatureDialog } from "./SignatureDialog";
+import { ContractorPicker } from "./ContractorPicker";
+import { formatNIP } from "@/lib/nip";
 import {
   PrefillHint,
   ProtocolPrefillDialog,
@@ -208,7 +210,7 @@ export function ProtocolForm({
               >
                 <option value="serwis">Serwis</option>
                 <option value="montaz">Montaż</option>
-                <option value="wizja">Wizja lokalna</option>
+                <option value="wizja">Wizja</option>
                 <option value="inne">Inne</option>
               </select>
               {hint("workType")}
@@ -260,10 +262,17 @@ export function ProtocolForm({
             <div className="text-sm font-semibold">Zleceniodawca</div>
             <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
               <div className="space-y-2">
-                <Label>Nazwa</Label>
-                <Input
+                {/* Podpowiedzi z bazy kontrahentów; wybór uzupełnia NIP i miejscowość. */}
+                <ContractorPicker
                   value={formData.clientName || ""}
-                  onChange={(e) => setField("clientName", e.target.value)}
+                  onChange={(name) => setField("clientName", name)}
+                  onSelect={(contractor) => {
+                    setField("clientName", contractor.name);
+                    setField("clientNip", formatNIP(contractor.nip));
+                    if (contractor.city) setField("clientCity", contractor.city);
+                  }}
+                  label="Nazwa"
+                  id="protocol-client-name"
                 />
                 {hint("clientName")}
               </div>

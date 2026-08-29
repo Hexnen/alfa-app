@@ -39,10 +39,10 @@ import {
   AlertCircle,
   Home,
 } from "lucide-react";
-import type { Order, OrderInput, Contractor, ObjectRecord, ObjectHistoryRecord } from "@/lib/api";
+import type { Order, OrderInput, Contractor, CompanyData, ObjectRecord, ObjectHistoryRecord } from "@/lib/api";
 import { getContractorObjects } from "@/lib/api";
 import { OBJECT_KINDS } from "@/lib/orderIntakeSteps";
-import { normalizeNIP } from "@/lib/nip";
+import { normalizeNIP, validateNIP } from "@/lib/nip";
 import { objectTypeLabels, installationTypeLabels, statusLabels } from "@/lib/utils";
 
 interface OrderFormProps {
@@ -218,6 +218,16 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
     }
   }, []);
 
+  /** Dane z wykazu VAT MF → pola nowego kontrahenta (telefon i mail zostają ręczne). */
+  const handleCompanyFound = useCallback((company: CompanyData) => {
+    setFormData((prev) => ({
+      ...prev,
+      payerName: company.name || prev.payerName,
+      contractorAddress: company.address || prev.contractorAddress,
+      contractorCity: company.city || prev.contractorCity,
+    }));
+  }, []);
+
   const handleUseExistingContractor = useCallback((contractor: Contractor) => {
     setSelectedContractor(contractor);
     setCreateContractor(false);
@@ -320,16 +330,6 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
   const getStatusLabel = (status: string) => {
     return orderStatuses.find((s) => s.value === status)?.label || status;
   };
-
-  // Helper function to validate NIP
-  function validateNIP(nip: string): boolean {
-    const normalized = nip.replace(/[^\d]/g, '');
-    if (normalized.length !== 10) return false;
-    const weights = [6, 5, 7, 2, 3, 4, 5, 6, 7];
-    const digits = normalized.split('').map(Number);
-    const sum = weights.reduce((acc, w, i) => acc + w * digits[i], 0);
-    return sum % 11 === digits[9];
-  }
 
   const isEditing = !!order;
 
@@ -445,6 +445,7 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
                 value={contractorNIP}
                 onChange={handleNIPChange}
                 onUseExisting={handleUseExistingContractor}
+                onCompanyFound={handleCompanyFound}
                 disabled={isEditing}
               />
 

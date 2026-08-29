@@ -443,39 +443,33 @@ export function CmaReportDetails() {
       {stats && (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="flex items-center gap-2 text-sm font-medium text-slate-500">
+            <CardContent className="p-4">
+              <CardTitle className="flex items-center gap-2 text-sm font-medium text-slate-500 mb-2">
                 <Video className="w-4 h-4" />
                 Zdarzenia
               </CardTitle>
-            </CardHeader>
-            <CardContent>
               <div className="text-2xl font-bold text-slate-900">
                 {stats.entryCount.toLocaleString("pl-PL")}
               </div>
             </CardContent>
           </Card>
           <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="flex items-center gap-2 text-sm font-medium text-slate-500">
+            <CardContent className="p-4">
+              <CardTitle className="flex items-center gap-2 text-sm font-medium text-slate-500 mb-2">
                 <Building2 className="w-4 h-4" />
                 Obiekty
               </CardTitle>
-            </CardHeader>
-            <CardContent>
               <div className="text-2xl font-bold text-slate-900">
                 {stats.objectCount.toLocaleString("pl-PL")}
               </div>
             </CardContent>
           </Card>
           <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="flex items-center gap-2 text-sm font-medium text-slate-500">
+            <CardContent className="p-4">
+              <CardTitle className="flex items-center gap-2 text-sm font-medium text-slate-500 mb-2">
                 <UserRound className="w-4 h-4" />
                 Obsłużone przez operatora
               </CardTitle>
-            </CardHeader>
-            <CardContent>
               <div className="text-2xl font-bold text-indigo-600">
                 {stats.operatorHandled.toLocaleString("pl-PL")}
               </div>
@@ -487,13 +481,11 @@ export function CmaReportDetails() {
             </CardContent>
           </Card>
           <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="flex items-center gap-2 text-sm font-medium text-slate-500">
+            <CardContent className="p-4">
+              <CardTitle className="flex items-center gap-2 text-sm font-medium text-slate-500 mb-2">
                 <Clock className="w-4 h-4" />
                 Zakończone automatycznie
               </CardTitle>
-            </CardHeader>
-            <CardContent>
               <div className="text-2xl font-bold text-slate-600">
                 {autoEnded.toLocaleString("pl-PL")}
               </div>

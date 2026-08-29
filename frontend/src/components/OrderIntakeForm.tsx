@@ -32,7 +32,7 @@ import {
   Send,
 } from "lucide-react";
 import { createOrder, type OrderInput } from "@/lib/api";
-import { autoFormatNIP, normalizeNIP, validateNIP } from "@/lib/nip";
+import { normalizeNIP, validateNIP } from "@/lib/nip";
 import {
   INVOICE_ISSUERS,
   OBJECT_KINDS,
@@ -42,6 +42,7 @@ import {
   type OrderIntakeFormState,
 } from "@/lib/orderIntakeSteps";
 import { LocationPicker } from "./LocationPicker";
+import { NIPField } from "./NIPField";
 
 interface OrderIntakeFormProps {
   /** Wywoływane po utworzeniu zlecenia — pozwala odświeżyć listę zleceń. */
@@ -340,31 +341,28 @@ export function OrderIntakeForm({ onCreated }: OrderIntakeFormProps) {
           {currentStep.id === "payer" && (
             <section className="space-y-4">
               <SectionHeader icon={Building2}>Kontrahent (płatnik)</SectionHeader>
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                <div className="space-y-2">
-                  <Label htmlFor="payerNip" className="text-slate-700">
-                    NIP Płatnika <span className="text-red-500">*</span>
-                  </Label>
-                  <Input
-                    id="payerNip"
-                    value={autoFormatNIP(form.payerNip)}
-                    onChange={(e) => set("payerNip", normalizeNIP(e.target.value))}
-                    placeholder="123-456-78-90"
-                    maxLength={13}
-                    className={inputCls}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="payerName" className="text-slate-700">
-                    Nazwa płatnika <span className="text-red-500">*</span>
-                  </Label>
-                  <Input
-                    id="payerName"
-                    value={form.payerName}
-                    onChange={handleInput("payerName")}
-                    className={inputCls}
-                  />
-                </div>
+              {/* NIP z walidacją sumy kontrolnej + wyszukiwarką firm w wykazie MF —
+                  „Wstaw dane” uzupełnia nazwę płatnika. */}
+              <NIPField
+                value={form.payerNip}
+                onChange={(nip) => set("payerNip", nip)}
+                onUseExisting={(contractor) => set("payerName", contractor.name)}
+                onCompanyFound={(company) => {
+                  if (company.name) set("payerName", company.name);
+                }}
+                label="NIP Płatnika"
+                id="payerNip"
+              />
+              <div className="space-y-2 md:max-w-md">
+                <Label htmlFor="payerName" className="text-slate-700">
+                  Nazwa płatnika <span className="text-red-500">*</span>
+                </Label>
+                <Input
+                  id="payerName"
+                  value={form.payerName}
+                  onChange={handleInput("payerName")}
+                  className={inputCls}
+                />
               </div>
               <div className="space-y-2 md:max-w-md">
                 <Label htmlFor="payerInvoiceEmail" className="text-slate-700">

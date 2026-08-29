@@ -148,6 +148,8 @@ import {
   BillingMark,
   ProtocolBadge,
   ProtocolMark,
+  QuoteBadge,
+  QuoteMark,
   RealizationBadge,
   RealizationMark,
 } from "@/components/CalendarEventBadges";
@@ -428,6 +430,7 @@ function renderEventContent(arg: EventContentArg) {
     <>
       <BillingMark billing={ev.billing} className="cal-ev-mark" />
       <ProtocolMark event={ev} className="cal-ev-mark" />
+      <QuoteMark event={ev} className="cal-ev-mark" />
       <RealizationMark event={ev} className="cal-ev-mark" />
     </>
   ) : null;
@@ -444,6 +447,7 @@ function renderEventContent(arg: EventContentArg) {
           <span className="cal-list-badges">
             <BillingBadge billing={ev.billing} compact />
             <ProtocolBadge event={ev} compact />
+            <QuoteBadge event={ev} compact />
             <RealizationBadge event={ev} compact />
           </span>
         )}
@@ -1700,81 +1704,14 @@ export function Calendar() {
   );
 
   return (
-    <div className="space-y-4">
-      {!editable && <ReadOnlyBanner />}
+    // Bez space-y na korzeniu: pusty węzeł aria-live dostawał margines, który
+    // spychał siatkę w dół. Odstępy ustawiają same elementy.
+    <div>
+      {!editable && <ReadOnlyBanner className="mb-3" />}
 
       {/* aria-live: zmiany okresu / przeniesienia / statusy */}
       <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
         {announcement}
-      </div>
-
-      {/* Nagłówek */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-bold">Kalendarz</h1>
-          <p className="text-sm text-muted-foreground">
-            Dział techniczny — serwisy, montaże, wizje, konserwacje
-          </p>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <Button
-            variant={activityOpen ? "secondary" : "outline"}
-            size="sm"
-            className="h-10 md:h-9"
-            aria-pressed={activityOpen}
-            onClick={() => {
-              setAssistantOpen(false);
-              setActivityOpen((o) => !o);
-            }}
-            {...tip(
-              activityOpen
-                ? "Zamknij panel aktywności"
-                : "Dziennik zmian w kalendarzu — kto, co i kiedy zmienił"
-            )}
-          >
-            <Activity className="mr-1 h-4 w-4" /> Aktywność
-          </Button>
-          {assistantAllowed && (
-            <Button
-              variant={assistantOpen ? "secondary" : "outline"}
-              size="sm"
-              className="h-10 md:h-9"
-              aria-pressed={assistantOpen}
-              onClick={() => {
-                setActivityOpen(false);
-                setAssistantOpen((o) => !o);
-              }}
-              {...tip(
-                assistantOpen
-                  ? "Zamknij panel asystenta"
-                  : "Asystent AI — opisz zwykłym zdaniem, co zaplanować lub zmienić w kalendarzu"
-              )}
-              data-testid="assistant-toggle"
-            >
-              <Sparkles className="mr-1 h-4 w-4" /> Asystent
-            </Button>
-          )}
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-10 md:h-9"
-            onClick={() => setIcsOpen(true)}
-            {...tip("Subskrybuj kalendarz w Outlooku lub Google — link ICS tylko do odczytu")}
-          >
-            <Rss className="mr-1 h-4 w-4" /> <span className="hidden sm:inline">Subskrybuj (ICS)</span>
-            <span className="sm:hidden">ICS</span>
-          </Button>
-          {editable && (
-            <Button
-              size="sm"
-              className="h-10 md:h-9"
-              onClick={() => openCreate()}
-              {...tip("Dodaj wydarzenie — otwiera pusty formularz", { shortcut: "N" })}
-            >
-              <Plus className="mr-1 h-4 w-4" /> Nowe wydarzenie
-            </Button>
-          )}
-        </div>
       </div>
 
       <div
@@ -1789,88 +1726,278 @@ export function Calendar() {
           assistantOpen && "lg:grid-cols-[1fr_420px]"
         )}
       >
-        <Card className={cn("min-w-0", fit && "flex min-h-0 flex-col overflow-hidden")}>
-          <CardContent className={cn("space-y-3 p-3 sm:p-4", fit && "flex min-h-0 flex-1 flex-col")}>
-            {/* Toolbar — rząd 1: nawigacja + tytuł | widoki */}
-            <div
-              className={cn(
-                "flex flex-wrap items-center justify-between gap-2",
-                mobile && "sticky top-16 z-20 -mx-3 -mt-3 border-b bg-card px-3 py-2"
+        <div
+          className={cn(
+            "min-w-0 space-y-2",
+            fit && "flex min-h-0 flex-col overflow-hidden"
+          )}
+        >
+          {/* Toolbar — rząd 1: nawigacja + tytuł | widoki */}
+          <div
+            className={cn(
+              "flex flex-wrap items-center justify-between gap-2",
+              mobile && "sticky top-16 z-20 -mx-4 border-b bg-background px-4 py-2"
+            )}
+          >
+            <div className="flex min-w-0 items-center gap-1">
+              <Button
+                variant="outline"
+                size="icon"
+                className="h-10 w-10 md:h-9 md:w-9"
+                onClick={navPrev}
+                aria-label={`Poprzedni ${periodNoun}`}
+                {...tip(`Poprzedni ${periodNoun}`, { shortcut: "←" })}
+              >
+                <ChevronLeft className="h-4 w-4" />
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-10 md:h-9"
+                onClick={navToday}
+                {...tip(`Wróć do bieżącego okresu (${periodNoun} z dzisiejszą datą)`, { shortcut: "T" })}
+              >
+                Dziś
+              </Button>
+              <Button
+                variant="outline"
+                size="icon"
+                className="h-10 w-10 md:h-9 md:w-9"
+                onClick={navNext}
+                aria-label={`Następny ${periodNoun}`}
+                {...tip(`Następny ${periodNoun}`, { shortcut: "→" })}
+              >
+                <ChevronRight className="h-4 w-4" />
+              </Button>
+              <h2
+                className="ml-1 min-w-0 truncate text-base font-semibold capitalize sm:ml-2 sm:text-lg"
+                aria-live="off"
+              >
+                {title}
+              </h2>
+              {loading && loadedOnce && (
+                <Loader2
+                  className="ml-1 h-4 w-4 shrink-0 animate-spin text-muted-foreground"
+                  aria-label="Odświeżanie"
+                />
               )}
-            >
-              <div className="flex min-w-0 items-center gap-1">
-                <Button
-                  variant="outline"
-                  size="icon"
-                  className="h-10 w-10 md:h-9 md:w-9"
-                  onClick={navPrev}
-                  aria-label={`Poprzedni ${periodNoun}`}
-                  {...tip(`Poprzedni ${periodNoun}`, { shortcut: "←" })}
+              {!loading && loadedOnce && overdueTotal > 0 && !isBoard && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    changeView("board");
+                    setBoardGroup("status");
+                  }}
+                  className="ml-2 hidden items-center gap-1 rounded-full bg-red-100 px-2 py-0.5 text-[11px] font-semibold text-red-700 hover:bg-red-200 dark:bg-red-500/20 dark:text-red-200 dark:hover:bg-red-500/30 md:inline-flex"
+                  {...tip(
+                    `Zaplanowane wydarzenia, których termin już minął: ${overdueTotal}\nKliknij, by otworzyć Tablicę pogrupowaną wg statusu`
+                  )}
                 >
-                  <ChevronLeft className="h-4 w-4" />
+                  <AlertTriangle className="h-3 w-3" aria-hidden />
+                  {overdueTotal} po terminie
+                </button>
+              )}
+              {!loading && loadedOnce && weekendHidden > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setWeekends(true)}
+                  className="ml-2 hidden shrink-0 items-center gap-1 whitespace-nowrap rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:inline-flex"
+                  {...tip("Weekendy są ukryte w siatce — kliknij, by je pokazać", { shortcut: "S" })}
+                  data-testid="weekend-hidden-hint"
+                >
+                  <CalendarRange className="h-3 w-3" aria-hidden />
+                  {weekendHidden} {plEvents(weekendHidden)} w weekend — pokaż
+                </button>
+              )}
+            </div>
+            <div className="flex flex-wrap items-center justify-end gap-2 min-w-0">
+              {isBoard && !mobile && (
+                <SegmentedControl
+                  label="Grupowanie tablicy"
+                  value={boardGroup}
+                  onChange={(k) => setBoardGroup(k as BoardGroupBy)}
+                  tone="secondary"
+                  options={[
+                    { key: "status", label: "wg statusu", icon: ListChecks, hint: "Grupuj kolumny wg statusu wydarzenia" },
+                    { key: "type", label: "wg typu", icon: Tags, hint: "Grupuj kolumny wg typu wydarzenia" },
+                  ]}
+                />
+              )}
+              <SegmentedControl
+                label="Widok"
+                value={view}
+                onChange={(k) => changeView(k as ViewName)}
+                options={orderedViews.map((v) => ({
+                  key: v.key,
+                  label: mobile ? v.shortLabel : v.label,
+                  hint: v.key === view ? `Bieżący widok: ${v.label}` : `Przełącz na widok: ${v.label}`,
+                  shortcut: v.keys[0].toUpperCase(),
+                }))}
+              />
+              {!isBoard && (
+                <Button
+                  variant={weekends ? "secondary" : "outline"}
+                  size="icon"
+                  className="hidden h-10 w-10 md:inline-flex md:h-9 md:w-9"
+                  aria-pressed={weekends}
+                  onClick={() => setWeekends(!weekends)}
+                  aria-label={weekends ? "Ukryj weekendy" : "Pokaż weekendy"}
+                  {...tip(
+                    weekends
+                      ? "Ukryj soboty i niedziele — dni robocze dostaną więcej miejsca"
+                      : "Pokaż soboty i niedziele w siatce",
+                    { shortcut: "S" }
+                  )}
+                  data-testid="weekend-toggle"
+                >
+                  {weekends ? <CalendarDays className="h-4 w-4" /> : <CalendarRange className="h-4 w-4" />}
                 </Button>
+              )}
+              <FilterSets
+                current={currentFilterState}
+                onApply={applyFilterSet}
+                technicians={technicians}
+              />
+              <Button
+                variant={activeFilterCount ? "secondary" : "outline"}
+                size="icon"
+                className="relative h-10 w-10 md:hidden"
+                onClick={() => setFiltersOpen(true)}
+                aria-label={`Filtry${activeFilterCount ? ` (${activeFilterCount} aktywne)` : ""}`}
+              >
+                <Filter className="h-4 w-4" />
+                {activeFilterCount > 0 && (
+                  <span className="absolute -right-1 -top-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-bold text-primary-foreground">
+                    {activeFilterCount}
+                  </span>
+                )}
+              </Button>
+              <div className="relative hidden md:block">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-9 w-9 text-muted-foreground"
+                  onClick={() => setHelpOpen((o) => !o)}
+                  aria-label="Pomoc: legenda i skróty"
+                  aria-expanded={helpOpen}
+                  {...tip("Legenda kolorów, znaczników i skrótów klawiszowych", { shortcut: "?" })}
+                >
+                  <HelpCircle className="h-4 w-4" />
+                </Button>
+                {helpOpen && <HelpPopover onClose={() => setHelpOpen(false)} editable={editable} />}
+              </div>
+              {/* Akcje strony (aktywność, asystent, ICS, nowe wydarzenie) —
+                  w tym samym rzędzie co widoki, żeby siatka dostała wyżej start. */}
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  variant={activityOpen ? "secondary" : "outline"}
+                  size="sm"
+                  className="h-10 md:h-9"
+                  aria-pressed={activityOpen}
+                  onClick={() => {
+                    setAssistantOpen(false);
+                    setActivityOpen((o) => !o);
+                  }}
+                  {...tip(
+                    activityOpen
+                      ? "Zamknij panel aktywności"
+                      : "Dziennik zmian w kalendarzu — kto, co i kiedy zmienił"
+                  )}
+                >
+                  <Activity className="mr-1 h-4 w-4" /> Aktywność
+                </Button>
+                {assistantAllowed && (
+                  <Button
+                    variant={assistantOpen ? "secondary" : "outline"}
+                    size="sm"
+                    className="h-10 md:h-9"
+                    aria-pressed={assistantOpen}
+                    onClick={() => {
+                      setActivityOpen(false);
+                      setAssistantOpen((o) => !o);
+                    }}
+                    {...tip(
+                      assistantOpen
+                        ? "Zamknij panel asystenta"
+                        : "Asystent AI — opisz zwykłym zdaniem, co zaplanować lub zmienić w kalendarzu"
+                    )}
+                    data-testid="assistant-toggle"
+                  >
+                    <Sparkles className="mr-1 h-4 w-4" /> Asystent
+                  </Button>
+                )}
                 <Button
                   variant="outline"
                   size="sm"
                   className="h-10 md:h-9"
-                  onClick={navToday}
-                  {...tip(`Wróć do bieżącego okresu (${periodNoun} z dzisiejszą datą)`, { shortcut: "T" })}
+                  onClick={() => setIcsOpen(true)}
+                  {...tip("Subskrybuj kalendarz w Outlooku lub Google — link ICS tylko do odczytu")}
                 >
-                  Dziś
+                  <Rss className="mr-1 h-4 w-4" /> <span className="hidden sm:inline">Subskrybuj (ICS)</span>
+                  <span className="sm:hidden">ICS</span>
                 </Button>
-                <Button
-                  variant="outline"
-                  size="icon"
-                  className="h-10 w-10 md:h-9 md:w-9"
-                  onClick={navNext}
-                  aria-label={`Następny ${periodNoun}`}
-                  {...tip(`Następny ${periodNoun}`, { shortcut: "→" })}
-                >
-                  <ChevronRight className="h-4 w-4" />
-                </Button>
-                <h2
-                  className="ml-1 min-w-0 truncate text-base font-semibold capitalize sm:ml-2 sm:text-lg"
-                  aria-live="off"
-                >
-                  {title}
-                </h2>
-                {loading && loadedOnce && (
-                  <Loader2
-                    className="ml-1 h-4 w-4 shrink-0 animate-spin text-muted-foreground"
-                    aria-label="Odświeżanie"
-                  />
-                )}
-                {!loading && loadedOnce && overdueTotal > 0 && !isBoard && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      changeView("board");
-                      setBoardGroup("status");
-                    }}
-                    className="ml-2 hidden items-center gap-1 rounded-full bg-red-100 px-2 py-0.5 text-[11px] font-semibold text-red-700 hover:bg-red-200 dark:bg-red-500/20 dark:text-red-200 dark:hover:bg-red-500/30 md:inline-flex"
-                    {...tip(
-                      `Zaplanowane wydarzenia, których termin już minął: ${overdueTotal}\nKliknij, by otworzyć Tablicę pogrupowaną wg statusu`
-                    )}
+                {editable && (
+                  <Button
+                    size="sm"
+                    className="h-10 md:h-9"
+                    onClick={() => openCreate()}
+                    {...tip("Dodaj wydarzenie — otwiera pusty formularz", { shortcut: "N" })}
                   >
-                    <AlertTriangle className="h-3 w-3" aria-hidden />
-                    {overdueTotal} po terminie
-                  </button>
-                )}
-                {!loading && loadedOnce && weekendHidden > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => setWeekends(true)}
-                    className="ml-2 hidden shrink-0 items-center gap-1 whitespace-nowrap rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:inline-flex"
-                    {...tip("Weekendy są ukryte w siatce — kliknij, by je pokazać", { shortcut: "S" })}
-                    data-testid="weekend-hidden-hint"
-                  >
-                    <CalendarRange className="h-3 w-3" aria-hidden />
-                    {weekendHidden} {plEvents(weekendHidden)} w weekend — pokaż
-                  </button>
+                    <Plus className="mr-1 h-4 w-4" /> Nowe wydarzenie
+                  </Button>
                 )}
               </div>
-              <div className="flex flex-wrap items-center justify-end gap-2 min-w-0">
-                {isBoard && !mobile && (
+            </div>
+          </div>
+
+          {/* Toolbar — rząd 2: filtry (desktop) */}
+          <div className="hidden flex-wrap items-center gap-2 md:flex">
+            <span className="inline-flex items-center gap-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              <Filter className="h-3.5 w-3.5" aria-hidden /> Filtry
+              {activeFilterCount > 0 && (
+                <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-bold text-primary-foreground">
+                  {activeFilterCount}
+                </span>
+              )}
+            </span>
+            {filterControls}
+            {activeFilterCount > 0 && (
+              <Tooltip content={`Zdejmij wszystkie filtry (aktywne: ${activeFilterCount}) i pokaż pełny kalendarz`}>
+                <button
+                  type="button"
+                  onClick={clearFilters}
+                  className="inline-flex h-8 items-center gap-1 rounded-md px-2 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <FilterX className="h-3.5 w-3.5" aria-hidden /> Wyczyść filtry
+                </button>
+              </Tooltip>
+            )}
+            {isBoard && mobile && null}
+          </div>
+
+          {/* Aktywne filtry na mobile — pasek podsumowania */}
+          {mobile && activeFilterCount > 0 && (
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <span>
+                Filtry: {activeFilterCount} aktywne
+                {typeFilter.size > 0 && ` · ${Array.from(typeFilter).map((t) => EVENT_TYPE_META[t].label).join(", ")}`}
+              </span>
+              <button type="button" onClick={clearFilters} className="ml-auto underline">
+                wyczyść
+              </button>
+            </div>
+          )}
+
+          {/* Tablica (kanban) — zamiast siatki FullCalendar */}
+          {isBoard && (
+            <div
+              className={cn("alfa-calendar relative min-w-0", fit && "flex min-h-0 flex-1 flex-col")}
+              data-fit={fit ? "true" : undefined}
+              onTouchStart={onTouchStart}
+              onTouchEnd={onTouchEnd}
+            >
+              {mobile && (
+                <div className="mb-2">
                   <SegmentedControl
                     label="Grupowanie tablicy"
                     value={boardGroup}
@@ -1881,243 +2008,117 @@ export function Calendar() {
                       { key: "type", label: "wg typu", icon: Tags, hint: "Grupuj kolumny wg typu wydarzenia" },
                     ]}
                   />
-                )}
-                <SegmentedControl
-                  label="Widok"
-                  value={view}
-                  onChange={(k) => changeView(k as ViewName)}
-                  options={orderedViews.map((v) => ({
-                    key: v.key,
-                    label: mobile ? v.shortLabel : v.label,
-                    hint: v.key === view ? `Bieżący widok: ${v.label}` : `Przełącz na widok: ${v.label}`,
-                    shortcut: v.keys[0].toUpperCase(),
-                  }))}
-                />
-                {!isBoard && (
-                  <Button
-                    variant={weekends ? "secondary" : "outline"}
-                    size="icon"
-                    className="hidden h-10 w-10 md:inline-flex md:h-9 md:w-9"
-                    aria-pressed={weekends}
-                    onClick={() => setWeekends(!weekends)}
-                    aria-label={weekends ? "Ukryj weekendy" : "Pokaż weekendy"}
-                    {...tip(
-                      weekends
-                        ? "Ukryj soboty i niedziele — dni robocze dostaną więcej miejsca"
-                        : "Pokaż soboty i niedziele w siatce",
-                      { shortcut: "S" }
-                    )}
-                    data-testid="weekend-toggle"
-                  >
-                    {weekends ? <CalendarDays className="h-4 w-4" /> : <CalendarRange className="h-4 w-4" />}
-                  </Button>
-                )}
-                <FilterSets
-                  current={currentFilterState}
-                  onApply={applyFilterSet}
-                  technicians={technicians}
-                />
-                <Button
-                  variant={activeFilterCount ? "secondary" : "outline"}
-                  size="icon"
-                  className="relative h-10 w-10 md:hidden"
-                  onClick={() => setFiltersOpen(true)}
-                  aria-label={`Filtry${activeFilterCount ? ` (${activeFilterCount} aktywne)` : ""}`}
-                >
-                  <Filter className="h-4 w-4" />
-                  {activeFilterCount > 0 && (
-                    <span className="absolute -right-1 -top-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-bold text-primary-foreground">
-                      {activeFilterCount}
-                    </span>
-                  )}
-                </Button>
-                <div className="relative hidden md:block">
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-9 w-9 text-muted-foreground"
-                    onClick={() => setHelpOpen((o) => !o)}
-                    aria-label="Pomoc: legenda i skróty"
-                    aria-expanded={helpOpen}
-                    {...tip("Legenda kolorów, znaczników i skrótów klawiszowych", { shortcut: "?" })}
-                  >
-                    <HelpCircle className="h-4 w-4" />
-                  </Button>
-                  {helpOpen && <HelpPopover onClose={() => setHelpOpen(false)} editable={editable} />}
                 </div>
-              </div>
-            </div>
-
-            {/* Toolbar — rząd 2: filtry (desktop) */}
-            <div className="hidden flex-wrap items-center gap-2 md:flex">
-              <span className="inline-flex items-center gap-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                <Filter className="h-3.5 w-3.5" aria-hidden /> Filtry
-                {activeFilterCount > 0 && (
-                  <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-bold text-primary-foreground">
-                    {activeFilterCount}
-                  </span>
-                )}
-              </span>
-              {filterControls}
-              {activeFilterCount > 0 && (
-                <Tooltip content={`Zdejmij wszystkie filtry (aktywne: ${activeFilterCount}) i pokaż pełny kalendarz`}>
-                  <button
-                    type="button"
-                    onClick={clearFilters}
-                    className="inline-flex h-8 items-center gap-1 rounded-md px-2 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  >
-                    <FilterX className="h-3.5 w-3.5" aria-hidden /> Wyczyść filtry
-                  </button>
-                </Tooltip>
               )}
-              {isBoard && mobile && null}
+              {!loadedOnce && <CalendarSkeleton columns={4} />}
+              <CalendarBoard
+                events={events}
+                groupBy={boardGroup}
+                editable={editable}
+                loading={loading}
+                onOpen={openEvent}
+                onContextMenu={handleBoardContextMenu}
+                onMove={handleBoardMove}
+                onCreate={editable ? () => openCreate() : undefined}
+              />
             </div>
+          )}
 
-            {/* Aktywne filtry na mobile — pasek podsumowania */}
-            {mobile && activeFilterCount > 0 && (
-              <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                <span>
-                  Filtry: {activeFilterCount} aktywne
-                  {typeFilter.size > 0 && ` · ${Array.from(typeFilter).map((t) => EVENT_TYPE_META[t].label).join(", ")}`}
-                </span>
-                <button type="button" onClick={clearFilters} className="ml-auto underline">
-                  wyczyść
-                </button>
-              </div>
-            )}
-
-            {/* Tablica (kanban) — zamiast siatki FullCalendar */}
-            {isBoard && (
-              <div
-                className={cn("alfa-calendar relative min-w-0", fit && "flex min-h-0 flex-1 flex-col")}
-                data-fit={fit ? "true" : undefined}
-                onTouchStart={onTouchStart}
-                onTouchEnd={onTouchEnd}
-              >
-                {mobile && (
-                  <div className="mb-2">
-                    <SegmentedControl
-                      label="Grupowanie tablicy"
-                      value={boardGroup}
-                      onChange={(k) => setBoardGroup(k as BoardGroupBy)}
-                      tone="secondary"
-                      options={[
-                        { key: "status", label: "wg statusu", icon: ListChecks, hint: "Grupuj kolumny wg statusu wydarzenia" },
-                        { key: "type", label: "wg typu", icon: Tags, hint: "Grupuj kolumny wg typu wydarzenia" },
-                      ]}
-                    />
-                  </div>
+          {/* Kalendarz */}
+          {!isBoard && (
+            <div
+              ref={gridRef}
+              className={cn("alfa-calendar relative", fit && "flex min-h-0 flex-1 flex-col")}
+              data-fit={fit ? "true" : undefined}
+              // FullCalendar sam dokleja `title` do „+N więcej”, linków dni i
+              // przycisku zamknięcia popovera — w tym zakresie przejmuje je
+              // nasz tooltip (patrz `data-tip-scope` w components/ui/tooltip).
+              data-tip-scope=""
+              onContextMenu={handleGridContextMenu}
+              onTouchStart={onTouchStart}
+              onTouchEnd={onTouchEnd}
+              aria-busy={loading || undefined}
+            >
+              {!loadedOnce && <CalendarSkeleton columns={view === "timeGridDay" ? 1 : 7} />}
+              <div className={cn(fit && "min-h-0 flex-1")}>
+              <FullCalendar
+                ref={calendarRef}
+                plugins={[dayGridPlugin, timeGridPlugin, listPlugin, interactionPlugin]}
+                locale={plLocale}
+                initialView={view}
+                initialDate={anchorDate}
+                headerToolbar={false}
+                firstDay={1}
+                height={fit ? "100%" : "auto"}
+                expandRows={fit}
+                weekends={weekends}
+                nowIndicator
+                slotMinTime="06:00:00"
+                slotMaxTime="20:00:00"
+                slotDuration="00:30:00"
+                scrollTime="07:00:00"
+                dayMaxEvents={mobile ? 2 : fit ? true : 3}
+                weekNumbers={!mobile}
+                weekText="T"
+                eventTimeFormat={{ hour: "2-digit", minute: "2-digit", hour12: false }}
+                slotLabelFormat={{ hour: "2-digit", minute: "2-digit", hour12: false }}
+                dayPopoverFormat={{ weekday: "long", day: "numeric", month: "long" }}
+                editable={editable}
+                eventStartEditable={editable}
+                eventDurationEditable={editable}
+                selectable={editable}
+                selectMirror
+                unselectAuto
+                events={fcEvents}
+                eventContent={renderEventContent}
+                eventClick={handleEventClick}
+                eventDidMount={handleEventDidMount}
+                eventWillUnmount={handleEventWillUnmount}
+                select={handleSelect}
+                eventDrop={handleMove}
+                eventResize={handleMove}
+                datesSet={handleDatesSet}
+                noEventsContent={() => (
+                  <EmptyState
+                    title={
+                      activeFilterCount
+                        ? "Brak wydarzeń pasujących do filtrów"
+                        : view === "timeGridDay"
+                          ? "Brak wydarzeń tego dnia"
+                          : "Brak wydarzeń w tym tygodniu"
+                    }
+                    onCreate={editable ? () => openCreate() : undefined}
+                    onClearFilters={activeFilterCount ? clearFilters : undefined}
+                    onNext={navNext}
+                  />
                 )}
-                {!loadedOnce && <CalendarSkeleton columns={4} />}
-                <CalendarBoard
-                  events={events}
-                  groupBy={boardGroup}
-                  editable={editable}
-                  loading={loading}
-                  onOpen={openEvent}
-                  onContextMenu={handleBoardContextMenu}
-                  onMove={handleBoardMove}
-                  onCreate={editable ? () => openCreate() : undefined}
-                />
+                moreLinkContent={(a) => `+${a.num} więcej`}
+                moreLinkHint={(n) => `Pokaż pozostałe ${eventsCount(n)} tego dnia`}
+                navLinkHint={(t) => `Przejdź do dnia: ${t}`}
+                closeHint="Zamknij listę wydarzeń dnia"
+                eventHint="Wydarzenie"
+              />
               </div>
-            )}
-
-            {/* Kalendarz */}
-            {!isBoard && (
-              <div
-                ref={gridRef}
-                className={cn("alfa-calendar relative", fit && "flex min-h-0 flex-1 flex-col")}
-                data-fit={fit ? "true" : undefined}
-                // FullCalendar sam dokleja `title` do „+N więcej”, linków dni i
-                // przycisku zamknięcia popovera — w tym zakresie przejmuje je
-                // nasz tooltip (patrz `data-tip-scope` w components/ui/tooltip).
-                data-tip-scope=""
-                onContextMenu={handleGridContextMenu}
-                onTouchStart={onTouchStart}
-                onTouchEnd={onTouchEnd}
-                aria-busy={loading || undefined}
-              >
-                {!loadedOnce && <CalendarSkeleton columns={view === "timeGridDay" ? 1 : 7} />}
-                <div className={cn(fit && "min-h-0 flex-1")}>
-                <FullCalendar
-                  ref={calendarRef}
-                  plugins={[dayGridPlugin, timeGridPlugin, listPlugin, interactionPlugin]}
-                  locale={plLocale}
-                  initialView={view}
-                  initialDate={anchorDate}
-                  headerToolbar={false}
-                  firstDay={1}
-                  height={fit ? "100%" : "auto"}
-                  expandRows={fit}
-                  weekends={weekends}
-                  nowIndicator
-                  slotMinTime="06:00:00"
-                  slotMaxTime="20:00:00"
-                  slotDuration="00:30:00"
-                  scrollTime="07:00:00"
-                  dayMaxEvents={mobile ? 2 : fit ? true : 3}
-                  weekNumbers={!mobile}
-                  weekText="T"
-                  eventTimeFormat={{ hour: "2-digit", minute: "2-digit", hour12: false }}
-                  slotLabelFormat={{ hour: "2-digit", minute: "2-digit", hour12: false }}
-                  dayPopoverFormat={{ weekday: "long", day: "numeric", month: "long" }}
-                  editable={editable}
-                  eventStartEditable={editable}
-                  eventDurationEditable={editable}
-                  selectable={editable}
-                  selectMirror
-                  unselectAuto
-                  events={fcEvents}
-                  eventContent={renderEventContent}
-                  eventClick={handleEventClick}
-                  eventDidMount={handleEventDidMount}
-                  eventWillUnmount={handleEventWillUnmount}
-                  select={handleSelect}
-                  eventDrop={handleMove}
-                  eventResize={handleMove}
-                  datesSet={handleDatesSet}
-                  noEventsContent={() => (
-                    <EmptyState
-                      title={
-                        activeFilterCount
-                          ? "Brak wydarzeń pasujących do filtrów"
-                          : view === "timeGridDay"
-                            ? "Brak wydarzeń tego dnia"
-                            : "Brak wydarzeń w tym tygodniu"
-                      }
-                      onCreate={editable ? () => openCreate() : undefined}
-                      onClearFilters={activeFilterCount ? clearFilters : undefined}
-                      onNext={navNext}
-                    />
+              {/* Pusty stan w siatce (mies./tydz.) — subtelny pasek pod siatką */}
+              {loadedOnce && !loading && visibleCount === 0 && view !== "listWeek" && (
+                <div className="mt-2 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 rounded-md border border-dashed px-3 py-2 text-xs text-muted-foreground">
+                  <CalendarX2 className="h-3.5 w-3.5" aria-hidden />
+                  {activeFilterCount ? "Brak wydarzeń pasujących do filtrów." : "Brak wydarzeń w tym okresie."}
+                  {activeFilterCount > 0 && (
+                    <button type="button" onClick={clearFilters} className="font-medium underline">
+                      Wyczyść filtry
+                    </button>
                   )}
-                  moreLinkContent={(a) => `+${a.num} więcej`}
-                  moreLinkHint={(n) => `Pokaż pozostałe ${eventsCount(n)} tego dnia`}
-                  navLinkHint={(t) => `Przejdź do dnia: ${t}`}
-                  closeHint="Zamknij listę wydarzeń dnia"
-                  eventHint="Wydarzenie"
-                />
+                  {editable && (
+                    <button type="button" onClick={() => openCreate()} className="font-medium underline">
+                      Nowe wydarzenie
+                    </button>
+                  )}
                 </div>
-                {/* Pusty stan w siatce (mies./tydz.) — subtelny pasek pod siatką */}
-                {loadedOnce && !loading && visibleCount === 0 && view !== "listWeek" && (
-                  <div className="mt-2 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 rounded-md border border-dashed px-3 py-2 text-xs text-muted-foreground">
-                    <CalendarX2 className="h-3.5 w-3.5" aria-hidden />
-                    {activeFilterCount ? "Brak wydarzeń pasujących do filtrów." : "Brak wydarzeń w tym okresie."}
-                    {activeFilterCount > 0 && (
-                      <button type="button" onClick={clearFilters} className="font-medium underline">
-                        Wyczyść filtry
-                      </button>
-                    )}
-                    {editable && (
-                      <button type="button" onClick={() => openCreate()} className="font-medium underline">
-                        Nowe wydarzenie
-                      </button>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
-          </CardContent>
-        </Card>
+              )}
+            </div>
+          )}
+        </div>
 
         {/* Panel Aktywność */}
         {activityOpen && (
@@ -2635,6 +2636,7 @@ function EventPreview({
           <div className="mt-1 flex flex-wrap items-center gap-1.5 empty:mt-0">
             <BillingBadge billing={ev.billing} />
             <ProtocolBadge event={ev} link />
+            <QuoteBadge event={ev} link />
             <RealizationBadge event={ev} link />
           </div>
         </div>

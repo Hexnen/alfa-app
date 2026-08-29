@@ -34,7 +34,11 @@ import {
   BILLING_META,
   billingBadgeClass,
   calendarEventHref,
+  pillClass,
+  protocolBadgeClass,
   protocolHref,
+  REALIZATION_BADGE_META,
+  realizationBadgeClass,
   REALIZATION_BILLING_ORDER,
   REALIZATION_WORK_TYPE_META,
   REALIZATION_WORK_TYPE_ORDER,
@@ -124,15 +128,25 @@ function autofillMarkFor(row: Realization, field: string): AutofillMark | null {
   return mark && typeof mark === "object" ? mark : null;
 }
 
-/** Rodzaj prac — ikona + etykieta, dokładnie jak przy wydarzeniu kalendarza. */
-function RealizationWorkTypeBadge({ workType }: { workType: RealizationWorkType }) {
+/**
+ * Rodzaj prac — ikona + etykieta, dokładnie jak przy wydarzeniu kalendarza.
+ * Ten sam badge obsługuje rodzaj pracy protokołu (`serwis|montaz|wizja|inne`
+ * to podzbiór rodzajów realizacji), więc obie zakładki wyglądają identycznie.
+ */
+function RealizationWorkTypeBadge({
+  workType,
+  testIdPrefix = "realization-worktype",
+}: {
+  workType: RealizationWorkType;
+  testIdPrefix?: string;
+}) {
   const meta = REALIZATION_WORK_TYPE_META[workType] ?? REALIZATION_WORK_TYPE_META.inne;
   const Icon = meta.icon;
   return (
     <span
-      data-testid={`realization-worktype-${workType}`}
+      data-testid={`${testIdPrefix}-${workType}`}
       className={cn(
-        "inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-xs font-medium",
+        "inline-flex items-center gap-1.5 whitespace-nowrap rounded-full border px-2 py-0.5 text-xs font-medium",
         meta.chip
       )}
     >
@@ -157,6 +171,9 @@ function RealizationBillingBadge({ billing }: { billing: RealizationBilling }) {
     </span>
   );
 }
+
+/** Ikona znacznika realizacji (paragon) — ta sama co w kalendarzu. */
+const InvoicedIcon = REALIZATION_BADGE_META.invoiced.icon;
 
 const numFmt = new Intl.NumberFormat("pl-PL", { maximumFractionDigits: 2 });
 
@@ -192,13 +209,6 @@ function ActualValue({
     </span>
   );
 }
-
-const PROTOCOL_TYPE_META: Record<string, { label: string; badge: string }> = {
-  serwis: { label: "Serwis", badge: "bg-emerald-100 text-emerald-700" },
-  montaz: { label: "Montaż", badge: "bg-violet-100 text-violet-700" },
-  wizja: { label: "Wizja lokalna", badge: "bg-sky-100 text-sky-700" },
-  inne: { label: "Inne", badge: "bg-muted text-muted-foreground" },
-};
 
 /** Filtr obecności protokołu w tabeli realizacji. */
 type RealizationProtocolFilter = "" | "with" | "without";
@@ -262,6 +272,8 @@ export function Technical() {
   const [bulk, setBulk] = useState<AutofillBulkRow[] | null>(null);
   const [bulkBusy, setBulkBusy] = useState<"preview" | "apply" | null>(null);
   const [bulkError, setBulkError] = useState<string | null>(null);
+  /** Co automat zrobił po podpisaniu protokołu (uzupełnienie realizacji, wycena z protokołu). */
+  const [signNote, setSignNote] = useState<string | null>(null);
 
   const [technicians, setTechnicians] = useState<Technician[]>([]);
   const [techLoading, setTechLoading] = useState(true);
@@ -408,18 +420,16 @@ export function Technical() {
                 <td className="px-3 py-2 font-medium">{tech.lastName}</td>
                 <td className="px-3 py-2">
                   {tech.type === "external" ? (
-                    <span className="inline-flex rounded-md bg-sky-100 px-2 py-0.5 text-xs font-medium text-sky-700">
-                      Zewnętrzny
-                    </span>
+                    <span className={pillClass("sky")}>Zewnętrzny</span>
                   ) : (
-                    <span className="inline-flex rounded-md bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700">
-                      Wewnętrzny
-                    </span>
+                    <span className={pillClass("emerald")}>Wewnętrzny</span>
                   )}
                 </td>
                 <td className="px-3 py-2">
                   {tech.priceListId ? (
-                    <span className="inline-flex max-w-40 truncate rounded-md bg-muted px-2 py-0.5 text-xs font-medium">
+                    <span
+                      className={pillClass("muted", { className: "max-w-40 truncate" })}
+                    >
                       {priceListLabel(tech.priceListId)}
                     </span>
                   ) : (
@@ -636,6 +646,51 @@ export function Technical() {
     loadQuotes();
   }, [loadQuotes]);
 
+  /**
+   * Deep-link `?quote=ID` (z kalendarza — wycena wydarzenia): przełącz na zakładkę
+   * Wyceny, otwórz formularz i przewiń do wiersza. Wycena z innego roku dociągana
+   * jest osobnym zapytaniem (lista jest filtrowana rokiem).
+   */
+  const quoteLinkBusy = useRef(false);
+  useEffect(() => {
+    const raw = searchParams.get("quote");
+    const id = raw ? Number(raw) : NaN;
+    if (!Number.isFinite(id)) return;
+    if (tab !== "wyceny") {
+      navigate(`/technical/wyceny?quote=${id}`, { replace: true });
+      return;
+    }
+    if (quotesLoading || quoteLinkBusy.current) return;
+    const clearParam = () => {
+      const next = new URLSearchParams(searchParams);
+      next.delete("quote");
+      setSearchParams(next, { replace: true });
+    };
+    const openQuote = (q: Quote) => {
+      setEditingQuote(q);
+      window.setTimeout(() => {
+        document.querySelector(`[data-quote-id="${q.id}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" });
+      }, 0);
+      clearParam();
+    };
+    const local = quotes.find((x) => x.id === id);
+    if (local) {
+      openQuote(local);
+      return;
+    }
+    quoteLinkBusy.current = true;
+    getQuotes()
+      .then((res) => {
+        const found = (res.data || []).find((x) => x.id === id);
+        if (found) openQuote(found);
+        else clearParam();
+      })
+      .catch(() => clearParam())
+      .finally(() => {
+        quoteLinkBusy.current = false;
+      });
+  }, [searchParams, setSearchParams, tab, navigate, quotesLoading, quotes]);
+
   const handleQuoteNew = async () => {
     if (!editable) return;
     try {
@@ -690,7 +745,12 @@ export function Technical() {
         signerName,
       });
       if (res.data) setEditingProto(res.data);
+      // Backend po podpisie dolicza realizację i przelicza wycenę z protokołu — pokazujemy,
+      // co się wydarzyło, bo dzieje się to poza otwartym dialogiem.
+      setSignNote(res.message && res.message !== "Protokół podpisany" ? res.message : null);
       loadProtocols();
+      load();
+      loadQuotes();
     }
   };
 
@@ -929,18 +989,11 @@ export function Technical() {
   }
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <h1 className="text-3xl font-bold">Techniczny</h1>
-        <p className="text-muted-foreground">
-          Realizacje, protokoły, wyceny i cennik
-        </p>
-      </div>
-
+    <div className="space-y-3">
       {!editable && <ReadOnlyBanner className="mb-4" />}
 
       <Tabs value={tab}>
-        <TabsContent value="realizacje" className="space-y-6">
+        <TabsContent value="realizacje" className="space-y-4">
           {/* Pasek: miesiąc + akcje */}
           <div className="flex flex-wrap items-center gap-2">
             <Button
@@ -963,7 +1016,7 @@ export function Technical() {
               <ChevronRight className="h-4 w-4" />
             </Button>
             {summary && summary.uninvoicedCount > 0 && (
-              <span className="ml-2 rounded-md bg-amber-100 px-2 py-1 text-xs font-medium text-amber-700">
+              <span className={pillClass("amber", { className: "ml-2" })}>
                 Do zafakturowania: {summary.uninvoicedCount}
               </span>
             )}
@@ -1173,7 +1226,7 @@ export function Technical() {
                 <div className="ml-auto flex items-center gap-2">
                   <span
                     data-testid="missing-protocols-count"
-                    className="rounded-md bg-amber-100 px-2 py-1 text-xs font-medium text-amber-800 dark:bg-amber-500/20 dark:text-amber-200"
+                    className={pillClass("amber")}
                   >
                     {missingProtocolCount}{" "}
                     {missingProtocolCount === 1
@@ -1335,15 +1388,20 @@ export function Technical() {
                             {row.note || "—"}
                           </td>
                           <td className="px-3 py-2">
-                            {row.invoiced ? (
-                              <span className="inline-flex rounded-md bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700">
-                                TAK
-                              </span>
-                            ) : (
-                              <span className="inline-flex rounded-md bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">
-                                NIE
-                              </span>
-                            )}
+                            {/* Ta sama pigułka co znacznik realizacji w kalendarzu. */}
+                            <span
+                              className={realizationBadgeClass(
+                                row.invoiced ? "invoiced" : "open"
+                              )}
+                              {...tip(
+                                REALIZATION_BADGE_META[
+                                  row.invoiced ? "invoiced" : "open"
+                                ].hint
+                              )}
+                            >
+                              <InvoicedIcon className="h-3.5 w-3.5" aria-hidden />
+                              {row.invoiced ? "TAK" : "NIE"}
+                            </span>
                           </td>
                           <td className="whitespace-nowrap px-3 py-2">
                             {row.contractor1 || row.caretaker || "—"}
@@ -1513,7 +1571,7 @@ export function Technical() {
           )}
         </TabsContent>
 
-        <TabsContent value="protokoly" className="space-y-6">
+        <TabsContent value="protokoly" className="space-y-4">
           <div className="flex flex-wrap items-center gap-2">
             <Button
               variant="outline"
@@ -1538,6 +1596,23 @@ export function Technical() {
               Protokoły tworzą się automatycznie z realizacji.
             </p>
           </div>
+
+          {signNote && (
+            <div
+              className="flex items-start justify-between gap-3 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-800 dark:text-emerald-200"
+              role="status"
+              data-testid="protocol-sign-note"
+            >
+              <span>{signNote}</span>
+              <button
+                type="button"
+                className="shrink-0 text-xs underline opacity-80 hover:opacity-100"
+                onClick={() => setSignNote(null)}
+              >
+                ukryj
+              </button>
+            </div>
+          )}
 
           <Card>
             <CardContent className="p-0">
@@ -1579,7 +1654,10 @@ export function Technical() {
                               !(proto.clientName || "").trim() && (
                                 <span
                                   data-testid={`protocol-needs-prefill-${proto.id}`}
-                                  className="ml-2 inline-flex rounded-full bg-muted px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide text-muted-foreground"
+                                  className={pillClass("amber", {
+                                    compact: true,
+                                    className: "ml-2 font-semibold uppercase tracking-wide",
+                                  })}
                                   title="Brak danych zleceniodawcy — otwórz protokół i użyj „Uzupełnij z danych”"
                                 >
                                   do uzupełnienia
@@ -1595,12 +1673,10 @@ export function Technical() {
                             {proto.installationAddress || proto.site || "—"}
                           </td>
                           <td className="px-3 py-2">
-                            <span
-                              className={`inline-flex rounded-md px-2 py-0.5 text-xs font-medium ${PROTOCOL_TYPE_META[proto.workType]?.badge ?? ""}`}
-                            >
-                              {PROTOCOL_TYPE_META[proto.workType]?.label ??
-                                proto.workType}
-                            </span>
+                            <RealizationWorkTypeBadge
+                              workType={proto.workType}
+                              testIdPrefix="protocol-worktype"
+                            />
                           </td>
                           <td className="whitespace-nowrap px-3 py-2">
                             {proto.contractor || "—"}
@@ -1622,12 +1698,15 @@ export function Technical() {
                             )}
                           </td>
                           <td className="px-3 py-2">
+                            {/* Te same kolory i ikony co znacznik protokołu w kalendarzu. */}
                             {proto.status === "final" ? (
-                              <span className="inline-flex rounded-md bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700">
+                              <span className={protocolBadgeClass("final")}>
+                                <FileCheck2 className="h-3.5 w-3.5" aria-hidden />
                                 Zatwierdzony
                               </span>
                             ) : (
-                              <span className="inline-flex rounded-md bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700">
+                              <span className={protocolBadgeClass("draft")}>
+                                <FileCheck2 className="h-3.5 w-3.5" aria-hidden />
                                 Szkic
                               </span>
                             )}
@@ -1669,7 +1748,7 @@ export function Technical() {
           </Card>
         </TabsContent>
 
-        <TabsContent value="wyceny" className="space-y-6">
+        <TabsContent value="wyceny" className="space-y-4">
           <div className="flex items-center justify-between">
             <p className="text-sm text-muted-foreground">
               Nowa wycena startuje z pozycjami z cennika — uzupełnij ilości i
@@ -1730,11 +1809,17 @@ export function Technical() {
                       {quotes.map((quote) => (
                         <tr
                           key={quote.id}
+                          data-quote-id={quote.id}
                           className="cursor-pointer border-b last:border-0 hover:bg-accent/50"
                           onClick={() => setEditingQuote(quote)}
                         >
                           <td className="whitespace-nowrap px-3 py-2 font-medium tabular-nums">
                             {quote.number}
+                            {quote.realizationId != null && (
+                              <span className="ml-1.5 text-xs font-normal text-muted-foreground">
+                                z realizacji #{quote.realizationId}
+                              </span>
+                            )}
                           </td>
                           <td className="whitespace-nowrap px-3 py-2 tabular-nums">
                             {new Date(quote.date).toLocaleDateString("pl-PL")}
@@ -1794,11 +1879,11 @@ export function Technical() {
           </Card>
         </TabsContent>
 
-        <TabsContent value="cennik" className="space-y-6">
+        <TabsContent value="cennik" className="space-y-4">
           <PriceListTab editable={editable} />
         </TabsContent>
 
-        <TabsContent value="technicy" className="space-y-6">
+        <TabsContent value="technicy" className="space-y-4">
           <div className="flex items-center justify-between">
             <p className="text-sm text-muted-foreground">
               Serwisanci podpowiadani w polach „Wykonawca" przy realizacjach.
@@ -1846,7 +1931,7 @@ export function Technical() {
           </Tabs>
         </TabsContent>
 
-        <TabsContent value="obiekty" className="space-y-6">
+        <TabsContent value="obiekty" className="space-y-4">
           <TechnicalObjects />
         </TabsContent>
       </Tabs>
