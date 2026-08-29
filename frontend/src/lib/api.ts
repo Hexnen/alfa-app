@@ -62,6 +62,8 @@ export async function getContractors(params?: {
   active?: "1" | "0";
   /** Id handlowca albo "none" = kontrahenci bez opiekuna. */
   salespersonId?: number | "none";
+  /** Id spółki albo "none" = kontrahenci bez spółki. */
+  companyId?: number | "none";
   page?: number;
   pageSize?: number;
 }) {
@@ -162,6 +164,7 @@ export async function getObjects(params?: {
   if (params?.hasValue) searchParams.set("hasValue", params.hasValue);
   if (params?.scope) searchParams.set("scope", params.scope);
   if (params?.salespersonId !== undefined) searchParams.set("salespersonId", String(params.salespersonId));
+  if (params?.companyId !== undefined) searchParams.set("companyId", String(params.companyId));
   if (params?.sort) searchParams.set("sort", params.sort);
   if (params?.dir) searchParams.set("dir", params.dir);
   if (params?.page) searchParams.set("page", String(params.page));
@@ -4349,6 +4352,7 @@ export const COMPANY_FALLBACK_VALUES: CompanySettingsValues = {
   officePostcode: "",
   officeLat: null,
   officeLng: null,
+  workDayHours: 8,
   rateHour: 0,
   hourlyCost: 0,
   rateKm: 0,
@@ -4403,6 +4407,7 @@ function coerceCompanyValues(raw: unknown): CompanySettingsValues {
     officePostcode: asStr(v.officePostcode, fb.officePostcode),
     officeLat: asNumOrNull(v.officeLat),
     officeLng: asNumOrNull(v.officeLng),
+    workDayHours: asNum(v.workDayHours, fb.workDayHours),
     rateHour: asNum(v.rateHour, fb.rateHour),
     hourlyCost: asNum(v.hourlyCost, fb.hourlyCost),
     rateKm: asNum(v.rateKm, fb.rateKm),
