@@ -101,7 +101,13 @@ const API_TAB_MAP: { prefix: string; tabs: string[] }[] = [
   // Spółki: własna zakładka; słownik czytają też formularz obiektu i kadry
   // (umowa/biuro wybierają spółkę z listy).
   { prefix: "/companies", tabs: ["spolki", "objects", "kadry/wynagrodzenia", "kadry/pracownicy"] },
-  { prefix: "/monitored-objects", tabs: ["technical/obiekty"] },
+  // Import raportu obiektów nadpisuje CAŁY rejestr — zostaje wyłącznie przy
+  // dziale technicznym. MUSI stać PRZED szerszym "/monitored-objects", bo
+  // find() bierze pierwsze dopasowanie.
+  { prefix: "/monitored-objects/import", tabs: ["technical/obiekty"] },
+  // Rejestr czytają dwa ekrany: kartoteka techniczna i ekran mapowania w CMA
+  // (mapowanie na kartotekę obiektów robi operator monitoringu).
+  { prefix: "/monitored-objects", tabs: ["technical/obiekty", "cma/obiekty"] },
   { prefix: "/monitoring", tabs: ["technical/projekty"] },
   { prefix: "/camera-models", tabs: ["technical/szablony"] },
   { prefix: "/warehouse", tabs: ["technical/magazyn"] },

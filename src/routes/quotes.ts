@@ -7,6 +7,7 @@ import type { ApiResponse } from "../types/index.js";
 import { PRICE_ITEM_KINDS } from "../db/schema.js";
 import type { CalendarEvent, Quote, Realization } from "../db/schema.js";
 import { buildQuotePrefill } from "../lib/quote-prefill.js";
+import { resolveObjectId } from "../lib/object-identity.js";
 import { buildProtocolPrefill, parseProtocolItems } from "../lib/protocol-prefill.js";
 import { matchPriceItem, resolveHourRate, resolveKmRate } from "../lib/price-match.js";
 import { getCompanyConfig } from "../lib/company-config.js";
@@ -81,11 +82,15 @@ export function createQuoteForRealizationSync(
   if (existing) return undefined;
 
   const { values } = buildQuotePrefill(tx, r, { event });
+  // Tożsamość wyceny dziedziczy się po realizacji (a gdy ta nie ma jeszcze FK —
+  // po wydarzeniu, które ją tworzy). `site` obok jest tylko migawką nazwy na dokument.
+  const objectId = resolveObjectId(tx, r, { events: event ? [event] : undefined })?.id ?? null;
   return tx
     .insert(schema.quotes)
     .values({
       number: nextQuoteNumberSync(tx, values.date),
       date: values.date,
+      objectId,
       site: values.site,
       address: values.address,
       items: JSON.stringify(values.items),
@@ -142,6 +147,28 @@ function parseItems(body: Record<string, unknown>): QuoteItem[] | undefined {
       unit: str(i.unit),
       price: str(i.price),
     }));
+}
+
+/**
+ * Obiekt wyceny z body — WYŁĄCZNIE po `objectId`, nigdy po nazwie z `site`.
+ * `site` jest migawką nazwy na dokument i nie ma prawa decydować o tożsamości
+ * (patrz src/lib/object-identity.ts).
+ *
+ * `undefined` w wyniku = body w ogóle nie ruszało obiektu (zostaw jak było).
+ * Nieistniejące id odrzucamy zamiast zapisywać po cichu NULL — wycena bez obiektu
+ * jest prawidłowym stanem, ale wycena „przypisana do obiektu, którego nie ma" nie.
+ */
+function objectIdFromBody(
+  body: Record<string, unknown>
+): { objectId?: number | null } | { error: string } {
+  if (!("objectId" in body)) return {};
+  const raw = body.objectId;
+  if (raw === null || raw === "") return { objectId: null };
+  const id = Number(raw);
+  if (!Number.isInteger(id) || id <= 0) return { error: "Nieprawidłowy identyfikator obiektu" };
+  const found = db.select({ id: schema.objects.id }).from(schema.objects).where(eq(schema.objects.id, id)).get();
+  if (!found) return { error: `Obiekt #${id} nie istnieje` };
+  return { objectId: id };
 }
 
 /**
@@ -242,6 +269,13 @@ app.post("/", async (c) => {
     );
   }
 
+  // Obiekt od razu przy tworzeniu — inaczej wycena wolnostojąca nigdy nie dostanie
+  // tożsamości i zostanie z samą nazwą w `site`.
+  const objectPick = objectIdFromBody(body);
+  if ("error" in objectPick) {
+    return c.json<ApiResponse<null>>({ success: false, error: objectPick.error }, 400);
+  }
+
   let items = parseItems(body);
   if (!items || items.length === 0) {
     const listId = await resolvePrefillListId(c, body);
@@ -272,6 +306,7 @@ app.post("/", async (c) => {
         .values({
           number: await nextQuoteNumber(date),
           date,
+          objectId: objectPick.objectId ?? null,
           site: typeof body.site === "string" ? body.site : "",
           address: typeof body.address === "string" ? body.address : "",
           items: JSON.stringify(items),
@@ -322,6 +357,26 @@ app.put("/:id", async (c) => {
   }
   const items = parseItems(body);
 
+  // Tożsamość obiektu. Wycena PRZYPIĘTA do realizacji dziedziczy ją po realizacji —
+  // to jedno źródło prawdy, a rozjazd wycena ↔ realizacja jest dokładnie tym błędem,
+  // którego pilnuje scripts/test-object-identity.ts. Klient nie może go wprowadzić
+  // ręcznie; wolnostojąca wycena dostaje obiekt z body (po id, nigdy po nazwie).
+  let objectId: number | null | undefined;
+  if (existing[0].realizationId != null) {
+    const r = db
+      .select({ id: schema.realizations.id, objectId: schema.realizations.objectId })
+      .from(schema.realizations)
+      .where(eq(schema.realizations.id, existing[0].realizationId))
+      .get();
+    objectId = r ? resolveObjectId(db, r)?.id ?? null : existing[0].objectId;
+  } else {
+    const objectPick = objectIdFromBody(body);
+    if ("error" in objectPick) {
+      return c.json<ApiResponse<null>>({ success: false, error: objectPick.error }, 400);
+    }
+    objectId = objectPick.objectId;
+  }
+
   // Optimistic concurrency: when the client echoes the updatedAt it read, only
   // update if the row has not changed since, otherwise 409 so it reloads. Two
   // users editing the same quote no longer silently clobber each other.
@@ -334,6 +389,7 @@ app.put("/:id", async (c) => {
     .update(schema.quotes)
     .set({
       date: date || existing[0].date,
+      ...(objectId !== undefined ? { objectId } : {}),
       site: typeof body.site === "string" ? body.site : existing[0].site,
       address:
         typeof body.address === "string" ? body.address : existing[0].address,

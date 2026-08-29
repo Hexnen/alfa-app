@@ -266,7 +266,9 @@ function technicianNames(dbx: DbOrTx, ids: number[]): { id: number; name: string
 
 function objectNameOf(dbx: DbOrTx, id: number | null): string | null {
   if (id == null) return null;
-  const o = dbx.select({ name: schema.objects.name }).from(schema.objects).where(eq(schema.objects.id, id)).get();
+  // identity-ok: pytamy PO ID i bierzemy nazwę na opis zmiany — to migawka do wyświetlenia,
+  // nie klucz. Kierunek odwrotny (nazwa → obiekt) jest zakazany, patrz src/lib/object-identity.ts.
+  const o = dbx.select({ name: schema.objects.name }).from(schema.objects).where(eq(schema.objects.id, id)).get(); // identity-ok
   if (!o) throw new ApiError(400, `Obiekt #${id} nie istnieje — użyj find_object`);
   return o.name;
 }

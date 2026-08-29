@@ -118,6 +118,10 @@ app.get("/", async (c) => {
   let query = db
     .select({
       protocol: schema.protocols,
+      // MIGAWKA nazwy obiektu na dokument, nie klucz — protokół pokazuje to, co
+      // uzgodniono w chwili prac, nawet gdy obiekt później przemianowano. Tożsamość
+      // obiektu idzie przez `realizations.object_id` (src/lib/object-identity.ts);
+      // złączenie tutaj jest po `realization_id`, więc jest bezpieczne.
       site: schema.realizations.site,
       kind: schema.realizations.kind,
     })
@@ -211,6 +215,10 @@ app.get("/:id", async (c) => {
   const rows = await db
     .select({
       protocol: schema.protocols,
+      // MIGAWKA nazwy obiektu na dokument, nie klucz — protokół pokazuje to, co
+      // uzgodniono w chwili prac, nawet gdy obiekt później przemianowano. Tożsamość
+      // obiektu idzie przez `realizations.object_id` (src/lib/object-identity.ts);
+      // złączenie tutaj jest po `realization_id`, więc jest bezpieczne.
       site: schema.realizations.site,
       kind: schema.realizations.kind,
     })

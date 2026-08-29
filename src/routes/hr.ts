@@ -16,6 +16,7 @@ import {
   computePayroll,
   type PayrollComputed,
 } from "../utils/hr-calc.js";
+import { fetchObjectCatalog } from "../lib/object-catalog.js";
 
 const app = new Hono();
 
@@ -248,22 +249,11 @@ app.get("/objects", async (c) => {
  * Kartoteka obiektów w formie listy wyboru do mapowania. Świadomie pod `/hr`,
  * a nie przez `GET /objects`: mapowanie robi kadrowa, która nie musi mieć
  * dostępu do modułu Kontrahenci/Obiekty, a tutaj potrzebuje wyłącznie nazw.
+ * Samo zapytanie jest wspólne z bliźniaczym ekranem w CMA — patrz
+ * src/lib/object-catalog.ts.
  */
 app.get("/object-catalog", async (c) => {
-  const rows = await db
-    .select({
-      id: schema.objects.id,
-      name: schema.objects.name,
-      city: schema.objects.city,
-      contractorName: schema.contractors.name,
-    })
-    .from(schema.objects)
-    .innerJoin(
-      schema.contractors,
-      eq(schema.objects.contractorId, schema.contractors.id),
-    )
-    .orderBy(asc(schema.objects.name));
-  return c.json({ success: true, data: rows });
+  return c.json({ success: true, data: await fetchObjectCatalog() });
 });
 
 /**

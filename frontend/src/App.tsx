@@ -27,6 +27,7 @@ import { CmaReports } from "./pages/CmaReports";
 import { CmaReportDetails } from "./pages/CmaReportDetails";
 import { CmaTrends } from "./pages/CmaTrends";
 import { CmaCameraOutages } from "./pages/CmaCameraOutages";
+import { CmaObjects } from "./pages/CmaObjects";
 import { CmaSettings } from "./pages/CmaSettings";
 import { Ofi } from "./pages/Ofi";
 import { AdminUsers } from "./pages/AdminUsers";
@@ -111,6 +112,7 @@ function AuthedApp() {
           <Route path="/cma/raporty/:id" element={<CmaReportDetails />} />
           <Route path="/cma/trendy" element={<CmaTrends />} />
           <Route path="/cma/braki-kamer" element={<CmaCameraOutages />} />
+          <Route path="/cma/obiekty" element={<CmaObjects />} />
           <Route path="/cma/ustawienia" element={<CmaSettings />} />
           <Route path="/admin/users" element={<AdminUsers />} />
           <Route path="/admin/asystent" element={<AdminAssistant />} />

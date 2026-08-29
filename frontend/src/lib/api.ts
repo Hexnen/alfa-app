@@ -1158,9 +1158,11 @@ export interface RealizationProtocol {
 
 /**
  * Obiekt powiązany z realizacją — pinezka na mapie miesiąca. Backend bierze go
- * z wydarzenia kalendarza (`source: "event"`), a dla wpisów ręcznych dopasowuje
- * po nazwie `site` (`source: "name"`). `lat`/`lng` null = obiekt bez współrzędnych
- * (realizacja trafia do licznika „bez lokalizacji”, nie na mapę).
+ * WYŁĄCZNIE z klucza obcego: `realizations.object_id` (`source: "realizacja"`),
+ * a gdy go nie ma — z obiektu wpiętego wydarzenia (`source: "kalendarz"`).
+ * Dopasowania po nazwie `site` już nie ma: mylilo się w 29 z 289 realizacji, bo
+ * kilkanaście obiektów w kartotece nazywa się tak samo. `lat`/`lng` null = obiekt
+ * bez współrzędnych (realizacja trafia do licznika „bez lokalizacji”, nie na mapę).
  */
 export interface RealizationLocation {
   objectId: number;
@@ -1169,7 +1171,7 @@ export interface RealizationLocation {
   city: string | null;
   lat: number | null;
   lng: number | null;
-  source: "event" | "name";
+  source: "realizacja" | "kalendarz";
 }
 
 /** Adres i współrzędne biura — znacznik na mapie (GET /company/office). */
@@ -1191,6 +1193,12 @@ export interface AutofillMark {
 export interface Realization {
   id: number;
   date: string; // YYYY-MM-DD
+  /**
+   * Obiekt z kartoteki — KLUCZ tożsamości realizacji. `null` = wpis ręczny sprzed
+   * powiązania z kartoteką. Brak pola = starszy backend.
+   */
+  objectId?: number | null;
+  /** Nazwa obiektu w chwili prac — MIGAWKA na dokument, nie klucz (patrz `objectId`). */
   site: string;
   /** Rodzaj prac. Brak pola = starszy backend (przed rozdzieleniem `kind`). */
   workType: RealizationWorkType;
@@ -1242,6 +1250,13 @@ export interface Realization {
 
 export interface RealizationInput {
   date: string;
+  /**
+   * Obiekt z kartoteki — jedyne, co wiąże realizację z obiektem. Pominięcie pola
+   * zostawia powiązanie bez zmian (PUT), `null` je zdejmuje. Nazwa z `site` NIE
+   * służy do odszukania obiektu.
+   */
+  objectId?: number | null;
+  /** Nazwa obiektu na dokument (migawka) — wypełniana z wybranego obiektu. */
   site: string;
   workType: RealizationWorkType;
   billing: RealizationBilling;
@@ -2124,10 +2139,31 @@ export async function deleteMonitoringProject(id: number) {
   return request<ApiResponse<null>>(`/monitoring/${id}`, { method: "DELETE" });
 }
 
-// --- Rejestr obiektów monitorowanych (Techniczny -> Obiekty) ---
+// --- Rejestr obiektów monitorowanych (Techniczny -> Obiekty, CMA -> Obiekty) ---
+
+/**
+ * Obiekt z kartoteki w formie pozycji listy wyboru przy mapowaniu rejestrów.
+ * Miasto i kontrahent są częścią identyfikacji, a nie ozdobą — kartoteka ma
+ * obiekty o bliźniaczych nazwach u różnych klientów.
+ */
+export interface ObjectCatalogEntry {
+  id: number;
+  name: string;
+  city: string | null;
+  contractorName: string;
+}
 
 export interface MonitoredObject {
   id: number;
+  /**
+   * Obiekt z kartoteki, któremu odpowiada ta pozycja rejestru monitoringu.
+   * null = niezmapowana. Rejestr powstał niezależnie od kartoteki i nie
+   * pokrywa się z nią ani po nazwie, ani po adresie, więc powiązanie ustawia
+   * ręcznie człowiek (CMA → Obiekty).
+   */
+  objectId: number | null;
+  /** Rozwinięcie `objectId` doklejane przez API (null = brak mapowania). */
+  object: ObjectCatalogEntry | null;
   externalId: number;
   account: string | null;
   category: string | null;
@@ -2271,6 +2307,25 @@ export const monitoredObjectsApi = {
 
     return data as ApiResponse<ObjectImport>;
   },
+
+  /**
+   * Ręczne przypisanie pozycji rejestru do obiektu z kartoteki
+   * (null = zdejmij mapowanie). Osobny endpoint, żeby zapis reszty danych
+   * pozycji nie czyścił powiązania.
+   */
+  async setMapping(id: number, objectId: number | null) {
+    return request<ApiResponse<MonitoredObject>>(
+      `/monitored-objects/${id}/mapping`,
+      { method: "PUT", body: JSON.stringify({ objectId }) }
+    );
+  },
+
+  /** Kartoteka obiektów do listy wyboru w mapowaniu (bez modułu Obiekty). */
+  async getObjectCatalog() {
+    return request<ApiResponse<ObjectCatalogEntry[]>>(
+      "/monitored-objects/object-catalog"
+    );
+  },
 };
 
 // --- Oferta monitoringu (zdjęcia + pola tekstowe + generowanie HTML) ---
@@ -2380,12 +2435,8 @@ export interface HrEmployeeInput {
 }
 
 /** Obiekt z kartoteki w formie pozycji listy wyboru przy mapowaniu. */
-export interface HrObjectRef {
-  id: number;
-  name: string;
-  city: string | null;
-  contractorName: string;
-}
+/** Pozycja kartoteki w liście wyboru — ten sam kształt co w mapowaniu CMA. */
+export type HrObjectRef = ObjectCatalogEntry;
 
 export interface HrObject {
   id: number;

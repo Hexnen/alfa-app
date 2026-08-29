@@ -8,7 +8,8 @@
  *     adres montażu, kontakt, wykonawcy z wydarzenia, typ prac z typu wydarzenia, data i godziny
  *     z terminu wydarzenia, czynności z tytułu i opisu),
  *   - pozycje: materiały z cennika technika → materiały z cennika domyślnego → DEFAULT_ITEMS,
- *   - brak wydarzenia → dane z realizacji (site jako adres, mapowanie typu z `kind`),
+ *   - brak wydarzenia → dane z realizacji (site jako adres, mapowanie typu z `kind`);
+ *     obiekt WYŁĄCZNIE z klucza obcego — sama zgodna nazwa nie podpina kartoteki,
  *   - `createProtocolForRealizationSync` zapisuje prefill i jest idempotentne,
  *   - GET /protocols/:id/prefill: pola puste → confident, pola z inną wartością → confident=false,
  *   - POST /protocols/:id/prefill zapisuje WYŁĄCZNIE wskazane pola, nieznane pole → 400,
@@ -222,6 +223,9 @@ function makeRealization(patch: Partial<Realization> & { site: string; date: str
     .insert(schema.realizations)
     .values({
       date: patch.date,
+      // Klucz obiektu podajemy JAWNIE — prefill nie ma innej drogi do kartoteki
+      // (dopasowanie po `site` zostało usunięte, patrz src/lib/object-identity.ts).
+      ...(patch.objectId !== undefined ? { objectId: patch.objectId } : {}),
       site: patch.site,
       kind: patch.kind ?? "service",
       ...(patch.workType ? { workType: patch.workType } : {}),
@@ -368,7 +372,7 @@ async function main(fx: Fixtures) {
   ok("origins.items puste, gdy wzór", p2.origins.items === undefined, p2.origins.items);
 
   // -------------------------------------------------------------------------
-  // 3. Brak wydarzenia → dane z realizacji (+ dopasowanie obiektu po nazwie)
+  // 3. Brak wydarzenia → dane z realizacji; obiekt tylko z object_id
   // -------------------------------------------------------------------------
   const r3 = makeRealization({
     site: `${PREFIX} Nieznany obiekt spoza słownika`,
@@ -390,13 +394,31 @@ async function main(fx: Fixtures) {
   ok("bez wydarzenia: czynności z adnotacji", p3.values.activities === "Wymiana zasilacza", p3.values.activities);
   ok("bez wydarzenia: cennik domyślny", p3.context.priceList?.via === "domyślny", p3.context.priceList);
 
-  // Bez wydarzenia, ale site = nazwa obiektu → dane klienta i tak wchodzą
+  // Bez wydarzenia i bez klucza: `site` jest DOKŁADNĄ nazwą istniejącego obiektu,
+  // a mimo to klient NIE wchodzi. Tak ma być — nazwa nie jest kluczem: dwanaście
+  // obiektów w kartotece nazywa się tak samo, więc dawne dopasowanie po nazwie
+  // wskazywało cudzy obiekt w 29 z 289 realizacji (src/lib/object-identity.ts).
   const r3b = makeRealization({ site: `${PREFIX} Obiekt Główny`, date: "2029-09-08" });
   const p3b = buildProtocolPrefill(db, r3b);
   ok(
-    "bez wydarzenia: obiekt dopasowany po nazwie → klient uzupełniony",
-    p3b.values.clientName === `${PREFIX} Klient Sp. z o.o.` && p3b.values.installationAddress === "ul. Obiektowa 7, Gliwice",
+    "bez wydarzenia i bez object_id: sama nazwa NIE podpina klienta",
+    p3b.values.clientName === "" && p3b.values.clientNip === "" && p3b.context.object === null,
     p3b.values
+  );
+
+  // Ten sam wpis, ale z kluczem obcym — teraz kontrahent i adres obiektu wchodzą
+  // bez żadnego wydarzenia. To jedyna droga do kartoteki poza kalendarzem.
+  const r3c = makeRealization({
+    site: `${PREFIX} Obiekt Główny`,
+    date: "2029-09-09",
+    objectId: fx.objectId,
+  });
+  const p3c = buildProtocolPrefill(db, r3c);
+  ok(
+    "bez wydarzenia, ale z object_id: klient i adres z kartoteki",
+    p3c.values.clientName === `${PREFIX} Klient Sp. z o.o.` &&
+      p3c.values.installationAddress === "ul. Obiektowa 7, Gliwice",
+    p3c.values
   );
 
   // -------------------------------------------------------------------------
@@ -555,7 +577,7 @@ async function main(fx: Fixtures) {
   const testProtocolIds = db
     .select({ id: schema.protocols.id })
     .from(schema.protocols)
-    .where(inArray(schema.protocols.realizationId, [r1.id, r2.id, r3.id, r3b.id]))
+    .where(inArray(schema.protocols.realizationId, [r1.id, r2.id, r3.id, r3b.id, r3c.id]))
     .all().length;
   const nowProtocols = db.select({ id: schema.protocols.id }).from(schema.protocols).all().length;
   const nowRealizations = db.select({ id: schema.realizations.id }).from(schema.realizations).all().length;
@@ -564,7 +586,7 @@ async function main(fx: Fixtures) {
     nowProtocols === prodProtocols + testProtocolIds,
     { prodProtocols, nowProtocols, testProtocolIds }
   );
-  ok("liczba realizacji = produkcyjne + 4 testowe", nowRealizations === prodRealizations + 4, {
+  ok("liczba realizacji = produkcyjne + 5 testowych", nowRealizations === prodRealizations + 5, {
     prodRealizations,
     nowRealizations,
   });

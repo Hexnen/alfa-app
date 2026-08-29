@@ -310,9 +310,11 @@ function techNameById(dbx: DbOrTx, id: number): string {
   return t ? `${t.firstName} ${t.lastName}`.trim() : `#${id}`;
 }
 
+/** Nazwa obiektu do wpisu w dzienniku — odczyt PO ID, nigdy odwrotnie. */
 function objectNameById(dbx: DbOrTx, id: number | null): string {
   if (id == null) return "—";
-  const o = dbx.select({ name: schema.objects.name }).from(schema.objects).where(eq(schema.objects.id, id)).get();
+  // identity-ok: id → nazwa (migawka na opis zmiany), nie nazwa → id.
+  const o = dbx.select({ name: schema.objects.name }).from(schema.objects).where(eq(schema.objects.id, id)).get(); // identity-ok
   return o ? o.name : `#${id}`;
 }
 

@@ -383,6 +383,17 @@ export const objectImports = sqliteTable("object_imports", {
 // identyfikacja po externalId ("ID Obiektu" z raportu)
 export const monitoredObjects = sqliteTable("monitored_objects", {
   id: integer("id").primaryKey({ autoIncrement: true }),
+  /**
+   * Obiekt z kartoteki, któremu odpowiada ta pozycja z systemu monitoringu.
+   * NULL = niezmapowana, i tak jest dziś dla wszystkich 416 pozycji: rejestr
+   * powstał niezależnie od kartoteki i nie pokrywa się z nią ani po nazwie,
+   * ani po adresie (0 dopasowań). To trzeci — po `hr_objects` — rejestr, który
+   * musiał dostać jawne powiązanie zamiast dopasowywania po tekście.
+   * Mapowanie ustawia się ręcznie w module CMA.
+   */
+  objectId: integer("object_id").references(() => objects.id, {
+    onDelete: "set null",
+  }),
   externalId: integer("external_id").notNull().unique(),
   account: text("account"),
   category: text("category"),
@@ -570,7 +581,22 @@ export type RealizationBilling = (typeof REALIZATION_BILLINGS)[number];
 export const realizations = sqliteTable("realizations", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   date: text("date").notNull(), // YYYY-MM-DD
-  site: text("site").notNull(), // Obiekt
+  /**
+   * Obiekt z kartoteki — JEDYNE ŹRÓDŁO TOŻSAMOŚCI tej realizacji.
+   * Dopasowywanie po `site` dawało 29 błędnych trafień na 289 realizacji (10%),
+   * bo dwanaście obiektów ma zduplikowane nazwy („Stacja paliw Bochnia" ×2)
+   * i nazwa wskazywała inny obiekt niż kalendarz. NULL tylko dla realizacji
+   * wpisanej ręcznie, zanim obiekt powstał.
+   */
+  objectId: integer("object_id").references(() => objects.id, {
+    onDelete: "set null",
+  }),
+  /**
+   * Nazwa obiektu w chwili wykonania prac — MIGAWKA na dokument, nie klucz.
+   * Zostaje niezmieniona, gdy ktoś przemianuje obiekt, bo protokół ma mówić to,
+   * co uzgodniono wtedy. Do łączenia służy wyłącznie `objectId`.
+   */
+  site: text("site").notNull(),
   // Rodzaj prac (CO) — źródło prawdy dla protokołów i statystyk.
   workType: text("work_type", { enum: REALIZATION_WORK_TYPES })
     .default("serwis")
@@ -917,7 +943,12 @@ export const quotes = sqliteTable(
     id: integer("id").primaryKey({ autoIncrement: true }),
     number: text("number").notNull().unique(), // np. W/2026/07/001
     date: text("date").notNull(), // YYYY-MM-DD
-    site: text("site").default("").notNull(), // Obiekt
+    /** Obiekt z kartoteki — źródło tożsamości. NULL = wycena bez obiektu. */
+    objectId: integer("object_id").references(() => objects.id, {
+      onDelete: "set null",
+    }),
+    /** Nazwa obiektu w chwili wyceny — MIGAWKA na dokument, nie klucz. */
+    site: text("site").default("").notNull(),
     address: text("address").default("").notNull(), // Adres
     items: text("items").default("[]").notNull(),
     /**

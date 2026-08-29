@@ -147,6 +147,7 @@ const sections: NavItem[] = [
       { name: "Raporty", href: "/cma/raporty", desc: "Raporty z przeglądu kamer" },
       { name: "Trendy", href: "/cma/trendy", desc: "Trendy z zaimportowanych raportów" },
       { name: "Braki kamer", href: "/cma/braki-kamer", desc: "Aktualne braki obrazu z kamer" },
+      { name: "Obiekty", href: "/cma/obiekty", desc: "Powiązanie rejestru monitoringu z kartoteką obiektów" },
       { name: "Ustawienia", href: "/cma/ustawienia", desc: "Ustawienia poczty i importu raportów" },
     ],
   },

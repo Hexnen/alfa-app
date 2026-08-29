@@ -116,7 +116,9 @@ app.get("/", async (c) => {
   if (search) {
     conditions.push(
       or(
-        like(schema.objects.name, `%${search}%`),
+        // identity-ok: to SZUKAJKA użytkownika (filtr listy), a nie złączenie — wynik
+        // trafia na ekran, nigdy do powiązania dokumentu z obiektem.
+        like(schema.objects.name, `%${search}%`), // identity-ok
         like(schema.objects.address, `%${search}%`),
         like(schema.objects.city, `%${search}%`)
       )

@@ -31,6 +31,7 @@ import {
   type CompanySettingsValues,
 } from "./company-config.js";
 import { distanceForObject, isGeoError, type DistanceMethod, type GeoPoint } from "./geo.js";
+import { resolveRealizationObject } from "./object-identity.js";
 import { matchPriceItem, resolveHourRate, resolveKmRate } from "./price-match.js";
 import { fillProtocolFromRealizationSync } from "./protocol-prefill.js";
 
@@ -224,39 +225,6 @@ function loadEventsFor(dbx: DbOrTx, realizationId: number) {
     .all();
 }
 
-/** Obiekt: z wydarzenia (object_id), a gdy brak — po nazwie z `realizations.site`. */
-function resolveObject(
-  dbx: DbOrTx,
-  site: string,
-  events: { objectId: number | null }[]
-): { id: number; name: string } | null {
-  const fromEvent = events.find((e) => e.objectId != null)?.objectId ?? null;
-  if (fromEvent != null) {
-    const row = dbx
-      .select({ id: schema.objects.id, name: schema.objects.name })
-      .from(schema.objects)
-      .where(eq(schema.objects.id, fromEvent))
-      .get();
-    if (row) return row;
-  }
-
-  const needle = site.trim();
-  if (!needle) return null;
-  const exact = dbx
-    .select({ id: schema.objects.id, name: schema.objects.name })
-    .from(schema.objects)
-    .where(sql`lower(${schema.objects.name}) = lower(${needle})`)
-    .all();
-  if (exact.length === 1) return exact[0];
-
-  const partial = dbx
-    .select({ id: schema.objects.id, name: schema.objects.name })
-    .from(schema.objects)
-    .where(sql`lower(${schema.objects.name}) LIKE lower(${`%${needle}%`})`)
-    .all();
-  return partial.length === 1 ? partial[0] : null;
-}
-
 /** Cennik: technika z wydarzenia → technika z pola „Wykonawca 1” → cennik główny. */
 function resolvePriceList(
   dbx: DbOrTx,
@@ -382,7 +350,10 @@ export async function computeAutofill(
       }
     : null;
 
-  const object = resolveObject(dbx, r.site, eventRows);
+  // Obiekt WYŁĄCZNIE z klucza obcego — od niego zależy kalkulacja km (biuro → obiekt),
+  // więc pomyłka kosztuje realnymi kilometrami na fakturze. Wydarzenia mamy wczytane,
+  // podajemy je jawnie (patrz src/lib/object-identity.ts).
+  const object = resolveRealizationObject(dbx, r, { events: eventRows });
   const priceList = resolvePriceList(dbx, r.contractor1 ?? "", eventRows.map((e) => e.id));
   const priceItems: PriceItem[] = priceList
     ? dbx
@@ -538,7 +509,10 @@ export async function computeAutofill(
   const wantsKm = wants("actualKm") || wants("amountKm");
   if (wantsKm && !opts.skipDistance) {
     if (!object) {
-      distanceError = "Nie ustalono obiektu realizacji (brak wydarzenia z obiektem i brak dopasowania po nazwie).";
+      // Świadomie NIE zgadujemy obiektu po nazwie — lepszy jawny brak km niż km
+      // policzone do cudzego adresu (src/lib/object-identity.ts).
+      distanceError =
+        "Realizacja nie wskazuje obiektu z kartoteki (brak object_id i brak wydarzenia z obiektem) — przypisz obiekt, żeby policzyć km.";
     } else {
       const d = await distanceForObject(object.id, { dbx, cacheOnly: opts.cacheOnly });
       if (isGeoError(d)) {

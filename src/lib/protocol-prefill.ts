@@ -2,9 +2,10 @@
  * Wstępne wypełnianie protokołu powykonawczego — „żeby technik i biuro wpisywali jak najmniej”.
  *
  * Łańcuch danych jest zawsze ten sam:
- *   calendar_events (termin, technicy, tytuł/opis, object_id)
- *     → objects (nazwa, adres, miasto, contractor_id)
- *       → contractors (nazwa, NIP, miasto, telefon/e-mail/osoba kontaktowa)
+ *   calendar_events (termin, technicy, tytuł/opis)
+ *     → objects przez KLUCZ OBCY (realizations.object_id → calendar_events.object_id;
+ *       rozstrzyga src/lib/object-identity.ts, nigdy nazwa z `site`)
+ *         → contractors (nazwa, NIP, miasto, telefon/e-mail/osoba kontaktowa)
  *   + price_list (materiały z cennika technika albo domyślnego)
  *   + realizations (to, czego kalendarz nie wie: km z kalkulacji, opiekun, kwoty)
  *
@@ -34,6 +35,7 @@ import type {
 import { logActivity, type ActivityUser, type DbOrTx } from "./activity-log.js";
 import { diffMinutes } from "./calendar-recurrence.js";
 import { getCompanyConfig } from "./company-config.js";
+import { resolveRealizationObject } from "./object-identity.js";
 
 // ---------------------------------------------------------------------------
 // Typy publiczne
@@ -286,42 +288,6 @@ function eventTechnicians(dbx: DbOrTx, eventId: number) {
     .all();
 }
 
-/**
- * Obiekt: z wydarzenia (`object_id`), a gdy go nie ma — po nazwie z `realizations.site`
- * (dopasowanie musi być jednoznaczne, inaczej wolimy nic nie podstawiać).
- * Ta sama zasada, co w automacie realizacji — powielona świadomie, żeby protokół nie
- * ciągnął za sobą modułu kalkulacji kwot.
- */
-function resolveObject(dbx: DbOrTx, site: string, objectId: number | null) {
-  const cols = {
-    id: schema.objects.id,
-    name: schema.objects.name,
-    address: schema.objects.address,
-    city: schema.objects.city,
-    contractorId: schema.objects.contractorId,
-  };
-  if (objectId != null) {
-    const row = dbx.select(cols).from(schema.objects).where(eq(schema.objects.id, objectId)).get();
-    if (row) return row;
-  }
-
-  const needle = site.trim();
-  if (!needle) return null;
-  const exact = dbx
-    .select(cols)
-    .from(schema.objects)
-    .where(sql`lower(${schema.objects.name}) = lower(${needle})`)
-    .all();
-  if (exact.length === 1) return exact[0];
-
-  const partial = dbx
-    .select(cols)
-    .from(schema.objects)
-    .where(sql`lower(${schema.objects.name}) LIKE lower(${`%${needle}%`})`)
-    .all();
-  return partial.length === 1 ? partial[0] : null;
-}
-
 /** Cennik: technika z wydarzenia → technika z „Wykonawca 1” → cennik domyślny. */
 function resolvePriceList(
   dbx: DbOrTx,
@@ -434,7 +400,11 @@ export function buildProtocolPrefill(
 
   const ev = opts.event ?? loadEventFor(dbx, r.id);
   const techs = ev ? eventTechnicians(dbx, ev.id) : [];
-  const object = resolveObject(dbx, r.site, ev?.objectId ?? null);
+  // Obiekt WYŁĄCZNIE z klucza obcego (realizacja → wydarzenie). Wydarzenie mamy już
+  // wczytane, więc podajemy je jawnie: `[]` znaczy „sprawdzone, nie ma żadnego", i nie
+  // każe modułowi tożsamości pytać bazy drugi raz. Gdy FK nie ma — `null`, a protokół
+  // zostaje bez kontrahenta i adresu obiektu (patrz src/lib/object-identity.ts).
+  const object = resolveRealizationObject(dbx, r, { events: ev ? [ev] : [] });
   const contractorRow =
     object != null
       ? dbx

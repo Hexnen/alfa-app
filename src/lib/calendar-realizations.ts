@@ -53,6 +53,15 @@ export type RealizationKind = "service" | "warranty" | "installation";
 
 export interface MappedRealization {
   date: string;
+  /**
+   * Obiekt z kartoteki — KLUCZ, przepisany wprost z `calendar_events.object_id`.
+   * Wydarzenie zna obiekt po id, więc realizacja dostaje go od razu; bez tego za
+   * miesiąc znowu byłyby realizacje bez FK, a jedyną „tożsamością" zostałby tekst
+   * (patrz src/lib/object-identity.ts — 29 z 289 błędnych trafień po nazwie).
+   * NULL = wydarzenie bez obiektu (np. wpisane samym adresem w „Lokalizacja").
+   */
+  objectId: number | null;
+  /** Nazwa obiektu w chwili prac — MIGAWKA na dokument, nie klucz. */
   site: string;
   /** Rodzaj prac — wprost z typu wydarzenia. */
   workType: RealizationWorkType;
@@ -82,9 +91,11 @@ function eventTechnicianNames(dbx: DbOrTx, eventId: number): string[] {
   return rows.map((t) => `${t.firstName} ${t.lastName}`.trim()).filter(Boolean);
 }
 
+/** Nazwa obiektu na MIGAWKĘ `realizations.site` — odczyt PO ID (klucz idzie osobno). */
 function objectNameById(dbx: DbOrTx, id: number | null): string | null {
   if (id == null) return null;
-  const o = dbx.select({ name: schema.objects.name }).from(schema.objects).where(eq(schema.objects.id, id)).get();
+  // identity-ok: id → nazwa. Nazwa nigdy nie wraca tu jako kryterium wyszukiwania.
+  const o = dbx.select({ name: schema.objects.name }).from(schema.objects).where(eq(schema.objects.id, id)).get(); // identity-ok
   return o?.name ?? null;
 }
 
@@ -124,6 +135,7 @@ export function mapEventToRealization(dbx: DbOrTx, ev: CalendarEventRow): Mapped
   const billing = realizationBillingOf(ev.billing);
   return {
     date: ev.startAt.slice(0, 10),
+    objectId: ev.objectId ?? null,
     site,
     workType,
     billing,
@@ -161,7 +173,7 @@ function protocolOfRealization(dbx: DbOrTx, realizationId: number) {
 /** Wycena realizacji (1:1, istnieje tylko dla prac płatnych). */
 function quoteOfRealization(dbx: DbOrTx, realizationId: number) {
   return dbx
-    .select({ id: schema.quotes.id, number: schema.quotes.number, date: schema.quotes.date, site: schema.quotes.site, items: schema.quotes.items })
+    .select({ id: schema.quotes.id, number: schema.quotes.number, date: schema.quotes.date, objectId: schema.quotes.objectId, site: schema.quotes.site, items: schema.quotes.items })
     .from(schema.quotes)
     .where(eq(schema.quotes.realizationId, realizationId))
     .get();
@@ -399,12 +411,18 @@ export function syncQuoteForEvent(
   }
 
   // --- płatne z wyceną: sama metryczka --------------------------------------
+  // Wycena dziedziczy tożsamość po realizacji: `objectId` to klucz (idzie za
+  // przepięciem obiektu w kalendarzu), `site` to migawka nazwy na dokument.
   const date = r.date;
-  if (r.invoiced || (existing.date === date && existing.site === r.site)) {
+  const objectId = r.objectId ?? null;
+  if (
+    r.invoiced ||
+    (existing.date === date && existing.site === r.site && (existing.objectId ?? null) === objectId)
+  ) {
     return { action: "none" };
   }
   tx.update(schema.quotes)
-    .set({ date, site: r.site, updatedAt: sql`(datetime('now'))` })
+    .set({ date, objectId, site: r.site, updatedAt: sql`(datetime('now'))` })
     .where(eq(schema.quotes.id, existing.id))
     .run();
   logForEvent(tx, ev, ctx, {
@@ -505,6 +523,9 @@ export function syncRealizationFromEvent(tx: Tx, ev: CalendarEventRow, ctx: Real
   const mapped = mapEventToRealization(tx, ev);
   const changed =
     r.date !== mapped.date ||
+    // Przepięcie wydarzenia na inny obiekt musi przenieść KLUCZ, nie tylko nazwę —
+    // inaczej realizacja zostałaby przy starym FK i cicho rozjechała się z kalendarzem.
+    (r.objectId ?? null) !== mapped.objectId ||
     r.site !== mapped.site ||
     r.workType !== mapped.workType ||
     r.billing !== mapped.billing ||
@@ -532,6 +553,7 @@ export function syncRealizationFromEvent(tx: Tx, ev: CalendarEventRow, ctx: Real
   tx.update(schema.realizations)
     .set({
       date: mapped.date,
+      objectId: mapped.objectId,
       site: mapped.site,
       workType: mapped.workType,
       billing: mapped.billing,
@@ -567,6 +589,12 @@ export function syncRealizationFromEvent(tx: Tx, ev: CalendarEventRow, ctx: Real
   const bits: string[] = [];
   if (r.date !== mapped.date) bits.push(`data ${r.date} → ${mapped.date}`);
   if (r.site !== mapped.site) bits.push(`obiekt ${r.site} → ${mapped.site}`);
+  // Przepięcie na inny obiekt O TEJ SAMEJ NAZWIE nie zmienia `site`, więc bez tego
+  // wpisu zmiana klucza byłaby w dzienniku niewidoczna — a to właśnie duplikaty nazw
+  // („Stacja paliw Bochnia" ×2) robiły dawniej ciche pomyłki.
+  else if ((r.objectId ?? null) !== mapped.objectId) {
+    bits.push(`obiekt #${r.objectId ?? "—"} → #${mapped.objectId ?? "—"} (ta sama nazwa)`);
+  }
   if (r.workType !== mapped.workType) {
     bits.push(
       `rodzaj ${REALIZATION_WORK_TYPE_LABELS[r.workType]} → ${REALIZATION_WORK_TYPE_LABELS[mapped.workType]}`,

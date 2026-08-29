@@ -34,6 +34,9 @@ export const TABS: TabDef[] = [
   { key: "cma/raporty", label: "Raporty", group: "CMA" },
   { key: "cma/trendy", label: "Trendy", group: "CMA" },
   { key: "cma/braki-kamer", label: "Braki kamer", group: "CMA" },
+  // Mapowanie rejestru monitoringu na kartotekę obiektów — osobny klucz, bo to
+  // ekran edycji powiązań, a nie kolejny raport.
+  { key: "cma/obiekty", label: "Obiekty", group: "CMA" },
   { key: "cma/ustawienia", label: "Ustawienia", group: "CMA" },
   { key: "technical/realizacje", label: "Realizacje", group: "Techniczny" },
   { key: "technical/protokoly", label: "Protokoły", group: "Techniczny" },

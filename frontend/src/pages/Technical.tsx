@@ -1363,7 +1363,9 @@ export function Technical() {
                           </td>
                           <td className="px-3 py-2 font-medium">
                             <span className="inline-flex flex-wrap items-center gap-1.5">
-                              {/* Obiekt z kartoteki (przez wydarzenie albo nazwę) → link do karty */}
+                              {/* Obiekt z kartoteki (po kluczu obcym) → link do karty.
+                                  Napis zostaje `row.site`, bo to migawka nazwy z dnia prac —
+                                  link prowadzi do obiektu, nazwa mówi, co było na dokumencie. */}
                               {row.location ? (
                                 <Link
                                   to={`/objects/${row.location.objectId}`}
@@ -1374,7 +1376,9 @@ export function Technical() {
                                     `Otwórz kartę obiektu\n${row.location.name}${
                                       row.location.city ? ` — ${row.location.city}` : ""
                                     }\npowiązanie: ${
-                                      row.location.source === "event" ? "z wydarzenia kalendarza" : "po nazwie"
+                                      row.location.source === "realizacja"
+                                        ? "obiekt przypisany do realizacji"
+                                        : "obiekt z wydarzenia kalendarza"
                                     }`
                                   )}
                                 >
