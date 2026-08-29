@@ -29,6 +29,24 @@ import {
 import { COMPANY_FIELDS } from "../src/lib/company-config.js";
 import { deleteSetting, getSetting, setSetting } from "../src/lib/settings.js";
 
+/**
+ * BLOKADA: ten test zmienia stan GLOBALNY, nie tylko własne fikstury — przestawia
+ * narzuty składek w `app_settings` i wyłącza pulę CMA, żeby liczyć arytmetykę przy
+ * znanych wartościach. Odtworzenie wisi na `finally`, więc przerwany proces
+ * (SIGKILL, OOM, restart kontenera) zostawiłby firmie zerowy koszt centrum
+ * monitorowania i koszty osobowe bez składek — po cichu.
+ *
+ * Dlatego wymagamy jawnie wskazanej bazy. Najprościej:
+ *   npx tsx scripts/test-on-copy.ts scripts/test-analytics.ts
+ */
+if (!process.env.ALFA_DB_PATH) {
+  console.error(
+    "Ten test zmienia ustawienia globalne, więc nie uruchamia się na domyślnej bazie.\n" +
+      "Użyj:  npx tsx scripts/test-on-copy.ts scripts/test-analytics.ts"
+  );
+  process.exit(1);
+}
+
 let failures = 0;
 function ok(label: string, cond: boolean, extra?: unknown) {
   console.log(`${cond ? "OK  " : "FAIL"} ${label}${cond ? "" : `\n     got: ${JSON.stringify(extra)}`}`);

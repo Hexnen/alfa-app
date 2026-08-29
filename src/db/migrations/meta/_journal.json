@@ -407,6 +407,13 @@
       "when": 1788026986780,
       "tag": "0057_object_identity_backfill",
       "breakpoints": true
+    },
+    {
+      "idx": 58,
+      "version": "6",
+      "when": 1788035343223,
+      "tag": "0058_fk_on_delete",
+      "breakpoints": true
     }
   ]
 }

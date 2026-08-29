@@ -4,7 +4,16 @@ import * as schema from "./schema.js";
 import { existsSync, mkdirSync } from "fs";
 import { dirname } from "path";
 
-const DB_PATH = "./data/alfa.db";
+/**
+ * Ścieżka bazy. Domyślnie produkcyjna, ale nadpisywalna zmienną ALFA_DB_PATH —
+ * dzięki temu skrypty testowe mogą pracować na KOPII zamiast deptać po danych.
+ * Wcześniej jedynym sposobem było uruchamianie z innego katalogu roboczego, co
+ * łatwo pominąć: test analityki globalnie przestawiał narzuty składek i wyłączał
+ * pulę CMA na prawdziwej bazie, a odtworzenie stanu wisiało wyłącznie na `finally`.
+ * Przerwany proces zostawiał firmie zerowy koszt centrum monitorowania i koszty
+ * osobowe bez składek — po cichu, bez żadnego sygnału.
+ */
+const DB_PATH = process.env.ALFA_DB_PATH ?? "./data/alfa.db";
 
 // Ensure data directory exists
 const dir = dirname(DB_PATH);
