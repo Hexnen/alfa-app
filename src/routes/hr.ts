@@ -67,7 +67,27 @@ app.get("/employees", async (c) => {
     .from(schema.hrEmployees)
     .orderBy(asc(schema.hrEmployees.fullName));
   if (onlyActive) rows = rows.filter((e) => e.active);
-  return c.json({ success: true, data: rows });
+  // Kartoteka jest niezależna od miesiąca, a spółka pracownika biura siedzi
+  // w miesięcznych wierszach rozliczenia — doklejamy więc komplet spółek z
+  // całej historii, żeby lista pokazywała je bez wybierania miesiąca.
+  const officeRows = await db
+    .selectDistinct({
+      employeeId: schema.hrOfficePayroll.employeeId,
+      company: schema.hrOfficePayroll.company,
+    })
+    .from(schema.hrOfficePayroll);
+  const byEmployee = new Map<number, string[]>();
+  for (const r of officeRows) {
+    if (!r.company) continue;
+    const list = byEmployee.get(r.employeeId);
+    if (list) list.push(r.company);
+    else byEmployee.set(r.employeeId, [r.company]);
+  }
+  const data = rows.map((e) => ({
+    ...e,
+    officeCompanies: (byEmployee.get(e.id) ?? []).sort(),
+  }));
+  return c.json({ success: true, data });
 });
 
 function parseEmployee(body: Record<string, unknown>): {
@@ -81,6 +101,9 @@ function parseEmployee(body: Record<string, unknown>): {
     data: {
       fullName,
       code: typeof body.code === "string" ? body.code : "",
+      // Rodzaj rozliczenia — decyduje, czy osoba trafia do tabeli ochrony
+      // (umowy) czy do zestawienia biura w wynagrodzeniach.
+      kind: body.kind === "biuro" ? "biuro" : "ochrona",
       notes: typeof body.notes === "string" ? body.notes : "",
       active: body.active === undefined ? true : Boolean(body.active),
     },
@@ -485,6 +508,23 @@ app.delete("/hours/:id", async (c) => {
 
 // ==================== UMOWY ====================
 
+/**
+ * Spółka umowy pochodzi ze słownika spółek (tabela `companies`), z którym kadry
+ * wiążą się po NAZWIE. Sprawdzamy istnienie nazwy, żeby literówka nie utworzyła
+ * "spółki widmo" niewidocznej w zestawieniach. Wiersze historyczne ze spółką
+ * spoza słownika da się zapisać dalej — pod warunkiem, że pole nie było ruszane.
+ */
+async function companyInDictionary(name: string): Promise<boolean> {
+  const rows = await db
+    .select({ id: schema.companies.id })
+    .from(schema.companies)
+    .where(eq(schema.companies.name, name));
+  return rows.length > 0;
+}
+
+const UNKNOWN_COMPANY_ERROR =
+  "Spółka spoza słownika — dodaj ją najpierw w zakładce Spółki";
+
 function parseContract(body: Record<string, unknown>): {
   data?: Partial<NewHrContract>;
   error?: string;
@@ -541,6 +581,12 @@ app.post("/contracts", async (c) => {
   if (error || !data) {
     return c.json<ApiResponse<null>>({ success: false, error }, 400);
   }
+  if (!(await companyInDictionary(data.company as string))) {
+    return c.json<ApiResponse<null>>(
+      { success: false, error: UNKNOWN_COMPANY_ERROR },
+      400,
+    );
+  }
   const result = await db
     .insert(schema.hrContracts)
     .values(data as NewHrContract)
@@ -564,6 +610,17 @@ app.put("/contracts/:id", async (c) => {
   const { data, error } = parseContract(body);
   if (error || !data) {
     return c.json<ApiResponse<null>>({ success: false, error }, 400);
+  }
+  // Zmiana spółki musi trafić w słownik; zostawienie starej (historycznej)
+  // wartości bez zmian nie blokuje edycji pozostałych pól.
+  if (
+    data.company !== existing.company &&
+    !(await companyInDictionary(data.company as string))
+  ) {
+    return c.json<ApiResponse<null>>(
+      { success: false, error: UNKNOWN_COMPANY_ERROR },
+      400,
+    );
   }
   // Optymistyczna kontrola współbieżności (patrz PUT /employees/:id) — zapis
   // tylko gdy odczytany updatedAt wciąż aktualny, inaczej 409.

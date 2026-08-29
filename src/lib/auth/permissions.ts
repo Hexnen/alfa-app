@@ -28,8 +28,8 @@ export const TABS: TabDef[] = [
   // Kadry
   { key: "kadry/wynagrodzenia", label: "Wynagrodzenia", group: "Kadry" },
   { key: "kadry/godziny", label: "Godziny", group: "Kadry" },
-  { key: "kadry/biuro", label: "Biuro", group: "Kadry" },
-  { key: "kadry/umowy", label: "Umowy", group: "Kadry" },
+  // Pracownicy = kartoteka osób razem z ich umowami (dawna podzakładka
+  // "kadry/umowy"); rozliczenie biura siedzi w Wynagrodzeniach.
   { key: "kadry/pracownicy", label: "Pracownicy", group: "Kadry" },
   { key: "kadry/obiekty", label: "Obiekty", group: "Kadry" },
   { key: "kadry/normy", label: "Normy", group: "Kadry" },
@@ -55,17 +55,36 @@ export const TABS: TabDef[] = [
 
 const TAB_KEYS = new Set(TABS.map((t) => t.key));
 
+// Klucze zakładek, które zniknęły po scaleniu — mapowane na następcę, żeby
+// zapisane uprawnienia użytkowników nie wyparowały przy odczycie. Gdy oba
+// klucze mają wpis, wygrywa wyższy poziom.
+const LEGACY_TAB_ALIASES: Record<string, string> = {
+  // Umowy weszły do kartoteki pracownika…
+  "kadry/umowy": "kadry/pracownicy",
+  // …a rozliczenie biura pod wypłaty miesiąca.
+  "kadry/biuro": "kadry/wynagrodzenia",
+};
+
+/** Wspólna normalizacja: filtr po katalogu zakładek + mapowanie starych kluczy. */
+function normalizePermissions(entries: [string, unknown][]): PermissionMap {
+  const out: PermissionMap = {};
+  for (const [rawKey, v] of entries) {
+    if (v !== "view" && v !== "edit") continue;
+    const key = LEGACY_TAB_ALIASES[rawKey] ?? rawKey;
+    if (!TAB_KEYS.has(key)) continue;
+    if (out[key] === "edit") continue; // "edit" bije "view" przy scaleniu
+    out[key] = v;
+  }
+  return out;
+}
+
 /** Bezpieczny parse mapy uprawnień z kolumny JSON. */
 export function parsePermissions(raw: string | null | undefined): PermissionMap {
   if (!raw) return {};
   try {
     const obj = JSON.parse(raw);
     if (typeof obj !== "object" || obj === null) return {};
-    const out: PermissionMap = {};
-    for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
-      if (TAB_KEYS.has(k) && (v === "view" || v === "edit")) out[k] = v;
-    }
-    return out;
+    return normalizePermissions(Object.entries(obj as Record<string, unknown>));
   } catch {
     return {};
   }
@@ -74,11 +93,7 @@ export function parsePermissions(raw: string | null | undefined): PermissionMap 
 /** Normalizuje dowolny obiekt do poprawnej mapy uprawnień (do zapisu). */
 export function sanitizePermissions(input: unknown): PermissionMap {
   if (typeof input !== "object" || input === null) return {};
-  const out: PermissionMap = {};
-  for (const [k, v] of Object.entries(input as Record<string, unknown>)) {
-    if (TAB_KEYS.has(k) && (v === "view" || v === "edit")) out[k] = v;
-  }
-  return out;
+  return normalizePermissions(Object.entries(input as Record<string, unknown>));
 }
 
 export function isAdmin(user: Pick<User, "role">): boolean {

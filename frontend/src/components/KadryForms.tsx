@@ -13,7 +13,9 @@ import {
   DialogFooter,
 } from "./ui/dialog";
 import type {
+  Company,
   HrBonusType,
+  HrEmployeeKind,
   HrChannel,
   HrContract,
   HrContractInput,
@@ -31,6 +33,18 @@ import type {
 
 const SELECT_CLS =
   "flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm";
+
+/**
+ * Nazwy spółek do wyboru: aktywne ze słownika + wartość już zapisana w wierszu,
+ * choćby spółka była zarchiwizowana albo (dane historyczne) spoza słownika —
+ * inaczej edycja innego pola po cichu podmieniałaby spółkę.
+ */
+function companyOptions(companies: Company[], current?: string | null): string[] {
+  const names = companies.filter((c) => c.active).map((c) => c.name);
+  const cur = (current ?? "").trim();
+  if (cur && !names.includes(cur)) names.push(cur);
+  return names.sort((a, b) => a.localeCompare(b, "pl"));
+}
 
 // pole liczbowe: puste = brak wartości (null), przecinek dozwolony
 type NumVal = number | string | null | undefined;
@@ -87,6 +101,7 @@ export function HrEmployeeForm({
   const [formData, setFormData] = useState<HrEmployeeInput>({
     fullName: employee?.fullName || "",
     code: employee?.code || "",
+    kind: employee?.kind || "ochrona",
     notes: employee?.notes || "",
     active: employee?.active ?? true,
   });
@@ -124,6 +139,29 @@ export function HrEmployeeForm({
               placeholder="np. Kowalski Jan"
               required
             />
+          </div>
+          <div className="space-y-2">
+            <Label
+              htmlFor="hre-kind"
+              title="Ochrona rozlicza się z umów kadrowych; biuro — z zestawienia biura w Wynagrodzeniach"
+              className="cursor-help"
+            >
+              Rodzaj rozliczenia
+            </Label>
+            <select
+              id="hre-kind"
+              value={formData.kind || "ochrona"}
+              onChange={(e) =>
+                setFormData((p) => ({
+                  ...p,
+                  kind: e.target.value as HrEmployeeKind,
+                }))
+              }
+              className={SELECT_CLS}
+            >
+              <option value="ochrona">Ochrona (umowy)</option>
+              <option value="biuro">Biuro</option>
+            </select>
           </div>
           <div className="space-y-2">
             <Label htmlFor="hre-code">Kod (status)</Label>
@@ -393,17 +431,25 @@ export function HrContractForm({
   contract,
   employees,
   companies,
+  defaultEmployeeId,
 }: {
   open: boolean;
   onClose: () => void;
   onSubmit: (data: HrContractInput) => Promise<void>;
   contract?: HrContract | null;
   employees: HrEmployee[];
-  companies: string[];
+  /** Słownik spółek (zakładka Spółki) — spółka umowy jest z niego wybierana. */
+  companies: Company[];
+  /** Pracownik podstawiany w nowej umowie (dodawanie z wiersza kartoteki). */
+  defaultEmployeeId?: number;
 }) {
   const [loading, setLoading] = useState(false);
   const [formData, setFormData] = useState<HrContractInput>({
-    employeeId: contract ? String(contract.employeeId) : "",
+    employeeId: contract
+      ? String(contract.employeeId)
+      : defaultEmployeeId
+        ? String(defaultEmployeeId)
+        : "",
     company: contract?.company || "",
     contractType: contract?.contractType || "zlecenie",
     chor: contract?.chor ?? false,
@@ -458,22 +504,34 @@ export function HrContractForm({
               </select>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="hrc-company">Spółka *</Label>
-              <Input
+              <Label
+                htmlFor="hrc-company"
+                title="Spółka zatrudniająca ze słownika (zakładka Spółki) — nazwa wiąże umowę ze spółką w zestawieniach"
+                className="cursor-help"
+              >
+                Spółka *
+              </Label>
+              <select
                 id="hrc-company"
                 value={formData.company}
                 onChange={(e) =>
                   setFormData((p) => ({ ...p, company: e.target.value }))
                 }
-                list="hrc-companies"
-                placeholder="np. ALFA"
+                className={SELECT_CLS}
                 required
-              />
-              <datalist id="hrc-companies">
-                {companies.map((c) => (
-                  <option key={c} value={c} />
+              >
+                <option value="">— wybierz —</option>
+                {companyOptions(companies, contract?.company).map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
                 ))}
-              </datalist>
+              </select>
+              {companies.length === 0 && (
+                <p className="text-xs text-muted-foreground">
+                  Słownik spółek jest pusty — dodaj spółkę w zakładce Spółki.
+                </p>
+              )}
             </div>
           </div>
 
@@ -839,6 +897,8 @@ export function HrOfficeForm({
   onSubmit,
   row,
   employees,
+  companies,
+  defaultEmployeeId,
   year,
   month,
 }: {
@@ -847,12 +907,15 @@ export function HrOfficeForm({
   onSubmit: (data: HrOfficeInput) => Promise<void>;
   row?: HrOfficeRow | null;
   employees: HrEmployee[];
+  /** Słownik spółek — biuro trzyma tam też formy zatrudnienia (ALFA ETAT / ALFA UZ). */
+  companies: Company[];
+  defaultEmployeeId?: number;
   year: number;
   month: number;
 }) {
   const [loading, setLoading] = useState(false);
   const [employeeId, setEmployeeId] = useState(
-    row ? String(row.employeeId) : "",
+    row ? String(row.employeeId) : defaultEmployeeId ? String(defaultEmployeeId) : "",
   );
   const [company, setCompany] = useState(row?.company || "");
   const [fields, setFields] = useState({
@@ -927,20 +990,29 @@ export function HrOfficeForm({
               </select>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="hro-company">Spółka / forma</Label>
-              <Input
+              {/* Biuro rozlicza się na spółce razem z formą zatrudnienia
+                  ("ALFA ETAT", "ALFA UZ") — te warianty są pozycjami słownika
+                  spółek, więc pole jest zwykłym wyborem z listy. */}
+              <Label
+                htmlFor="hro-company"
+                title="Spółka / forma zatrudnienia ze słownika (zakładka Spółki)"
+                className="cursor-help"
+              >
+                Spółka / forma
+              </Label>
+              <select
                 id="hro-company"
                 value={company}
                 onChange={(e) => setCompany(e.target.value)}
-                placeholder="np. ALFA ETAT / ALFA UZ"
-                list="hro-companies"
-              />
-              <datalist id="hro-companies">
-                <option value="ALFA ETAT" />
-                <option value="ALFA UZ" />
-                <option value="ALFA S" />
-                <option value="CONTROL ETAT" />
-              </datalist>
+                className={SELECT_CLS}
+              >
+                <option value="">— wybierz —</option>
+                {companyOptions(companies, row?.company).map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
             </div>
           </div>
 

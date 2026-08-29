@@ -939,6 +939,13 @@ export const hrEmployees = sqliteTable("hr_employees", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   fullName: text("full_name").notNull().unique(), // "Nazwisko Imię" — jak w arkuszu
   code: text("code").default("").notNull(), // KOD z listy pracowników: Emeryt / Rencista / Student <26 lat
+  // Rodzaj rozliczenia: "ochrona" = osoba z umowami kadrowymi (arkusz
+  // WYNAGRODZENIA), "biuro" = osoba z zestawienia "WYNAGRODZENIA - Biuro".
+  // Dawniej wynikał tylko z tego, w której tabeli ktoś miał wiersze — teraz
+  // jest cechą pracownika, bo kartoteka jest wspólna i niezależna od miesiąca.
+  kind: text("kind", { enum: ["ochrona", "biuro"] })
+    .default("ochrona")
+    .notNull(),
   active: integer("active", { mode: "boolean" }).default(true).notNull(),
   notes: text("notes").default("").notNull(),
   createdAt: text("created_at")

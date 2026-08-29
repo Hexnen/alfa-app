@@ -68,8 +68,6 @@ const API_TAB_MAP: { prefix: string; tabs: string[] }[] = [
     tabs: [
       "kadry/wynagrodzenia",
       "kadry/godziny",
-      "kadry/biuro",
-      "kadry/umowy",
       "kadry/pracownicy",
       "kadry/obiekty",
       "kadry/normy",
@@ -85,7 +83,9 @@ const API_TAB_MAP: { prefix: string; tabs: string[] }[] = [
   // Handlowcy: własna zakładka, ale listę czytają też formularze kontrahenta i obiektu.
   { prefix: "/salespeople", tabs: ["handlowcy", "contractors", "objects"] },
   // Spółki: własna zakładka; listę czyta też formularz obiektu i kadry.
-  { prefix: "/companies", tabs: ["spolki", "objects", "kadry/wynagrodzenia"] },
+  // Spółki: własna zakładka; słownik czytają też formularz obiektu i kadry
+  // (umowa/biuro wybierają spółkę z listy).
+  { prefix: "/companies", tabs: ["spolki", "objects", "kadry/wynagrodzenia", "kadry/pracownicy"] },
   { prefix: "/monitored-objects", tabs: ["technical/obiekty"] },
   { prefix: "/monitoring", tabs: ["technical/projekty"] },
   { prefix: "/camera-models", tabs: ["technical/szablony"] },

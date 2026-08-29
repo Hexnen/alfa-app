@@ -20,8 +20,8 @@ export const TABS: TabDef[] = [
   { key: "orders", label: "Zlecenia", group: "Ogólne" },
   { key: "kadry/wynagrodzenia", label: "Wynagrodzenia", group: "Kadry" },
   { key: "kadry/godziny", label: "Godziny", group: "Kadry" },
-  { key: "kadry/biuro", label: "Biuro", group: "Kadry" },
-  { key: "kadry/umowy", label: "Umowy", group: "Kadry" },
+  // Pracownicy = kartoteka osób razem z umowami (dawne "kadry/umowy");
+  // biuro trafiło do Wynagrodzeń. Stare klucze mapuje backend.
   { key: "kadry/pracownicy", label: "Pracownicy", group: "Kadry" },
   { key: "kadry/obiekty", label: "Obiekty", group: "Kadry" },
   { key: "kadry/normy", label: "Normy", group: "Kadry" },

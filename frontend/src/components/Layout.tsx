@@ -107,8 +107,6 @@ const sections: NavItem[] = [
     children: [
       { name: "Wynagrodzenia", href: "/kadry/wynagrodzenia" },
       { name: "Godziny", href: "/kadry/godziny" },
-      { name: "Biuro", href: "/kadry/biuro" },
-      { name: "Umowy", href: "/kadry/umowy" },
       { name: "Pracownicy", href: "/kadry/pracownicy" },
       { name: "Obiekty", href: "/kadry/obiekty" },
       { name: "Normy", href: "/kadry/normy" },

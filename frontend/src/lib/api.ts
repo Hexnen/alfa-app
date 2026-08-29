@@ -2252,10 +2252,15 @@ export async function deleteMonitoringPhoto(photoId: number) {
 // Kadry — pracownicy, obiekty, normy, godziny, umowy, wynagrodzenia, biuro
 // ---------------------------------------------------------------------------
 
+export type HrEmployeeKind = "ochrona" | "biuro";
+
 export interface HrEmployee {
   id: number;
   fullName: string;
   code: string;
+  kind: HrEmployeeKind;
+  /** Spółki z rozliczeń biura (cała historia) — liczone przez API. */
+  officeCompanies?: string[];
   active: boolean;
   notes: string;
   createdAt: string;
@@ -2265,6 +2270,7 @@ export interface HrEmployee {
 export interface HrEmployeeInput {
   fullName: string;
   code?: string;
+  kind?: HrEmployeeKind;
   active?: boolean;
   notes?: string;
 }
