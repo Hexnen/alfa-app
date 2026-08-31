@@ -40,6 +40,7 @@ import {
 } from "../lib/calendar-mutations.js";
 import { ApiError, BILLING_LABELS, PROTOCOL_TYPES, STATUS_LABELS, TYPE_LABELS } from "../lib/calendar-labels.js";
 import calendarFilterSetsRoutes from "./calendar-filter-sets.js";
+import calendarDayRouteRoutes from "./calendar-day-route.js";
 
 // Re-eksporty dla dotychczasowych importów (asystent, testy).
 export { ApiError, STATUS_LABELS, TYPE_LABELS, loadEvents, parseInput };
@@ -50,6 +51,9 @@ export const calendarPublicRoutes = new Hono();
 
 // Zapisane zestawy filtrów (per użytkownik) — src/routes/calendar-filter-sets.ts
 app.route("/filter-sets", calendarFilterSetsRoutes);
+
+// Planer trasy — punkty i macierz odległości dnia (odczyt) — src/routes/calendar-day-route.ts
+app.route("/", calendarDayRouteRoutes);
 
 function handleError(c: Context, error: unknown, what: string) {
   if (error instanceof ApiError) {

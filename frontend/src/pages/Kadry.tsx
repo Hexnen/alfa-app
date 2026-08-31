@@ -14,6 +14,9 @@ import {
   HrOfficeForm,
   HrPayrollForm,
 } from "@/components/KadryForms";
+import { HrHoursTab } from "@/components/kadry/HoursTab";
+import { TABLE_SELECT_CLS, hrs, money } from "@/components/kadry/shared";
+import { Th } from "@/components/kadry/parts";
 import { printHrStatement } from "@/lib/hrPrint";
 import { usePerms } from "@/auth/permissions";
 import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
@@ -90,45 +93,12 @@ const MONTH_NAMES = [
   "Grudzień",
 ];
 
-const pln = new Intl.NumberFormat("pl-PL", {
-  style: "currency",
-  currency: "PLN",
-});
-const money = (v: number | null | undefined) =>
-  v == null ? "—" : pln.format(v);
-const hrs = (v: number | null | undefined) =>
-  v == null ? "—" : String(Math.round(v * 100) / 100).replace(".", ",");
-
 const BONUS_SHORT: Record<string, string> = {
   brak: "—",
   gotowka: "Gotówka",
   delegacja_przelew: "Deleg. przelew",
   delegacja_gotowka: "Deleg. gotówka",
 };
-
-// Nagłówek kolumny z tooltipem "z czego się kalkuluje" (wymóg: hover na nagłówku)
-function Th({
-  tip,
-  children,
-  className,
-}: {
-  tip?: string;
-  children?: React.ReactNode;
-  className?: string;
-}) {
-  return (
-    <th
-      title={tip}
-      className={cn(
-        "whitespace-nowrap px-3 py-2 text-left font-medium",
-        tip && "cursor-help underline decoration-dotted underline-offset-4",
-        className,
-      )}
-    >
-      {children}
-    </th>
-  );
-}
 
 /**
  * Pozycje słownika kadrowego, które NIE są obiektem chronionym, tylko kosztem
@@ -150,10 +120,6 @@ function overheadKind(name: string): "techniczna" | "ogolna" | null {
  */
 const catalogLabel = (o: HrObjectRef) =>
   [o.name, o.city, o.contractorName].filter(Boolean).join(" · ");
-
-/** Select w komórce tabeli — wygląd pól z formularzy Kadr, tylko niższy. */
-const TABLE_SELECT_CLS =
-  "h-8 w-full min-w-52 rounded-md border border-input bg-background px-2 py-1 text-xs";
 
 const KADRY_TABS = [
   "wynagrodzenia",
@@ -205,7 +171,6 @@ export function Kadry() {
   const [officeEdit, setOfficeEdit] = useState<HrOfficeRow | null>(null);
 
   const [payrollFilter, setPayrollFilter] = useState("");
-  const [hoursFilter, setHoursFilter] = useState("");
   const [employeeFilter, setEmployeeFilter] = useState("");
   /** Kartoteka: wszyscy / tylko ochrona (umowy) / tylko biuro — dawne podzakładki. */
   const [employeeKind, setEmployeeKind] = useState<"all" | "ochrona" | "biuro">(
@@ -224,11 +189,22 @@ export function Kadry() {
   // zapisem stanu po szybkiej zmianie miesiąca (klucz ostatniego żądania)
   const carryTriedRef = useRef<Set<string>>(new Set());
   const monthKeyRef = useRef("");
+  // Zbiorcze odświeżenie miesiąca po serii zapisów inline (debounce).
+  const hoursRefreshRef = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (hoursRefreshRef.current) window.clearTimeout(hoursRefreshRef.current);
+    },
+    [],
+  );
 
-  const loadMonth = useCallback(async () => {
+  // `silent` — odświeżenie w tle po zapisie inline: dane mają się przeliczyć
+  // (godziny karmią wynagrodzenia i kafle), ale tabela nie ma migotać
+  // komunikatem „Ładowanie…" pod palcami wpisującego.
+  const loadMonth = useCallback(async (opts?: { silent?: boolean }) => {
     const key = `${year}-${month}`;
     monthKeyRef.current = key;
-    setLoading(true);
+    if (!opts?.silent) setLoading(true);
     try {
       const fetchAll = () =>
         Promise.all([
@@ -266,7 +242,7 @@ export function Kadry() {
       setHours(h.data ?? []);
       setOffice(o.data ?? []);
     } finally {
-      if (monthKeyRef.current === key) setLoading(false);
+      if (monthKeyRef.current === key && !opts?.silent) setLoading(false);
     }
   }, [year, month, hoursEditable]);
 
@@ -408,16 +384,6 @@ export function Kadry() {
     );
   }, [payroll, payrollFilter]);
 
-  const hoursVisible = useMemo(() => {
-    const q = hoursFilter.trim().toLowerCase();
-    if (!q) return hours;
-    return hours.filter(
-      (r) =>
-        r.employeeName.toLowerCase().includes(q) ||
-        r.objectName.toLowerCase().includes(q),
-    );
-  }, [hours, hoursFilter]);
-
   // --- handlery CRUD (wzorzec: zapis → przeładowanie miesiąca/słowników) ---
 
   const handlePayrollSave = async (data: HrPayrollSaveInput) => {
@@ -431,6 +397,31 @@ export function Kadry() {
     if (hoursEdit) await updateHrHours(hoursEdit.id, data);
     else await createHrHours(data);
     await loadMonth();
+  };
+
+  /**
+   * Zapis pojedynczej komórki w trybie edycji. Wiersz podmieniamy od razu
+   * (PUT zwraca sam rekord godzin — nazwy dokładamy z ekranu), a przeliczenie
+   * wynagrodzeń i kafli dociągamy raz na serię zmian, nie po każdym polu.
+   */
+  const handleHoursRowSaved = (id: number, saved: HrHoursEntry) => {
+    setHours((prev) =>
+      prev.map((r) =>
+        r.id === id
+          ? {
+              ...r,
+              ...saved,
+              employeeName: r.employeeName,
+              objectName:
+                objects.find((o) => o.id === saved.objectId)?.name ?? "",
+            }
+          : r,
+      ),
+    );
+    if (hoursRefreshRef.current) window.clearTimeout(hoursRefreshRef.current);
+    hoursRefreshRef.current = window.setTimeout(() => {
+      void loadMonth({ silent: true });
+    }, 1500);
   };
 
   const handleHoursDelete = async (row: HrHoursEntry) => {
@@ -1126,183 +1117,27 @@ export function Kadry() {
         </TabsContent>
 
         {/* ==================== GODZINY ==================== */}
+        {/* Cały ekran (filtry, przełącznik trybu, tabela) siedzi w HrHoursTab —
+            edycja inline ma własny stan brudnopisów, który nie ma po co
+            mieszać się ze stanem całego modułu. */}
         <TabsContent value="godziny" className="space-y-4">
-          <div className="flex flex-wrap items-center gap-3">
-            {monthNav}
-            <Input
-              value={hoursFilter}
-              onChange={(e) => setHoursFilter(e.target.value)}
-              placeholder="Szukaj: pracownik / obiekt…"
-              className="max-w-xs"
-            />
-            {editable && (
-              <Button
-                className="ml-auto"
-                onClick={() => {
-                  setHoursEdit(null);
-                  setHoursFormOpen(true);
-                }}
-              >
-                <Plus className="mr-2 h-4 w-4" />
-                Dodaj godziny
-              </Button>
-            )}
-          </div>
-          <Card>
-            <CardContent className="overflow-x-auto p-0">
-              <table className="w-full min-w-[1080px] text-sm">
-                <thead className="border-b bg-muted/50 text-xs uppercase tracking-wide text-muted-foreground">
-                  <tr>
-                    <Th tip="Pracownik, którego dotyczy wpis (jedna osoba może mieć kilka wpisów w miesiącu — sumują się)">
-                      Pracownik
-                    </Th>
-                    <Th tip="Obiekt (posterunek) — informacyjny, nie wpływa na kalkulację wypłaty">
-                      Obiekt
-                    </Th>
-                    <Th
-                      tip="Godziny nocne — informacyjne, nie wchodzą do kalkulacji"
-                      className="text-right"
-                    >
-                      Nocne
-                    </Th>
-                    <Th
-                      tip="Godziny wypracowane — podstawa fakt godzin i nadwyżki dodatku"
-                      className="text-right"
-                    >
-                      Wyprac.
-                    </Th>
-                    <Th
-                      tip="Urlop wypoczynkowy (h) — wlicza się do godzin rozliczanych"
-                      className="text-right"
-                    >
-                      UW
-                    </Th>
-                    <Th
-                      tip="Chorobowe (h) — wlicza się przy umowie o pracę (oraz do nadwyżki dodatku przy zleceniu w ALFA)"
-                      className="text-right"
-                    >
-                      L4
-                    </Th>
-                    <Th
-                      tip="Indywidualny limit godzin — przy UoP zastępuje normę miesiąca (brany największy wpis z miesiąca)"
-                      className="text-right"
-                    >
-                      Godz. maks
-                    </Th>
-                    <Th
-                      tip="Potrącenia (zł) — pomniejszają premię/potrącenie w wynagrodzeniu"
-                      className="text-right"
-                    >
-                      Potrącenia
-                    </Th>
-                    <Th
-                      tip="Dodatki/premie (zł) — powiększają premię/potrącenie w wynagrodzeniu"
-                      className="text-right"
-                    >
-                      Dodatki
-                    </Th>
-                    <Th>Notatka</Th>
-                    <Th className="w-20" />
-                  </tr>
-                </thead>
-                <tbody>
-                  {hoursVisible.length === 0 ? (
-                    <tr>
-                      <td
-                        colSpan={11}
-                        className="px-3 py-8 text-center text-muted-foreground"
-                      >
-                        {loading ? "Ładowanie…" : "Brak wpisów godzin w tym miesiącu"}
-                      </td>
-                    </tr>
-                  ) : (
-                    hoursVisible.map((r) => (
-                      <tr
-                        key={r.id}
-                        className={cn(
-                          "border-b hover:bg-accent/50",
-                          editable && "cursor-pointer",
-                        )}
-                        onClick={
-                          editable
-                            ? () => {
-                                setHoursEdit(r);
-                                setHoursFormOpen(true);
-                              }
-                            : undefined
-                        }
-                      >
-                        <td className="whitespace-nowrap px-3 py-2 font-medium">
-                          {r.employeeName}
-                        </td>
-                        <td className="px-3 py-2">
-                          {r.objectName || "—"}
-                          {r.objectUncertain && (
-                            <span
-                              title="Przeniesione z poprzedniego miesiąca — potwierdź obiekt zapisując wpis"
-                              className="ml-1.5 cursor-help font-semibold text-amber-600"
-                            >
-                              ?
-                            </span>
-                          )}
-                        </td>
-                        <td className="px-3 py-2 text-right">
-                          {r.nightHours != null ? hrs(r.nightHours) : ""}
-                        </td>
-                        <td className="px-3 py-2 text-right font-medium">
-                          {r.workedHours != null ? hrs(r.workedHours) : ""}
-                        </td>
-                        <td className="px-3 py-2 text-right">
-                          {r.uwHours != null ? hrs(r.uwHours) : ""}
-                        </td>
-                        <td className="px-3 py-2 text-right">
-                          {r.l4Hours != null ? hrs(r.l4Hours) : ""}
-                        </td>
-                        <td className="px-3 py-2 text-right">
-                          {r.maxHours != null ? hrs(r.maxHours) : ""}
-                        </td>
-                        <td className="px-3 py-2 text-right text-red-600">
-                          {r.deductions != null ? money(r.deductions) : ""}
-                        </td>
-                        <td className="px-3 py-2 text-right text-emerald-700">
-                          {r.bonuses != null ? money(r.bonuses) : ""}
-                        </td>
-                        <td className="max-w-[220px] truncate px-3 py-2 text-xs text-muted-foreground">
-                          {r.notes}
-                        </td>
-                        <td className="px-3 py-2">
-                          {editable && (
-                            <div
-                              className="flex justify-end gap-1"
-                              onClick={(e) => e.stopPropagation()}
-                            >
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                onClick={() => {
-                                  setHoursEdit(r);
-                                  setHoursFormOpen(true);
-                                }}
-                              >
-                                <Pencil className="h-4 w-4" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                onClick={() => handleHoursDelete(r)}
-                              >
-                                <Trash2 className="h-4 w-4" />
-                              </Button>
-                            </div>
-                          )}
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </CardContent>
-          </Card>
+          <HrHoursTab
+            rows={hours}
+            objects={objects}
+            editable={editable}
+            loading={loading}
+            monthNav={monthNav}
+            onRowSaved={handleHoursRowSaved}
+            onAdd={() => {
+              setHoursEdit(null);
+              setHoursFormOpen(true);
+            }}
+            onEdit={(row) => {
+              setHoursEdit(row);
+              setHoursFormOpen(true);
+            }}
+            onDelete={handleHoursDelete}
+          />
         </TabsContent>
 
         {/* ==================== BIURO ==================== */}

@@ -30,6 +30,8 @@ import type {
   HrPayrollRow,
   HrPayrollSaveInput,
 } from "@/lib/api";
+// pola liczbowe (puste = null, przecinek dozwolony) — wspólne z tabelami Kadr
+import { fieldToNum, numToField } from "./kadry/shared";
 
 const SELECT_CLS =
   "flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm";
@@ -45,15 +47,6 @@ function companyOptions(companies: Company[], current?: string | null): string[]
   if (cur && !names.includes(cur)) names.push(cur);
   return names.sort((a, b) => a.localeCompare(b, "pl"));
 }
-
-// pole liczbowe: puste = brak wartości (null), przecinek dozwolony
-type NumVal = number | string | null | undefined;
-const numToField = (v: NumVal) => (v == null ? "" : String(v));
-const fieldToNum = (v: string): number | null => {
-  if (v.trim() === "") return null;
-  const n = parseFloat(v.replace(",", "."));
-  return Number.isFinite(n) ? n : null;
-};
 
 function NumField({
   id,

@@ -463,6 +463,46 @@ async function main() {
   ok("O4: zwrot z instalacji = 12 mies.", byName("O4")?.payback === 12, byName("O4"));
   ok("O1: brak nakładu → payback null", byName("O1")?.payback === null, byName("O1"));
   ok("O2: koszt NULL → hasCost false", byName("O2")?.hasCost === false, byName("O2"));
+
+  /*
+   * REGRESJA (naprawiona): udział w puli centrum monitorowania zapalał `hasCost`.
+   * Dostaje go automatycznie każdy aktywny obiekt z kamerami albo SSWiN-em, więc
+   * warunek "personnelCost > 0" czynił koszt "znanym" praktycznie wszędzie —
+   * i obiekty bez ŻADNEJ wiedzy o koszcie pokazywały marże rzędu 98%.
+   * Udział CMA ma WCHODZIĆ do kosztu, ale nie czynić go znanym.
+   */
+  /*
+   * REGRESJA (naprawiona): miesiąc z wierszami płacowymi, ale BEZ wprowadzonych
+   * kwot, był liczony jak pełny. Godziny importuje się wcześniej niż kwoty od
+   * księgowości, więc miesiąc czekający na rozliczenie miał komplet wierszy
+   * z `main_amount = NULL` — a poprzedni warunek sprawdzał tylko, czy wiersze
+   * istnieją. Na produkcji dzieliło to koszt przez 3 zamiast przez 2 i pokazywało
+   * +9,9% marży zamiast −2,2%.
+   */
+  const pInfo = os.totals.personnel;
+  ok(
+    "Miesiące bez wprowadzonych kwot są pomijane i RAPORTOWANE",
+    Array.isArray(pInfo.skippedMonths) &&
+      pInfo.monthsUsed === pInfo.months.length &&
+      !pInfo.months.some((m: any) =>
+        pInfo.skippedMonths.some((s: any) => s.year === m.year && s.month === m.month)
+      ),
+    { uzyte: pInfo.months, pominiete: pInfo.skippedMonths }
+  );
+
+  const cmaOnly = os.rows.filter(
+    (r: any) => r.otherCost === 0 && r.personnelDirectCost === 0 && r.personnelCmaCost > 0
+  );
+  ok(
+    "Sam udział CMA nie zapala hasCost ani marży",
+    cmaOnly.every((r: any) => r.hasCost === false && r.margin === null),
+    cmaOnly.slice(0, 3).map((r: any) => ({ n: r.name, hasCost: r.hasCost, margin: r.margin }))
+  );
+  ok(
+    "…ale nadal wchodzi do kosztu obiektu",
+    cmaOnly.every((r: any) => r.cost >= r.personnelCmaCost - 0.01),
+    cmaOnly.slice(0, 2).map((r: any) => ({ n: r.name, cost: r.cost, cma: r.personnelCmaCost }))
+  );
   ok("O2: koszt nieznany → marża null, a NIE 100%", byName("O2")?.margin === null, byName("O2"));
   ok("O3: koszt 0 zł → hasCost true i marża 100%",
     byName("O3")?.hasCost === true && near(byName("O3")?.margin, 100), byName("O3"));

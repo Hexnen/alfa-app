@@ -1,5 +1,6 @@
 import {
   ArrowRightLeft,
+  Ban,
   Banknote,
   Building2,
   Calculator,
@@ -9,6 +10,8 @@ import {
   ShieldCheck,
   CalendarCheck,
   CalendarClock,
+  Check,
+  CircleCheck,
   ClipboardList,
   Eye,
   HardHat,
@@ -140,26 +143,47 @@ export const EVENT_STATUS_ORDER: CalendarEventStatus[] = [
 
 export const EVENT_STATUS_META: Record<
   CalendarEventStatus,
-  { label: string; badge: string; /** Krótki opis do legendy. */ hint: string }
+  {
+    label: string;
+    icon: LucideIcon;
+    badge: string;
+    /** Segment wyboru statusu w dialogu — te same konwencje co BILLING_META. */
+    chip: string;
+    chipActive: string;
+    /** Krótki opis do legendy. */
+    hint: string;
+  }
 > = {
   planned: {
     label: "Zaplanowane",
+    icon: CalendarClock,
     badge: "bg-sky-100 text-sky-800 dark:bg-sky-500/20 dark:text-sky-200",
+    chip: "border-sky-500/50 text-sky-700 dark:text-sky-300",
+    chipActive: "bg-sky-500 border-sky-500 text-white",
     hint: "termin wstępny — czeka na potwierdzenie",
   },
   confirmed: {
     label: "Potwierdzone",
+    icon: CircleCheck,
     badge: "bg-emerald-100 text-emerald-800 dark:bg-emerald-500/20 dark:text-emerald-200",
+    chip: "border-emerald-500/50 text-emerald-700 dark:text-emerald-300",
+    chipActive: "bg-emerald-500 border-emerald-500 text-white",
     hint: "termin uzgodniony z klientem i ekipą",
   },
   done: {
     label: "Wykonane",
+    icon: Check,
     badge: "bg-slate-200 text-slate-700 dark:bg-slate-500/25 dark:text-slate-200",
+    chip: "border-slate-400/60 text-slate-700 dark:text-slate-300",
+    chipActive: "bg-slate-500 border-slate-500 text-white",
     hint: "zakończone — wyszarzone, ze znacznikiem ✓",
   },
   cancelled: {
     label: "Anulowane",
+    icon: Ban,
     badge: "bg-red-100 text-red-800 dark:bg-red-500/20 dark:text-red-200",
+    chip: "border-red-500/50 text-red-700 dark:text-red-300",
+    chipActive: "bg-red-500 border-red-500 text-white",
     hint: "odwołane — przekreślone, przerywana ramka",
   },
 };
@@ -350,6 +374,19 @@ export function fmtDayHeading(dayKey: string, now = new Date()): string {
   return `${d.getDate()} ${MONTHS_GEN[d.getMonth()]} ${d.getFullYear()}`;
 }
 
+/** „90” → „1 godz. 30 min”, „30” → „30 min”, „1500” → „1 dzień 1 godz.” */
+export function fmtMinutes(m: number): string {
+  if (m <= 0) return "";
+  const days = Math.floor(m / 1440);
+  const hrs = Math.floor((m % 1440) / 60);
+  const rest = m % 60;
+  const parts: string[] = [];
+  if (days) parts.push(days === 1 ? "1 dzień" : `${days} dni`);
+  if (hrs) parts.push(`${hrs} godz.`);
+  if (rest) parts.push(`${rest} min`);
+  return parts.join(" ");
+}
+
 /** Czas relatywny PL: „przed chwilą”, „5 min temu”, „wczoraj 14:32”, „12.03.2026”. */
 export function fmtRelative(v: string | null | undefined, now = Date.now()): string {
   if (!v) return "—";
@@ -420,6 +457,39 @@ export function fmtRange(startAt: string, endAt: string, allDay: boolean): strin
     return `${fmtLong(startAt)} – ${pad(e.getHours())}:${pad(e.getMinutes())}`;
   }
   return `${fmtLong(startAt)} – ${fmtLong(endAt)}`;
+}
+
+/**
+ * Zakres bez daty, gdy wydarzenie mieści się w jednym dniu („08:00 – 10:00”). W kalendarzu
+ * dzień widać z siatki, więc data w dymku tylko zabiera miejsce. Wielodniowe zostają z pełną
+ * datą, a jednodniowe całodniowe zwracają pusty string — zostaje samo „cały dzień”.
+ */
+export function fmtRangeCompact(startAt: string, endAt: string, allDay: boolean): string {
+  const s = parseLocal(startAt);
+  const e = parseLocal(endAt);
+  if (allDay) {
+    const last = new Date(e);
+    last.setDate(last.getDate() - 1); // koniec exclusive → ostatni dzień
+    return toDateStr(s) === toDateStr(last) ? "" : fmtRange(startAt, endAt, allDay);
+  }
+  if (toDateStr(s) === toDateStr(e)) {
+    return `${pad(s.getHours())}:${pad(s.getMinutes())} – ${pad(e.getHours())}:${pad(e.getMinutes())}`;
+  }
+  return fmtRange(startAt, endAt, allDay);
+}
+
+/** Linia terminu do dymków: „08:00 – 10:00 (2 godz.)”, „cały dzień”, „12.09.2026 – 14.09.2026 (3 dni) · cały dzień”. */
+export function eventTermLine(
+  ev: { startAt: string; endAt: string; allDay: boolean },
+  compact = false
+): string {
+  const range = compact
+    ? fmtRangeCompact(ev.startAt, ev.endAt, ev.allDay)
+    : fmtRange(ev.startAt, ev.endAt, ev.allDay);
+  if (!range) return "cały dzień";
+  const duration = fmtDuration(ev.startAt, ev.endAt, ev.allDay);
+  const withDuration = duration ? `${range} (${duration})` : range;
+  return ev.allDay ? `${withDuration} · cały dzień` : withDuration;
 }
 
 // ---------------------------------------------------------------------------
@@ -1109,11 +1179,10 @@ export function eventTooltipText(
   now: Date | number = Date.now()
 ): string {
   const typeLabel = eventTypeLabel(String(ev.type));
-  const duration = fmtDuration(ev.startAt, ev.endAt, ev.allDay);
   const lines: string[] = [
     ev.title,
     [typeLabel, ev.objectName || ""].filter(Boolean).join(" · "),
-    `${fmtRange(ev.startAt, ev.endAt, ev.allDay)}${duration ? ` (${duration})` : ""}${ev.allDay ? " · cały dzień" : ""}`,
+    eventTermLine(ev),
   ];
   if (ev.location) lines.push(`Lokalizacja: ${ev.location}`);
   if (ev.technicians?.length) {
@@ -1192,21 +1261,22 @@ export const EVENT_TIP_HINT = "Kliknij, by otworzyć · prawy przycisk: więcej"
  */
 export function eventTipData(
   ev: EventTipInput,
-  opts: { hint?: string | null; warnings?: string[]; now?: Date | number } = {}
+  opts: {
+    hint?: string | null;
+    warnings?: string[];
+    now?: Date | number;
+    /** W kalendarzu dzień widać z siatki — wtedy termin bez daty (fmtRangeCompact). */
+    compactDate?: boolean;
+    /** Gotowa linia dojazdu („wyjazd 05:21 · dojazd 1 godz.”) — liczy ją `departureLine` z lib/travel. */
+    departure?: string | null;
+  } = {}
 ): RichTip {
   const now = opts.now ?? Date.now();
   const type = ev.type as CalendarEventType;
   const typeLabel = eventTypeLabel(String(ev.type));
-  const duration = fmtDuration(ev.startAt, ev.endAt, ev.allDay);
 
-  const rows: TipRow[] = [
-    {
-      icon: "clock",
-      text: `${fmtRange(ev.startAt, ev.endAt, ev.allDay)}${duration ? ` (${duration})` : ""}${
-        ev.allDay ? " · cały dzień" : ""
-      }`,
-    },
-  ];
+  const rows: TipRow[] = [{ icon: "clock", text: eventTermLine(ev, opts.compactDate) }];
+  if (opts.departure) rows.push({ icon: "route", text: opts.departure });
   if (ev.technicians?.length) {
     rows.push({
       icon: "users",

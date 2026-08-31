@@ -300,7 +300,12 @@ export function KontrahenciView({
           value={hasCostData ? plnFull(agg.profit) : DASH}
           tone={!hasCostData ? "neutral" : agg.profit >= 0 ? "good" : "bad"}
           sub={hasCostData ? "przychód − koszt" : "uzupełnij koszty, żeby policzyć"}
-          tip="Przychód minus koszt miesięczny. Liczony tylko z obiektów z uzupełnionym kosztem."
+          // Dymek mówił „liczony tylko z obiektów z uzupełnionym kosztem", a
+          // `agg.profit` sumuje WSZYSTKIE wiersze — przychód po całości, koszt
+          // po uzupełnionych. Poprawiamy dymek do stanu faktycznego (liczba jest
+          // celowo taka: okrajanie sum rozjeżdżało kafelki, uczciwość niesie
+          // pokrycie), bo bliźniaczy kafelek w ObiektyView mówi to samo.
+          tip="Przychód minus koszt miesięczny. Obiekt bez uzupełnionego kosztu wchodzi do sumy jako zero, więc przy niepełnym pokryciu zysk jest zawyżony — patrz pokrycie."
           coverage={coverageProps}
         />
         <KpiTile

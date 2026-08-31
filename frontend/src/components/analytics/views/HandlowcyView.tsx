@@ -88,6 +88,33 @@ function roiLabel(roi: number | null): string {
   return `×${roi.toLocaleString("pl-PL", { maximumFractionDigits: 1 })}`;
 }
 
+/**
+ * Zwrot na handlowcu: ile złotych MARŻY JEGO PORTFELA przypada na złotówkę tego,
+ * co firma na niego wydaje (koszt własny + prowizja).
+ *
+ * Świadomie NIE bierzemy `roi` z API. Backend liczy tam `revenue / (ownCost +
+ * commission)` — PRZYCHÓD na złotówkę kosztu — a cały ten ekran (opis karty,
+ * nagłówek „Zwrot”, przypis, bliźniacza tabela z kolumną „Marża portfela”) mówi
+ * o marży. Przy definicji przychodowej próg ×1 nic nie znaczy: portfel za 220 tys.
+ * zł „zwracał” ×11 na zielono, choć po odjęciu kosztu obiektów przynosił firmie
+ * stratę, a bliźniacza tabela w tym samym wierszu pokazywała ujemną marżę.
+ *
+ * Wybraliśmy definicję marżową, a nie zmianę opisu, bo próg ×1 jest tu jedyną
+ * liczbą z twardym znaczeniem: poniżej niego marża portfela nie pokrywa kosztu
+ * handlowca. `contribution` (przychód − koszt obiektów) jest już w wierszu.
+ */
+function roiOf(r: AnalyticsSalespersonRow): number | null {
+  const cost = r.ownCost + r.commission;
+  // Bez znanego kosztu handlowca nie ma czego dzielić — „×0” byłoby kłamstwem.
+  if (cost <= 0) return null;
+  // Portfel BEZ ANI JEDNEGO uzupełnionego kosztu obiektu ma `contribution`
+  // równe przychodowi wyłącznie dlatego, że koszty policzyliśmy jako zero.
+  // Zwrot z takiej marży byłby dokładnie tym samym zawyżeniem, które ta funkcja
+  // naprawia — więc mówimy „nie wiem”, a nie zgadujemy.
+  if (r.objectsCount > 0 && r.objectsWithCost === 0) return null;
+  return r.contribution / cost;
+}
+
 export function HandlowcyView({
   scope,
   costWindow,
@@ -280,14 +307,28 @@ export function HandlowcyView({
     [rows]
   );
 
-  /** Ranking ROI — ile marży przynosi złotówka wydana na handlowca. */
+  /**
+   * Ranking zwrotu — ile marży przynosi złotówka wydana na handlowca.
+   * Sortowanie idzie po TEJ SAMEJ definicji co słupki i tabela (`roiOf`),
+   * inaczej kolejność przeczyłaby pokazanym liczbom.
+   */
   const roiRows = useMemo(
-    () => [...rows].sort((a, b) => cmpNullLast(a.roi, b.roi, "desc")),
+    () =>
+      [...rows]
+        .map((r) => ({ row: r, roi: roiOf(r) }))
+        .sort((a, b) => cmpNullLast(a.roi, b.roi, "desc")),
     [rows]
   );
+  // Skala zaczyna się od ×1, żeby próg był widoczny nawet wtedy, gdy nikt go nie
+  // przekracza. Marża bywa ujemna — taki pasek i tak zostaje przy lewej krawędzi.
   const roiMax = useMemo(
     () => Math.max(1, ...roiRows.map((r) => r.roi ?? 0)),
     [roiRows]
+  );
+  /** Czy w rankingu jest ktoś, komu marżę zaniża nieuzupełniony koszt obiektów. */
+  const roiPartialCoverage = useMemo(
+    () => rows.some((r) => r.objectsWithCost > 0 && r.objectsWithCost < r.objectsCount),
+    [rows]
   );
 
   const tableRows = useMemo(() => {
@@ -329,7 +370,7 @@ export function HandlowcyView({
         case "margin":
           return cmpNullLast(a.margin, b.margin, dir);
         case "roi":
-          return cmpNullLast(a.roi, b.roi, dir);
+          return cmpNullLast(roiOf(a), roiOf(b), dir);
         default:
           return 0;
       }
@@ -487,9 +528,9 @@ export function HandlowcyView({
           description="Ile złotych marży portfela przypada na złotówkę kosztu handlowca."
           tableData={{
             headers: ["Handlowiec", "Zwrot", "Marża portfela", "Koszt handlowca"],
-            rows: roiRows.map((r) => [
+            rows: roiRows.map(({ row: r, roi }) => [
               `${r.firstName} ${r.lastName}`,
-              roiLabel(r.roi),
+              roiLabel(roi),
               plnFull(r.contribution),
               plnFull(r.ownCost + r.commission),
             ]),
@@ -502,18 +543,18 @@ export function HandlowcyView({
         >
           <div className="space-y-3">
             <div className="space-y-1">
-              {roiRows.map((r) => (
+              {roiRows.map(({ row: r, roi }) => (
                 <RankBar
                   key={r.id}
                   label={`${r.firstName} ${r.lastName}`}
                   subLabel={r.region ?? undefined}
-                  value={r.roi}
+                  value={roi}
                   max={roiMax}
-                  valueLabel={roiLabel(r.roi)}
-                  detail={`koszt ${plnFull(r.ownCost + r.commission)}`}
+                  valueLabel={roiLabel(roi)}
+                  detail={`marża ${plnFull(r.contribution)}`}
                   // Poniżej ×1 marża portfela nie pokrywa nawet kosztu
                   // handlowca — to nie „słabszy wynik”, tylko strata.
-                  color={r.roi !== null && r.roi < 1 ? COLOR_LOSS : COLOR_PROFIT}
+                  color={roi !== null && roi < 1 ? COLOR_LOSS : COLOR_PROFIT}
                   onClick={() => navigate(`/objects?salespersonId=${r.id}`)}
                 />
               ))}
@@ -523,9 +564,18 @@ export function HandlowcyView({
               <span className="font-medium" style={{ color: COLOR_LOSS }}>
                 ×1
               </span>{" "}
-              handlowiec nie zarabia na siebie: marża jego portfela jest mniejsza
-              niż koszt własny wraz z prowizją.
+              handlowiec nie zarabia na siebie: marża jego portfela (przychód
+              minus koszt obiektów) jest mniejsza niż jego koszt własny wraz z
+              prowizją.
+              {roiPartialCoverage && (
+                <>
+                  {" "}
+                  Marża stoi na obiektach z uzupełnionym kosztem — dopóki
+                  brakuje któregoś, zwrot jest zawyżony.
+                </>
+              )}
             </p>
+            <CoverageNote {...coverageProps} withIcon />
           </div>
         </ChartCard>
       </div>
@@ -576,7 +626,7 @@ export function HandlowcyView({
                   active={sort === "roi"}
                   dir={dir}
                   onToggle={toggleSort}
-                  tip="Marża portfela / koszt handlowca; poniżej ×1 nie zarabia na siebie"
+                  tip="Marża portfela (przychód − koszt obiektów) / koszt handlowca z prowizją; poniżej ×1 nie zarabia na siebie"
                 />
               </tr>
             </thead>
@@ -710,6 +760,7 @@ function SalespersonRow({
   onClick: () => void;
 }) {
   const knownCost = row.objectsWithCost > 0;
+  const roi = roiOf(row);
   return (
     <tr
       onClick={onClick}
@@ -792,13 +843,19 @@ function SalespersonRow({
       <td className="px-2 py-2">
         <MarginGauge value={row.margin} size="sm" />
       </td>
+      {/* Ta sama definicja co w rankingu obok — `roiOf`, nie `row.roi` z API. */}
       <td
         className={cn(
           "px-2 py-2 text-right font-medium tabular-nums",
-          row.roi !== null && row.roi < 1 && "text-red-600"
+          roi !== null && roi < 1 && "text-red-600"
         )}
+        title={
+          roi === null
+            ? "Zwrotu nie da się policzyć: brak kosztu handlowca albo żaden obiekt portfela nie ma uzupełnionego kosztu"
+            : `Marża portfela ${plnFull(row.contribution)} / koszt handlowca ${plnFull(row.ownCost + row.commission)}`
+        }
       >
-        {roiLabel(row.roi)}
+        {roiLabel(roi)}
       </td>
     </tr>
   );

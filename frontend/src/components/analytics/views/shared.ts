@@ -227,6 +227,16 @@ export function costWindowLabel(w: CostWindow): string {
   return w === 1 ? "ostatni pełny miesiąc" : `średnia z ${w} mies.`;
 }
 
+const MONTHS_NOM = [
+  "styczeń", "luty", "marzec", "kwiecień", "maj", "czerwiec",
+  "lipiec", "sierpień", "wrzesień", "październik", "listopad", "grudzień",
+];
+
+/** Miesiąc z nazwy: „czerwiec 2026". Mianownik, bo zdanie brzmi „… czeka na rozliczenie". */
+export function monthLabel(m: { year: number; month: number }): string {
+  return `${MONTHS_NOM[m.month - 1] ?? m.month} ${m.year}`;
+}
+
 /**
  * Podpis pod kafelkiem „Koszt mies.": z czego składa się pokazana suma.
  *
@@ -248,11 +258,21 @@ export function costSplitLabel(personnelCost: number, otherCost: number): string
  * jak niski koszt.
  */
 export function personnelNote(p: PersonnelInfo): string {
+  // Miesiąc z wierszami płacowymi, ale bez kwot, jest POMIJANY w średniej.
+  // Sam licznik „dane za 2 z 3" wygląda na awarię systemu, a to najczęściej
+  // jeden konkretny miesiąc, którego księgowa jeszcze nie domknęła — więc
+  // wymieniamy go z nazwy, żeby było wiadomo, co domknąć.
+  const skipped =
+    p.skippedMonths.length > 0
+      ? ` — ${p.skippedMonths.map(monthLabel).join(", ")} ${
+          p.skippedMonths.length === 1 ? "czeka" : "czekają"
+        } na rozliczenie`
+      : "";
   const parts = [`Koszt osobowy: ${costWindowLabel(p.costWindow)}`];
   if (p.monthsUsed === 0) {
-    parts[0] += " (brak danych płacowych w tym oknie)";
+    parts[0] += ` (brak danych płacowych w tym oknie${skipped})`;
   } else if (p.monthsUsed < p.costWindow) {
-    parts[0] += ` (dane za ${p.monthsUsed})`;
+    parts[0] += ` (dane za ${p.monthsUsed}${skipped})`;
   }
   parts.push(
     `zmapowano ${p.mappedObjects} z ${p.hrObjectsTotal} pozycji kadrowych`
@@ -263,6 +283,26 @@ export function personnelNote(p: PersonnelInfo): string {
     );
   }
   return `${parts.join(", ")}.`;
+}
+
+/**
+ * Zdanie o DRUGIEJ ścieżce kosztu osobowego — udziale w puli centrum
+ * monitorowania. To blisko połowa całego kosztu osobowego, a przypis o niej
+ * milczał: czytelnik widział tylko „zmapowano N pozycji kadrowych" i miał prawo
+ * sądzić, że alokacja z godzin to wszystko.
+ *
+ * Zwraca `null`, gdy mechanizm jest nieaktywny (nikt nie oznaczył pozycji-puli) —
+ * wtedy nie ma o czym pisać.
+ */
+export function cmaNote(p: PersonnelInfo): string | null {
+  const c = p.cma;
+  if (c.poolPositions === 0 || c.pool <= 0) return null;
+  return (
+    `Z kosztu osobowego ${plnFull(c.pool)}/mies. to udział w puli centrum ` +
+    `monitorowania: dzielona przez ${c.units} jednostek dozoru na ` +
+    `${c.objectsInDenominator} obiektach, czyli ${plnFull(c.perUnit)} za jednostkę ` +
+    `(kamera po sztuce, SSWiN i wideorecepcja po jednym).`
+  );
 }
 
 /** Filtr tekstowy: bez rozróżniania wielkości liter, po kilku polach naraz. */

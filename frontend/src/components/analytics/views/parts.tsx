@@ -11,7 +11,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import { EmptyState } from "@/components/analytics";
 import type { PersonnelInfo } from "@/lib/api";
-import { personnelNote, type LoadState } from "./shared";
+import { cmaNote, personnelNote, type LoadState } from "./shared";
 
 /**
  * Ekran zastępczy dla stanów innych niż „mamy dane”. Ponowną próbę robi
@@ -86,7 +86,12 @@ export function NoCostEmpty({ what }: { what: string }) {
  *     i CAŁA ta funkcja milczy. Zero wygląda wtedy jak wynik („tani obiekt"),
  *     a jest dziurą w danych — dlatego zamiast przypisu leci wtedy komunikat
  *     z linkiem do miejsca, w którym można to naprawić.
- *  2. „Netto" znaczy tu dwie różne rzeczy: strona handlowa jest bez VAT,
+ *  2. Koszt osobowy ma DWIE ścieżki: alokację wprost z godzin i udział w puli
+ *     centrum monitorowania (blisko połowa kwoty). Przypis milczał o drugiej,
+ *     więc czytelnik widział „zmapowano N pozycji" i miał prawo sądzić, że to
+ *     wszystko. Obiekty z kamerami bez podanej ILOŚCI nie dostają wagi za
+ *     kamery — ich koszt jest zaniżony i to musi być widać, a nie zgadywane.
+ *  3. „Netto" znaczy tu dwie różne rzeczy: strona handlowa jest bez VAT,
  *     a wypłaty są „na rękę". Do wypłat doliczamy narzut składek pracodawcy,
  *     więc koszt osobowy jest SZACOWANYM pełnym kosztem zatrudnienia — ale
  *     mnożnik przelicza z netto, choć składki liczy się od brutto, więc to
@@ -94,6 +99,8 @@ export function NoCostEmpty({ what }: { what: string }) {
  */
 export function PersonnelFootnote({ personnel }: { personnel: PersonnelInfo }) {
   const mapped = personnel.mappedObjects > 0;
+  const cma = cmaNote(personnel);
+  const missingCameras = personnel.cma.objectsMissingCameraCount;
 
   return (
     <div className="space-y-1 px-1">
@@ -118,6 +125,29 @@ export function PersonnelFootnote({ personnel }: { personnel: PersonnelInfo }) {
               zmapuj pozycje kadrowe
             </Link>
           </span>
+        </p>
+      )}
+      {cma && (
+        <p className="text-xs text-muted-foreground">
+          {cma}
+          {missingCameras > 0 && (
+            <>
+              {" "}
+              <span className="text-amber-600">
+                {missingCameras}{" "}
+                {missingCameras === 1
+                  ? "obiekt ma usługę kamer bez podanej ilości i nie dostaje za nie wagi — jego koszt jest zaniżony"
+                  : "obiektów ma usługę kamer bez podanej ilości i nie dostaje za nie wagi — ich koszt jest zaniżony"}
+                .{" "}
+                <Link
+                  to="/objects"
+                  className="font-medium underline underline-offset-2 hover:text-amber-700"
+                >
+                  uzupełnij liczbę kamer
+                </Link>
+              </span>
+            </>
+          )}
         </p>
       )}
       <p className="text-xs text-muted-foreground">

@@ -63,6 +63,7 @@ import {
   Plus,
   RefreshCw,
   Repeat,
+  Route,
   Rss,
   Sparkles,
   StickyNote,
@@ -89,6 +90,7 @@ import {
   activityApi,
   assistantApi,
   calendarApi,
+  getCompanyTravelBatch,
   getTechnicians,
   type ActivityEntry,
   type AssistantStatus,
@@ -100,6 +102,7 @@ import {
   type CalendarEventType,
   type CalendarFilterSetFilters,
   type CalendarSeriesScope,
+  type CompanyTravel,
   type Technician,
 } from "@/lib/api";
 import {
@@ -126,6 +129,7 @@ import {
   realizationMoney,
   fmtDayHeading,
   fmtRange,
+  fmtRangeCompact,
   fmtRelative,
   fmtShort,
   fmtTimestamp,
@@ -155,14 +159,19 @@ import {
 } from "@/components/CalendarEventBadges";
 import { NotesBadge } from "@/components/CalendarEventNotes";
 import { FilterSets } from "@/components/calendar/FilterSets";
+import { RoutePlanner } from "@/components/calendar/RoutePlanner";
 import { Tooltip, applyTip, blockTooltips, hideTooltip, tip } from "@/components/ui/tooltip";
 import { AssistantDrawer, type AssistantEventChangeKind, type AssistantPreview } from "@/components/assistant/AssistantDrawer";
+import { departureAt, departureLine, travelSourceLabel, travelSummary, useTravel } from "@/lib/travel";
 import { cn } from "@/lib/utils";
 import "./Calendar.css";
 
 type FcViewName = "dayGridMonth" | "timeGridWeek" | "timeGridDay" | "listWeek";
-/** "board" = Tablica (kanban wg statusu/typu) — poza FullCalendar. */
-type ViewName = FcViewName | "board";
+/**
+ * "board" = Tablica (kanban wg statusu/typu), "route" = Planer trasy (mapa dnia).
+ * Oba są POZA FullCalendarem — `calendarRef` jest wtedy odmontowany.
+ */
+type ViewName = FcViewName | "board" | "route";
 
 const VIEWS: { key: ViewName; label: string; shortLabel: string; keys: string[] }[] = [
   { key: "dayGridMonth", label: "Miesiąc", shortLabel: "Mies.", keys: ["m"] },
@@ -170,6 +179,7 @@ const VIEWS: { key: ViewName; label: string; shortLabel: string; keys: string[] 
   { key: "timeGridDay", label: "Dzień", shortLabel: "Dzień", keys: ["d"] },
   { key: "listWeek", label: "Lista", shortLabel: "Lista", keys: ["l", "a"] },
   { key: "board", label: "Tablica", shortLabel: "Tabl.", keys: ["b"] },
+  { key: "route", label: "Trasa", shortLabel: "Trasa", keys: ["r"] },
 ];
 
 const VIEW_STORAGE_KEY = "alfa.calendar.view";
@@ -382,6 +392,21 @@ type CtxMenuState =
   | { kind: "slot"; x: number; y: number; startAt: string; endAt: string; allDay: boolean };
 
 /** Podgląd wydarzenia (jeden klik) — zakotwiczony przy elemencie. */
+/**
+ * Pas dojazdu rysowany w siatce godzinowej na czas najechania na wydarzenie: od godziny
+ * wyjazdu do początku wydarzenia, w kolumnie jego dnia. Współrzędne są w układzie okna
+ * (`position: fixed`), bo siatka FullCalendara ma własne przewijanie.
+ */
+interface TravelBand {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  /** Wyjazd przed początkiem widocznego zakresu — pas urwany u góry, etykieta pod linią. */
+  clipped: boolean;
+  label: string;
+}
+
 interface PreviewState {
   ev: CalendarEvent;
   rect: { left: number; top: number; width: number; height: number };
@@ -508,8 +533,11 @@ export function Calendar() {
     () => readStoredView() ?? (mobile ? "listWeek" : "dayGridMonth")
   );
   const isBoard = view === "board";
-  const isBoardRef = useRef(isBoard);
-  isBoardRef.current = isBoard;
+  const isRoute = view === "route";
+  /** Widok siatki FullCalendar — jedyny, w którym `calendarRef` jest zamontowany. */
+  const isFc = !isBoard && !isRoute;
+  const isFcRef = useRef(isFc);
+  isFcRef.current = isFc;
   /** Data „kotwicy” — utrzymuje ciągłość nawigacji między siatką a Tablicą. */
   const [anchorDate, setAnchorDate] = useState<Date>(() => new Date());
   /** Grupowanie kolumn Tablicy. */
@@ -543,6 +571,19 @@ export function Calendar() {
     const t = toDateStr(to);
     setRange((r) => (r && r.from === f && r.to === t ? r : { from: f, to: t }));
   }, [isBoard, anchorDate]);
+
+  // Trasa: zakres = jeden dzień kotwicy (FullCalendar jest wtedy odmontowany).
+  useEffect(() => {
+    if (!isRoute) return;
+    const from = new Date(anchorDate.getFullYear(), anchorDate.getMonth(), anchorDate.getDate());
+    const to = new Date(from.getFullYear(), from.getMonth(), from.getDate() + 1);
+    setTitle(
+      new Intl.DateTimeFormat("pl-PL", { weekday: "long", day: "numeric", month: "long", year: "numeric" }).format(from)
+    );
+    const f = toDateStr(from);
+    const t = toDateStr(to);
+    setRange((r) => (r && r.from === f && r.to === t ? r : { from: f, to: t }));
+  }, [isRoute, anchorDate]);
 
   // --- Toasty + aria-live ---
   const [toasts, setToasts] = useState<CalendarToast[]>([]);
@@ -784,9 +825,9 @@ export function Calendar() {
   const visibleCount = useMemo(() => events.filter((e) => !e.deletedAt).length, [events]);
   /** Ile wydarzeń chowa 5-dniowy tydzień (start w sobotę/niedzielę). */
   const weekendHidden = useMemo(() => {
-    if (weekends || isBoard) return 0;
+    if (weekends || !isFc) return 0;
     return events.filter((e) => !e.deletedAt && isWeekendDay(parseLocal(e.startAt))).length;
-  }, [events, weekends, isBoard]);
+  }, [events, weekends, isFc]);
 
   // --- Dialog wydarzenia ---
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -794,6 +835,22 @@ export function Calendar() {
   const [dialogEvent, setDialogEvent] = useState<CalendarEvent | null>(null);
   const [dialogPrefill, setDialogPrefill] = useState<CalendarEventPrefill | null>(null);
   const [dialogNonce, setDialogNonce] = useState(0);
+  /**
+   * Formularz jako szuflada zwężająca kalendarz zamiast okna na środku. Włącza go tylko
+   * przycisk „Edytuj” w podglądzie i tylko na dość szerokim ekranie — niżej kalendarz obok
+   * panelu 480 px przestaje być czytelny, więc zostaje okno modalne.
+   */
+  const [docked, setDocked] = useState(false);
+  const [wide, setWide] = useState(() =>
+    typeof window === "undefined" ? true : window.matchMedia("(min-width: 1024px)").matches
+  );
+  useEffect(() => {
+    const mq = window.matchMedia("(min-width: 1024px)");
+    const on = () => setWide(mq.matches);
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, []);
+
 
   const openCreate = useCallback(
     (prefill?: CalendarEventPrefill) => {
@@ -802,17 +859,19 @@ export function Calendar() {
       setDialogEvent(null);
       setDialogPrefill(prefill ?? null);
       setDialogNonce((n) => n + 1);
+      setDocked(false);
       setDialogOpen(true);
     },
     [editable]
   );
 
   const openEvent = useCallback(
-    (ev: CalendarEvent) => {
+    (ev: CalendarEvent, asDrawer = false) => {
       setDialogMode(editable && !ev.deletedAt ? "edit" : "view");
       setDialogEvent(ev);
       setDialogPrefill(null);
       setDialogNonce((n) => n + 1);
+      setDocked(asDrawer);
       setDialogOpen(true);
     },
     [editable]
@@ -822,6 +881,7 @@ export function Calendar() {
   const gotoDateRef = useRef<(date: string) => void>(() => {});
   gotoDateRef.current = (date) => {
     if (isBoard) setAnchorDate(startOfMonth(new Date(`${date}T00:00`)));
+    else if (isRoute) setAnchorDate(new Date(`${date}T00:00`));
     else calendarRef.current?.getApi().gotoDate(date);
   };
 
@@ -905,7 +965,115 @@ export function Calendar() {
   type ElWithHandlers = HTMLElement & {
     _alfaCtx?: (e: MouseEvent) => void;
     _alfaDbl?: (e: MouseEvent) => void;
+    _alfaOver?: () => void;
+    _alfaOut?: () => void;
   };
+  /**
+   * Dojazd per obiekt pod dymki w siatce. Dymki są atrybutami DOM (budowane synchronicznie),
+   * więc dane muszą być pod ręką zawczasu — stąd jeden strzał na obiekt, nie na wydarzenie.
+   * Backend odpowiada z cache'u, a wyniki wstępne (`pending`) odpytujemy jeszcze raz przy
+   * kolejnym odświeżeniu listy wydarzeń.
+   */
+  const [travelByObject, setTravelByObject] = useState<Map<number, CompanyTravel>>(new Map());
+  const travelAskedRef = useRef(new Set<number>());
+  useEffect(() => {
+    const ids = [
+      ...new Set(
+        events
+          .filter((e) => e.type !== "urlop" && e.objectId && !travelAskedRef.current.has(e.objectId))
+          .map((e) => e.objectId as number)
+      ),
+    ];
+    if (ids.length === 0) return;
+    let cancelled = false;
+    for (const id of ids) travelAskedRef.current.add(id);
+    void (async () => {
+      // Jedno zapytanie na cały widok zamiast kilkudziesięciu równoległych; backend i tak
+      // odpowiada z cache'u, a trasy, których jeszcze nie policzył, dolicza w tle.
+      const list = await getCompanyTravelBatch(ids);
+      if (cancelled) return;
+      if (list.length === 0) {
+        // Nic nie wróciło (błąd / starszy backend) — nie zostawiamy id jako zapytanych,
+        // inaczej dojazd nie pojawiłby się już nigdy w tej sesji.
+        for (const id of ids) travelAskedRef.current.delete(id);
+        return;
+      }
+      const fresh = new Map<number, CompanyTravel>();
+      for (const t of list) {
+        if (t.pending) travelAskedRef.current.delete(t.objectId); // dolicza się w tle — spytamy ponownie
+        if (t.error || t.km == null) continue;
+        fresh.set(t.objectId, t);
+      }
+      if (fresh.size > 0) setTravelByObject((m) => new Map([...m, ...fresh]));
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [events]);
+
+  /** Dojazd wydarzenia: pełna linia do dymka i skrót na kafelek. */
+  const travelCtx = useCallback(
+    (ev: CalendarEvent) => ({
+      travel: ev.objectId ? (travelByObject.get(ev.objectId) ?? null) : null,
+      ctx: { startAt: ev.startAt, allDay: ev.allDay },
+    }),
+    [travelByObject]
+  );
+  const departureFor = useCallback(
+    (ev: CalendarEvent) => {
+      const { travel, ctx } = travelCtx(ev);
+      return departureLine(travel, ctx);
+    },
+    [travelCtx]
+  );
+
+  /** Pas dojazdu pod kursorem (tylko widoki z osią godzin). */
+  const [band, setBand] = useState<TravelBand | null>(null);
+  const travelRef = useRef(travelByObject);
+  travelRef.current = travelByObject;
+  const bandRef = useRef<(ev: CalendarEvent, el: HTMLElement) => void>(() => {});
+  bandRef.current = (ev, el) => {
+    // Sam kafelek daje skalę: jego wysokość to czas trwania wydarzenia, więc godzinę
+    // wyjazdu odkładamy w pikselach bez sięgania do wewnętrznych wymiarów FullCalendara.
+    const body = el.closest(".fc-timegrid-body") as HTMLElement | null;
+    if (!body || ev.allDay) return;
+    const travel = ev.objectId ? (travelRef.current.get(ev.objectId) ?? null) : null;
+    const dep = departureAt(travel, { startAt: ev.startAt, allDay: ev.allDay });
+    if (!dep || travel?.minutes == null) return;
+    const minutes = (parseLocal(ev.endAt).getTime() - parseLocal(ev.startAt).getTime()) / 60_000;
+    const r = el.getBoundingClientRect();
+    if (minutes <= 0 || r.height <= 0) return;
+    const col = (el.closest(".fc-timegrid-col") as HTMLElement | null) ?? el;
+    const cr = col.getBoundingClientRect();
+    // Przycinamy do widocznej części siatki (scroller), a nie do całej tabeli — inaczej pas
+    // wychodzi na nagłówki dni, gdy wyjazd wypada przed początkiem widocznego zakresu godzin.
+    const scroller = (el.closest(".fc-scroller") as HTMLElement | null) ?? body;
+    const limit = scroller.getBoundingClientRect().top;
+    const rawTop = r.top - travel.minutes * (r.height / minutes);
+    const top = Math.max(limit, rawTop);
+    const clipped = rawTop < limit - 0.5;
+    setBand({
+      left: cr.left,
+      top,
+      width: cr.width,
+      height: Math.max(2, r.top - top),
+      clipped,
+      label: `${clipped ? "↑ " : ""}wyjazd ${dep.time}${dep.dayBefore ? " (dzień wcześniej)" : ""}`,
+    });
+  };
+  const hideBand = useCallback(() => setBand(null), []);
+
+  // Pas znika, gdy siatka się przewinie albo na wierzchu jest podgląd/menu/dialog.
+  useEffect(() => {
+    if (!band) return;
+    window.addEventListener("scroll", hideBand, true);
+    window.addEventListener("resize", hideBand);
+    return () => {
+      window.removeEventListener("scroll", hideBand, true);
+      window.removeEventListener("resize", hideBand);
+    };
+  }, [band, hideBand]);
+
   const handleEventDidMount = useCallback((arg: EventMountArg) => {
     const el = arg.el as ElWithHandlers;
     const ev = arg.event.extendedProps.ev as CalendarEvent | undefined;
@@ -918,10 +1086,19 @@ export function Calendar() {
       const cur = freshEvent(arg.event);
       if (cur) eventDblRef.current(cur);
     };
+    const over = () => {
+      const cur = freshEvent(arg.event);
+      if (cur) bandRef.current(cur, el);
+    };
+    const out = () => setBand(null);
     el._alfaCtx = ctx;
     el._alfaDbl = dbl;
+    el._alfaOver = over;
+    el._alfaOut = out;
     el.addEventListener("contextmenu", ctx);
     el.addEventListener("dblclick", dbl);
+    el.addEventListener("mouseenter", over);
+    el.addEventListener("mouseleave", out);
     // Własny dymek zamiast natywnego `title`: kafelki bywają wąskie, więc dymek
     // pokazuje pełny tytuł z kropką typu, termin z czasem trwania, obiekt,
     // techników i stan (status/rozliczenie/protokół/realizacja) jako pigułki.
@@ -929,10 +1106,10 @@ export function Calendar() {
     // obsługiwane przez delegowany listener z `components/ui/tooltip`.
     if (ev) {
       el.dataset.alfaEv = String(ev.id);
-      applyTip(el, eventTipData(ev));
+      applyTip(el, eventTipData(ev, { compactDate: true, departure: departureFor(ev) }));
       el.setAttribute("aria-label", eventTipAria(ev));
     }
-  }, [freshEvent]);
+  }, [freshEvent, departureFor]);
 
   /**
    * FullCalendar recyklinguje kafelki (eventDidMount nie powtarza się po zapisie),
@@ -944,10 +1121,10 @@ export function Calendar() {
     for (const el of Array.from(root.querySelectorAll<HTMLElement>("[data-alfa-ev]"))) {
       const ev = eventsByIdRef.current.get(Number(el.dataset.alfaEv));
       if (!ev) continue;
-      applyTip(el, eventTipData(ev));
+      applyTip(el, eventTipData(ev, { compactDate: true, departure: departureFor(ev) }));
       el.setAttribute("aria-label", eventTipAria(ev));
     }
-  }, [allEvents]);
+  }, [allEvents, departureFor]);
 
   /**
    * Dymki milkną, gdy na wierzchu jest coś ważniejszego: podgląd wydarzenia,
@@ -962,6 +1139,8 @@ export function Calendar() {
     const el = arg.el as ElWithHandlers;
     if (el._alfaCtx) el.removeEventListener("contextmenu", el._alfaCtx);
     if (el._alfaDbl) el.removeEventListener("dblclick", el._alfaDbl);
+    if (el._alfaOver) el.removeEventListener("mouseenter", el._alfaOver);
+    if (el._alfaOut) el.removeEventListener("mouseleave", el._alfaOut);
   }, []);
 
   /**
@@ -1274,36 +1453,39 @@ export function Calendar() {
       setPreview(null);
       // Siatka znika pod tooltipem — chowamy go, żeby nie wisiał nad nowym widokiem.
       hideTooltip();
-      if (v === "board") {
-        // Kotwicy nie zaokrąglamy — Tablica sama liczy miesiąc z anchorDate,
+      if (v === "board" || v === "route") {
+        // Kotwicy nie zaokrąglamy — Tablica liczy z niej miesiąc, Trasa dzień,
         // a powrót do siatki wraca wtedy do tego samego tygodnia/dnia.
         setView(v);
         return;
       }
-      // Z Tablicy wracamy przez remount FullCalendar z initialView/initialDate;
+      // Z Tablicy i Trasy wracamy przez remount FullCalendar z initialView/initialDate;
       // z siatki — zwykła zmiana widoku.
-      if (view !== "board") calendarRef.current?.getApi().changeView(v);
+      if (isFc) calendarRef.current?.getApi().changeView(v);
       setView(v);
     },
-    [view]
+    [isFc]
   );
 
-  /** Nawigacja ‹ Dziś ›: FullCalendar albo miesiąc Tablicy. */
+  /** Nawigacja ‹ Dziś ›: FullCalendar, miesiąc Tablicy albo dzień Trasy. */
   const navPrev = useCallback(() => {
     setPreview(null);
     if (isBoard) setAnchorDate((d) => new Date(d.getFullYear(), d.getMonth() - 1, 1));
+    else if (isRoute) setAnchorDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() - 1));
     else api()?.prev();
-  }, [isBoard]);
+  }, [isBoard, isRoute]);
   const navNext = useCallback(() => {
     setPreview(null);
     if (isBoard) setAnchorDate((d) => new Date(d.getFullYear(), d.getMonth() + 1, 1));
+    else if (isRoute) setAnchorDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1));
     else api()?.next();
-  }, [isBoard]);
+  }, [isBoard, isRoute]);
   const navToday = useCallback(() => {
     setPreview(null);
     if (isBoard) setAnchorDate(startOfMonth(new Date()));
+    else if (isRoute) setAnchorDate(new Date());
     else api()?.today();
-  }, [isBoard]);
+  }, [isBoard, isRoute]);
 
   // Ogłaszaj zmianę okresu czytnikom ekranu.
   useEffect(() => {
@@ -1378,7 +1560,7 @@ export function Calendar() {
       if (raf) cancelAnimationFrame(raf);
       window.removeEventListener("resize", schedule);
     };
-  }, [fit, view, weekends, activityOpen, assistantOpen, activeFilterCount, editable, loadedOnce]);
+  }, [fit, view, weekends, activityOpen, assistantOpen, activeFilterCount, editable, loadedOnce, docked, dialogOpen]);
 
   // FullCalendar przelicza kolumny tylko przy resize okna — a szerokość
   // kontenera zmienia też zwinięcie menu bocznego. Obserwujemy więc kontener.
@@ -1450,7 +1632,7 @@ export function Calendar() {
     const day = r.startAt.slice(0, 10);
     const api = calendarRef.current?.getApi();
     let outside = true;
-    if (api && !isBoardRef.current) {
+    if (api && isFcRef.current) {
       const v = api.view;
       const d = new Date(`${day}T00:00`);
       outside = d < v.activeStart || d >= v.activeEnd;
@@ -1601,7 +1783,7 @@ export function Calendar() {
     });
 
   const orderedViews = mobile
-    ? [VIEWS[3], VIEWS[0], VIEWS[1], VIEWS[2], VIEWS[4]]
+    ? [VIEWS[3], VIEWS[0], VIEWS[1], VIEWS[2], VIEWS[4], VIEWS[5]]
     : VIEWS;
 
   // --- Zapisane zestawy filtrów (components/calendar/FilterSets.tsx) ---
@@ -1637,7 +1819,11 @@ export function Calendar() {
 
   /** Rzeczownik okresu do tooltipów nawigacji: „Poprzedni tydzień”, „Następny miesiąc”. */
   const periodNoun =
-    view === "timeGridDay" ? "dzień" : view === "timeGridWeek" || view === "listWeek" ? "tydzień" : "miesiąc";
+    view === "timeGridDay" || view === "route"
+      ? "dzień"
+      : view === "timeGridWeek" || view === "listWeek"
+        ? "tydzień"
+        : "miesiąc";
 
   /** Chipy typów + selecty — wspólne dla paska desktop i arkusza mobile. */
   const filterControls = (
@@ -1703,6 +1889,43 @@ export function Calendar() {
     </>
   );
 
+  /**
+   * Formularz wydarzenia. Ta sama instancja w dwóch powłokach: jako okno modalne poza siatką
+   * albo jako szuflada w kolumnie obok kalendarza (wtedy kalendarz zwęża się zamiast znikać
+   * pod overlayem). Wariant ustala się przy otwarciu i już się nie zmienia — przeniesienie
+   * formularza między kontenerami to remount, czyli utrata niezapisanych zmian.
+   */
+  const eventEditor = (variant: "modal" | "drawer") => (
+    <CalendarEventDialog
+      key={dialogNonce}
+      variant={variant}
+      open={dialogOpen}
+      mode={dialogMode}
+      event={dialogEvent}
+      prefill={dialogPrefill}
+      onClose={() => {
+        assistantSavedRef.current = null;
+        setDialogOpen(false);
+      }}
+      onSaved={(ev) => {
+        const fromAssistant = assistantSavedRef.current;
+        assistantSavedRef.current = null;
+        if (fromAssistant) {
+          // Propozycja asystenta zapisana z dialogu — toast + wpis systemowy w czacie.
+          fromAssistant(ev);
+          return;
+        }
+        announce(`Zapisano „${ev.title}”`);
+        void loadEvents();
+      }}
+      onDeleted={handleDeleted}
+      onNotesChanged={(id, count) =>
+        setAllEvents((list) => list.map((e) => (e.id === id ? { ...e, notesCount: count } : e)))
+      }
+      onOpenEvent={(id) => void openEventById(id)}
+    />
+  );
+
   return (
     // Bez space-y na korzeniu: pusty węzeł aria-live dostawał margines, który
     // spychał siatkę w dół. Odstępy ustawiają same elementy.
@@ -1723,7 +1946,8 @@ export function Calendar() {
           // (asystent) rozpycha wiersz ponad wyliczoną wysokość.
           fit && "min-h-0 [grid-template-rows:minmax(0,1fr)]",
           activityOpen && "lg:grid-cols-[1fr_360px]",
-          assistantOpen && "lg:grid-cols-[1fr_420px]"
+          assistantOpen && "lg:grid-cols-[1fr_420px]",
+          docked && dialogOpen && "lg:grid-cols-[1fr_480px]"
         )}
       >
         <div
@@ -1834,7 +2058,7 @@ export function Calendar() {
                   shortcut: v.keys[0].toUpperCase(),
                 }))}
               />
-              {!isBoard && (
+              {isFc && (
                 <Button
                   variant={weekends ? "secondary" : "outline"}
                   size="icon"
@@ -2024,8 +2248,28 @@ export function Calendar() {
             </div>
           )}
 
+          {/* Planer trasy (mapa dnia) — zamiast siatki FullCalendar */}
+          {isRoute && (
+            <div
+              className={cn("alfa-calendar relative min-w-0", fit && "flex min-h-0 flex-1 flex-col")}
+              data-fit={fit ? "true" : undefined}
+            >
+              {!loadedOnce && <CalendarSkeleton columns={1} />}
+              <RoutePlanner
+                key={toDateStr(anchorDate)}
+                date={toDateStr(anchorDate)}
+                events={events}
+                technicians={technicians}
+                loading={loading}
+                fit={fit}
+                onOpenEvent={(ev) => openEvent(ev)}
+                onAnnounce={announce}
+              />
+            </div>
+          )}
+
           {/* Kalendarz */}
-          {!isBoard && (
+          {isFc && (
             <div
               ref={gridRef}
               className={cn("alfa-calendar relative", fit && "flex min-h-0 flex-1 flex-col")}
@@ -2053,6 +2297,10 @@ export function Calendar() {
                 expandRows={fit}
                 weekends={weekends}
                 nowIndicator
+                // Domyślnie FullCalendar nakłada równoległe wydarzenia na siebie z przesunięciem
+                // — tytuły wchodzą jeden na drugi i nic nie da się przeczytać. Dzielimy slot na
+                // kolumny: pojedyncze wydarzenie ma pełną szerokość, równoległe dzielą ją po równo.
+                slotEventOverlap={false}
                 slotMinTime="06:00:00"
                 slotMaxTime="20:00:00"
                 slotDuration="00:30:00"
@@ -2131,6 +2379,9 @@ export function Calendar() {
           />
         )}
 
+        {/* Formularz wydarzenia jako szuflada — zwęża kalendarz zamiast go zasłaniać */}
+        {docked && dialogOpen && eventEditor("drawer")}
+
         {/* Panel Asystent (wg status.allowed) */}
         {assistantOpen && assistantAllowed && (
           <AssistantDrawer
@@ -2144,6 +2395,19 @@ export function Calendar() {
         )}
       </div>
 
+      {/* Pas dojazdu — widoczny tylko pod kursorem, nie łapie zdarzeń myszy */}
+      {band && !preview && !ctxMenu && !dialogOpen && (
+        <div
+          className="cal-travel-band"
+          data-testid="travel-band"
+          style={{ left: band.left, top: band.top, width: band.width, height: band.height }}
+          data-clipped={band.clipped ? "true" : undefined}
+          aria-hidden
+        >
+          <span className="cal-travel-band-label">{band.label}</span>
+        </div>
+      )}
+
       {/* Podgląd wydarzenia (jeden klik) */}
       {preview && (
         <EventPreview
@@ -2152,7 +2416,7 @@ export function Calendar() {
           onClose={closePreview}
           onEdit={() => {
             closePreview();
-            openEvent(preview.ev);
+            openEvent(preview.ev, wide);
           }}
           onGoToObject={
             preview.ev.objectId ? () => navigate(`/objects/${preview.ev.objectId}`) : undefined
@@ -2161,34 +2425,8 @@ export function Calendar() {
         />
       )}
 
-      {/* Dialog wydarzenia */}
-      <CalendarEventDialog
-        key={dialogNonce}
-        open={dialogOpen}
-        mode={dialogMode}
-        event={dialogEvent}
-        prefill={dialogPrefill}
-        onClose={() => {
-          assistantSavedRef.current = null;
-          setDialogOpen(false);
-        }}
-        onSaved={(ev) => {
-          const fromAssistant = assistantSavedRef.current;
-          assistantSavedRef.current = null;
-          if (fromAssistant) {
-            // Propozycja asystenta zapisana z dialogu — toast + wpis systemowy w czacie.
-            fromAssistant(ev);
-            return;
-          }
-          announce(`Zapisano „${ev.title}”`);
-          void loadEvents();
-        }}
-        onDeleted={handleDeleted}
-        onNotesChanged={(id, count) =>
-          setAllEvents((list) => list.map((e) => (e.id === id ? { ...e, notesCount: count } : e)))
-        }
-        onOpenEvent={(id) => void openEventById(id)}
-      />
+      {/* Formularz wydarzenia — okno modalne (szuflada renderuje się w siatce wyżej) */}
+      {!docked && eventEditor("modal")}
 
       {/* Menu kontekstowe (prawy przycisk na wydarzeniu / pustym dniu) */}
       <ContextMenu
@@ -2235,7 +2473,7 @@ export function Calendar() {
           onClear={clearFilters}
           onClose={() => setFiltersOpen(false)}
         >
-          {!isBoard && (
+          {isFc && (
             <button
               type="button"
               aria-pressed={weekends}
@@ -2543,6 +2781,11 @@ function EventPreview({
   const meta = EVENT_TYPE_META[ev.type];
   const Icon = meta?.icon ?? Building2;
   const status = EVENT_STATUS_META[ev.status];
+  // Dojazd biuro → obiekt; przy urlopie i wydarzeniach bez obiektu nie ma czego liczyć.
+  const { travel, loading: travelLoading } = useTravel(ev.objectId, ev.type !== "urlop");
+  // Dzień widać z siatki kalendarza, więc jednodniowe wydarzenia pokazują sam zakres godzin.
+  const term = fmtRangeCompact(ev.startAt, ev.endAt, ev.allDay);
+  const travelText = travelSummary(travel, { startAt: ev.startAt, allDay: ev.allDay });
   const canMutate = editable && !ev.deletedAt;
   const overdue = isOverdue(ev, new Date());
   const notesCount = ev.notesCount ?? ev.notes?.length ?? 0;
@@ -2647,7 +2890,7 @@ function EventPreview({
       <dl className="space-y-1.5 px-3 py-2.5 text-xs">
         <div className="flex gap-2">
           <dt className="w-4 shrink-0 text-muted-foreground"><CalendarDays className="h-3.5 w-3.5" aria-label="Termin" /></dt>
-          <dd className="tabular-nums">{fmtRange(ev.startAt, ev.endAt, ev.allDay)}{ev.allDay && " · cały dzień"}</dd>
+          <dd className="tabular-nums">{term || "cały dzień"}{term && ev.allDay && " · cały dzień"}</dd>
         </div>
         {ev.objectName && (
           <div className="flex gap-2">
@@ -2661,14 +2904,22 @@ function EventPreview({
             <dd className="truncate">{ev.location}</dd>
           </div>
         )}
+        {(travelText || travelLoading) && (
+          <div className="flex gap-2" data-testid="preview-travel">
+            <dt className="w-4 shrink-0 text-muted-foreground"><Route className="h-3.5 w-3.5" aria-label="Dojazd" /></dt>
+            <dd className="min-w-0" {...tip(travelSourceLabel(travel, travelLoading) || undefined)}>
+              {travelText ?? "liczę…"}
+            </dd>
+          </div>
+        )}
         {ev.realization && (
           <div className="flex gap-2" data-testid="preview-realization">
             <dt className="w-4 shrink-0 text-muted-foreground"><Receipt className="h-3.5 w-3.5" aria-label="Realizacja" /></dt>
             <dd className="min-w-0 truncate">
+              {/* Obiekt jest już w wierszu wyżej — tu tylko rodzaj i kwota. */}
               {REALIZATION_KIND_LABEL[ev.realization.kind] ?? ev.realization.kind}
               {" · "}
               <span className="tabular-nums">{realizationMoney(ev.realization.total)}</span>
-              <span className="text-muted-foreground"> · {ev.realization.site}</span>
             </dd>
           </div>
         )}

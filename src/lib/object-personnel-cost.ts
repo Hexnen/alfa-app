@@ -195,6 +195,12 @@ export interface PersonnelCostResult {
   monthsUsed: number;
   /** Które to miesiące, od najstarszego. */
   months: MonthKey[];
+  /**
+   * Miesiące pominięte, bo mają wiersze płacowe, ale ŻADNEJ wprowadzonej kwoty —
+   * czekają na księgową. UI ma o nich powiedzieć wprost: inaczej „średnia z 3 (dane
+   * za 2)" wygląda na brak danych, a jest brakiem ROZLICZENIA konkretnego miesiąca.
+   */
+  skippedMonths: MonthKey[];
   /** Ile pozycji słownika kadrowego ma mapowanie na kartotekę. */
   mappedObjects: number;
   /** Ile pozycji słownika kadrowego jest w ogóle — do przypisu „12 z 44". */
@@ -247,6 +253,7 @@ interface WindowComputation {
   cma: CmaAllocationInfo;
   byEmployeeId: Map<number, number>;
   months: MonthKey[];
+  skippedMonths: MonthKey[];
   mappedObjects: number;
   hrObjectsTotal: number;
   unmappedHoursShare: number;
@@ -483,6 +490,8 @@ function computeWindow(window: CostWindow, now = new Date()): WindowComputation 
   const objectTotals = new Map<number, number>(); // objects.id → suma zł z okna
   const employeeTotals = new Map<number, number>(); // hr_employees.id → suma zł z okna
   const usedMonths: MonthKey[] = [];
+  /** Miesiące z wierszami, ale bez kwot — czekają na księgową. */
+  const skippedMonths: MonthKey[] = [];
   let cmaPoolCost = 0; // suma zł z okna, która trafiła na pozycje puli CMA
   let mappedHours = 0;
   let cmaHours = 0;
@@ -496,10 +505,31 @@ function computeWindow(window: CostWindow, now = new Date()): WindowComputation 
     const key = ymKey(m.year, m.month);
     const monthPayroll: HrPayroll[] = payrollByMonth.get(key) ?? [];
     const monthOffice = officeByMonth.get(key) ?? [];
-    // Miesiąc bez ŻADNYCH danych płacowych nie jest „miesiącem z kosztem zero" —
-    // to miesiąc, którego jeszcze nie wprowadzono. Wliczony do mianownika
-    // rozcieńczyłby średnią (3 miesiące danych podzielone przez 12).
-    if (monthPayroll.length === 0 && monthOffice.length === 0) continue;
+    /*
+     * Miesiąc niewprowadzony NIE jest miesiącem o koszcie zero — wliczony do
+     * mianownika rozcieńcza średnią.
+     *
+     * Sprawdzamy WPROWADZONE KWOTY, a nie istnienie wierszy. Godziny importuje
+     * się wcześniej niż kwoty od księgowości, więc miesiąc czekający na
+     * rozliczenie ma komplet wierszy z `main_amount = NULL` — i wcześniejszy
+     * warunek (`length === 0`) brał go za policzony. Na produkcji był to
+     * czerwiec 2026: 90 wierszy, ZERO kwot, przy 470 tys. w maju i 484 tys.
+     * w lipcu. Domyślne okno 3 miesięcy dzieliło koszt przez trzy zamiast przez
+     * dwa i pokazywało firmie +9,9% marży zamiast −2,2%.
+     *
+     * Wszystkie pozostałe miesiące mają kwoty w 100% wierszy, więc nie ma tu
+     * strefy szarej: albo księgowa wprowadziła miesiąc, albo nie.
+     */
+    const hasPayrollAmounts = monthPayroll.some((r) => r.mainAmount != null);
+    const hasOfficeAmounts = monthOffice.some((r) => r.amount != null);
+    if (!hasPayrollAmounts && !hasOfficeAmounts) continue;
+    if (monthPayroll.length > 0 && !hasPayrollAmounts) {
+      // Wiersze są, kwot nie ma: miesiąc czeka na księgową. Biuro bywa już
+      // rozliczone, ale ochrona to ~90% kosztu, więc taki miesiąc nie opisuje
+      // żadnej realnej stawki miesięcznej. Zgłaszamy go osobno.
+      skippedMonths.push(m);
+      continue;
+    }
     usedMonths.push(m);
 
     const monthHours: HrHours[] = hoursByMonth.get(key) ?? [];
@@ -659,6 +689,7 @@ function computeWindow(window: CostWindow, now = new Date()): WindowComputation 
     },
     byEmployeeId,
     months: usedMonths,
+    skippedMonths,
     mappedObjects: objectOf.size,
     hrObjectsTotal: hrObjectRows.length,
     // Godziny bez ani jednego wpisu w oknie → 0, a nie NaN: „nic nie uciekło
@@ -803,6 +834,7 @@ export function computeObjectPersonnelCost(
     cma: c.cma,
     monthsUsed: c.months.length,
     months: c.months,
+    skippedMonths: c.skippedMonths,
     mappedObjects: c.mappedObjects,
     hrObjectsTotal: c.hrObjectsTotal,
     unmappedHoursShare: c.unmappedHoursShare,

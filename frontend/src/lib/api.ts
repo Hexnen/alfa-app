@@ -1196,6 +1196,72 @@ export interface CompanyOffice {
   lng: number | null;
 }
 
+/** Dojazd biuro → obiekt, w jedną stronę (GET /company/travel). */
+export interface CompanyTravel {
+  objectId: number;
+  km: number | null;
+  minutes: number | null;
+  method: "route" | "straight" | null;
+  /** true = czas ze średniej prędkości, nie z trasy OSRM. */
+  minutesEstimated: boolean;
+  cached: boolean;
+  /** true = wynik tymczasowy, trasa dolicza się w tle — warto zapytać ponownie. */
+  pending: boolean;
+  from: { lat: number; lng: number; label: string } | null;
+  to: { lat: number; lng: number; label: string } | null;
+  /** Komunikat PL (brak adresu, tryb ręczny, brak sieci) — wtedy km/minutes są null. */
+  error: string | null;
+}
+
+/** Dlaczego wydarzenie nie weszło na trasę planera. */
+export type DayRouteSkip = "no-object" | "no-coords" | "all-day" | "off-site" | "cancelled" | "limit";
+
+/** Punkt na trasie dnia: biuro albo obiekt. */
+export interface DayRoutePoint {
+  /** "office" albo "obj:<id>" — spina punkt z macierzą i z wydarzeniami. */
+  key: string;
+  kind: "office" | "object";
+  objectId: number | null;
+  label: string;
+  address: string | null;
+  city: string | null;
+  lat: number;
+  lng: number;
+}
+
+export interface DayRouteEventRef {
+  eventId: number;
+  /** Klucz punktu; null zawsze razem z `skip`. */
+  pointKey: string | null;
+  skip: DayRouteSkip | null;
+  skipMessage: string | null;
+}
+
+/** Macierz odległości dnia — ASYMETRYCZNA (jednokierunkowe, zakazy skrętu). */
+export interface DayRouteMatrix {
+  keys: string[];
+  km: number[][];
+  minutes: number[][];
+  method: ("route" | "straight")[][];
+}
+
+/**
+ * Surowce planera trasy (GET /calendar/day-route). Celowo BEZ danych kosztowych —
+ * stawki zostają w panelu admina (patrz komentarz w src/routes/company.ts).
+ */
+export interface DayRoute {
+  date: string;
+  office: DayRoutePoint | null;
+  officeError: string | null;
+  points: DayRoutePoint[];
+  events: DayRouteEventRef[];
+  matrix: DayRouteMatrix | null;
+  /** true = część par to jeszcze linia prosta; trasy doliczają się w tle. */
+  pending: boolean;
+  truncated: number;
+  notes: string[];
+}
+
 /** Ślad automatu przy pojedynczym polu realizacji (kolumna `autofill`). */
 export interface AutofillMark {
   source?: string;
@@ -1335,6 +1401,42 @@ export async function getRealizationSummary(year: number, month: number) {
  */
 export async function getCompanyOffice() {
   return request<ApiResponse<CompanyOffice>>("/company/office");
+}
+
+/**
+ * Dystans i przewidywany czas dojazdu z biura do obiektu. `null` = starszy backend
+ * bez tej trasy albo błąd sieci — pole „Dojazd” jest informacyjne i nie może niczego blokować.
+ */
+export async function getCompanyTravel(objectId: number): Promise<CompanyTravel | null> {
+  try {
+    const res = await request<ApiResponse<CompanyTravel>>(`/company/travel?objectId=${objectId}`);
+    return res.data ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Dojazd dla wielu obiektów naraz — dymki kalendarza pytają o cały widok jednym zapytaniem.
+ * Pusta tablica = starszy backend bez trybu zbiorczego albo błąd; wołający ponowi przy
+ * następnym odświeżeniu widoku.
+ */
+export async function getCompanyTravelBatch(objectIds: number[]): Promise<CompanyTravel[]> {
+  if (objectIds.length === 0) return [];
+  // Backend przyjmuje 200 id na raz (COMPANY_TRAVEL_BATCH_LIMIT) — dzielimy, żeby wołający
+  // nie musiał pilnować limitu.
+  const chunks: number[][] = [];
+  for (let i = 0; i < objectIds.length; i += 200) chunks.push(objectIds.slice(i, i + 200));
+  try {
+    const results = await Promise.all(
+      chunks.map((chunk) =>
+        request<ApiResponse<CompanyTravel[]>>(`/company/travel?objectIds=${chunk.join(",")}`)
+      )
+    );
+    return results.flatMap((r) => r.data ?? []);
+  } catch {
+    return [];
+  }
 }
 
 export async function createRealization(data: RealizationInput) {
@@ -4104,6 +4206,17 @@ export const calendarApi = {
     );
   },
 
+  /**
+   * Punkty i macierz odległości dla planera trasy. Backend odpowiada z cache'u,
+   * więc `pending: true` znaczy „trasa dolicza się w tle” — warto dopytać za chwilę.
+   * `eventIds` zawęża plan do wydarzeń widocznych po filtrach widoku.
+   */
+  async getDayRoute(date: string, eventIds?: number[]) {
+    const sp = new URLSearchParams({ date });
+    if (eventIds?.length) sp.set("eventIds", eventIds.join(","));
+    return request<ApiResponse<DayRoute>>(`/calendar/day-route?${sp.toString()}`);
+  },
+
   async create(data: CalendarEventInput) {
     return request<ApiResponse<CalendarEvent>>("/calendar/events", {
       method: "POST",
@@ -5438,6 +5551,12 @@ export interface PersonnelInfo {
   monthsUsed: number;
   /** Które to miesiące, od najstarszego. */
   months: Array<{ year: number; month: number }>;
+  /**
+   * Miesiące pominięte w średniej, bo mają wiersze płacowe bez kwot — czekają
+   * na księgową. Wymień je w przypisie: sam licznik „dane za 2 z 3" wygląda na
+   * awarię, a to brak rozliczenia konkretnego miesiąca.
+   */
+  skippedMonths: Array<{ year: number; month: number }>;
   /** Ile pozycji słownika kadrowego ma mapowanie na kartotekę obiektów. */
   mappedObjects: number;
   /** Ile pozycji kadrowych jest w ogóle — do przypisu „12 z 44". */

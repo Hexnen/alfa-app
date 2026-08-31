@@ -124,6 +124,13 @@ export interface PersonnelInfo {
   costWindow: CostWindow;
   monthsUsed: number;
   months: Array<{ year: number; month: number }>;
+  /**
+   * Miesiące z wierszami płacowymi, ale bez wprowadzonych kwot — czekają na
+   * księgową i są POMIJANE w średniej. UI ma je wymienić z nazwy: „średnia z 3
+   * (dane za 2)" bez wskazania miesiąca wygląda na awarię, a jest brakiem
+   * rozliczenia konkretnego okresu, który ktoś może domknąć.
+   */
+  skippedMonths: Array<{ year: number; month: number }>;
   mappedObjects: number;
   hrObjectsTotal: number;
   unmappedHoursShare: number;
@@ -148,6 +155,7 @@ function personnelInfo(costWindow: CostWindow, p: PersonnelCostResult): Personne
     costWindow,
     monthsUsed: p.monthsUsed,
     months: p.months,
+    skippedMonths: p.skippedMonths,
     mappedObjects: p.mappedObjects,
     hrObjectsTotal: p.hrObjectsTotal,
     unmappedHoursShare: p.unmappedHoursShare,
