@@ -128,7 +128,10 @@ export function ObjectForm({
     installationType: object?.installationType || "new",
     status: object?.status || "pending",
     department: object?.department || "sales",
-    monthlyValue: object?.monthlyValue || undefined,
+    // `?? null`, nie `|| undefined`: pusty abonament musi POJECHAĆ do backendu
+    // jako null (żeby go wyczyścić), a 0 zł to świadomy wpis, nie brak danych.
+    monthlyValue: object?.monthlyValue ?? null,
+    monthlyRental: object?.monthlyRental ?? null,
     monthlyCost: object?.monthlyCost ?? null,
     setupCost: object?.setupCost ?? null,
     salespersonId: object?.salespersonId ?? null,
@@ -179,7 +182,11 @@ export function ObjectForm({
     const { name, value, type } = e.target;
     setFormData((prev) => ({
       ...prev,
-      [name]: type === "number" ? (value ? parseFloat(value) : undefined) : value,
+      // Puste pole liczbowe → `null` („wyczyść”), a nie `undefined`.
+      // `undefined` wypada z JSON.stringify, więc PUT /objects/:id (`.set({ ...body })`)
+      // po prostu nie dostawał tego klucza i stara kwota zostawała w bazie —
+      // czyszczenie abonamentu nic nie robiło. Ta sama reguła co w `parseCost`.
+      [name]: type === "number" ? parseCost(value) : value,
     }));
   };
 
@@ -197,10 +204,16 @@ export function ObjectForm({
    * — wtedy marży nie da się policzyć i mówimy o tym wprost.
    */
   const marginHint = (() => {
-    const value = formData.monthlyValue;
+    // Przychód miesięczny to abonament PLUS dzierżawa sprzętu — klient płaci
+    // obie pozycje, więc marża liczona z samego abonamentu byłaby zaniżona.
+    const hasAny =
+      formData.monthlyValue !== null && formData.monthlyValue !== undefined
+        ? true
+        : formData.monthlyRental !== null && formData.monthlyRental !== undefined;
+    const value = (formData.monthlyValue ?? 0) + (formData.monthlyRental ?? 0);
     const cost = formData.monthlyCost;
     if (cost === null || cost === undefined) return "Marża: — (uzupełnij koszt)";
-    if (value === null || value === undefined) return "Marża: — (uzupełnij wartość miesięczną)";
+    if (!hasAny) return "Marża: — (uzupełnij wartość miesięczną)";
     const profit = value - cost;
     const pct = value > 0 ? Math.round((profit / value) * 100) : null;
     let text = `Marża: ${formatCurrency(profit)}${pct !== null ? ` (${pct}%)` : ""}`;
@@ -581,13 +594,31 @@ export function ObjectForm({
                       tu wprost ze zlecenia („Abonament (zł netto)"), więc pole
                       musi mówić tym samym językiem, co formularz, z którego
                       kwota przyszła. */}
-                  <Label htmlFor="monthlyValue">Wartość miesięczna (zł netto)</Label>
+                  <Label htmlFor="monthlyValue">Abonament (zł netto/mies.)</Label>
+                  {/* `?? ""` zamiast `|| ""` — 0 zł to wpisana kwota („obiekt bez
+                      abonamentu”), a `|| ""` zamieniałby ją w puste pole. */}
                   <Input
                     id="monthlyValue"
                     name="monthlyValue"
                     type="number"
                     step="0.01"
-                    value={formData.monthlyValue || ""}
+                    value={formData.monthlyValue ?? ""}
+                    onChange={handleChange}
+                  />
+                </div>
+                <div className="space-y-2">
+                  {/* Osobno od abonamentu, bo to inny tytuł płatności — najem
+                      sprzętu, nie usługa. Przychód obiektu to suma obu. */}
+                  <Label htmlFor="monthlyRental">Dzierżawa sprzętu (zł netto/mies.)</Label>
+                  <Input
+                    id="monthlyRental"
+                    name="monthlyRental"
+                    data-testid="object-monthly-rental"
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    className="tabular-nums"
+                    value={formData.monthlyRental ?? ""}
                     onChange={handleChange}
                   />
                 </div>

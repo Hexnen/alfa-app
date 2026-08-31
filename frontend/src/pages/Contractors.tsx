@@ -310,7 +310,7 @@ export function Contractors() {
                     const active = contractor.activeObjectsCount ?? 0;
                     const value =
                       contractor.objectsMonthlyValue ??
-                      rows.reduce((a, o) => a + (o.monthlyValue ?? 0), 0);
+                      rows.reduce((a, o) => a + (o.monthlyValue ?? 0) + (o.monthlyRental ?? 0), 0);
                     return (
                       <Fragment key={contractor.id}>
                         <tr className="border-b hover:bg-muted/50">
@@ -493,8 +493,12 @@ export function Contractors() {
                                             {statusLabels[o.status] || o.status}
                                           </Badge>
                                         </td>
+                                        {/* Przychód = abonament + dzierżawa sprzętu. */}
                                         <td className="py-1.5 px-2 text-right tabular-nums">
-                                          {formatCurrency(o.monthlyValue)}
+                                          {formatCurrency(
+                                            (o.monthlyValue ?? 0) +
+                                              (o.monthlyRental ?? 0)
+                                          )}
                                         </td>
                                         {/* Brak kosztu = nieuzupełniony, nie 0 zł. */}
                                         <td className="py-1.5 px-2 text-right tabular-nums">
@@ -509,44 +513,85 @@ export function Contractors() {
                                             <span className="text-muted-foreground">—</span>
                                           ) : (
                                             formatCurrency(
-                                              (o.monthlyValue ?? 0) - o.monthlyCost
+                                              (o.monthlyValue ?? 0) +
+                                                (o.monthlyRental ?? 0) -
+                                                o.monthlyCost
                                             )
                                           )}
                                         </td>
                                       </tr>
                                     ))}
-                                    <tr className="border-t">
-                                      <td
-                                        className="py-1.5 pl-6 pr-2 font-medium"
-                                        colSpan={4}
-                                      >
-                                        Razem: {rows.length}{" "}
-                                        {rows.length === 1 ? "obiekt" : "obiektów"}
-                                      </td>
-                                      <td className="py-1.5 px-2 text-right font-medium tabular-nums">
-                                        {formatCurrency(
-                                          rows.reduce(
-                                            (a, o) => a + (o.monthlyValue ?? 0),
-                                            0
-                                          )
-                                        )}{" "}
-                                        / mies.
-                                      </td>
-                                      <td className="py-1.5 px-2 text-right font-medium tabular-nums">
-                                        {formatCurrency(
-                                          rows.reduce((a, o) => a + (o.monthlyCost ?? 0), 0)
-                                        )}
-                                      </td>
-                                      <td className="py-1.5 px-2 text-right font-medium tabular-nums">
-                                        {formatCurrency(
-                                          rows.reduce(
-                                            (a, o) =>
-                                              a + (o.monthlyValue ?? 0) - (o.monthlyCost ?? 0),
-                                            0
-                                          )
-                                        )}
-                                      </td>
-                                    </tr>
+                                    {(() => {
+                                      // Przychód sumuje się po WSZYSTKICH obiektach,
+                                      // a koszt tylko po tych z uzupełnioną kwotą —
+                                      // więc różnica jest zyskiem WYŁĄCZNIE przy
+                                      // komplecie kosztów. Bez tej bramki VITROMET
+                                      // pokazywał „23 610 zł zysku”, mając „—” w
+                                      // koszcie trzech z czterech obiektów. Wiersze
+                                      // pojedyncze robią to samo od zawsze (`—`),
+                                      // podsumowanie im dotąd przeczyło.
+                                      const missing = rows.filter(
+                                        (o) => o.monthlyCost === null
+                                      ).length;
+                                      const known = rows.length - missing;
+                                      const value = rows.reduce(
+                                        (a, o) =>
+                                          a + (o.monthlyValue ?? 0) + (o.monthlyRental ?? 0),
+                                        0
+                                      );
+                                      const cost = rows.reduce(
+                                        (a, o) => a + (o.monthlyCost ?? 0),
+                                        0
+                                      );
+                                      return (
+                                        <tr className="border-t">
+                                          <td
+                                            className="py-1.5 pl-6 pr-2 font-medium"
+                                            colSpan={4}
+                                          >
+                                            Razem: {rows.length}{" "}
+                                            {rows.length === 1 ? "obiekt" : "obiektów"}
+                                            {missing > 0 && (
+                                              <span className="ml-1 font-normal text-muted-foreground">
+                                                · koszt uzupełniony w {known} z{" "}
+                                                {rows.length}
+                                              </span>
+                                            )}
+                                          </td>
+                                          <td className="py-1.5 px-2 text-right font-medium tabular-nums">
+                                            {formatCurrency(value)} / mies.
+                                          </td>
+                                          <td
+                                            className="py-1.5 px-2 text-right font-medium tabular-nums"
+                                            title={
+                                              missing > 0
+                                                ? `Suma z ${known} obiektów; ${missing} bez uzupełnionego kosztu`
+                                                : undefined
+                                            }
+                                          >
+                                            {known > 0 ? (
+                                              formatCurrency(cost)
+                                            ) : (
+                                              <span className="text-muted-foreground">—</span>
+                                            )}
+                                          </td>
+                                          <td
+                                            className="py-1.5 px-2 text-right font-medium tabular-nums"
+                                            title={
+                                              missing > 0
+                                                ? `Zysku nie da się policzyć: ${missing} ${missing === 1 ? "obiekt nie ma" : "obiektów nie ma"} uzupełnionego kosztu`
+                                                : undefined
+                                            }
+                                          >
+                                            {missing === 0 && rows.length > 0 ? (
+                                              formatCurrency(value - cost)
+                                            ) : (
+                                              <span className="text-muted-foreground">—</span>
+                                            )}
+                                          </td>
+                                        </tr>
+                                      );
+                                    })()}
                                   </tbody>
                                 </table>
                               )}

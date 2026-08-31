@@ -20,7 +20,8 @@ import {
  * kontrahenci, obiekty i handlowcy w ujęciu przychód / koszt / zysk.
  *
  * Cały moduł stoi na jednym słowniku pojęć liczonym per obiekt:
- *   revenue       = coalesce(monthly_value, 0)          — abonament
+ *   revenue       = coalesce(monthly_value,0) + coalesce(monthly_rental,0)
+ *                                                       — abonament + dzierżawa sprzętu
  *   personnelCost = personnelDirectCost + personnelCmaCost — koszt osobowy z Kadr
  *   personnelDirectCost = wypłaty × godziny NA TYM obiekcie (ochrona fizyczna)
  *   personnelCmaCost    = udział w koszcie centrum monitorowania, dzielonym po
@@ -29,7 +30,7 @@ import {
  *   otherCost     = coalesce(monthly_cost, 0)           — monitoring, sprzęt, abonamenty
  *   cost          = personnelCost + otherCost           — KOSZT CAŁKOWITY
  *   profit        = revenue - cost
- *   hasCost       = monthly_cost IS NOT NULL || personnelCost > 0
+ *   hasCost       = monthly_cost IS NOT NULL || personnelDirectCost > 0
  *   setup         = coalesce(setup_cost, 0)             — jednorazowe wdrożenie
  *   margin        = revenue > 0 ? profit / revenue * 100 : null
  *   payback       = setup > 0 && profit > 0 ? ceil(setup / profit) : null  (w miesiącach)
@@ -275,6 +276,7 @@ async function loadObjectRows(
       contractorSalespersonId: schema.contractors.salespersonId,
       companyName: schema.companies.name,
       monthlyValue: schema.objects.monthlyValue,
+      monthlyRental: schema.objects.monthlyRental,
       monthlyCost: schema.objects.monthlyCost,
       objectSetupCost: schema.objects.setupCost,
       objectSalesId: objectSalesperson.id,
@@ -292,7 +294,10 @@ async function loadObjectRows(
     .where(SCOPE_WHERE[scope]);
 
   return rows.map((r) => {
-    const revenue = r.monthlyValue ?? 0;
+    // Przychód miesięczny to abonament ORAZ dzierżawa sprzętu — klient płaci
+    // obie pozycje co miesiąc. Do sierpnia 2026 liczył się sam abonament, przez
+    // co obiekty ze sprzętem w najmie wyglądały na dużo mniej rentowne.
+    const revenue = (r.monthlyValue ?? 0) + (r.monthlyRental ?? 0);
     // Koszt osobowy z Kadr i koszt pozostały z kartoteki SUMUJĄ SIĘ.
     const personnelCost = personnel.byObjectId.get(r.id) ?? 0;
     // ...a sam koszt osobowy składa się z dwóch ścieżek, które też się SUMUJĄ:
@@ -306,7 +311,22 @@ async function loadObjectRows(
     const setupCost = r.objectSetupCost ?? 0;
     // Koszt 0 zł to informacja, NULL to jej brak — ale gdy z Kadr spłynęła choćby
     // złotówka, koszt tego obiektu ZNAMY, nawet jeśli nikt nie wypełnił `monthly_cost`.
-    const hasCost = r.monthlyCost !== null || personnelCost > 0;
+    /*
+     * „Znamy koszt tego obiektu" to koszt WPISANY albo godziny ludzi pracujących
+     * NA NIM — nie udział w puli centrum monitorowania.
+     *
+     * Udział CMA dostaje automatycznie każdy aktywny obiekt z kamerami albo
+     * SSWiN-em, więc warunek `personnelCost > 0` zapalał `hasCost` praktycznie
+     * wszędzie i unieważniał regułę „NULL ≠ 0", o którą walczy nagłówek tego
+     * pliku. Na produkcji 15 obiektów bez ŻADNEJ wiedzy o koszcie pokazywało
+     * przez to marże 98,6% / 93,9% / 88,7%, a pokrycie raportowało 90% zamiast
+     * realnych 77%. To jest dokładnie „najgorsze możliwe kłamstwo tego modułu",
+     * tylko wprowadzone okrężną drogą.
+     *
+     * Udział CMA nadal WCHODZI do kosztu i zysku — jest realnym wydatkiem.
+     * Nie czyni jednak kosztu obiektu ZNANYM, więc nie zapala marży.
+     */
+    const hasCost = r.monthlyCost !== null || personnelDirectCost > 0;
     return {
       id: r.id,
       name: r.name,

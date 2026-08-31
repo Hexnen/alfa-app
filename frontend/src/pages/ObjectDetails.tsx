@@ -289,11 +289,13 @@ export function ObjectDetails() {
   // więc zysku ani marży nie liczymy — inaczej każdy pusty obiekt miałby 100%.
   const monthlyCost = object.monthlyCost ?? null;
   const setupCost = object.setupCost ?? null;
-  const monthlyProfit = monthlyCost === null ? null : (object.monthlyValue ?? 0) - monthlyCost;
+  // Przychód miesięczny = abonament + dzierżawa sprzętu (klient płaci obie pozycje).
+  const monthlyRevenue = (object.monthlyValue ?? 0) + (object.monthlyRental ?? 0);
+  const monthlyProfit = monthlyCost === null ? null : monthlyRevenue - monthlyCost;
   const marginPct =
-    monthlyProfit === null || !object.monthlyValue
+    monthlyProfit === null || !monthlyRevenue
       ? null
-      : Math.round((monthlyProfit / object.monthlyValue) * 100);
+      : Math.round((monthlyProfit / monthlyRevenue) * 100);
 
   const actionLabels: Record<string, string> = {
     created: "Utworzono",
@@ -362,10 +364,16 @@ export function ObjectDetails() {
               </div>
               <div>
                 <dt className="text-sm text-muted-foreground">
-                  Wartosc miesieczna
+                  Przychód miesięczny
                 </dt>
                 <dd className="font-medium">
-                  {formatCurrency(object.monthlyValue)}
+                  {formatCurrency(monthlyRevenue)}
+                  {object.monthlyRental ? (
+                    <div className="text-xs font-normal text-muted-foreground">
+                      abonament {formatCurrency(object.monthlyValue)} + dzierżawa{" "}
+                      {formatCurrency(object.monthlyRental)}
+                    </div>
+                  ) : null}
                 </dd>
               </div>
               {/* Koszty: pusty koszt to „nieuzupełniony”, a nie 0 zł — dlatego

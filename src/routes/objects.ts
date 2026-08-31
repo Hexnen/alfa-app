@@ -61,11 +61,12 @@ const SORT_COLUMNS = {
   company: sql`lower(coalesce(${schema.companies.name}, 'zzzz'))`,
   // Handlowiec obiektu, a gdy go nie ma — opiekun kontrahenta (tak samo pokazuje to lista).
   salesperson: sql`lower(coalesce(${objectSalesperson.lastName}, ${contractorSalesperson.lastName}, 'zzzz'))`,
-  value: sql`${schema.objects.monthlyValue}`,
+  // Przychód miesięczny = abonament + dzierżawa sprzętu (klient płaci obie pozycje).
+  value: sql`coalesce(objects.monthly_value, 0) + coalesce(objects.monthly_rental, 0)`,
   cost: sql`${schema.objects.monthlyCost}`,
   // Nazwy kolumn piszemy DOSŁOWNIE, bo coalesce z dwóch kolumn tej samej tabeli
   // i tak nie skorzysta z aliasu drizzle — a zapis kwalifikowany jest jednoznaczny.
-  profit: sql`coalesce(objects.monthly_value, 0) - coalesce(objects.monthly_cost, 0)`,
+  profit: sql`coalesce(objects.monthly_value, 0) + coalesce(objects.monthly_rental, 0) - coalesce(objects.monthly_cost, 0)`,
   created: sql`${schema.objects.createdAt}`,
 } as const;
 
@@ -143,18 +144,25 @@ app.get("/", async (c) => {
     conditions.push(eq(schema.objects.contractorId, parseInt(contractorId)));
   }
 
-  // Wartość miesięczna: widełki i „ma / nie ma abonamentu”. Obiekt bez kwoty (NULL)
-  // nigdy nie wpada w widełki — brak wartości to nie jest zero.
+  // Wartość miesięczna: widełki i „ma / nie ma przychodu”. Filtrujemy po SUMIE
+  // abonamentu i dzierżawy — dla klienta to jedna kwota płacona co miesiąc, a
+  // obiekt z samą dzierżawą też ma przychód i nie może wypaść z widełek.
+  // Obiekt bez żadnej z kwot ma sumę 0 i nie trafia w widełki dodatnie.
+  const monthlyRevenueSql = sql`coalesce(objects.monthly_value, 0) + coalesce(objects.monthly_rental, 0)`;
+  // Obiekt bez ŻADNEJ z dwóch kwot nie wpada w widełki — brak wartości to nie
+  // jest zero. Sam `coalesce(...)` by go wpuszczał: „do 500 zł" łapałoby też
+  // obiekty, którym nikt nic nie wpisał, i to był niezmiennik sprzed dzierżawy.
+  const hasAnyRevenueSql = sql`(objects.monthly_value is not null or objects.monthly_rental is not null)`;
   if (minValue !== undefined) {
-    conditions.push(gte(schema.objects.monthlyValue, minValue));
+    conditions.push(sql`${hasAnyRevenueSql} and ${monthlyRevenueSql} >= ${minValue}`);
   }
   if (maxValue !== undefined) {
-    conditions.push(lte(schema.objects.monthlyValue, maxValue));
+    conditions.push(sql`${hasAnyRevenueSql} and ${monthlyRevenueSql} <= ${maxValue}`);
   }
   if (hasValue === "1") {
-    conditions.push(sql`${schema.objects.monthlyValue} is not null and ${schema.objects.monthlyValue} > 0`);
+    conditions.push(sql`${monthlyRevenueSql} > 0`);
   } else if (hasValue === "0") {
-    conditions.push(sql`${schema.objects.monthlyValue} is null or ${schema.objects.monthlyValue} = 0`);
+    conditions.push(sql`${monthlyRevenueSql} = 0`);
   }
 
   // Koszt miesięczny: te same widełki, ale „ma koszt” to wyłącznie IS NOT NULL —
@@ -207,9 +215,11 @@ app.get("/", async (c) => {
   // koszcie czy zysku pokazywałoby najpierw obiekty bez wpisanych kwot. Przy zysku „puste”
   // to dopiero brak OBU składników: sam brak kosztu wciąż mówi coś o przychodzie.
   const NULLS_LAST: Partial<Record<ObjectSortKey, SQL>> = {
-    value: sql`case when objects.monthly_value is null then 1 else 0 end`,
+    // „Puste" przy przychodzie to brak OBU kwot — sama dzierżawa bez abonamentu
+    // jest wypełnioną informacją i nie może lądować na końcu listy.
+    value: sql`case when objects.monthly_value is null and objects.monthly_rental is null then 1 else 0 end`,
     cost: sql`case when objects.monthly_cost is null then 1 else 0 end`,
-    profit: sql`case when objects.monthly_value is null and objects.monthly_cost is null then 1 else 0 end`,
+    profit: sql`case when objects.monthly_value is null and objects.monthly_rental is null and objects.monthly_cost is null then 1 else 0 end`,
   };
   const column = SORT_COLUMNS[sort];
   const direction = dir === "desc" ? desc : asc;
@@ -257,8 +267,9 @@ app.get("/", async (c) => {
   const summaryRows = await db
     .select({
       count: sql<number>`count(*)`,
-      sum: sql<number | null>`sum(${schema.objects.monthlyValue})`,
-      withValue: sql<number>`sum(case when ${schema.objects.monthlyValue} is not null and ${schema.objects.monthlyValue} > 0 then 1 else 0 end)`,
+      // Suma przychodu miesięcznego: abonament + dzierżawa sprzętu.
+      sum: sql<number | null>`sum(coalesce(objects.monthly_value, 0) + coalesce(objects.monthly_rental, 0))`,
+      withValue: sql<number>`sum(case when coalesce(objects.monthly_value, 0) + coalesce(objects.monthly_rental, 0) > 0 then 1 else 0 end)`,
       sumCost: sql<number | null>`sum(${schema.objects.monthlyCost})`,
       sumSetup: sql<number | null>`sum(${schema.objects.setupCost})`,
       // Licznik uzupełnionych kosztów — front musi wiedzieć, na ilu obiektach opiera się
@@ -395,6 +406,7 @@ app.post("/", async (c) => {
         monthlyValue: body.monthlyValue,
         // Lista pól jest tu wypisana jawnie (bez spreadu body), więc każdy nowy
         // atrybut trzeba dopisać — inaczej edycja go zapisuje, a zakładanie gubi.
+        monthlyRental: body.monthlyRental ?? null,
         monthlyCost: body.monthlyCost ?? null,
         setupCost: body.setupCost ?? null,
         notes: body.notes,

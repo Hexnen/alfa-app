@@ -99,6 +99,29 @@ export interface CompanySettingsValues {
   kmSource: KmSource;
   /** Narzut procentowy na materiały z protokołu (0 = bez narzutu). */
   materialMarkup: number;
+  /**
+   * Narzut procentowy na towary z magazynu — z niego liczy się cena sprzedaży
+   * towaru, który nie ma własnej (`warehouse_items.sale_price` = NULL).
+   *
+   * CELOWO OSOBNY od `materialMarkup`: tamten dotyczy materiałów przepisywanych
+   * z protokołu na wycenę powykonawczą po cenach CENNIKA, ten — sprzedaży towaru
+   * z kartoteki magazynu po cenie ZAKUPU. Sklejenie ich zmieniłoby po cichu
+   * kwoty w działającym automacie protokół → wycena.
+   */
+  warehouseMarkup: number;
+  /**
+   * Próg marży (%) — poniżej niego oferta i jej pozycje są oznaczane na czerwono.
+   * 0 = bez ostrzeżeń.
+   */
+  minMarginPct: number;
+  /**
+   * Domyślny procent ROCZNY dzierżawy sprzętu. Rata = wartość sprzętu × ten
+   * procent ÷ 12, więc 117% znaczy, że w rok najem zwraca nieco więcej niż
+   * wartość sprzętu — tak wycenia się dzierżawę z obsługą, a nie sprzedaż
+   * ratalną. Podpowiadany przy włączaniu dzierżawy; na ofercie zawsze można
+   * go nadpisać.
+   */
+  leaseAnnualRate: number;
   /*
    * NARZUTY SKŁADEK PRACODAWCY — współczynniki, przez które moduł kosztu osobowego
    * (src/lib/object-personnel-cost.ts) mnoży wypłatę NETTO, żeby dostać szacunkowy
@@ -163,6 +186,9 @@ export const COMPANY_DEFAULTS: CompanySettingsValues = {
   kmRoundTrip: true,
   kmSource: "route",
   materialMarkup: 0,
+  warehouseMarkup: 0,
+  minMarginPct: 0,
+  leaseAnnualRate: 117,
   employerMarkupUop: 1.65,
   employerMarkupZlecenieZua: 1.59,
   employerMarkupZlecenieZza: 1.22,
@@ -393,6 +419,9 @@ export const COMPANY_FIELDS: { [K in CompanySettingField]: CompanyFieldDef<Compa
   kmRoundTrip: booleanField("company.km_round_trip", "Dystans w obie strony"),
   kmSource: kmSourceField,
   materialMarkup: numberField("company.material_markup", "Narzut na materiały", { min: -100, max: 1000, unit: "%" }),
+  warehouseMarkup: numberField("company.warehouse_markup", "Narzut na towary z magazynu", { min: -100, max: 1000, unit: "%" }),
+  minMarginPct: numberField("company.min_margin_pct", "Minimalna marża (ostrzeżenie)", { min: 0, max: 100, unit: "%" }),
+  leaseAnnualRate: numberField("company.lease_annual_rate", "Dzierżawa — procent roczny", { min: 0, max: 1000, unit: "%" }),
   employerMarkupUop: markupField("company.employer_markup_uop", "Narzut składek — umowa o pracę"),
   employerMarkupZlecenieZua: markupField(
     "company.employer_markup_zlecenie_zua",

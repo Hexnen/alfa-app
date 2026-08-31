@@ -21,6 +21,8 @@ import { Analityka, AnalitykaRedirect } from "./pages/Analityka";
 import { Monitoring } from "./pages/Monitoring";
 import { Templates } from "./pages/Templates";
 import { Warehouse } from "./pages/Warehouse";
+import { Uslugi } from "./pages/Uslugi";
+import { Oferty } from "./pages/Oferty";
 import { Calendar } from "./pages/Calendar";
 import { OrderDetails } from "./pages/OrderDetails";
 import { CmaReports } from "./pages/CmaReports";
@@ -87,6 +89,8 @@ function AuthedApp() {
           <Route path="/technical/szablony" element={<Templates />} />
           <Route path="/technical/kalendarz" element={<Calendar />} />
           <Route path="/technical/magazyn" element={<Warehouse />} />
+          <Route path="/technical/uslugi" element={<Uslugi />} />
+          <Route path="/technical/oferty" element={<Oferty />} />
           <Route path="/technical/:tab" element={<Technical />} />
           {/* Legacy paths → new locations under Techniczny */}
           <Route

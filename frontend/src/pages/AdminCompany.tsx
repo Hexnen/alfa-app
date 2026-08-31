@@ -532,6 +532,61 @@ export function AdminCompany() {
               onChange={(e) => setField("materialMarkup", parseFloat(e.target.value) || 0)}
             />
           </Field>
+          <Field
+            id="company-warehouse-markup"
+            label="Narzut na towary z magazynu (%)"
+            source={source("warehouseMarkup")}
+            dirty={isDirty("warehouseMarkup")}
+            description="Z niego liczy się cena sprzedaży towaru, który nie ma własnej. Towar z ręcznie wpisaną ceną ignoruje ten narzut."
+          >
+            <Input
+              id="company-warehouse-markup"
+              data-testid="company-warehouse-markup"
+              type="number"
+              step="1"
+              min="0"
+              className="tabular-nums"
+              value={val("warehouseMarkup")}
+              onChange={(e) => setField("warehouseMarkup", parseFloat(e.target.value) || 0)}
+            />
+          </Field>
+          <Field
+            id="company-min-margin"
+            label="Minimalna marża (%)"
+            source={source("minMarginPct")}
+            dirty={isDirty("minMarginPct")}
+            description="Pozycje i oferty poniżej tego progu są oznaczane na czerwono. 0 = bez ostrzeżeń."
+          >
+            <Input
+              id="company-min-margin"
+              data-testid="company-min-margin"
+              type="number"
+              step="1"
+              min="0"
+              max="100"
+              className="tabular-nums"
+              value={val("minMarginPct")}
+              onChange={(e) => setField("minMarginPct", parseFloat(e.target.value) || 0)}
+            />
+          </Field>
+          <Field
+            id="company-lease-rate"
+            label="Dzierżawa — procent roczny (%)"
+            source={source("leaseAnnualRate")}
+            dirty={isDirty("leaseAnnualRate")}
+            description="Podpowiadany przy włączaniu dzierżawy na ofercie. Rata = wartość sprzętu × ten procent ÷ 12; na pojedynczej ofercie można go nadpisać."
+          >
+            <Input
+              id="company-lease-rate"
+              data-testid="company-lease-rate"
+              type="number"
+              step="1"
+              min="0"
+              className="tabular-nums"
+              value={val("leaseAnnualRate")}
+              onChange={(e) => setField("leaseAnnualRate", parseFloat(e.target.value) || 0)}
+            />
+          </Field>
         </div>
       </SectionCard>
 

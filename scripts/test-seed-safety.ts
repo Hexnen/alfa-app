@@ -127,6 +127,7 @@ async function runCase(name: string): Promise<void> {
   const warehouse = await import("./seed-dev/warehouse.js");
   const hr = await import("./seed-dev/hr.js");
   const services = await import("./seed-dev/services.js");
+  const offers = await import("./seed-dev/offers.js");
   const links = await import("./seed-dev/links.js");
 
   const raw = new Database(dbPath);
@@ -374,6 +375,7 @@ async function runCase(name: string): Promise<void> {
         ["warehouse", () => warehouse.seedWarehouse()],
         ["hr", () => hr.seedHr()],
         ["services", () => services.seedServices()],
+        ["offers", () => offers.seedOffers()],
         ["links", () => links.seedLinks()],
       ];
       for (const [label, fn] of modules) {
@@ -384,7 +386,7 @@ async function runCase(name: string): Promise<void> {
           `Moduł "${label}" odmówił, ale komunikat nie mówi, co zrobić: ${msg}`,
         );
       }
-      ok("wszystkie sześć modułów odmawia zasiania na zasianej bazie");
+      ok("wszystkie siedem modułów odmawia zasiania na zasianej bazie");
 
       // Scenariusz z bughuntu: `--only=operations` dwa razy z rzędu.
       await operations.resetOperations();

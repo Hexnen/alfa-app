@@ -39,6 +39,9 @@ import {
   DOC_TYPE_META,
   WAREHOUSE_TYPE_META,
   fmtDate,
+  fmtPct,
+  fmtPln,
+  fmtPlnOrDash,
   fmtQty,
   totalStockFor,
   warehouseLabel,
@@ -57,17 +60,22 @@ export function Warehouse() {
   const [warehouses, setWarehouses] = useState<WarehouseDef[]>([]);
   const [stock, setStock] = useState<StockEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  // Narzut firmowy — formularz liczy z niego cenę sprzedaży na żywo. Lista bierze
+  // gotowe wartości z backendu, więc tutaj potrzebny jest tylko do podglądu.
+  const [warehouseMarkup, setWarehouseMarkup] = useState(0);
 
   const loadCore = useCallback(async () => {
     try {
-      const [itemsRes, whRes, stockRes] = await Promise.all([
+      const [itemsRes, whRes, stockRes, cfgRes] = await Promise.all([
         warehouseApi.getItems(true),
         warehouseApi.getWarehouses(),
         warehouseApi.getStock(),
+        warehouseApi.getPricingConfig(),
       ]);
       setItems(itemsRes.data || []);
       setWarehouses(whRes.data || []);
       setStock(stockRes.data || []);
+      setWarehouseMarkup(cfgRes.data?.warehouseMarkup ?? 0);
     } catch (err) {
       alertError(err, "Błąd wczytywania danych magazynu");
     } finally {
@@ -351,6 +359,18 @@ export function Warehouse() {
     [items]
   );
 
+  const manufacturers = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          items
+            .map((i) => (i.manufacturer || "").trim())
+            .filter((m): m is string => m.length > 0)
+        )
+      ).sort((a, b) => a.localeCompare(b, "pl")),
+    [items]
+  );
+
   const activeWarehouses = useMemo(
     () => warehouses.filter((w) => !w.isArchived),
     [warehouses]
@@ -495,6 +515,9 @@ export function Warehouse() {
                       <th className="px-3 py-2 text-right font-medium">
                         Stan łączny
                       </th>
+                      <th className="px-3 py-2 text-right font-medium">
+                        Wartość
+                      </th>
                       <th className="px-3 py-2 font-medium">Wg magazynów</th>
                       <th className="px-3 py-2 text-right font-medium">
                         Akcje
@@ -505,7 +528,7 @@ export function Warehouse() {
                     {loading ? (
                       <tr>
                         <td
-                          colSpan={6}
+                          colSpan={7}
                           className="px-3 py-8 text-center text-muted-foreground"
                         >
                           Ładowanie…
@@ -514,7 +537,7 @@ export function Warehouse() {
                     ) : stockRows.length === 0 ? (
                       <tr>
                         <td
-                          colSpan={6}
+                          colSpan={7}
                           className="px-3 py-8 text-center text-muted-foreground"
                         >
                           Brak towarów spełniających kryteria.
@@ -547,6 +570,18 @@ export function Warehouse() {
                                   niski stan
                                 </span>
                               )}
+                            </td>
+                            <td
+                              className="px-3 py-2 text-right tabular-nums"
+                              title={
+                                item.purchasePrice != null
+                                  ? `${fmtQty(total)} × ${fmtPln(item.purchasePrice)} (cena zakupu)`
+                                  : "Towar nie ma ceny zakupu — wartości nie da się policzyć"
+                              }
+                            >
+                              {item.purchasePrice != null
+                                ? fmtPln(total * item.purchasePrice)
+                                : "—"}
                             </td>
                             <td className="px-3 py-2">
                               <div className="flex flex-wrap gap-1">
@@ -781,7 +816,15 @@ export function Warehouse() {
                       <th className="px-3 py-2 font-medium">Nazwa</th>
                       <th className="px-3 py-2 font-medium">Kategoria</th>
                       <th className="px-3 py-2 font-medium">Jedn.</th>
-                      <th className="px-3 py-2 font-medium">Kod kreskowy</th>
+                      <th className="px-3 py-2 text-right font-medium">
+                        Zakup
+                      </th>
+                      <th className="px-3 py-2 text-right font-medium">
+                        Sprzedaż
+                      </th>
+                      <th className="px-3 py-2 text-right font-medium">
+                        Marża / narzut
+                      </th>
                       <th className="px-3 py-2 text-right font-medium">
                         Min. stan
                       </th>
@@ -797,7 +840,7 @@ export function Warehouse() {
                     {loading ? (
                       <tr>
                         <td
-                          colSpan={editable ? 8 : 7}
+                          colSpan={editable ? 10 : 9}
                           className="px-3 py-8 text-center text-muted-foreground"
                         >
                           Ładowanie…
@@ -806,7 +849,7 @@ export function Warehouse() {
                     ) : visibleItems.length === 0 ? (
                       <tr>
                         <td
-                          colSpan={editable ? 8 : 7}
+                          colSpan={editable ? 10 : 9}
                           className="px-3 py-8 text-center text-muted-foreground"
                         >
                           Kartoteka towarów jest pusta.
@@ -823,9 +866,11 @@ export function Warehouse() {
                           <td className="px-3 py-2">{photoThumb(item)}</td>
                           <td className="px-3 py-2">
                             <div className="font-medium">{item.name}</div>
-                            {item.sku && (
+                            {(item.sku || item.manufacturer) && (
                               <div className="text-xs text-muted-foreground">
-                                {item.sku}
+                                {[item.manufacturer, item.sku]
+                                  .filter(Boolean)
+                                  .join(" · ")}
                               </div>
                             )}
                           </td>
@@ -833,8 +878,40 @@ export function Warehouse() {
                             {item.category || "—"}
                           </td>
                           <td className="px-3 py-2">{item.unit}</td>
-                          <td className="px-3 py-2 text-muted-foreground">
-                            {item.barcode || "—"}
+                          <td className="px-3 py-2 text-right tabular-nums">
+                            {fmtPlnOrDash(item.purchasePrice)}
+                          </td>
+                          <td className="px-3 py-2 text-right tabular-nums">
+                            {fmtPlnOrDash(item.effectiveSalePrice)}
+                            {item.salePriceAuto &&
+                              item.effectiveSalePrice !== null && (
+                                <span
+                                  className="ml-1 rounded bg-muted px-1 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground"
+                                  title={`Liczona z narzutu ${warehouseMarkup}% — towar nie ma własnej ceny`}
+                                >
+                                  auto
+                                </span>
+                              )}
+                          </td>
+                          <td
+                            className="px-3 py-2 text-right tabular-nums"
+                            title={
+                              item.marginAmount !== null
+                                ? `Zysk ${fmtPln(item.marginAmount)} na ${item.unit}`
+                                : "Brak ceny zakupu — marży nie da się policzyć"
+                            }
+                          >
+                            {item.marginPct !== null ? (
+                              <>
+                                {fmtPct(item.marginPct)}
+                                <span className="text-muted-foreground">
+                                  {" / "}
+                                  {fmtPct(item.markupPct)}
+                                </span>
+                              </>
+                            ) : (
+                              "—"
+                            )}
                           </td>
                           <td className="px-3 py-2 text-right">
                             {item.minStock != null
@@ -1093,6 +1170,8 @@ export function Warehouse() {
           onSubmit={handleItemSubmit}
           item={editingItem}
           categories={categories}
+          manufacturers={manufacturers}
+          warehouseMarkup={warehouseMarkup}
         />
       )}
 

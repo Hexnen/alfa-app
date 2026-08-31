@@ -97,6 +97,8 @@ export interface ObjectInput {
   status?: ObjectStatus;
   department?: Department;
   monthlyValue?: number;
+  /** Dzierżawa sprzętu (zł netto/mies.) — druga część przychodu obok abonamentu. */
+  monthlyRental?: number | null;
   /** Miesięczny koszt obsługi obiektu (null = nieuzupełniony, to NIE jest zero). */
   monthlyCost?: number | null;
   /** Jednorazowy koszt uruchomienia (null = nieuzupełniony, to NIE jest zero). */

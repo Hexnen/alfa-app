@@ -94,6 +94,13 @@ const API_TAB_MAP: { prefix: string; tabs: string[] }[] = [
   { prefix: "/protocols", tabs: ["technical/protokoly"] },
   { prefix: "/quotes", tabs: ["technical/wyceny"] },
   { prefix: "/pricelist", tabs: ["technical/cennik"] },
+  // Katalog usług czyta nie tylko własna zakładka, ale i edytor ofert —
+  // bez tego handlowiec z dostępem wyłącznie do ofert nie doda robocizny.
+  { prefix: "/services", tabs: ["technical/uslugi", "technical/oferty"] },
+  // Oferty. Klucz kosztowy `technical/oferty-koszty` NIE jest tutaj: on nie
+  // otwiera ani nie zamyka tras, tylko decyduje, czy w odpowiedzi zostają pola
+  // kosztowe (redactCosts w src/routes/offers.ts).
+  { prefix: "/offers", tabs: ["technical/oferty"] },
   { prefix: "/technicians", tabs: ["technical/technicy", "technical/kalendarz"] },
   // Handlowcy: własna zakładka, ale listę czytają też formularze kontrahenta i obiektu.
   { prefix: "/salespeople", tabs: ["handlowcy", "contractors", "objects"] },

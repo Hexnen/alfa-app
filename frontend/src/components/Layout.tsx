@@ -166,6 +166,8 @@ const sections: NavItem[] = [
       { name: "Protokoły", href: "/technical/protokoly", desc: "Protokoły odbioru i serwisu do realizacji" },
       { name: "Wyceny", href: "/technical/wyceny", desc: "Wyceny prac i materiałów dla kontrahentów" },
       { name: "Cennik", href: "/technical/cennik", desc: "Cenniki usług i materiałów przypisane technikom" },
+      { name: "Usługi", href: "/technical/uslugi", desc: "Robocizna i abonamenty do ofert — koszt własny, cena i marża" },
+      { name: "Oferty", href: "/technical/oferty", desc: "Oferty dla klientów: pakiety sprzętu, abonament i dzierżawa" },
       { name: "Technicy", href: "/technical/technicy", desc: "Technicy, stawki i przypisania" },
       { name: "Obiekty", href: "/technical/obiekty", desc: "Obiekty obsługiwane przez dział techniczny" },
       { name: "Magazyn", href: "/technical/magazyn", desc: "Dokumenty PZ/WZ/RW/MM i stany magazynowe" },

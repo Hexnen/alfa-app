@@ -11,6 +11,21 @@ import { db, schema } from "../src/db/index.js";
 import { eq, like } from "drizzle-orm";
 import { createSession, SESSION_COOKIE } from "../src/lib/auth/sessions.js";
 
+/*
+ * TEN TEST WYMAGA ŻYWEGO BACKENDU i pracuje na TEJ SAMEJ bazie, co on.
+ * Uruchomiony przez `test-on-copy.ts` dostaje `ALFA_DB_PATH` wskazujący kopię:
+ * sesję zakłada w kopii, a serwer czyta oryginał, więc każde żądanie wraca 401
+ * i wygląda to na regresję, którą nie jest. Mówimy o tym wprost.
+ */
+if (process.env.ALFA_DB_PATH) {
+  console.error(
+    "Ten test nie działa na kopii bazy (ALFA_DB_PATH) — sesja poszłaby do kopii,\n" +
+      "a serwer czyta data/alfa.db. Uruchom bezpośrednio: ./alfa start && npx tsx " +
+      process.argv[1]
+  );
+  process.exit(1);
+}
+
 const BASE = "http://localhost:4001/api";
 const EMAIL = "__ZZ_PERM__@example.invalid";
 

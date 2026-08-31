@@ -52,6 +52,22 @@ export const TABS: TabDef[] = [
   { key: "technical/protokoly", label: "Protokoły", group: "Techniczny" },
   { key: "technical/wyceny", label: "Wyceny", group: "Techniczny" },
   { key: "technical/cennik", label: "Cennik", group: "Techniczny" },
+  // Usługi (montaż, uruchomienie, konfiguracja) — katalog z kosztem własnym,
+  // z którego oferty biorą robociznę. Osobny od Cennika, który obsługuje
+  // wyceny powykonawcze i nie zna kosztów.
+  { key: "technical/uslugi", label: "Usługi", group: "Techniczny" },
+  { key: "technical/oferty", label: "Oferty", group: "Techniczny" },
+  /*
+   * WYJĄTEK OD REGUŁY „klucz == ścieżka SPA": to nie jest zakładka, tylko
+   * przełącznik widoczności KOSZTÓW I MARŻY na ofertach. Nadaje się osobno, bo
+   * ofertę może składać ktoś, komu nie pokazujemy cen zakupu całego magazynu
+   * ani zarobku na kliencie — tak samo, jak rozdzielono klucze w Analityce.
+   *
+   * Nie ma dla niego trasy ani wpisu w API_TAB_MAP; czyta go `redactCosts`
+   * w src/routes/offers.ts, a front pomija go przy wyznaczaniu zakładki
+   * z adresu (`tabKeyForPath`).
+   */
+  { key: "technical/oferty-koszty", label: "Oferty — koszty i marża", group: "Techniczny" },
   { key: "technical/technicy", label: "Technicy", group: "Techniczny" },
   { key: "technical/obiekty", label: "Obiekty", group: "Techniczny" },
   { key: "technical/projekty", label: "Projekty", group: "Techniczny" },

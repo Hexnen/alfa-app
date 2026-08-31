@@ -180,8 +180,8 @@ export async function createOrderFromInput(
         : null;
 
       const insertObjectStmt = sqlite.prepare(`
-        INSERT INTO objects (contractor_id, name, address, city, type, has_cameras, camera_count, has_sswin, has_videoreception, has_ofi, installation_type, status, department, monthly_value, notes, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+        INSERT INTO objects (contractor_id, name, address, city, type, has_cameras, camera_count, has_sswin, has_videoreception, has_ofi, installation_type, status, department, monthly_value, monthly_rental, notes, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
       `);
 
       const objectInsert = insertObjectStmt.run(
@@ -199,6 +199,10 @@ export async function createOrderFromInput(
         "pending",
         "technical",
         body.monthlyAmount || null,
+        // Dzierżawa to druga część miesięcznego przychodu obiektu. Bez tej
+        // linii kwota ze zlecenia zostawała wyłącznie na zleceniu, a Analityka
+        // pokazywała zaniżony przychód obiektów ze sprzętem w najmie.
+        body.rentalAmount || null,
         body.notes || null
       );
 

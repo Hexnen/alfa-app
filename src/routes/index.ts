@@ -14,6 +14,8 @@ import pricelistRoutes from "./pricelist.js";
 import cameraModelsRoutes from "./camera-models.js";
 import protocolsRoutes from "./protocols.js";
 import quotesRoutes from "./quotes.js";
+import servicesRoutes from "./services.js";
+import offersRoutes from "./offers.js";
 import cmaRoutes from "./cma.js";
 import monitoringRoutes from "./monitoring.js";
 import monitoredObjectsRoutes from "./monitored-objects.js";
@@ -127,8 +129,11 @@ api.get("/stats", async (c) => {
     .from(schema.objects)
     .where(eq(schema.objects.department, "accounting"));
 
+  // Przychód miesięczny = abonament + dzierżawa sprzętu (obie kwoty płatne co miesiąc).
   const [monthlyValueSum] = await db
-    .select({ sum: sql<number>`COALESCE(sum(monthly_value), 0)` })
+    .select({
+      sum: sql<number>`COALESCE(sum(COALESCE(monthly_value, 0) + COALESCE(monthly_rental, 0)), 0)`,
+    })
     .from(schema.objects)
     .where(eq(schema.objects.status, "active"));
 
@@ -194,6 +199,8 @@ api.route("/pricelist", pricelistRoutes);
 api.route("/camera-models", cameraModelsRoutes);
 api.route("/protocols", protocolsRoutes);
 api.route("/quotes", quotesRoutes);
+api.route("/services", servicesRoutes);
+api.route("/offers", offersRoutes);
 api.route("/cma/mail", cmaMailRoutes);
 api.route("/cma", cmaRoutes);
 api.route("/monitoring", monitoringRoutes);

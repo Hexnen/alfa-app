@@ -34,7 +34,8 @@
  * UWAGA: better-sqlite3 jest zbudowany pod Node 22:
  *   export PATH="/config/.nvm/versions/node/v22.22.0/bin:$PATH"
  */
-import { db } from "../src/db/index.js";
+import { db, schema } from "../src/db/index.js";
+import { sql } from "drizzle-orm";
 import { PERIOD, type Tx, seed as setSeed } from "./seed-dev/shared.js";
 import { seedCommercial, resetCommercial } from "./seed-dev/commercial.js";
 import { seedOperations, resetOperations } from "./seed-dev/operations.js";
@@ -42,6 +43,7 @@ import { seedWarehouse, resetWarehouse } from "./seed-dev/warehouse.js";
 import { seedHr, resetHr } from "./seed-dev/hr.js";
 import { seedLinks, resetLinks } from "./seed-dev/links.js";
 import { seedServices, resetServices } from "./seed-dev/services.js";
+import { seedOffers, resetOffers } from "./seed-dev/offers.js";
 
 /** Ziarno losowości — stałe, żeby dwa uruchomienia dały tę samą bazę. */
 const SEED = 20260829;
@@ -57,6 +59,9 @@ const MODULES = [
   { name: "commercial", label: "kontrahenci, obiekty, umowy, zlecenia", run: seedCommercial, undo: resetCommercial },
   { name: "operations", label: "kalendarz, realizacje, protokoły, wyceny", run: seedOperations, undo: resetOperations },
   { name: "warehouse", label: "magazyn: towary, dokumenty, stany", run: seedWarehouse, undo: resetWarehouse },
+  // Oferty PO magazynie: pakiety wskazują na konkretne towary z kartoteki,
+  // a ceny pozycji biorą się z cen zakupu, które magazyn dopiero zakłada.
+  { name: "offers", label: "usługi, pakiety ofertowe i oferty", run: seedOffers, undo: resetOffers },
   { name: "hr", label: "kadry: domknięcie roku", run: seedHr, undo: resetHr },
   // Usługi muszą być przed `links`: dobór mapowania mierzy koszt osobowy, a ten
   // zależy od liczby kamer (podział puli centrum monitorowania).
@@ -84,6 +89,36 @@ function report(title: string, counts: object) {
   console.log(`  ${title}${parts.length ? " — " + parts.join(", ") : " — nic do zrobienia"}`);
 }
 
+/**
+ * Reset magazynu KASKADUJE na pakiety ofertowe.
+ *
+ * `offer_package_items.warehouse_item_id` ma ON DELETE CASCADE, więc skasowanie
+ * towarów zabiera pozycje sprzętowe z pakietów, o które nikt nie prosił —
+ * a ponowny seed magazynu tego NIE odtwarza: pakiet zostaje w bibliotece
+ * wyglądając na sprawny, tylko bez kamer i rejestratorów. Pełny `--reset` jest
+ * bezpieczny (idzie odwrotną kolejnością i czyści też oferty), niebezpieczne
+ * jest dopiero `--only=warehouse`. Zamiast po cichu okaleczyć dane — odmawiamy.
+ */
+function assertWarehouseResetSafe(mods: readonly { name: string }[], reset: boolean) {
+  if (!reset) return;
+  const names = mods.map((m) => m.name);
+  if (!names.includes("warehouse") || names.includes("offers")) return;
+
+  const affected = db
+    .select({ n: sql<number>`count(*)` })
+    .from(schema.offerPackageItems)
+    .where(sql`warehouse_item_id is not null`)
+    .all()[0]?.n ?? 0;
+  if (affected === 0) return;
+
+  console.error(
+    `\nOdmowa: reset magazynu skasowałby ${affected} pozycji sprzętowych z pakietów ofertowych\n` +
+      "(kaskada po offer_package_items.warehouse_item_id), a ponowny seed magazynu tego nie odtworzy.\n" +
+      "Uruchom oba moduły razem:  npx tsx scripts/seed-dev-year.ts --reset --seed --only=warehouse,offers"
+  );
+  process.exit(1);
+}
+
 function main() {
   const { reset, generate, only } = parseArgs();
   const mods = MODULES.filter((m) => !only || only.includes(m.name));
@@ -91,6 +126,7 @@ function main() {
     console.error(`Nieznany moduł. Dostępne: ${MODULES.map((m) => m.name).join(", ")}`);
     process.exit(1);
   }
+  assertWarehouseResetSafe(mods, reset);
 
   console.log(`Baza deweloperska, okno ${PERIOD.from} … ${PERIOD.to}`);
 

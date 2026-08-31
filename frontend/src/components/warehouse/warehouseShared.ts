@@ -65,6 +65,54 @@ export function fmtPln(v: number | null | undefined): string {
   return plnFormat.format(Number(v || 0));
 }
 
+/**
+ * Kwota, której może nie być. W odróżnieniu od `fmtPln` NIE udaje, że brak
+ * danych to 0 zł — towar bez wpisanej ceny zakupu ma pokazać kreskę, a nie
+ * „0,00 zł", bo z zera policzyłoby się 100% marży.
+ */
+export function fmtPlnOrDash(v: number | null | undefined): string {
+  return v === null || v === undefined ? "—" : plnFormat.format(v);
+}
+
+/** Procent z jednym miejscem po przecinku; brak danych = kreska. */
+export function fmtPct(v: number | null | undefined): string {
+  if (v === null || v === undefined) return "—";
+  return `${v.toLocaleString("pl-PL", { maximumFractionDigits: 1 })}%`;
+}
+
+/**
+ * Lustro `marginOf` z src/lib/margin.ts — do liczenia na żywo w formularzu,
+ * zanim cokolwiek poleci na backend. Zwraca null, gdy liczby nie da się podać
+ * uczciwie (brak kosztu, brak ceny, wartość niedodatnia).
+ */
+export function marginOf(
+  cost: number | null | undefined,
+  price: number | null | undefined
+): { amount: number; marginPct: number; markupPct: number } | null {
+  if (cost === null || cost === undefined || price === null || price === undefined)
+    return null;
+  if (!Number.isFinite(cost) || !Number.isFinite(price)) return null;
+  if (cost <= 0 || price <= 0) return null;
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  return {
+    amount: r2(price - cost),
+    marginPct: r2(((price - cost) / price) * 100),
+    markupPct: r2(((price - cost) / cost) * 100),
+  };
+}
+
+/** Lustro `effectiveSalePrice` — cena własna, a bez niej koszt + narzut firmowy. */
+export function effectiveSalePrice(
+  purchasePrice: number | null | undefined,
+  salePrice: number | null | undefined,
+  markupPct: number
+): number | null {
+  if (salePrice !== null && salePrice !== undefined) return salePrice;
+  if (purchasePrice === null || purchasePrice === undefined) return null;
+  if (!Number.isFinite(purchasePrice)) return null;
+  return Math.round(purchasePrice * (1 + markupPct / 100) * 100) / 100;
+}
+
 /** Format SQLite "YYYY-MM-DD HH:MM:SS" — UTC bez znacznika strefy. */
 const SQLITE_UTC_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
 

@@ -146,7 +146,7 @@ app.get("/", async (c) => {
         where coalesce(objects.salesperson_id, contractors.salesperson_id) = salespeople.id
       )`,
       objectsMonthlyValue: sql<number>`(
-        select coalesce(sum(objects.monthly_value), 0) from objects
+        select coalesce(sum(coalesce(objects.monthly_value, 0) + coalesce(objects.monthly_rental, 0)), 0) from objects
         join contractors on contractors.id = objects.contractor_id
         where coalesce(objects.salesperson_id, contractors.salesperson_id) = salespeople.id
       )`,

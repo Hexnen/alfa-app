@@ -42,6 +42,12 @@ export const TABS: TabDef[] = [
   { key: "technical/protokoly", label: "Protokoły", group: "Techniczny" },
   { key: "technical/wyceny", label: "Wyceny", group: "Techniczny" },
   { key: "technical/cennik", label: "Cennik", group: "Techniczny" },
+  // Lustro wpisów z src/lib/auth/permissions.ts — katalog usług i oferty.
+  { key: "technical/uslugi", label: "Usługi", group: "Techniczny" },
+  { key: "technical/oferty", label: "Oferty", group: "Techniczny" },
+  // Nie zakładka, tylko przełącznik widoczności kosztów i marży na ofertach —
+  // patrz komentarz przy odpowiedniku w backendzie. Celowo poza NAVIGABLE_KEYS.
+  { key: "technical/oferty-koszty", label: "Oferty — koszty i marża", group: "Techniczny" },
   { key: "technical/technicy", label: "Technicy", group: "Techniczny" },
   { key: "technical/obiekty", label: "Obiekty", group: "Techniczny" },
   { key: "technical/magazyn", label: "Magazyn", group: "Techniczny" },
@@ -54,6 +60,13 @@ export const TABS: TabDef[] = [
 const TAB_KEY_SET = new Set(TABS.map((t) => t.key));
 
 /**
+ * Klucze, które NIE są ścieżkami SPA — uprawnienia doprecyzowujące widoczność
+ * danych wewnątrz innej zakładki. Nie wolno po nich nawigować ani ich
+ * dopasowywać do adresu, bo `AccessGuard` odesłałby użytkownika donikąd.
+ */
+const NON_NAVIGABLE_KEYS = new Set(["technical/oferty-koszty"]);
+
+/**
  * Mapuje ścieżkę SPA na klucz zakładki. Ścieżki szczegółowe bez własnego
  * klucza (np. /orders/formularz, /objects/5) dziedziczą uprawnienie z
  * nadrzędnej zakładki. Zwraca null dla ścieżek nieobjętych katalogiem.
@@ -61,7 +74,7 @@ const TAB_KEY_SET = new Set(TABS.map((t) => t.key));
 export function tabKeyForPath(pathname: string): string | null {
   let key = pathname.replace(/^\//, "").split("?")[0];
   while (key) {
-    if (TAB_KEY_SET.has(key)) return key;
+    if (TAB_KEY_SET.has(key) && !NON_NAVIGABLE_KEYS.has(key)) return key;
     const i = key.lastIndexOf("/");
     if (i < 0) break;
     key = key.slice(0, i);

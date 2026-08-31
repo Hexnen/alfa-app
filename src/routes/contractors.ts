@@ -108,7 +108,7 @@ app.get("/", async (c) => {
       },
       objectsCount: sql<number>`count(${schema.objects.id})`,
       activeObjectsCount: sql<number>`sum(case when ${schema.objects.status} = 'active' then 1 else 0 end)`,
-      objectsMonthlyValue: sql<number>`coalesce(sum(${schema.objects.monthlyValue}), 0)`,
+      objectsMonthlyValue: sql<number>`coalesce(sum(coalesce(objects.monthly_value, 0) + coalesce(objects.monthly_rental, 0)), 0)`,
       objectsMonthlyCost: sql<number>`coalesce(sum(${schema.objects.monthlyCost}), 0)`,
       objectsSetupCost: sql<number>`coalesce(sum(${schema.objects.setupCost}), 0)`,
     })
@@ -132,7 +132,7 @@ app.get("/", async (c) => {
   const totalsResult = await db
     .select({
       objects: sql<number>`count(${schema.objects.id})`,
-      value: sql<number>`coalesce(sum(${schema.objects.monthlyValue}), 0)`,
+      value: sql<number>`coalesce(sum(coalesce(objects.monthly_value, 0) + coalesce(objects.monthly_rental, 0)), 0)`,
       monthlyCost: sql<number>`coalesce(sum(${schema.objects.monthlyCost}), 0)`,
       setupCost: sql<number>`coalesce(sum(${schema.objects.setupCost}), 0)`,
     })

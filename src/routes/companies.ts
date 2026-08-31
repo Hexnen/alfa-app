@@ -136,7 +136,7 @@ app.get("/", async (c) => {
         select count(*) from objects where objects.company_id = companies.id
       )`,
       objectsMonthlyValue: sql<number>`(
-        select coalesce(sum(monthly_value), 0) from objects where objects.company_id = companies.id
+        select coalesce(sum(coalesce(monthly_value, 0) + coalesce(monthly_rental, 0)), 0) from objects where objects.company_id = companies.id
       )`,
       contractsCount: sql<number>`(
         select count(*) from hr_contracts where hr_contracts.company = companies.name

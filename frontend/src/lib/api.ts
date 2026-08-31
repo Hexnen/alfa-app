@@ -384,6 +384,11 @@ export interface ObjectRecord {
   status: "pending" | "in_progress" | "active" | "inactive";
   department: "sales" | "technical" | "accounting";
   monthlyValue: number | null;
+  /**
+   * Dzierżawa sprzętu (zł netto/mies.) — druga część miesięcznego przychodu obok
+   * abonamentu. Przychód obiektu to SUMA obu, nie samo `monthlyValue`.
+   */
+  monthlyRental: number | null;
   /** Miesięczny koszt obsługi. null = NIEUZUPEŁNIONY, co nie znaczy 0 zł. */
   monthlyCost: number | null;
   /** Jednorazowy koszt instalacji / wdrożenia. */
@@ -429,7 +434,16 @@ export interface ObjectInput {
   installationType: "new" | "takeover";
   status?: "pending" | "in_progress" | "active" | "inactive";
   department?: "sales" | "technical" | "accounting";
-  monthlyValue?: number;
+  /**
+   * Abonament miesięczny; null czyści wartość („obiekt bez abonamentu”).
+   * Bez `| null` wyczyszczone pole w ogóle nie docierało do backendu: `undefined`
+   * wypada z JSON-a, a PUT /objects/:id robi `.set({ ...body })` — użytkownik
+   * kasował kwotę, zapisywał i wracała stara. Ta sama umowa co przy
+   * `monthlyCost` i `setupCost` niżej.
+   */
+  monthlyValue?: number | null;
+  /** Dzierżawa sprzętu (zł netto/mies.); null czyści wartość. */
+  monthlyRental?: number | null;
   /** Koszt miesięczny; null czyści wartość („nieuzupełniony”). */
   monthlyCost?: number | null;
   /** Jednorazowy koszt instalacji; null czyści wartość. */
@@ -2002,6 +2016,599 @@ export const protocolPrefillApi = {
 };
 
 // ---------------------------------------------------------------------------
+// Usługi — katalog robocizny i abonamentów dla ofert (koszt własny + cena).
+// Osobny byt od Cennika (`priceListsApi`), który obsługuje wyceny powykonawcze
+// i nie zna kosztów.
+// ---------------------------------------------------------------------------
+
+export const SERVICE_CATEGORIES = [
+  "montaz",
+  "uruchomienie",
+  "konfiguracja",
+  "serwis",
+  "projekt",
+  "abonament",
+  "inne",
+] as const;
+export type ServiceCategory = (typeof SERVICE_CATEGORIES)[number];
+
+export const SERVICE_SYSTEMS = [
+  "cctv",
+  "sswin",
+  "kd",
+  "ppoz",
+  "sieci",
+  "inne",
+] as const;
+export type ServiceSystem = (typeof SERVICE_SYSTEMS)[number];
+
+export interface Service {
+  id: number;
+  name: string;
+  category: ServiceCategory;
+  /** null = usługa uniwersalna, niezwiązana z konkretnym systemem. */
+  system: ServiceSystem | null;
+  unit: string;
+  /** Koszt własny netto (robocizna). */
+  cost: number;
+  /** Cena sprzedaży netto. */
+  price: number;
+  description: string | null;
+  active: boolean;
+  position: number;
+  createdAt: string;
+  updatedAt: string;
+  // --- wyliczane przez backend (src/lib/margin.ts) ---
+  marginAmount: number | null;
+  marginPct: number | null;
+  markupPct: number | null;
+}
+
+export interface ServiceInput {
+  name: string;
+  category: ServiceCategory;
+  system?: ServiceSystem | "";
+  unit: string;
+  cost?: number | string;
+  price?: number | string;
+  description?: string;
+  active?: boolean;
+  position?: number;
+}
+
+export const servicesApi = {
+  async list(opts: {
+    includeInactive?: boolean;
+    category?: ServiceCategory;
+    system?: ServiceSystem;
+  } = {}) {
+    const params = new URLSearchParams();
+    if (opts.includeInactive) params.set("includeInactive", "1");
+    if (opts.category) params.set("category", opts.category);
+    if (opts.system) params.set("system", opts.system);
+    const q = params.toString();
+    return request<ApiResponse<Service[]>>(`/services${q ? `?${q}` : ""}`);
+  },
+
+  async create(data: ServiceInput) {
+    return request<ApiResponse<Service>>("/services", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  },
+
+  /** PUT = pełna podmiana pozycji (backend waliduje komplet pól). */
+  async update(id: number, data: ServiceInput) {
+    return request<ApiResponse<Service>>(`/services/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    });
+  },
+
+  /** DELETE = archiwizacja (active=false); oferty nadal wskazują na tę pozycję. */
+  async archive(id: number) {
+    return request<ApiResponse<null>>(`/services/${id}`, { method: "DELETE" });
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Oferty — dokument handlowy dla klienta (inny byt niż „Wyceny" niżej, które są
+// powykonawcze). Model i słownik pojęć: src/db/schema.ts, sekcja OFERTY.
+//
+// UWAGA: pola kosztowe (`unitCost`, `lineCost`, `oneTimeCost`, `monthlyCost`,
+// `margin`, `belowMinMargin`) backend WYCINA z odpowiedzi użytkownikom bez
+// uprawnienia `technical/oferty-koszty` — dlatego są opcjonalne w typach.
+// ---------------------------------------------------------------------------
+
+export const OFFER_KINDS = ["rozbudowa", "montaz", "serwis"] as const;
+export type OfferKind = (typeof OFFER_KINDS)[number];
+
+export const OFFER_STATUSES = ["draft", "sent", "accepted", "rejected", "expired"] as const;
+export type OfferStatus = (typeof OFFER_STATUSES)[number];
+
+export const OFFER_LEASE_MODES = ["none", "y1", "y2", "custom"] as const;
+export type OfferLeaseMode = (typeof OFFER_LEASE_MODES)[number];
+
+export const OFFER_SECTION_CATEGORIES = [
+  "cctv",
+  "sswin",
+  "kd",
+  "wideoweryfikacja",
+  "abonament",
+  "inne",
+] as const;
+export type OfferSectionCategory = (typeof OFFER_SECTION_CATEGORIES)[number];
+
+export const OFFER_ITEM_SOURCES = ["warehouse", "service", "manual"] as const;
+export type OfferItemSource = (typeof OFFER_ITEM_SOURCES)[number];
+
+export const OFFER_ITEM_KINDS = ["material", "labour", "subscription", "other"] as const;
+export type OfferItemKind = (typeof OFFER_ITEM_KINDS)[number];
+
+export const OFFER_ITEM_BILLINGS = ["one_time", "monthly"] as const;
+export type OfferItemBilling = (typeof OFFER_ITEM_BILLINGS)[number];
+
+export const OFFER_PACKAGE_MODES = ["parametric", "fixed"] as const;
+export type OfferPackageMode = (typeof OFFER_PACKAGE_MODES)[number];
+
+export const OFFER_QTY_ROUNDINGS = ["none", "up"] as const;
+export type OfferQtyRounding = (typeof OFFER_QTY_ROUNDINGS)[number];
+
+export interface Offer {
+  id: number;
+  number: string;
+  parentId: number | null;
+  version: number;
+  date: string;
+  validUntil: string | null;
+  sentAt: string | null;
+  kind: OfferKind;
+  status: OfferStatus;
+  contractorId: number | null;
+  clientName: string;
+  clientNip: string;
+  objectId: number | null;
+  site: string;
+  address: string;
+  salespersonId: number | null;
+  companyId: number | null;
+  discountPct: number;
+  leaseMode: OfferLeaseMode;
+  leaseMonths: number | null;
+  leaseAnnualRate: number | null;
+  leaseIncludeLabour: boolean;
+  orderId: number | null;
+  warehouseDocId: number | null;
+  notes: string | null;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+  /** Liczba miesięcy wynikająca z trybu dzierżawy (12 / 24 / własna). */
+  leaseMonthsEffective?: number | null;
+}
+
+export interface OfferSection {
+  id: number;
+  offerId: number;
+  position: number;
+  category: OfferSectionCategory;
+  title: string;
+  packageId: number | null;
+  params: string;
+  isOptional: boolean;
+  variantGroup: string | null;
+  variantSelected: boolean;
+  notes: string | null;
+}
+
+export interface OfferItem {
+  id: number;
+  offerId: number;
+  sectionId: number;
+  position: number;
+  source: OfferItemSource;
+  warehouseItemId: number | null;
+  serviceId: number | null;
+  name: string;
+  unit: string;
+  qty: number;
+  kind: OfferItemKind;
+  billing: OfferItemBilling;
+  unitPrice: number;
+  discountPct: number;
+  isOptional: boolean;
+  lineTotal: number;
+  /** Stan magazynowy towaru; null dla pozycji nietowarowych. */
+  stock: number | null;
+  /** Aktualna cena w kartotece, gdy odjechała od migawki. null = zgodna. */
+  priceDrift: number | null;
+  // --- widoczne tylko z uprawnieniem do kosztów ---
+  unitCost?: number | null;
+  lineCost?: number | null;
+}
+
+export interface OfferMargin {
+  amount: number;
+  marginPct: number;
+  markupPct: number;
+}
+
+export interface OfferTotals {
+  oneTimePrice: number;
+  monthlyPrice: number;
+  leaseBase: number;
+  leaseMonthly: number;
+  equipmentValue: number;
+  oneTimePayable: number;
+  /** Rata i abonament PO rabacie — te liczby sumują się do `monthlyTotal`. */
+  leaseMonthlyNet: number;
+  monthlyPriceNet: number;
+  monthlyTotal: number;
+  /** Opcje dodatkowe, rozdzielone na strumienie (poza kwotą do zapłaty). */
+  optionsOneTime: number;
+  optionsMonthly: number;
+  /** Okres, na którym liczona jest marża: długość dzierżawy albo 12 mies. */
+  marginHorizonMonths: number;
+  horizonRevenue: number;
+  // --- widoczne tylko z uprawnieniem do kosztów ---
+  /** Koszt wdrożenia: co firma wykłada na starcie (sprzęt + robocizna). */
+  oneTimeCost?: number | null;
+  oneTimeCostMaterial?: number | null;
+  oneTimeCostLabour?: number | null;
+  monthlyCost?: number | null;
+  /** Koszt w okresie `marginHorizonMonths` — podstawa marży. */
+  horizonCost?: number | null;
+  margin?: OfferMargin | null;
+  belowMinMargin?: boolean;
+}
+
+/** Znacznik zakresu spoza kategorii sekcji — dzierżawa jest parametrem oferty. */
+export const OFFER_SCOPE_LEASE = "dzierzawa";
+
+/** Wiersz listy ofert — nagłówek z policzonymi sumami i faktycznym zakresem. */
+export interface OfferListRow extends Offer {
+  totals: OfferTotals;
+  /**
+   * Czego oferta NAPRAWDĘ dotyczy: kategorie sekcji z pozycjami + „abonament"
+   * przy pozycjach miesięcznych + „dzierzawa" przy aktywnej dzierżawie.
+   * Liczone na backendzie (`scopeOf`), żeby lista i dokument mówiły to samo.
+   */
+  scope: string[];
+}
+
+/** Pełna oferta z sekcjami, pozycjami i sumami. */
+export interface OfferDetail {
+  offer: Offer;
+  sections: OfferSection[];
+  items: OfferItem[];
+  totals: OfferTotals;
+  /** Wypełniane tylko przez akceptację. */
+  created?: { orderId: number; orderNumber: string; warehouseDocId: number | null };
+}
+
+export interface OfferInput {
+  date: string;
+  validUntil?: string | null;
+  kind?: OfferKind;
+  contractorId?: number | null;
+  clientName?: string;
+  clientNip?: string;
+  objectId?: number | null;
+  site?: string;
+  address?: string;
+  salespersonId?: number | null;
+  companyId?: number | null;
+  discountPct?: number;
+  leaseMode?: OfferLeaseMode;
+  leaseMonths?: number | null;
+  leaseAnnualRate?: number | null;
+  leaseIncludeLabour?: boolean;
+  notes?: string;
+}
+
+export interface OfferPackageParam {
+  key: string;
+  label: string;
+  default?: number;
+  min?: number;
+  max?: number;
+}
+
+export interface OfferPackage {
+  id: number;
+  name: string;
+  category: OfferSectionCategory;
+  manufacturer: string | null;
+  description: string | null;
+  mode: OfferPackageMode;
+  /** JSON z definicją parametrów — parsuj przez `parsePackageParams`. */
+  params: string;
+  active: boolean;
+  position: number;
+  createdAt: string;
+  updatedAt: string;
+  itemCount?: number;
+}
+
+export interface OfferPackageItem {
+  id: number;
+  packageId: number;
+  position: number;
+  source: OfferItemSource;
+  warehouseItemId: number | null;
+  serviceId: number | null;
+  name: string;
+  unit: string;
+  kind: OfferItemKind;
+  billing: OfferItemBilling;
+  qtyBase: number;
+  qtyPerParam: number;
+  paramKey: string | null;
+  qtyRound: OfferQtyRounding;
+  unitPriceOverride: number | null;
+}
+
+export interface OfferPackageDetail extends OfferPackage {
+  items: OfferPackageItem[];
+}
+
+export interface OfferPackageItemInput {
+  source: OfferItemSource;
+  warehouseItemId?: number | null;
+  serviceId?: number | null;
+  name?: string;
+  unit?: string;
+  kind?: OfferItemKind;
+  billing?: OfferItemBilling;
+  qtyBase?: number;
+  qtyPerParam?: number;
+  paramKey?: string | null;
+  qtyRound?: OfferQtyRounding;
+  unitPriceOverride?: number | null;
+}
+
+export interface OfferPackageInput {
+  name: string;
+  category?: OfferSectionCategory;
+  manufacturer?: string;
+  description?: string;
+  mode?: OfferPackageMode;
+  params?: OfferPackageParam[];
+  active?: boolean;
+  items?: OfferPackageItemInput[];
+}
+
+/** Bezpieczny parse definicji parametrów pakietu (lustro backendu). */
+export function parsePackageParams(raw: string): OfferPackageParam[] {
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? (v as OfferPackageParam[]).filter((p) => p && p.key) : [];
+  } catch {
+    return [];
+  }
+}
+
+export const offersApi = {
+  async list(opts: { status?: OfferStatus; kind?: OfferKind; year?: number; q?: string } = {}) {
+    const params = new URLSearchParams();
+    if (opts.status) params.set("status", opts.status);
+    if (opts.kind) params.set("kind", opts.kind);
+    if (opts.year) params.set("year", String(opts.year));
+    if (opts.q) params.set("q", opts.q);
+    const q = params.toString();
+    return request<ApiResponse<OfferListRow[]>>(`/offers${q ? `?${q}` : ""}`);
+  },
+
+  async get(id: number) {
+    return request<ApiResponse<OfferDetail>>(`/offers/${id}`);
+  },
+
+  /**
+   * Parametry edytora: próg ostrzeżenia o marży i domyślny procent dzierżawy.
+   * Pod kluczem OFERT — `/warehouse/pricing-config` jest za `technical/magazyn`,
+   * którego handlowiec mieć nie musi.
+   */
+  async config() {
+    return request<ApiResponse<{ minMarginPct: number; leaseAnnualRate: number }>>(
+      "/offers/config"
+    );
+  },
+
+  async create(data: Partial<OfferInput> = {}) {
+    return request<ApiResponse<Offer>>("/offers", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  },
+
+  /** Zapis CZĄSTKOWY: pominięte pole zostaje bez zmian (patrz parseOfferHead). */
+  async update(id: number, data: Partial<OfferInput> | Record<string, unknown>) {
+    return request<ApiResponse<OfferDetail>>(`/offers/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    });
+  },
+
+  async remove(id: number) {
+    return request<ApiResponse<null>>(`/offers/${id}`, { method: "DELETE" });
+  },
+
+  /** Nowa wersja zamkniętej oferty — jedyny sposób na zmianę tego, co poszło do klienta. */
+  async newVersion(id: number) {
+    return request<ApiResponse<Offer>>(`/offers/${id}/version`, { method: "POST" });
+  },
+
+  async send(id: number) {
+    return request<ApiResponse<OfferDetail>>(`/offers/${id}/send`, { method: "POST" });
+  },
+
+  async reject(id: number) {
+    return request<ApiResponse<OfferDetail>>(`/offers/${id}/reject`, { method: "POST" });
+  },
+
+  /** Akceptacja: tworzy zlecenie i szkic WZ w jednej transakcji. */
+  async accept(
+    id: number,
+    contact: {
+      requesterName?: string;
+      requesterPhone?: string;
+      requesterEmail?: string;
+      contactPerson?: string;
+      contactPhone?: string;
+      contactEmail?: string;
+    } = {}
+  ) {
+    return request<ApiResponse<OfferDetail>>(`/offers/${id}/accept`, {
+      method: "POST",
+      body: JSON.stringify(contact),
+    });
+  },
+
+  async reprice(id: number) {
+    return request<ApiResponse<OfferDetail>>(`/offers/${id}/reprice`, { method: "POST" });
+  },
+
+  async addSection(
+    id: number,
+    data: {
+      packageId?: number | null;
+      params?: Record<string, number>;
+      category?: OfferSectionCategory;
+      title?: string;
+      variantGroup?: string;
+      isOptional?: boolean;
+    }
+  ) {
+    return request<ApiResponse<OfferDetail>>(`/offers/${id}/sections`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  },
+
+  async updateSection(
+    id: number,
+    sectionId: number,
+    data: {
+      title?: string;
+      category?: OfferSectionCategory;
+      isOptional?: boolean;
+      variantGroup?: string | null;
+      variantSelected?: boolean;
+      notes?: string;
+    }
+  ) {
+    return request<ApiResponse<OfferDetail>>(`/offers/${id}/sections/${sectionId}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    });
+  },
+
+  async removeSection(id: number, sectionId: number) {
+    return request<ApiResponse<OfferDetail>>(`/offers/${id}/sections/${sectionId}`, {
+      method: "DELETE",
+    });
+  },
+
+  async saveSectionAsPackage(id: number, sectionId: number, data: { name: string; manufacturer?: string }) {
+    return request<ApiResponse<OfferPackage>>(
+      `/offers/${id}/sections/${sectionId}/save-as-package`,
+      { method: "POST", body: JSON.stringify(data) }
+    );
+  },
+
+  async addItem(
+    id: number,
+    data: {
+      sectionId: number;
+      source: OfferItemSource;
+      warehouseItemId?: number | null;
+      serviceId?: number | null;
+      name?: string;
+      unit?: string;
+      qty?: number;
+      kind?: OfferItemKind;
+      billing?: OfferItemBilling;
+      unitCost?: number | null;
+      unitPrice?: number;
+    }
+  ) {
+    return request<ApiResponse<OfferDetail>>(`/offers/${id}/items`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  },
+
+  async updateItem(
+    id: number,
+    itemId: number,
+    data: {
+      name?: string;
+      unit?: string;
+      qty?: number;
+      kind?: OfferItemKind;
+      billing?: OfferItemBilling;
+      unitCost?: number | null;
+      unitPrice?: number;
+      discountPct?: number;
+      isOptional?: boolean;
+    }
+  ) {
+    return request<ApiResponse<OfferDetail>>(`/offers/${id}/items/${itemId}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    });
+  },
+
+  async removeItem(id: number, itemId: number) {
+    return request<ApiResponse<OfferDetail>>(`/offers/${id}/items/${itemId}`, {
+      method: "DELETE",
+    });
+  },
+
+  // --- Biblioteka pakietów ---
+  async listPackages(opts: { includeInactive?: boolean; category?: OfferSectionCategory } = {}) {
+    const params = new URLSearchParams();
+    if (opts.includeInactive) params.set("includeInactive", "1");
+    if (opts.category) params.set("category", opts.category);
+    const q = params.toString();
+    return request<ApiResponse<OfferPackage[]>>(`/offers/packages${q ? `?${q}` : ""}`);
+  },
+
+  async getPackage(id: number) {
+    return request<ApiResponse<OfferPackageDetail>>(`/offers/packages/${id}`);
+  },
+
+  async createPackage(data: OfferPackageInput) {
+    return request<ApiResponse<OfferPackage>>("/offers/packages", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  },
+
+  async updatePackage(id: number, data: OfferPackageInput) {
+    return request<ApiResponse<OfferPackage>>(`/offers/packages/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    });
+  },
+
+  async archivePackage(id: number) {
+    return request<ApiResponse<null>>(`/offers/packages/${id}`, { method: "DELETE" });
+  },
+
+  /** Oferta z projektu CCTV — liczba kamer bierze się z planu w designerze. */
+  async fromMonitoring(
+    projectId: number,
+    data: { packageId?: number | null; contractorId?: number | null; objectId?: number | null } = {}
+  ) {
+    return request<ApiResponse<Offer>>(`/offers/from-monitoring/${projectId}`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  },
+};
+
+// ---------------------------------------------------------------------------
 // Wyceny usług serwisowych
 // ---------------------------------------------------------------------------
 
@@ -2489,6 +3096,9 @@ export interface HrHoursEntry {
   notes: string;
   employeeName: string;
   objectName: string;
+  // Znacznik ostatniego zapisu — edycja inline odsyła go jako
+  // `expectedUpdatedAt`, żeby nie nadpisać zmiany zrobionej w innej karcie (409).
+  updatedAt: string;
 }
 
 export interface HrHoursInput {
@@ -2728,7 +3338,12 @@ export const createHrHours = (data: HrHoursInput) =>
     method: "POST",
     body: JSON.stringify(data),
   });
-export const updateHrHours = (id: number, data: HrHoursInput) =>
+// `expectedUpdatedAt` (opcjonalny) — optymistyczna kontrola współbieżności:
+// backend zapisze wpis tylko wtedy, gdy od odczytu nikt go nie zmienił.
+export const updateHrHours = (
+  id: number,
+  data: HrHoursInput & { expectedUpdatedAt?: string },
+) =>
   request<ApiResponse<HrHoursEntry>>(`/hr/hours/${id}`, {
     method: "PUT",
     body: JSON.stringify(data),
@@ -2797,8 +3412,14 @@ export interface WarehouseItem {
   sku: string | null;
   name: string;
   category: string | null;
+  /** Producent (Dahua, Hikvision, Satel…) — wolny tekst. */
+  manufacturer: string | null;
   unit: string;
   description: string | null;
+  /** Cena zakupu netto = koszt własny. null = nikt jej nie podał. */
+  purchasePrice: number | null;
+  /** Własna cena sprzedaży netto. null = liczona z narzutu firmowego. */
+  salePrice: number | null;
   photoData: string | null;
   minStock: number | null;
   isAsset: boolean;
@@ -2806,6 +3427,17 @@ export interface WarehouseItem {
   isArchived: boolean;
   createdAt: string;
   updatedAt: string;
+  // --- pola wyliczane przez backend (src/lib/margin.ts), tylko do odczytu ---
+  /** Cena sprzedaży użyta w praktyce: własna albo z narzutu. */
+  effectiveSalePrice: number | null;
+  /** Czy `effectiveSalePrice` pochodzi z automatu. */
+  salePriceAuto: boolean;
+  /** Zysk na jednostce (zł). null = nie da się policzyć (brak ceny zakupu). */
+  marginAmount: number | null;
+  /** Marża: udział zysku w cenie (%). */
+  marginPct: number | null;
+  /** Narzut: o ile procent cena przewyższa koszt (%). */
+  markupPct: number | null;
 }
 
 export interface WarehouseItemInput {
@@ -2813,13 +3445,34 @@ export interface WarehouseItemInput {
   unit: string;
   sku?: string;
   category?: string;
+  manufacturer?: string;
   description?: string;
+  /** Pusty string = wyczyść cenę (NULL w bazie), nie zero. */
+  purchasePrice?: number | string | null;
+  /** Pusty string = wróć do ceny z narzutu firmowego. */
+  salePrice?: number | string | null;
   minStock?: number | null;
   isAsset?: boolean;
   barcode?: string;
   photoData?: string | null;
   /** false = przywrócenie towaru z archiwum */
   isArchived?: boolean;
+}
+
+/** Parametry cenowe firmy używane przez kartotekę magazynu. */
+export interface WarehousePricingConfig {
+  /** Narzut (%), z którego liczy się cena sprzedaży towaru bez własnej ceny. */
+  warehouseMarkup: number;
+  /** Próg marży (%) do ostrzeżeń. 0 = wyłączone. */
+  minMarginPct: number;
+}
+
+/** Ostatnie zatwierdzone przyjęcie towaru — podpowiedź ceny zakupu. */
+export interface WarehouseLastPurchase {
+  unitPrice: number | null;
+  docNumber: string | null;
+  confirmedAt: string | null;
+  issuedAt: string;
 }
 
 export type WarehouseType = "main" | "vehicle" | "employee" | "site" | "other";
@@ -2955,6 +3608,20 @@ export const warehouseApi = {
     return request<ApiResponse<null>>(`/warehouse/items/${id}`, {
       method: "DELETE",
     });
+  },
+
+  /** Cena z ostatniego zatwierdzonego PZ (null = towar nigdy nie był przyjęty z ceną). */
+  async getLastPurchase(id: number) {
+    return request<ApiResponse<WarehouseLastPurchase | null>>(
+      `/warehouse/items/${id}/last-purchase`
+    );
+  },
+
+  /** Narzut firmowy i próg marży — do liczenia cen na żywo w formularzu magazynu. */
+  async getPricingConfig() {
+    return request<ApiResponse<WarehousePricingConfig>>(
+      "/warehouse/pricing-config"
+    );
   },
 
   // Magazyny
@@ -4493,6 +5160,12 @@ export interface CompanySettingsValues {
   kmSource: CompanyKmSource;
   /** Narzut procentowy na materiały z protokołu. */
   materialMarkup: number;
+  /** Narzut na towary z magazynu — źródło ceny sprzedaży, gdy towar nie ma własnej. */
+  warehouseMarkup: number;
+  /** Próg marży (%); poniżej niego oferta świeci na czerwono. 0 = bez ostrzeżeń. */
+  minMarginPct: number;
+  /** Domyślny procent ROCZNY dzierżawy — rata = wartość sprzętu × procent ÷ 12. */
+  leaseAnnualRate: number;
   // Narzuty składek pracodawcy. Wypłaty w kadrach są netto „na rękę”, więc żeby
   // pokazać realny koszt zatrudnienia, mnożymy je przez współczynnik zależny od
   // formy zatrudnienia. Spółka może mieć własne wartości (Company.employerMarkup*).
@@ -4580,6 +5253,9 @@ export const COMPANY_FALLBACK_VALUES: CompanySettingsValues = {
   kmRoundTrip: true,
   kmSource: "route",
   materialMarkup: 0,
+  warehouseMarkup: 0,
+  minMarginPct: 0,
+  leaseAnnualRate: 117,
   employerMarkupUop: 1.65,
   employerMarkupZlecenieZua: 1.59,
   employerMarkupZlecenieZza: 1.22,
@@ -4641,6 +5317,9 @@ function coerceCompanyValues(raw: unknown): CompanySettingsValues {
       ? (kmSource as CompanyKmSource)
       : fb.kmSource,
     materialMarkup: asNum(v.materialMarkup, fb.materialMarkup),
+    warehouseMarkup: asNum(v.warehouseMarkup, fb.warehouseMarkup),
+    minMarginPct: asNum(v.minMarginPct, fb.minMarginPct),
+    leaseAnnualRate: asNum(v.leaseAnnualRate, fb.leaseAnnualRate),
     employerMarkupUop: asNum(v.employerMarkupUop, fb.employerMarkupUop),
     employerMarkupZlecenieZua: asNum(v.employerMarkupZlecenieZua, fb.employerMarkupZlecenieZua),
     employerMarkupZlecenieZza: asNum(v.employerMarkupZlecenieZza, fb.employerMarkupZlecenieZza),
@@ -4717,7 +5396,8 @@ export const isMissingEndpoint = (e: unknown): boolean => errStatus(e) === 404;
 //
 // Wszystkie trzy widoki mówią tym samym słownikiem faktów, liczonym w
 // src/routes/analytics.ts:
-//   revenue = coalesce(monthly_value, 0)
+//   revenue = coalesce(monthly_value,0) + coalesce(monthly_rental,0)
+//             — abonament PLUS dzierżawa sprzętu
 //   cost    = personnelCost + otherCost      ← KOSZT SKŁADA SIĘ Z DWÓCH CZĘŚCI
 //   profit  = revenue - cost                 margin = profit / revenue * 100
 // gdzie `personnelCost` to koszt osobowy policzony z wypłat kadrowych (mapowanie
@@ -4773,6 +5453,33 @@ export interface PersonnelInfo {
   costBasis: "employerCost";
   /** Skąd wzięła się kwota — do przypisu i do obrony liczby przed księgową. */
   employer: EmployerCostInfo;
+  /**
+   * Druga ścieżka kosztu osobowego: udział w puli centrum monitorowania.
+   * Backend wysyła to od początku, a typ milczał — więc i przypis milczał,
+   * choć chodzi o blisko połowę całego kosztu osobowego.
+   */
+  cma: CmaAllocationInfo;
+}
+
+/**
+ * Audyt podziału kosztu centrum monitorowania (`src/lib/object-personnel-cost.ts`).
+ * Ta sama intencja co przy `employer`: liczba ma dać się OBRONIĆ („obiekt dostał
+ * 3 jednostki × 439 zł"), a braki danych mają być widoczne, a nie po cichu
+ * zaniżać koszt.
+ */
+export interface CmaAllocationInfo {
+  /** Koszt puli CMA w zł/mies. po narzucie składkowym. 0 = mechanizm nieaktywny. */
+  pool: number;
+  /** Mianownik — suma jednostek dozoru wszystkich obiektów firmy. */
+  units: number;
+  /** `pool / units` — ile kosztuje jedna dozorowana jednostka. */
+  perUnit: number;
+  /** Ile obiektów faktycznie weszło do mianownika (jednostki > 0). */
+  objectsInDenominator: number;
+  /** Obiekty z usługą kamer, ale bez podanej ilości — mają ZANIŻONY udział. */
+  objectsMissingCameraCount: number;
+  /** Ile pozycji kadrowych oznaczono jako pula (0 = mechanizm nieaktywny). */
+  poolPositions: number;
 }
 
 /** Rozliczenie narzutu składek: ile wierszy poszło którą formą i jakim mnożnikiem. */

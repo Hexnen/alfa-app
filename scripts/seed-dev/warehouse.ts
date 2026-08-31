@@ -105,6 +105,48 @@ interface ItemDef {
 }
 
 /**
+ * Producent wg prefiksu SKU. Kartoteka montera nie jest markowo przypadkowa:
+ * kamery i rejestratory chodzą w dwóch liniach (Dahua / Hikvision), alarmy
+ * w polskich, sieć w typowych dla instalacji dozorowych.
+ *
+ * Marka jest wybierana po INDEKSIE pozycji, nie losowo — dzięki temu „kamera
+ * Dahua" to zawsze ta sama kamera, a moduł ofert może zbudować pakiet „CCTV
+ * Dahua" i „CCTV Hikvision" z przewidywalnego sprzętu.
+ */
+const BRAND_BY_PREFIX: Record<string, readonly string[]> = {
+  CAM: ["Dahua", "Hikvision"],
+  NVR: ["Dahua", "Hikvision"],
+  HDD: ["Seagate", "Western Digital"],
+  ALM: ["Satel", "Ropam"],
+  SW: ["TP-Link", "Ubiquiti"],
+  NET: ["TP-Link", "MikroTik"],
+  PSU: ["Pulsar"],
+  UPS: ["Eaton"],
+  AKU: ["Green Cell"],
+  NRZ: ["Bosch", "Makita"],
+};
+
+function brandFor(sku: string, index: number): string | null {
+  const list = BRAND_BY_PREFIX[sku.split("-")[0]];
+  return list ? list[index % list.length] : null;
+}
+
+/**
+ * Towary z WŁASNĄ ceną sprzedaży — reszta katalogu liczy ją z narzutu firmowego.
+ * Powody są takie, jakie bywają w praktyce: cena z umowy dystrybucyjnej, sprzęt
+ * schodzący po cenie zakupu przy większych wdrożeniach, albo pozycja, na której
+ * firma świadomie nie zarabia.
+ */
+const FIXED_SALE_PRICE: Record<string, number> = {
+  "CAM-006": 5200, // PTZ — marża wyższa niż standardowy narzut
+  "CAM-008": 5900, // ANPR — sprzęt niszowy, cena projektowa
+  "NVR-003": 4100,
+  "KAB-001": 2.6, // skrętka schodzi z niższą marżą niż sprzęt
+  "AKU-001": 89,
+  "NRZ-005": 12800, // spawarka: narzędzie własne, sprzedawane bez narzutu
+};
+
+/**
  * Kartoteka firmy montującej CCTV i systemy alarmowe. Ceny netto z okolic
  * dystrybucji zabezpieczeń — nie chodzi o dokładność, tylko o to, żeby
  * wartości dokumentów na liście nie wyglądały jak losowy szum.
@@ -370,9 +412,21 @@ export function seedWarehouse(outerTx?: Tx): WarehouseSeedCounts {
           sku: def.sku,
           name: def.name,
           category: def.category,
+          manufacturer: brandFor(def.sku, i),
           unit: def.unit,
           // Opis niesie MARKER — to po nim `--reset` znajduje towary seeda.
           description: mark(`${def.category} · cena zakupu ok. ${def.price} zł netto`),
+          // Cena zakupu to ta sama liczba, którą dostają pozycje dokumentów —
+          // inaczej kartoteka mówiłaby co innego niż historia przyjęć.
+          purchasePrice: def.price,
+          /*
+           * Cena sprzedaży zostaje NULL prawie wszędzie: ma się liczyć
+           * z globalnego narzutu (`company.warehouse_markup`), bo tak działa
+           * kartoteka w praktyce. Wyjątkiem są pozycje z indywidualną ceną —
+           * dwa procenty katalogu, żeby ścieżka „własna cena bije narzut"
+           * też miała reprezentację w danych deweloperskich.
+           */
+          salePrice: FIXED_SALE_PRICE[def.sku] ?? null,
           minStock: def.minStock,
           isAsset: def.isAsset ?? false,
           // Kod kreskowy tylko dla materiałów — narzędzia są ewidencjonowane

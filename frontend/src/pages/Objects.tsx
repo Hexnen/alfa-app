@@ -68,6 +68,12 @@ const departmentColors: Record<string, "default" | "secondary" | "outline"> = {
 /** Filtr wartości miesięcznej: wszystkie / tylko z abonamentem / tylko bez. */
 type ValueMode = "all" | "with" | "without";
 
+/**
+ * Filtr kosztu miesięcznego: wszystkie / tylko z uzupełnionym / tylko bez.
+ * „Bez” to `monthly_cost IS NULL` — koszt 0 zł jest uzupełnioną informacją.
+ */
+type CostMode = "all" | "with" | "without";
+
 /** Domyślny kierunek sortowania kolumny — kwoty ludzie czytają od największej. */
 const DEFAULT_DIR: Record<ObjectSortKey, "asc" | "desc"> = {
   name: "asc",
@@ -121,6 +127,8 @@ export function Objects() {
   const [salespersonFilter, setSalespersonFilter] = useState<number | "none" | undefined>(undefined);
   const [companyFilter, setCompanyFilter] = useState<number | "none" | undefined>(undefined);
   const [valueMode, setValueMode] = useState<ValueMode>("all");
+  // Wejście z każdego kafelka analityki (/objects?hasCost=0 — „uzupełnij koszty”).
+  const [costMode, setCostMode] = useState<CostMode>("all");
 
   const [sort, setSort] = useState<ObjectSortKey>("name");
   const [dir, setDir] = useState<"asc" | "desc">("asc");
@@ -144,6 +152,12 @@ export function Objects() {
     if (companyId) {
       setCompanyFilter(companyId === "none" ? "none" : parseInt(companyId));
     }
+    // `?hasCost=0` — link „uzupełnij koszty” spod KAŻDEGO kafelka analityki
+    // (parts.tsx, ObiektyView, HandlowcyView). Bez tego odczytu lista otwierała
+    // się nieprzefiltrowana i użytkownik dostawał wszystko zamiast braków.
+    const hasCost = params.get("hasCost");
+    if (hasCost === "0") setCostMode("without");
+    else if (hasCost === "1") setCostMode("with");
   }, []);
 
   useEffect(() => {
@@ -190,6 +204,7 @@ export function Objects() {
         minValue: range.min,
         maxValue: range.max,
         hasValue: valueMode === "with" ? "1" : valueMode === "without" ? "0" : undefined,
+        hasCost: costMode === "with" ? "1" : costMode === "without" ? "0" : undefined,
         sort,
         dir,
         pageSize: 200,
@@ -220,6 +235,7 @@ export function Objects() {
     range.min,
     range.max,
     valueMode,
+    costMode,
     sort,
     dir,
   ]);
@@ -247,6 +263,7 @@ export function Objects() {
     serviceFilter !== "all" ||
     contractorFilter !== undefined ||
     valueMode !== "all" ||
+    costMode !== "all" ||
     minInput !== "" ||
     maxInput !== "";
 
@@ -259,6 +276,7 @@ export function Objects() {
     setSalespersonFilter(undefined);
     setCompanyFilter(undefined);
     setValueMode("all");
+    setCostMode("all");
     setMinInput("");
     setMaxInput("");
   };
@@ -343,8 +361,20 @@ export function Objects() {
     // byłby po prostu przepisaną sumą abonamentów i wprowadzał w błąd.
     if (summary.withCost > 0) {
       parts.push(`koszty ${formatCurrency(summary.cost)}`);
-      parts.push(`zysk ${formatCurrency(summary.value - summary.cost)}`);
       parts.push(`koszt uzupełniony: ${summary.withCost}`);
+    }
+    // Zysk = przychód − koszt, ale przychód sumuje się po WSZYSTKICH obiektach,
+    // a koszt tylko po uzupełnionych. Dopóki brakuje choćby jednego kosztu, ta
+    // różnica nie jest zyskiem, tylko liczbą zawyżoną o obiekty bez kosztu —
+    // bramka `withCost > 0` puszczała tu „zysk 223 010 zł" przy 26 obiektach
+    // wnoszących sam przychód. Ta sama reguła co w Analityce i w Kontrahentach.
+    const missingCost = summary.total - summary.withCost;
+    if (summary.total > 0) {
+      parts.push(
+        missingCost === 0 && summary.withCost > 0
+          ? `zysk ${formatCurrency(summary.value - summary.cost)}`
+          : `zysk — (brak kosztu w ${missingCost} ${missingCost === 1 ? "obiekcie" : "obiektach"})`
+      );
     }
     // Jedno zdanie o konwencji na ekran zamiast dopisku „netto” przy każdej
     // kolumnie — kwoty handlowe w całej aplikacji są bez VAT.
@@ -488,6 +518,20 @@ export function Objects() {
             <SelectItem value="all">Wartość: wszystkie</SelectItem>
             <SelectItem value="with">Tylko z abonamentem</SelectItem>
             <SelectItem value="without">Tylko bez abonamentu</SelectItem>
+          </SelectContent>
+        </Select>
+
+        {/* Filtr kosztu MUSI być widoczny, a nie tylko wczytany z URL-a: wejście
+            z kafelka analityki zawęża listę do braków i użytkownik ma prawo
+            wiedzieć, dlaczego nie widzi wszystkich obiektów. */}
+        <Select value={costMode} onValueChange={(v) => setCostMode(v as CostMode)}>
+          <SelectTrigger className="w-[220px]" data-testid="objects-filter-cost-mode">
+            <SelectValue placeholder="Koszt" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">Koszt: wszystkie</SelectItem>
+            <SelectItem value="with">Tylko z uzupełnionym kosztem</SelectItem>
+            <SelectItem value="without">Tylko bez uzupełnionego kosztu</SelectItem>
           </SelectContent>
         </Select>
         <div className="flex items-center gap-1 text-sm text-muted-foreground">
@@ -649,8 +693,19 @@ export function Objects() {
                           <span className="text-muted-foreground">-</span>
                         )}
                       </td>
+                      {/* Przychód = abonament + dzierżawa. Rozbicie pokazujemy
+                          pod kwotą tylko wtedy, gdy dzierżawa faktycznie jest —
+                          inaczej kolumna zaszumiłaby się przy wszystkich obiektach. */}
                       <td className="py-3 px-2 text-right tabular-nums">
-                        {formatCurrency(obj.monthlyValue)}
+                        {formatCurrency(
+                          (obj.monthlyValue ?? 0) + (obj.monthlyRental ?? 0)
+                        )}
+                        {obj.monthlyRental ? (
+                          <div className="text-xs text-muted-foreground">
+                            {formatCurrency(obj.monthlyValue)} + dzierżawa{" "}
+                            {formatCurrency(obj.monthlyRental)}
+                          </div>
+                        ) : null}
                       </td>
                       {/* Brak kosztu to „nieuzupełniony”, a nie 0 zł — stąd kreska
                           zamiast kwoty i pusty zysk zamiast całego abonamentu. */}
@@ -666,7 +721,10 @@ export function Objects() {
                           <span className="text-muted-foreground">—</span>
                         ) : (
                           (() => {
-                            const profit = (obj.monthlyValue ?? 0) - obj.monthlyCost;
+                            const profit =
+                              (obj.monthlyValue ?? 0) +
+                              (obj.monthlyRental ?? 0) -
+                              obj.monthlyCost;
                             return (
                               <span
                                 className={cn(

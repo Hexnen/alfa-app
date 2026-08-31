@@ -121,7 +121,9 @@ export function seedLinks(outerTx?: Tx): LinksCounts {
   // Przychód miesięczny obiektów — punkt odniesienia dla celu kosztowego.
   const revenue =
     db
-      .select({ v: sql<number>`coalesce(sum(monthly_value), 0)` })
+      .select({
+        v: sql<number>`coalesce(sum(coalesce(monthly_value, 0) + coalesce(monthly_rental, 0)), 0)`,
+      })
       .from(schema.objects)
       .all()[0]?.v ?? 0;
   const target = revenue * 0.3;

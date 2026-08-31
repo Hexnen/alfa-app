@@ -116,6 +116,18 @@ export const objects = sqliteTable("objects", {
   /** Abonament miesięczny w zł NETTO (bez VAT) — przepisywany z kwoty ze zlecenia. */
   monthlyValue: real("monthly_value"),
   /**
+   * Dzierżawa sprzętu w zł NETTO/mies. — druga część tego, co klient płaci co
+   * miesiąc, przepisywana ze zlecenia (`orders.rental_amount`).
+   *
+   * OSOBNA KOLUMNA, a nie doliczenie do `monthly_value`, żeby dało się odróżnić
+   * abonament za usługę od najmu sprzętu; Analityka sumuje obie pozycje
+   * (`revenue = monthly_value + monthly_rental`). Do wersji z sierpnia 2026
+   * kwota dzierżawy w ogóle nie docierała do obiektu i przychód takich obiektów
+   * był zaniżony — dlatego dla danych sprzed migracji ta kolumna jest NULL,
+   * a nie 0: nie ma z czego jej odtworzyć.
+   */
+  monthlyRental: real("monthly_rental"),
+  /**
    * Miesięczny koszt POZOSTAŁY obiektu (zł NETTO/mies., bez VAT) — wszystko poza wynagrodzeniami:
    * monitoring, abonamenty, sprzęt, dojazdy. NIE jest to koszt całkowity.
    *
@@ -977,6 +989,69 @@ export const quotes = sqliteTable(
 export type Quote = typeof quotes.$inferSelect;
 export type NewQuote = typeof quotes.$inferInsert;
 
+// ============================================================================
+// USŁUGI (dział techniczny) — katalog rzeczy, które NIE są towarem, a wchodzą
+// do oferty: montaż kamery, uruchomienie rejestratora, konfiguracja, dojazd.
+// ============================================================================
+
+/**
+ * DLACZEGO OSOBNO OD `price_list`
+ *
+ * Cennik (`price_list`) to cennik usług SERWISOWYCH: stawki RBH i km przypisane
+ * technikom, z których automat przepisuje protokół na wycenę powykonawczą.
+ * Zna wyłącznie cenę sprzedaży — nie ma pojęcia o koszcie własnym, więc marży
+ * z niego nie policzysz. Dołożenie tam kosztu zmieniłoby zachowanie działającego
+ * automatu protokół → wycena, dlatego ofertowanie dostaje własny katalog.
+ */
+export const SERVICE_CATEGORIES = [
+  "montaz",
+  "uruchomienie",
+  "konfiguracja",
+  "serwis",
+  "projekt",
+  "abonament",
+  "inne",
+] as const;
+export type ServiceCategory = (typeof SERVICE_CATEGORIES)[number];
+
+/** System, którego usługa dotyczy — filtr przy składaniu pakietów oferty. */
+export const SERVICE_SYSTEMS = [
+  "cctv",
+  "sswin",
+  "kd",
+  "ppoz",
+  "sieci",
+  "inne",
+] as const;
+export type ServiceSystem = (typeof SERVICE_SYSTEMS)[number];
+
+export const services = sqliteTable("services", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(), // np. „Montaż kamery IP"
+  category: text("category", { enum: SERVICE_CATEGORIES })
+    .default("montaz")
+    .notNull(),
+  /** NULL = usługa uniwersalna, niezwiązana z konkretnym systemem. */
+  system: text("system", { enum: SERVICE_SYSTEMS }),
+  unit: text("unit").default("szt").notNull(), // szt / RBH / mb / kpl
+  /** Koszt własny netto (robocizna). 0 = zadeklarowane zero, nie „nie wiem". */
+  cost: real("cost").default(0).notNull(),
+  /** Cena sprzedaży netto. */
+  price: real("price").default(0).notNull(),
+  description: text("description"),
+  active: integer("active", { mode: "boolean" }).default(true).notNull(),
+  position: integer("position").default(0).notNull(),
+  createdAt: text("created_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+  updatedAt: text("updated_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+});
+
+export type Service = typeof services.$inferSelect;
+export type NewService = typeof services.$inferInsert;
+
 // Projekty monitoringu (CCTV) — projektowanie kamer na mapie satelitarnej
 // (moduł "Monitoring", designer w frontend/public/monitoring/designer.html).
 // data to pełny stan projektu z designera (JSON: center, zoom, cameras,
@@ -1306,8 +1381,18 @@ export const warehouseItems = sqliteTable("warehouse_items", {
   sku: text("sku").unique(),
   name: text("name").notNull(),
   category: text("category"),
+  /** Producent (Dahua, Hikvision, Satel...) — wolny tekst, jak `category`. */
+  manufacturer: text("manufacturer"),
   unit: text("unit").default("szt").notNull(),
   description: text("description"),
+  /** Cena zakupu netto = koszt własny towaru. NULL = nikt jej nie podał. */
+  purchasePrice: real("purchase_price"),
+  /**
+   * Cena sprzedaży netto. NULL NIE znaczy „za darmo" — znaczy „licz automatem":
+   * cena zakupu + globalny narzut `company.warehouse_markup`. Wpisana wartość to
+   * świadome nadpisanie automatu dla tego towaru (src/lib/margin.ts).
+   */
+  salePrice: real("sale_price"),
   photoData: text("photo_data"), // base64 data-URL (wzorzec jak monitoringPhotos)
   minStock: real("min_stock"), // próg alertu niskiego stanu
   isAsset: integer("is_asset", { mode: "boolean" }).default(false).notNull(),
@@ -1478,6 +1563,357 @@ export const warehouseDocSequences = sqliteTable(
 
 export type WarehouseDocSequence = typeof warehouseDocSequences.$inferSelect;
 export type NewWarehouseDocSequence = typeof warehouseDocSequences.$inferInsert;
+
+// ============================================================================
+// OFERTY (dział techniczny) — dokument handlowy dla klienta, składany z pakietów
+// ============================================================================
+
+/*
+ * CZYM OFERTA NIE JEST
+ *
+ * `quotes` („Wyceny") to dokument POWYKONAWCZY, sztywno związany z realizacją,
+ * z pozycjami w płaskim JSON-ie bez identyfikatorów. Oferta idzie do klienta
+ * PRZED pracą, zna kontrahenta, koszt własny i marżę, ma pozycje cykliczne
+ * (abonament) i dzierżawę — dlatego jest osobnym bytem, a nie rozbudową wyceny.
+ *
+ * TRZY STRUMIENIE PIENIĘDZY, które oferta musi rozróżniać:
+ *   jednorazowo — sprzęt i robocizna płatne przy wdrożeniu,
+ *   miesięcznie — abonament (analityka, internet, grupa interwencyjna),
+ *   dzierżawa   — najem sprzętu, liczony z wartości sprzętu w ofercie.
+ *
+ * Wszystkie kwoty NETTO (patrz nagłówek pliku).
+ */
+
+export const OFFER_KINDS = ["rozbudowa", "montaz", "serwis"] as const;
+export type OfferKind = (typeof OFFER_KINDS)[number];
+
+export const OFFER_STATUSES = [
+  "draft",
+  "sent",
+  "accepted",
+  "rejected",
+  "expired",
+] as const;
+export type OfferStatus = (typeof OFFER_STATUSES)[number];
+
+/** Tryb dzierżawy; `custom` = dowolna liczba miesięcy wpisana ręcznie. */
+export const OFFER_LEASE_MODES = ["none", "y1", "y2", "custom"] as const;
+export type OfferLeaseMode = (typeof OFFER_LEASE_MODES)[number];
+
+export const offers = sqliteTable(
+  "offers",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    /** OF/RRRR/MM/NNN, wersje z sufiksem „-w2" (patrz `parentId`). */
+    number: text("number").notNull().unique(),
+    /**
+     * Oferta pierwotna, z której powstała ta wersja. NULL = wersja pierwsza.
+     * Wysłanej oferty nie wolno edytować — negocjacje tworzą nową wersję, żeby
+     * to, co klient dostał na papierze, dało się odtworzyć co do złotówki.
+     */
+    parentId: integer("parent_id").references((): AnySQLiteColumn => offers.id, {
+      onDelete: "set null",
+    }),
+    version: integer("version").default(1).notNull(),
+
+    date: text("date").notNull(), // YYYY-MM-DD
+    /** Termin ważności; status „expired" WYLICZAMY z niego przy odczycie. */
+    validUntil: text("valid_until"),
+    sentAt: text("sent_at"),
+
+    kind: text("kind", { enum: OFFER_KINDS }).default("montaz").notNull(),
+    status: text("status", { enum: OFFER_STATUSES }).default("draft").notNull(),
+
+    // Klient: wskazanie na kartotekę + MIGAWKI na dokument. Migawka jest po to,
+    // żeby zmiana nazwy kontrahenta nie przepisała wstecz wystawionej oferty.
+    contractorId: integer("contractor_id").references(() => contractors.id, {
+      onDelete: "set null",
+    }),
+    clientName: text("client_name").default("").notNull(),
+    clientNip: text("client_nip").default("").notNull(),
+
+    objectId: integer("object_id").references(() => objects.id, {
+      onDelete: "set null",
+    }),
+    site: text("site").default("").notNull(),
+    address: text("address").default("").notNull(),
+
+    /** Handlowiec prowadzący — pod konwersję ofert i prowizje w Analityce. */
+    salespersonId: integer("salesperson_id").references(() => salespeople.id, {
+      onDelete: "set null",
+    }),
+    /** Spółka wystawiająca — z niej wydruk bierze NIP/KRS/REGON do stopki. */
+    companyId: integer("company_id").references(() => companies.id, {
+      onDelete: "set null",
+    }),
+
+    /** Rabat na CAŁY dokument (%), obok rabatów na pojedynczych pozycjach. */
+    discountPct: real("discount_pct").default(0).notNull(),
+
+    // --- Dzierżawa: jeden zestaw parametrów na całą ofertę ---
+    leaseMode: text("lease_mode", { enum: OFFER_LEASE_MODES })
+      .default("none")
+      .notNull(),
+    leaseMonths: integer("lease_months"),
+    /** Procent ROCZNY; rata miesięczna = podstawa × procent / 100 / 12. */
+    leaseAnnualRate: real("lease_annual_rate"),
+    /** Czy robocizna wchodzi do podstawy raty (raz tak, raz nie). */
+    leaseIncludeLabour: integer("lease_include_labour", { mode: "boolean" })
+      .default(false)
+      .notNull(),
+
+    // --- Ślady po akceptacji ---
+    orderId: integer("order_id").references(() => orders.id, {
+      onDelete: "set null",
+    }),
+    warehouseDocId: integer("warehouse_doc_id").references(
+      () => warehouseDocuments.id,
+      { onDelete: "set null" }
+    ),
+
+    notes: text("notes"),
+    createdBy: text("created_by"), // login (email) użytkownika
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+    updatedAt: text("updated_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+  },
+  (t) => ({
+    contractorIdIdx: index("offers_contractor_id_idx").on(t.contractorId),
+    objectIdIdx: index("offers_object_id_idx").on(t.objectId),
+    statusIdx: index("offers_status_idx").on(t.status),
+    parentIdIdx: index("offers_parent_id_idx").on(t.parentId),
+  })
+);
+
+export type Offer = typeof offers.$inferSelect;
+export type NewOffer = typeof offers.$inferInsert;
+
+/** Kategoria sekcji — pokrywa się z usługami obiektu (src/lib/object-services.ts). */
+export const OFFER_SECTION_CATEGORIES = [
+  "cctv",
+  "sswin",
+  "kd",
+  "wideoweryfikacja",
+  "abonament",
+  "inne",
+] as const;
+export type OfferSectionCategory = (typeof OFFER_SECTION_CATEGORIES)[number];
+
+/**
+ * Sekcja oferty = jeden pakiet (np. „CCTV Dahua, 8 kamer") albo ręczna grupa pozycji.
+ *
+ * WARIANTY: sekcje z tym samym `variantGroup` są dla klienta alternatywami
+ * („Dahua albo Hikvision”) — do sum wchodzi wyłącznie ta z `variantSelected`.
+ * OPCJE: sekcja `isOptional` jest na dokumencie widoczna, ale poza kwotą
+ * „do zapłaty” — to propozycja dodatkowa, nie część zamówienia.
+ */
+export const offerSections = sqliteTable(
+  "offer_sections",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    offerId: integer("offer_id")
+      .notNull()
+      .references(() => offers.id, { onDelete: "cascade" }),
+    position: integer("position").default(0).notNull(),
+    category: text("category", { enum: OFFER_SECTION_CATEGORIES })
+      .default("inne")
+      .notNull(),
+    title: text("title").default("").notNull(),
+    /** Pakiet, z którego sekcja powstała (NULL = złożona ręcznie). */
+    packageId: integer("package_id").references(
+      (): AnySQLiteColumn => offerPackages.id,
+      { onDelete: "set null" }
+    ),
+    /** Parametry użyte przy rozwijaniu pakietu, JSON: {"cameras": 8}. */
+    params: text("params").default("{}").notNull(),
+    isOptional: integer("is_optional", { mode: "boolean" })
+      .default(false)
+      .notNull(),
+    variantGroup: text("variant_group"),
+    variantSelected: integer("variant_selected", { mode: "boolean" })
+      .default(true)
+      .notNull(),
+    notes: text("notes"),
+  },
+  (t) => ({
+    offerIdIdx: index("offer_sections_offer_id_idx").on(t.offerId),
+  })
+);
+
+export type OfferSection = typeof offerSections.$inferSelect;
+export type NewOfferSection = typeof offerSections.$inferInsert;
+
+/** Skąd wzięła się pozycja — decyduje, którą kartotekę odświeża „Przelicz ceny". */
+export const OFFER_ITEM_SOURCES = ["warehouse", "service", "manual"] as const;
+export type OfferItemSource = (typeof OFFER_ITEM_SOURCES)[number];
+
+/**
+ * Rodzaj pozycji. Rozstrzyga, co wchodzi do PODSTAWY DZIERŻAWY: zawsze
+ * `material` (sprzęt), a `labour` tylko przy `leaseIncludeLabour`.
+ */
+export const OFFER_ITEM_KINDS = [
+  "material",
+  "labour",
+  "subscription",
+  "other",
+] as const;
+export type OfferItemKind = (typeof OFFER_ITEM_KINDS)[number];
+
+/** Jednorazowo czy co miesiąc — dwa osobne strumienie w podsumowaniu oferty. */
+export const OFFER_ITEM_BILLINGS = ["one_time", "monthly"] as const;
+export type OfferItemBilling = (typeof OFFER_ITEM_BILLINGS)[number];
+
+export const offerItems = sqliteTable(
+  "offer_items",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    /**
+     * Denormalizacja: pozycja zna swoją ofertę wprost, żeby suma dokumentu nie
+     * wymagała joinu przez sekcje. Kaskada leci obiema drogami.
+     */
+    offerId: integer("offer_id")
+      .notNull()
+      .references(() => offers.id, { onDelete: "cascade" }),
+    sectionId: integer("section_id")
+      .notNull()
+      .references(() => offerSections.id, { onDelete: "cascade" }),
+    position: integer("position").default(0).notNull(),
+
+    source: text("source", { enum: OFFER_ITEM_SOURCES })
+      .default("manual")
+      .notNull(),
+    warehouseItemId: integer("warehouse_item_id").references(
+      () => warehouseItems.id,
+      { onDelete: "set null" }
+    ),
+    serviceId: integer("service_id").references(() => services.id, {
+      onDelete: "set null",
+    }),
+
+    /** MIGAWKI: nazwa i jednostka na dokumencie nie zmieniają się po edycji kartoteki. */
+    name: text("name").notNull(),
+    unit: text("unit").default("szt").notNull(),
+    qty: real("qty").default(1).notNull(),
+
+    kind: text("kind", { enum: OFFER_ITEM_KINDS }).default("material").notNull(),
+    billing: text("billing", { enum: OFFER_ITEM_BILLINGS })
+      .default("one_time")
+      .notNull(),
+
+    /** Koszt własny netto za jednostkę. NULL = nieznany, i to NIE jest zero. */
+    unitCost: real("unit_cost"),
+    /** Cena sprzedaży netto za jednostkę. */
+    unitPrice: real("unit_price").default(0).notNull(),
+    discountPct: real("discount_pct").default(0).notNull(),
+    /** Pozycja pokazana klientowi, ale poza kwotą „do zapłaty". */
+    isOptional: integer("is_optional", { mode: "boolean" })
+      .default(false)
+      .notNull(),
+  },
+  (t) => ({
+    offerIdIdx: index("offer_items_offer_id_idx").on(t.offerId),
+    sectionIdIdx: index("offer_items_section_id_idx").on(t.sectionId),
+  })
+);
+
+export type OfferItem = typeof offerItems.$inferSelect;
+export type NewOfferItem = typeof offerItems.$inferInsert;
+
+/**
+ * Biblioteka pakietów — zapisane zestawy, z których składa się ofertę jednym
+ * kliknięciem („+ CCTV → Dahua → 8 kamer").
+ *
+ * `parametric` skaluje pozycje od parametru (8 kamer → 8 kamer, 1 rejestrator
+ * na każde 8, 8 montaży), `fixed` to sztywny zestaw ignorujący parametry.
+ */
+export const OFFER_PACKAGE_MODES = ["parametric", "fixed"] as const;
+export type OfferPackageMode = (typeof OFFER_PACKAGE_MODES)[number];
+
+export const offerPackages = sqliteTable("offer_packages", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(),
+  category: text("category", { enum: OFFER_SECTION_CATEGORIES })
+    .default("inne")
+    .notNull(),
+  /** Marka zestawu (Dahua, Hikvision, Satel) — wolny tekst, jak w magazynie. */
+  manufacturer: text("manufacturer"),
+  description: text("description"),
+  mode: text("mode", { enum: OFFER_PACKAGE_MODES })
+    .default("parametric")
+    .notNull(),
+  /**
+   * Definicja parametrów, JSON:
+   * [{ "key": "cameras", "label": "Liczba kamer", "default": 4, "min": 1, "max": 64 }]
+   * Przy `mode = "fixed"` pusta tablica.
+   */
+  params: text("params").default("[]").notNull(),
+  active: integer("active", { mode: "boolean" }).default(true).notNull(),
+  position: integer("position").default(0).notNull(),
+  createdAt: text("created_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+  updatedAt: text("updated_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+});
+
+export type OfferPackage = typeof offerPackages.$inferSelect;
+export type NewOfferPackage = typeof offerPackages.$inferInsert;
+
+/** Zaokrąglenie ilości po przeskalowaniu — „1 rejestrator na każde 8 kamer". */
+export const OFFER_QTY_ROUNDINGS = ["none", "up"] as const;
+export type OfferQtyRounding = (typeof OFFER_QTY_ROUNDINGS)[number];
+
+export const offerPackageItems = sqliteTable(
+  "offer_package_items",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    packageId: integer("package_id")
+      .notNull()
+      .references(() => offerPackages.id, { onDelete: "cascade" }),
+    position: integer("position").default(0).notNull(),
+
+    source: text("source", { enum: OFFER_ITEM_SOURCES })
+      .default("warehouse")
+      .notNull(),
+    warehouseItemId: integer("warehouse_item_id").references(
+      () => warehouseItems.id,
+      { onDelete: "cascade" }
+    ),
+    serviceId: integer("service_id").references(() => services.id, {
+      onDelete: "cascade",
+    }),
+    /** Nazwa dla pozycji ręcznej; przy magazynie/usłudze — zapas, gdy zniknie źródło. */
+    name: text("name").default("").notNull(),
+    unit: text("unit").default("szt").notNull(),
+
+    kind: text("kind", { enum: OFFER_ITEM_KINDS }).default("material").notNull(),
+    billing: text("billing", { enum: OFFER_ITEM_BILLINGS })
+      .default("one_time")
+      .notNull(),
+
+    /** Ilość stała, niezależna od parametru (np. 1 rejestrator „zawsze"). */
+    qtyBase: real("qty_base").default(0).notNull(),
+    /** Mnożnik parametru: 1 = jedna sztuka na kamerę, 0.125 = jedna na osiem. */
+    qtyPerParam: real("qty_per_param").default(0).notNull(),
+    /** Klucz parametru z `offerPackages.params`, np. „cameras". */
+    paramKey: text("param_key"),
+    qtyRound: text("qty_round", { enum: OFFER_QTY_ROUNDINGS })
+      .default("none")
+      .notNull(),
+    /** Cena narzucona przez pakiet; NULL = weź aktualną ze źródła. */
+    unitPriceOverride: real("unit_price_override"),
+  },
+  (t) => ({
+    packageIdIdx: index("offer_package_items_package_id_idx").on(t.packageId),
+  })
+);
+
+export type OfferPackageItem = typeof offerPackageItems.$inferSelect;
+export type NewOfferPackageItem = typeof offerPackageItems.$inferInsert;
 
 // ============================================================================
 // KALENDARZ (dział techniczny) — wydarzenia, serie cykliczne, przypisani technicy
