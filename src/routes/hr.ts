@@ -2,10 +2,11 @@
 // Kalkulacja płac: src/utils/hr-calc.ts (agregacja godzin + jeden przebieg).
 import { Hono } from "hono";
 import { db, schema } from "../db/index.js";
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, ne, sql, type SQL } from "drizzle-orm";
 import type { ApiResponse } from "../types/index.js";
 import type {
   NewHrContract,
+  NewHrDepartment,
   NewHrEmployee,
   NewHrHours,
   NewHrObject,
@@ -17,10 +18,17 @@ import {
   type PayrollComputed,
 } from "../utils/hr-calc.js";
 import { fetchObjectCatalog } from "../lib/object-catalog.js";
+import { departmentLabel, getCompanyConfig } from "../lib/company-config.js";
 
 const app = new Hono();
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
+
+// Uchwyt transakcji drizzle (ten sam wzorzec, co w src/lib/activity-log.ts) —
+// helpery działów muszą przyjmować i `db`, i `tx`, żeby niezmiennik puli CMA
+// wykonywał się atomowo razem z zapisem działu.
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+type DbOrTx = typeof db | Tx;
 
 // Liczba lub null — akceptuje number i string z przecinkiem
 function toNum(v: unknown): number | null {
@@ -393,6 +401,269 @@ app.delete("/objects/:id", async (c) => {
   return c.json({ success: true, data: null, message: "Obiekt usunięty" });
 });
 
+// ==================== DZIAŁY ====================
+
+/*
+ * Słownik działów firmy (Kadry → Działy). Rodzeństwo `hr_objects`, nie kartoteka:
+ * wpis godzin wskazuje ALBO obiekt (posterunek), ALBO dział — pracę, która nie
+ * należy do żadnego obiektu (handlowy, księgowość, zarząd, centrum monitorowania).
+ * Wcześniej rolę działów pełniły pozycje słownika obiektów rozpoznawane po NAZWIE
+ * (prefiks „#", literalne „CMA"); nazwa przestała być kluczem.
+ */
+
+export interface HrDepartmentDto {
+  id: number;
+  name: string;
+  /**
+   * Nazwa z prefiksem firmy („ALFA GROUP:Handlowy”). Składana na serwerze, bo
+   * `company.name` żyje w app_settings za `requireAdmin` — front Kadr nie ma jak
+   * jej przeczytać. Patrz `departmentLabel()` w src/lib/company-config.ts.
+   */
+  label: string;
+  isCmaPool: boolean;
+  sortOrder: number;
+  active: boolean;
+  /** Waga działu: suma godzin i liczba osób z CAŁEJ historii `hr_hours`. */
+  hoursTotal: number;
+  employeesCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Działy razem z wagą. `where` zawężające do jednego id używamy po zapisie —
+ * POST i PUT mają zwracać dokładnie ten sam kształt, co GET, żeby front mógł
+ * podmienić wiersz w tabeli bez ponownego pobierania listy.
+ */
+async function loadDepartments(where?: SQL): Promise<HrDepartmentDto[]> {
+  const rows = await db
+    .select({
+      row: schema.hrDepartments,
+      // Kolumnę nadrzędną piszemy DOSŁOWNIE (`hr_departments.id`) — z tego samego
+      // powodu co w GET /objects: drizzle zrenderowałby ${schema.hrDepartments.id}
+      // jako niekwalifikowane "id", trafiające w kolumnę tabeli z podzapytania.
+      hoursTotal: sql<number>`(
+        select coalesce(sum(coalesce(hr_hours.worked_hours, 0)), 0)
+        from hr_hours where hr_hours.department_id = hr_departments.id
+      )`,
+      employeesCount: sql<number>`(
+        select count(distinct hr_hours.employee_id)
+        from hr_hours where hr_hours.department_id = hr_departments.id
+      )`,
+    })
+    .from(schema.hrDepartments)
+    .where(where)
+    .orderBy(asc(schema.hrDepartments.sortOrder), asc(schema.hrDepartments.name));
+  // Nazwa firmy czytana RAZ na odpowiedź, nie raz na wiersz — to zapytanie po PK,
+  // ale w pętli po kilkunastu działach byłoby kilkanaście identycznych.
+  const { values } = getCompanyConfig();
+  return rows.map((r) => ({
+    ...r.row,
+    label: departmentLabel(r.row.name, values),
+    hoursTotal: r.hoursTotal ?? 0,
+    employeesCount: r.employeesCount ?? 0,
+  }));
+}
+
+/** Czy błąd to naruszenie UNIQUE na nazwie działu (wyścig dwóch zapisów)? */
+function isUniqueViolation(err: unknown): boolean {
+  return (
+    err instanceof Error &&
+    ((err as { code?: string }).code === "SQLITE_CONSTRAINT_UNIQUE" ||
+      err.message.includes("UNIQUE constraint failed"))
+  );
+}
+
+/**
+ * `partial = true` (PUT): zmieniają się tylko pola obecne w body. Przy POST nazwa
+ * jest obowiązkowa, reszta bierze wartości domyślne ze schematu.
+ */
+function parseDepartment(
+  body: Record<string, unknown>,
+  partial: boolean,
+): { data?: Partial<NewHrDepartment>; error?: string } {
+  const data: Partial<NewHrDepartment> = {};
+  if (!partial || body.name !== undefined) {
+    const name = typeof body.name === "string" ? body.name.trim() : "";
+    if (!name) return { error: "Nazwa działu jest wymagana" };
+    if (name.length > 100) return { error: "Nazwa działu: maks. 100 znaków" };
+    data.name = name;
+  }
+  if (body.isCmaPool !== undefined) data.isCmaPool = Boolean(body.isCmaPool);
+  if (body.sortOrder !== undefined) {
+    const n = toNum(body.sortOrder);
+    if (n == null || !Number.isInteger(n)) {
+      return { error: "Kolejność musi być liczbą całkowitą" };
+    }
+    data.sortOrder = n;
+  }
+  if (body.active !== undefined) data.active = Boolean(body.active);
+  return { data };
+}
+
+/**
+ * NIEZMIENNIK: pula centrum monitorowania jest JEDNA. `object-personnel-cost.ts`
+ * zniesie wiele działów z flagą (zsumuje ich godziny w jedną pulę), ale operacyjnie
+ * byłby to błąd — nikt nie zamierza mieć dwóch centrów. Dlatego zaznaczenie puli
+ * zdejmuje flagę z pozostałych działów, w tej samej transakcji co zapis.
+ */
+function clearOtherPools(tx: DbOrTx, keepId: number): void {
+  tx.update(schema.hrDepartments)
+    .set({ isCmaPool: false, updatedAt: new Date().toISOString() })
+    .where(
+      and(eq(schema.hrDepartments.isCmaPool, true), ne(schema.hrDepartments.id, keepId)),
+    )
+    .run();
+}
+
+/** Kolizja nazwy — bez rozróżniania wielkości liter, jak przy spółkach. */
+function departmentNameTaken(tx: DbOrTx, name: string, exceptId?: number): boolean {
+  return (
+    tx
+      .select({ id: schema.hrDepartments.id })
+      .from(schema.hrDepartments)
+      .where(
+        exceptId == null
+          ? sql`lower(${schema.hrDepartments.name}) = lower(${name})`
+          : sql`lower(${schema.hrDepartments.name}) = lower(${name}) and ${schema.hrDepartments.id} <> ${exceptId}`,
+      )
+      .get() != null
+  );
+}
+
+const DEPARTMENT_NAME_TAKEN = "Dział o tej nazwie już istnieje";
+
+app.get("/departments", async (c) => {
+  const onlyActive = c.req.query("active") === "true";
+  const rows = await loadDepartments();
+  return c.json({
+    success: true,
+    data: onlyActive ? rows.filter((d) => d.active) : rows,
+  });
+});
+
+app.post("/departments", async (c) => {
+  const body = await c.req.json<Record<string, unknown>>();
+  const { data, error } = parseDepartment(body, false);
+  if (error || !data) {
+    return c.json<ApiResponse<null>>({ success: false, error }, 400);
+  }
+  let outcome: { status: 201; id: number } | { status: 409 };
+  try {
+    outcome = db.transaction((tx) => {
+      if (departmentNameTaken(tx, data.name as string)) {
+        return { status: 409 as const };
+      }
+      const [created] = tx
+        .insert(schema.hrDepartments)
+        .values(data as NewHrDepartment)
+        .returning()
+        .all();
+      if (created.isCmaPool) clearOtherPools(tx, created.id);
+      return { status: 201 as const, id: created.id };
+    });
+  } catch (err) {
+    // Wyścig: nazwa wolna przy sprawdzeniu, zajęta przy INSERT. Spójność pilnuje
+    // UNIQUE — tłumaczymy je na ten sam czytelny 409 zamiast surowego 500.
+    if (isUniqueViolation(err)) {
+      return c.json<ApiResponse<null>>({ success: false, error: DEPARTMENT_NAME_TAKEN }, 409);
+    }
+    throw err;
+  }
+  if (outcome.status === 409) {
+    return c.json<ApiResponse<null>>({ success: false, error: DEPARTMENT_NAME_TAKEN }, 409);
+  }
+  const [dto] = await loadDepartments(eq(schema.hrDepartments.id, outcome.id));
+  return c.json({ success: true, data: dto, message: "Dział dodany" }, 201);
+});
+
+app.put("/departments/:id", async (c) => {
+  const id = parseInt(c.req.param("id"));
+  const body = await c.req.json<Record<string, unknown>>();
+  const { data, error } = parseDepartment(body, true);
+  if (error || !data) {
+    return c.json<ApiResponse<null>>({ success: false, error }, 400);
+  }
+  let outcome: { status: 200 } | { status: 404 } | { status: 409 };
+  try {
+    outcome = db.transaction((tx) => {
+      const existing = tx
+        .select()
+        .from(schema.hrDepartments)
+        .where(eq(schema.hrDepartments.id, id))
+        .get();
+      if (!existing) return { status: 404 as const };
+      if (data.name != null && departmentNameTaken(tx, data.name, id)) {
+        return { status: 409 as const };
+      }
+      tx.update(schema.hrDepartments)
+        .set({ ...data, updatedAt: new Date().toISOString() })
+        .where(eq(schema.hrDepartments.id, id))
+        .run();
+      // Flaga puli zdejmowana z pozostałych DOPIERO po zapisie tego działu —
+      // inaczej `keepId` nie miałby jeszcze ustawionej flagi i wyczyścilibyśmy ją
+      // wszystkim, łącznie z tym, który właśnie miał ją dostać.
+      if (data.isCmaPool === true) clearOtherPools(tx, id);
+      return { status: 200 as const };
+    });
+  } catch (err) {
+    if (isUniqueViolation(err)) {
+      return c.json<ApiResponse<null>>({ success: false, error: DEPARTMENT_NAME_TAKEN }, 409);
+    }
+    throw err;
+  }
+  if (outcome.status === 404) {
+    return c.json<ApiResponse<null>>({ success: false, error: "Nie znaleziono działu" }, 404);
+  }
+  if (outcome.status === 409) {
+    return c.json<ApiResponse<null>>({ success: false, error: DEPARTMENT_NAME_TAKEN }, 409);
+  }
+  const [dto] = await loadDepartments(eq(schema.hrDepartments.id, id));
+  return c.json({ success: true, data: dto, message: "Dział zapisany" });
+});
+
+/**
+ * Usunięcie działu. FK `hr_hours.department_id` jest ON DELETE SET NULL, więc
+ * kasowanie NIE usuwa godzin — po cichu ODPINA je od przypisania.
+ *
+ * DECYZJA: dział z godzinami wymaga świadomego potwierdzenia (`?force=1`), inaczej
+ * 409 z liczbą wierszy. Sam dział CMA niesie 31 tys. godzin całej historii; jedno
+ * przypadkowe kliknięcie zabrałoby alokacji kosztów jej podstawę, nie zgłaszając
+ * żadnego błędu — wiersze zostają, tylko przestają być czyjekolwiek. Odtworzyć
+ * tego z aplikacji się nie da.
+ */
+app.delete("/departments/:id", async (c) => {
+  const id = parseInt(c.req.param("id"));
+  const force = c.req.query("force") === "1";
+  if (!force) {
+    const [used] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(schema.hrHours)
+      .where(eq(schema.hrHours.departmentId, id));
+    const rowsUsing = Number(used?.count ?? 0);
+    if (rowsUsing > 0) {
+      return c.json<ApiResponse<null>>(
+        {
+          success: false,
+          error: `Dział ma przypisane godziny (wpisów: ${rowsUsing}). Usunięcie odepnie je od działu — potwierdź operację.`,
+        },
+        409,
+      );
+    }
+  }
+  const result = await db
+    .delete(schema.hrDepartments)
+    .where(eq(schema.hrDepartments.id, id))
+    .returning();
+  if (result.length === 0) {
+    return c.json<ApiResponse<null>>(
+      { success: false, error: "Nie znaleziono działu" },
+      404,
+    );
+  }
+  return c.json({ success: true, data: null, message: "Dział usunięty" });
+});
+
 // ==================== NORMY GODZIN ====================
 
 app.get("/norms", async (c) => {
@@ -459,10 +730,21 @@ function parseHours(body: Record<string, unknown>): {
   if (!year || !month || month < 1 || month > 12) {
     return { error: "Nieprawidłowy rok/miesiąc" };
   }
+  const objectId = toNum(body.objectId);
+  const departmentId = toNum(body.departmentId);
+  // Rozłączność przypisania (patrz komentarz przy `hrHours.objectId` w schemacie).
+  // Front wysyła OBA klucze przy każdym zapisie (jeden zawsze null), więc oba
+  // wypełnione naraz to błąd programu, a nie pomyłka użytkownika — nie zerujemy
+  // po cichu drugiego pola, bo cicha poprawka ukryłaby wadę i przypisała godziny
+  // nie tam, gdzie chciał operator.
+  if (objectId != null && departmentId != null) {
+    return { error: "Wpis może wskazywać obiekt albo dział, nie oba naraz" };
+  }
   return {
     data: {
       employeeId,
-      objectId: toNum(body.objectId),
+      objectId,
+      departmentId,
       year,
       month,
       nightHours: toNum(body.nightHours),
@@ -473,8 +755,9 @@ function parseHours(body: Record<string, unknown>): {
       deductions: toNum(body.deductions),
       bonuses: toNum(body.bonuses),
       notes: typeof body.notes === "string" ? body.notes : "",
-      // Flaga "obiekt do potwierdzenia" (carry-over). Formularz jej nie wysyła,
-      // więc każdy zapis wpisu przez użytkownika zdejmuje pytajnik.
+      // Flaga „przypisanie do potwierdzenia" (carry-over) — jedna dla obiektu
+      // i dla działu. Formularz jej nie wysyła, więc każdy zapis wpisu przez
+      // użytkownika zdejmuje pytajnik.
       objectUncertain: body.objectUncertain === true,
     },
   };
@@ -487,16 +770,28 @@ app.get("/hours", async (c) => {
       hours: schema.hrHours,
       employeeName: schema.hrEmployees.fullName,
       objectName: schema.hrObjects.name,
+      departmentRawName: schema.hrDepartments.name,
     })
     .from(schema.hrHours)
     .innerJoin(schema.hrEmployees, eq(schema.hrHours.employeeId, schema.hrEmployees.id))
     .leftJoin(schema.hrObjects, eq(schema.hrHours.objectId, schema.hrObjects.id))
+    .leftJoin(
+      schema.hrDepartments,
+      eq(schema.hrHours.departmentId, schema.hrDepartments.id),
+    )
     .where(and(eq(schema.hrHours.year, year), eq(schema.hrHours.month, month)))
     .orderBy(asc(schema.hrEmployees.fullName));
+  // Nazwa firmy raz na odpowiedź, nie raz na wiersz — miesiąc potrafi mieć
+  // kilkaset wpisów godzin.
+  const { values } = getCompanyConfig();
   const data = rows.map((r) => ({
     ...r.hours,
     employeeName: r.employeeName,
     objectName: r.objectName ?? "",
+    // GOTOWA etykieta („ALFA GROUP:Handlowy"), a nie sama nazwa: front Kadr nie
+    // ma dostępu do `company.name` (app_settings za requireAdmin).
+    departmentName:
+      r.departmentRawName != null ? departmentLabel(r.departmentRawName, values) : "",
   }));
   return c.json({ success: true, data });
 });
@@ -556,10 +851,23 @@ app.put("/hours/:id", async (c) => {
   return c.json({ success: true, data: result[0], message: "Godziny zapisane" });
 });
 
+/**
+ * Klucz deduplikacji carry-over: (pracownik, przypisanie). Przypisanie to obiekt
+ * ALBO dział, więc w kluczu muszą być oba id — z prefiksami `o`/`d`, żeby obiekt
+ * nr 5 nie zlał się z działem nr 5. Jeden helper zamiast dwóch kopii wzoru:
+ * rozjazd między nimi objawiłby się dopiero zdublowanymi wierszami godzin.
+ */
+const carryOverPairKey = (r: {
+  employeeId: number;
+  objectId: number | null;
+  departmentId: number | null;
+}) => `${r.employeeId}:o${r.objectId ?? ""}:d${r.departmentId ?? ""}`;
+
 // Przeniesienie aktywnych pracowników z poprzedniego miesiąca: dla każdego
 // wpisu godzin z miesiąca poprzedzającego (year, month) — o ile pracownik jest
-// aktywny, a para (pracownik, obiekt) nie istnieje jeszcze w miesiącu docelowym
-// — tworzy pusty wpis z flagą objectUncertain (obiekt do potwierdzenia).
+// aktywny, a para (pracownik, przypisanie) nie istnieje jeszcze w miesiącu
+// docelowym — tworzy pusty wpis z flagą objectUncertain (przypisanie do
+// potwierdzenia). Kopiuje się zarówno obiekt, jak i dział.
 // Idempotentny: ponowne wywołanie niczego nie dubluje. Uprawnienie edycji
 // egzekwuje tabPermissionGuard (zapis na /hr/* wymaga poziomu "edit"),
 // tak samo jak dla POST /hours.
@@ -592,26 +900,26 @@ app.post("/hours/carry-over", async (c) => {
       ),
     );
 
-  // Dedup: pary (pracownik, obiekt) już obecne w miesiącu docelowym
+  // Dedup: pary (pracownik, przypisanie) już obecne w miesiącu docelowym
   const existing = await db
     .select({
       employeeId: schema.hrHours.employeeId,
       objectId: schema.hrHours.objectId,
+      departmentId: schema.hrHours.departmentId,
     })
     .from(schema.hrHours)
     .where(and(eq(schema.hrHours.year, year), eq(schema.hrHours.month, month)));
-  const seen = new Set(
-    existing.map((r) => `${r.employeeId}:${r.objectId ?? "null"}`),
-  );
+  const seen = new Set(existing.map(carryOverPairKey));
 
   const toInsert: NewHrHours[] = [];
   for (const { hours: prev } of prevRows) {
-    const key = `${prev.employeeId}:${prev.objectId ?? "null"}`;
+    const key = carryOverPairKey(prev);
     if (seen.has(key)) continue;
     seen.add(key);
     toInsert.push({
       employeeId: prev.employeeId,
       objectId: prev.objectId,
+      departmentId: prev.departmentId,
       objectUncertain: true,
       year,
       month,

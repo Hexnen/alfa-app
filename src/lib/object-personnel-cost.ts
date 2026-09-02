@@ -32,10 +32,11 @@
  *  1. koszt pracownika w miesiącu = suma `wyplata` × narzut składkowy po jego umowach
  *     (+ rozliczenie biura z `hr_office_payroll` dla `kind='biuro'`),
  *  2. rozbicie na obiekty proporcjonalnie do `worked_hours` z `hr_hours`,
- *  3. godziny na pozycjach NIEZMAPOWANYCH (`hr_objects.object_id IS NULL`)
- *     nie trafiają nigdzie — to koszt ogólny firmy (#BIURO, #zlecenie),
- *     a nie koszt konkretnego obiektu. Pracownik z połową godzin na biurze oddaje
- *     obiektowi połowę swojego kosztu i TAK MA BYĆ,
+ *  3. do KOSZTU OGÓLNEGO (nierozdzielonego) idą godziny: bez przypisania,
+ *     na pozycjach NIEZMAPOWANYCH (`hr_objects.object_id IS NULL` — #BIURO,
+ *     #zlecenie) oraz na DZIAŁACH SPOZA PULI (handlowy, księgowość, zarząd).
+ *     To nie jest koszt konkretnego obiektu. Pracownik z połową godzin na dziale
+ *     handlowym oddaje obiektowi połowę swojego kosztu i TAK MA BYĆ,
  *  4. suma po `hr_objects.object_id` (kilka pozycji kadrowych może wskazywać
  *     ten sam obiekt kartoteki — sumujemy),
  *  5. średnia po liczbie miesięcy, które FAKTYCZNIE miały dane płacowe.
@@ -46,7 +47,7 @@
  * │ CMA były do tej pory kosztem ogólnym i po prostu PRZEPADAŁY, przez co        │
  * │ obiekt z pięcioma kamerami wychodził na czysty zysk.                        │
  * │                                                                             │
- * │ Od teraz pozycja kadrowa oznaczona `hr_objects.is_cma_pool` tworzy PULĘ,     │
+ * │ Od teraz DZIAŁ oznaczony `hr_departments.is_cma_pool` tworzy PULĘ,           │
  * │ którą rozdzielamy po dozorowanych JEDNOSTKACH:                              │
  * │   jednostki(obiekt) = SSWiN(1) + wideorecepcja(1) + liczba kamer            │
  * │   udziałCMA(obiekt) = pulaCMA × jednostki(obiekt) / Σ jednostki             │
@@ -57,6 +58,11 @@
  * │                                                                             │
  * │ Obie ścieżki SIĘ SUMUJĄ: obiekt z OFI i kamerami dostaje i pensje swojej     │
  * │ załogi, i udział w centrum. Nigdy jedno zamiast drugiego.                    │
+ * │                                                                             │
+ * │ Pula mieszka w `hr_departments`, bo centrum monitorowania nie jest obiektem  │
+ * │ — nikt na nim nie stoi i nie da się go zmapować do kartoteki. Godziny        │
+ * │ wskazują ALBO obiekt (`hr_hours.object_id`), ALBO dział                      │
+ * │ (`hr_hours.department_id`); działy spoza puli są kosztem ogólnym.            │
  * └────────────────────────────────────────────────────────────────────────────┘
  */
 import { db, schema } from "../db/index.js";
@@ -174,7 +180,11 @@ export interface CmaAllocationInfo {
   objectsInDenominator: number;
   /** Obiekty z usługą kamer, ale bez podanej ilości — nie dostają wagi za kamery. */
   objectsMissingCameraCount: number;
-  /** Ile pozycji kadrowych oznaczono jako pula (0 = mechanizm nieaktywny). */
+  /**
+   * Ile DZIAŁÓW oznaczono jako pula centrum monitorowania (0 = mechanizm
+   * nieaktywny, godziny CMA wracają do kosztu ogólnego). W praktyce 1 — CRUD
+   * działów pilnuje, że flagę nosi jeden dział naraz.
+   */
   poolPositions: number;
 }
 
@@ -433,9 +443,18 @@ function computeWindow(window: CostWindow, now = new Date()): WindowComputation 
     .select({
       id: schema.hrObjects.id,
       objectId: schema.hrObjects.objectId,
-      isCmaPool: schema.hrObjects.isCmaPool,
     })
     .from(schema.hrObjects)
+    .all();
+  // Działy — jedno zapytanie na całe okno, poza pętlą miesięcy (jak `objectRows`
+  // niżej): słownik nie zmienia się w trakcie liczenia, a flagi puli szukamy dla
+  // każdego z kilkunastu miesięcy tej samej.
+  const hrDepartmentRows = db
+    .select({
+      id: schema.hrDepartments.id,
+      isCmaPool: schema.hrDepartments.isCmaPool,
+    })
+    .from(schema.hrDepartments)
     .all();
   // Usługi obiektów — jedno zapytanie na całe okno, poza pętlą miesięcy: kartoteka
   // nie zmienia się w trakcie liczenia, a mianownik CMA jest ten sam dla wszystkich
@@ -471,15 +490,21 @@ function computeWindow(window: CostWindow, now = new Date()): WindowComputation 
 
   // hr_objects.id → objects.id; brak wpisu = pozycja niezmapowana (koszt ogólny).
   const objectOf = new Map<number, number>();
-  // Pozycje będące PULĄ centrum monitorowania — ich godziny nie idą na żaden obiekt
-  // wprost, tylko do wspólnego worka rozdzielanego po jednostkach.
-  const cmaPoolIds = new Set<number>();
   for (const r of hrObjectRows) {
-    // Pula wygrywa ze wskazaniem obiektu. Schemat pozwala ustawić oba naraz, ale
-    // znaczyłoby to „ten koszt należy i do obiektu, i do wszystkich" — czyli
-    // policzenie go dwa razy. Jedna ścieżka na pozycję, koniec.
-    if (r.isCmaPool) cmaPoolIds.add(r.id);
-    else if (r.objectId != null) objectOf.set(r.id, r.objectId);
+    if (r.objectId != null) objectOf.set(r.id, r.objectId);
+  }
+  /**
+   * `hr_departments.id` DZIAŁÓW będących PULĄ centrum monitorowania — ich godziny
+   * nie idą na żaden obiekt wprost, tylko do wspólnego worka rozdzielanego po
+   * jednostkach. Uwaga: to id z INNEJ tabeli niż klucze `objectOf`.
+   *
+   * Podwójnego liczenia pilnuje sam model: wiersz `hr_hours` wskazuje obiekt ALBO
+   * dział (`parseHours` w src/routes/hr.ts odrzuca oba naraz), więc te same godziny
+   * nie mogą trafić i na obiekt, i do puli.
+   */
+  const cmaPoolIds = new Set<number>();
+  for (const d of hrDepartmentRows) {
+    if (d.isCmaPool) cmaPoolIds.add(d.id);
   }
 
   const payrollByMonth = groupBy(payrollRows, (r) => ymKey(r.year, r.month));
@@ -598,13 +623,28 @@ function computeWindow(window: CostWindow, now = new Date()): WindowComputation 
         entry = { total: 0, perObject: new Map(), cma: 0 };
         hoursByEmployee.set(h.employeeId, entry);
       }
+      /*
+       * ┌── UWAGA: TE DWIE LINIE MUSZĄ ZOSTAĆ PRZED ROZGAŁĘZIENIEM ──────────────┐
+       * │ `entry.total` jest MIANOWNIKIEM alokacji kosztu pracownika. Wchodzi do  │
+       * │ niego KAŻDA przepracowana godzina — także ta na dziale spoza puli.      │
+       * │ Naturalny odruch przy dopisywaniu działów („to nie obiekt, pomiń        │
+       * │ wiersz") skurczyłby mianownik i obiekty wchłonęłyby koszt Handlowego    │
+       * │ i Księgowości: pracownik z połową godzin na dziale oddałby obiektowi    │
+       * │ CAŁY swój koszt zamiast połowy. Cicho, bez błędu, z zawyżonym kosztem   │
+       * │ obiektu i zaniżonym kosztem ogólnym firmy.                              │
+       * └────────────────────────────────────────────────────────────────────────┘
+       */
       entry.total += worked;
       allHours += worked;
-      if (h.objectId != null && cmaPoolIds.has(h.objectId)) {
-        // Godziny centrum monitorowania — nie wiadomo jeszcze, na które obiekty
-        // pójdą, bo to zależy od podziału po jednostkach. Zbieramy do puli.
-        cmaHours += worked;
-        entry.cma += worked;
+      if (h.departmentId != null) {
+        if (cmaPoolIds.has(h.departmentId)) {
+          // Godziny centrum monitorowania — nie wiadomo jeszcze, na które obiekty
+          // pójdą, bo to zależy od podziału po jednostkach. Zbieramy do puli.
+          cmaHours += worked;
+          entry.cma += worked;
+        }
+        // Dział spoza puli (handlowy, księgowość, zarząd) — koszt ogólny firmy,
+        // nie alokujemy go na żaden obiekt.
         continue;
       }
       const objectId = h.objectId != null ? objectOf.get(h.objectId) : undefined;
@@ -612,7 +652,7 @@ function computeWindow(window: CostWindow, now = new Date()): WindowComputation 
         mappedHours += worked;
         entry.perObject.set(objectId, (entry.perObject.get(objectId) ?? 0) + worked);
       }
-      // else: pozycja niezmapowana albo wpis bez obiektu — koszt ogólny, nie alokujemy.
+      // else: pozycja niezmapowana albo wpis bez przypisania — koszt ogólny.
     }
 
     // --- alokacja proporcjonalna
@@ -722,7 +762,8 @@ function computeWindow(window: CostWindow, now = new Date()): WindowComputation 
  * Analityka liczy to przy KAŻDYM żądaniu, a trzy zakładki potrafią odpytać
  * backend jedna po drugiej — bez cache'u ten sam rachunek szedłby trzy razy.
  * Klucz to okno + odcisk stanu tabel kadrowych: dopóki nikt nie ruszył godzin,
- * wypłat, umów ani mapowania obiektów, wynik nie ma prawa się zmienić.
+ * wypłat, umów, mapowania obiektów ani słownika działów, wynik nie ma prawa
+ * się zmienić.
  *
  * Sam `max(updated_at)` nie wystarcza — ma rozdzielczość sekundy, więc dwie
  * edycje w tej samej sekundzie dałyby ten sam odcisk. Stąd dokładane liczności
@@ -750,6 +791,10 @@ const FINGERPRINT_SQL = sql`select
   (select coalesce(max(updated_at), '') from hr_hours) as h_max,
   (select count(*) from hr_hours) as h_cnt,
   (select coalesce(sum(worked_hours), 0) from hr_hours) as h_sum,
+  -- Przypisanie wiersza godzin do działu. Bez tej sumy przepięcie wpisu z obiektu
+  -- na dział w tej samej sekundzie co inna edycja nie zmieniłoby ani h_max
+  -- (rozdzielczość sekundy), ani h_cnt, ani h_sum — a koszt obiektu owszem.
+  (select coalesce(sum(coalesce(department_id, 0)), 0) from hr_hours) as h_dept,
   (select coalesce(max(updated_at), '') from hr_office_payroll) as o_max,
   (select count(*) from hr_office_payroll) as o_cnt,
   (select coalesce(sum(coalesce(ror_base, 0) + coalesce(amount, 0)), 0) from hr_office_payroll) as o_sum,
@@ -758,7 +803,11 @@ const FINGERPRINT_SQL = sql`select
   (select coalesce(max(updated_at), '') from hr_objects) as m_max,
   (select count(object_id) from hr_objects) as m_cnt,
   (select coalesce(sum(object_id), 0) from hr_objects) as m_sum,
-  (select coalesce(sum(is_cma_pool), 0) from hr_objects) as m_pool,
+  -- Działy: sama flaga puli nie wystarczy (przeniesienie jej z działu 1 na dział 2
+  -- daje tę samą sumę), stąd max(updated_at) i licznik obok.
+  (select coalesce(sum(is_cma_pool * id), 0) from hr_departments) as d_pool,
+  (select coalesce(max(updated_at), '') from hr_departments) as d_max,
+  (select count(*) from hr_departments) as d_cnt,
   (select coalesce(max(updated_at), '') from objects) as ob_max,
   (select count(*) from objects) as ob_cnt,
   (select coalesce(sum(has_sswin + 2 * has_cameras + 4 * has_videoreception), 0) from objects) as ob_svc,
@@ -819,8 +868,8 @@ function windowComputation(window: CostWindow, now = new Date()): WindowComputat
  * mapowanie robi się ręcznie w Kadry → Obiekty) zwraca pustą mapę, `mappedObjects: 0`
  * i `unmappedHoursShare: 1`. To jest poprawna odpowiedź, a nie błąd: dopóki nikt nie
  * powiedział, który posterunek to który obiekt, kosztu osobowego nie ma jak przypisać.
- * Tak samo brak pozycji z `is_cma_pool` daje `cma.pool = 0` — mechanizm jest wtedy
- * nieaktywny, a nie zepsuty.
+ * Tak samo brak działu z `hr_departments.is_cma_pool` daje `cma.pool = 0` — mechanizm
+ * jest wtedy nieaktywny, a nie zepsuty.
  */
 export function computeObjectPersonnelCost(
   window: CostWindow,

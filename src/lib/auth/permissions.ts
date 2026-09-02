@@ -38,6 +38,8 @@ export const TABS: TabDef[] = [
   // "kadry/umowy"); rozliczenie biura siedzi w Wynagrodzeniach.
   { key: "kadry/pracownicy", label: "Pracownicy", group: "Kadry" },
   { key: "kadry/obiekty", label: "Obiekty", group: "Kadry" },
+  // Słownik działów firmy (handlowy, księgowość, CMA…) — rodzeństwo Obiektów.
+  { key: "kadry/dzialy", label: "Działy", group: "Kadry" },
   { key: "kadry/normy", label: "Normy", group: "Kadry" },
   // CMA
   { key: "cma/raporty", label: "Raporty", group: "CMA" },

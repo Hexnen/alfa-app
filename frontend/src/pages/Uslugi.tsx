@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Archive, ArchiveRestore, Pencil, Plus } from "lucide-react";
+import { AlertTriangle, Archive, ArchiveRestore, Pencil, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { usePerms } from "@/auth/permissions";
 import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
+import { tip } from "@/components/ui/tooltip";
+import { isPriceStale, priceAgeLabel } from "@/lib/price-age";
 import {
   servicesApi,
   SERVICE_CATEGORIES,
@@ -21,13 +23,42 @@ import {
   fmtPct,
   fmtPln,
 } from "@/components/warehouse/warehouseShared";
-import { pillClass } from "@/lib/calendar-labels";
+import { fmtRelative, fmtTimestamp, pillClass } from "@/lib/calendar-labels";
 
 const alertError = (err: unknown, fallback: string) =>
   window.alert(err instanceof Error ? err.message : fallback);
 
 const selectClass =
   "flex h-10 rounded-md border border-input bg-background px-3 py-2 text-sm";
+
+/**
+ * Komórka ze stawką. Na czerwono, gdy ceny nikt nie potwierdził od roku —
+ * stara stawka robocizny w ofercie zjada marżę po cichu, więc sygnał musi być
+ * widoczny już na liście katalogu, a nie dopiero w edytorze oferty.
+ * Osobny komponent, żeby nie liczyć wieku dwa razy w ciele wiersza.
+ */
+function PriceCell({
+  value,
+  priceUpdatedAt,
+}: {
+  value: number;
+  priceUpdatedAt: string | null;
+}) {
+  if (!isPriceStale(priceUpdatedAt, "service")) {
+    return <td className="px-3 py-2 text-right tabular-nums">{fmtPln(value)}</td>;
+  }
+  return (
+    <td className="px-3 py-2 text-right tabular-nums text-red-600 font-medium">
+      <span
+        className="inline-flex items-center gap-1"
+        {...tip(priceAgeLabel(priceUpdatedAt, "service"))}
+      >
+        <AlertTriangle className="h-3 w-3" />
+        {fmtPln(value)}
+      </span>
+    </td>
+  );
+}
 
 export function Uslugi() {
   const { canEdit } = usePerms();
@@ -181,6 +212,8 @@ export function Uslugi() {
                   <th className="px-3 py-2 text-right font-medium">
                     Marża / narzut
                   </th>
+                  <th className="px-3 py-2 font-medium">Utworzył</th>
+                  <th className="px-3 py-2 font-medium">Zmienił</th>
                   {editable && (
                     <th className="px-3 py-2 text-right font-medium">Akcje</th>
                   )}
@@ -190,7 +223,7 @@ export function Uslugi() {
                 {loading ? (
                   <tr>
                     <td
-                      colSpan={editable ? 8 : 7}
+                      colSpan={editable ? 10 : 9}
                       className="px-3 py-8 text-center text-muted-foreground"
                     >
                       Ładowanie…
@@ -199,7 +232,7 @@ export function Uslugi() {
                 ) : visible.length === 0 ? (
                   <tr>
                     <td
-                      colSpan={editable ? 8 : 7}
+                      colSpan={editable ? 10 : 9}
                       className="px-3 py-8 text-center text-muted-foreground"
                     >
                       Katalog usług jest pusty. Dodaj pierwszą pozycję, np.
@@ -236,12 +269,8 @@ export function Uslugi() {
                         {s.system ? SERVICE_SYSTEM_LABEL[s.system] : "—"}
                       </td>
                       <td className="px-3 py-2">{s.unit}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">
-                        {fmtPln(s.cost)}
-                      </td>
-                      <td className="px-3 py-2 text-right tabular-nums">
-                        {fmtPln(s.price)}
-                      </td>
+                      <PriceCell value={s.cost} priceUpdatedAt={s.priceUpdatedAt} />
+                      <PriceCell value={s.price} priceUpdatedAt={s.priceUpdatedAt} />
                       <td
                         className="px-3 py-2 text-right tabular-nums"
                         title={
@@ -260,6 +289,48 @@ export function Uslugi() {
                           </>
                         ) : (
                           "—"
+                        )}
+                      </td>
+                      {/* Autor i data w jednej kolumnie — to jedna informacja
+                          („kto i kiedy"), a osobna kolumna na samą datę tylko
+                          rozpychałaby tabelę. Pełny znacznik czasu siedzi
+                          w dymku, bo „2 dni temu" czyta się szybciej niż
+                          „30.08.2026 14:12". Układ 1:1 jak w tabeli ofert. */}
+                      <td className="px-3 py-2 text-xs whitespace-nowrap">
+                        <div>
+                          {s.createdByLabel || (
+                            <span className="text-muted-foreground">—</span>
+                          )}
+                        </div>
+                        <div
+                          className="text-muted-foreground"
+                          {...tip(fmtTimestamp(s.createdAt))}
+                        >
+                          {fmtRelative(s.createdAt)}
+                        </div>
+                      </td>
+                      <td className="px-3 py-2 text-xs whitespace-nowrap">
+                        {s.updatedAt && s.updatedAt !== s.createdAt ? (
+                          <>
+                            <div>
+                              {s.updatedByLabel || (
+                                <span className="text-muted-foreground">—</span>
+                              )}
+                            </div>
+                            <div
+                              className="text-muted-foreground"
+                              {...tip(fmtTimestamp(s.updatedAt))}
+                            >
+                              {fmtRelative(s.updatedAt)}
+                            </div>
+                          </>
+                        ) : (
+                          <span
+                            className="text-muted-foreground"
+                            {...tip("Pozycja nie była zmieniana od utworzenia")}
+                          >
+                            —
+                          </span>
                         )}
                       </td>
                       {editable && (

@@ -1,4 +1,6 @@
 import { useMemo, useState } from "react";
+import { fmtRelative, fmtTimestamp } from "@/lib/calendar-labels";
+import { tip } from "@/components/ui/tooltip";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -264,6 +266,26 @@ export function ServiceForm({
             />
             Aktywna (widoczna przy składaniu oferty)
           </label>
+
+          {/* Ślad edycji przy przyciskach, nie w treści formularza: przy sporze
+              o stawkę pierwsze pytanie brzmi „kto to zmienił i kiedy", a nie
+              „ile wynosi" — i ma być pod ręką bez wchodzenia do dziennika. */}
+          {service && (
+            <p className="text-[11px] text-muted-foreground">
+              Utworzył {service.createdByLabel || "—"},{" "}
+              <span {...tip(fmtTimestamp(service.createdAt))}>
+                {fmtRelative(service.createdAt)}
+              </span>
+              {service.updatedAt !== service.createdAt && (
+                <>
+                  {" · "}Zmienił {service.updatedByLabel || "—"},{" "}
+                  <span {...tip(fmtTimestamp(service.updatedAt))}>
+                    {fmtRelative(service.updatedAt)}
+                  </span>
+                </>
+              )}
+            </p>
+          )}
 
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose}>

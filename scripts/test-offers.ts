@@ -169,9 +169,19 @@ try {
   cleanup();
 
   // --- Fikstury katalogów ---------------------------------------------------
+  // Stemple wieku ceny wpisane wprost: pozycja oferty ma je oddawać z kartoteki,
+  // a fikstura zakładana przez `db.insert` omija trasy, które je nadają.
+  const CAMERA_PRICE_STAMP = "2026-01-15 10:00:00";
+  const MOUNT_PRICE_STAMP = "2025-11-02 08:30:00";
   const camera = db
     .insert(schema.warehouseItems)
-    .values({ name: `${PREFIX} Kamera`, unit: "szt", purchasePrice: 400, salePrice: 500 })
+    .values({
+      name: `${PREFIX} Kamera`,
+      unit: "szt",
+      purchasePrice: 400,
+      salePrice: 500,
+      priceUpdatedAt: CAMERA_PRICE_STAMP,
+    })
     .returning()
     .get();
   const nvr = db
@@ -181,7 +191,14 @@ try {
     .get();
   const mount = db
     .insert(schema.services)
-    .values({ name: `${PREFIX} Montaż kamery`, unit: "szt", cost: 60, price: 150, category: "montaz" })
+    .values({
+      name: `${PREFIX} Montaż kamery`,
+      unit: "szt",
+      cost: 60,
+      price: 150,
+      category: "montaz",
+      priceUpdatedAt: MOUNT_PRICE_STAMP,
+    })
     .returning()
     .get();
   const subscription = db
@@ -302,6 +319,18 @@ try {
   ok(
     "pozycja usługowa nie ma stanu magazynowego",
     detail.items[2].stock === null,
+    detail.items[2]
+  );
+  // Wiek ceny z kartoteki — sygnał niezależny od `priceDrift`: cena może się
+  // zgadzać z migawką i mimo to pochodzić ze starego cennika.
+  ok(
+    "pozycja towarowa niesie wiek ceny z kartoteki",
+    detail.items[0].priceUpdatedAt === CAMERA_PRICE_STAMP,
+    detail.items[0]
+  );
+  ok(
+    "pozycja usługowa niesie wiek ceny z katalogu usług",
+    detail.items[2].priceUpdatedAt === MOUNT_PRICE_STAMP,
     detail.items[2]
   );
 
@@ -506,6 +535,131 @@ try {
     Number(afterVersions.data.number.slice(-3)) === Number(offerNumber.slice(-3)) + 2,
     { base: offerNumber, next: afterVersions.data.number }
   );
+
+  // --- Adres oferty z numeru (deep link) ------------------------------------
+  const slug = offerNumber.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const byNumber = await call("GET", `/offers/number/${slug}`);
+  ok("oferta spod adresu z numeru", byNumber.data?.offer?.id === offerId, byNumber.error);
+  const byNumberDashes = await call("GET", `/offers/number/${offerNumber.replace(/\//g, "-")}`);
+  ok(
+    "myślniki w adresie też trafiają w numer",
+    byNumberDashes.data?.offer?.id === offerId,
+    byNumberDashes.error
+  );
+  const badSlug = await call("GET", "/offers/number/of000000999");
+  ok("nieznany adres → 404", badSlug.status === 404, badSlug);
+
+  // --- Sloty wariantów i przeliczanie sekcji ---------------------------------
+  // Slot to jedno miejsce w zestawie, w którym pakiet WYBIERA sprzęt zależnie od
+  // parametru: 1–8 kamer → rejestrator 8ch, 9–16 → 16ch, 17+ → 32ch.
+  const nvr16 = db
+    .insert(schema.warehouseItems)
+    .values({ name: `${PREFIX} Rejestrator 16ch`, unit: "szt", purchasePrice: 1600, salePrice: 2000 })
+    .returning()
+    .get();
+  const nvr32 = db
+    .insert(schema.warehouseItems)
+    .values({ name: `${PREFIX} Rejestrator 32ch`, unit: "szt", purchasePrice: 3200, salePrice: 4000 })
+    .returning()
+    .get();
+
+  const slotVariants = (min: number | null, max: number | null, itemId: number) => ({
+    source: "warehouse",
+    warehouseItemId: itemId,
+    qtyBase: 1,
+    paramKey: "cameras",
+    slot: "Rejestrator",
+    paramMin: min,
+    paramMax: max,
+  });
+  const slotPkgRes = await call("POST", "/offers/packages", {
+    name: `${PREFIX} CCTV sloty`,
+    category: "cctv",
+    mode: "parametric",
+    params: [{ key: "cameras", label: "Liczba kamer", default: 8, min: 1, max: 64 }],
+    items: [
+      { source: "warehouse", warehouseItemId: camera.id, qtyPerParam: 1, paramKey: "cameras" },
+      slotVariants(null, 8, nvr.id),
+      slotVariants(9, 16, nvr16.id),
+      slotVariants(17, null, nvr32.id),
+    ],
+  });
+  ok("pakiet ze slotem utworzony", slotPkgRes.status === 201, slotPkgRes);
+  const slotPkgId: number = slotPkgRes.data.id;
+
+  const overlapping = await call("POST", "/offers/packages", {
+    name: `${PREFIX} Nachodzące`,
+    mode: "parametric",
+    params: [{ key: "cameras", label: "Kamery", default: 8, min: 1 }],
+    items: [slotVariants(null, 10, nvr.id), slotVariants(9, 16, nvr16.id)],
+  });
+  ok("nachodzące zakresy w slocie odrzucone", overlapping.status === 400, overlapping);
+
+  const rangeNoSlot = await call("POST", "/offers/packages", {
+    name: `${PREFIX} Zakres bez slotu`,
+    mode: "parametric",
+    params: [{ key: "cameras", label: "Kamery", default: 8, min: 1 }],
+    items: [{ source: "warehouse", warehouseItemId: camera.id, qtyBase: 1, paramMin: 5 }],
+  });
+  ok("zakres bez slotu odrzucony", rangeNoSlot.status === 400, rangeNoSlot);
+
+  const slotOffer = await call("POST", "/offers", {
+    date: "2026-08-10",
+    contractorId: contractor.id,
+    site: `${PREFIX} Sloty`,
+    notes: PREFIX,
+  });
+  const slotOfferId: number = slotOffer.data.id;
+
+  const slotSect = await call("POST", `/offers/${slotOfferId}/sections`, {
+    packageId: slotPkgId,
+    params: { cameras: 12 },
+  });
+  ok("sekcja ze slotem dodana", slotSect.status === 201, slotSect.error);
+  const slotSectionId: number = slotSect.data.sections[0].id;
+  ok(
+    "12 kamer → jeden rejestrator, 16-kanałowy",
+    slotSect.data.items.length === 2 &&
+      slotSect.data.items[1].name === `${PREFIX} Rejestrator 16ch` &&
+      slotSect.data.items[1].qty === 1,
+    slotSect.data.items.map((i: any) => `${i.name}=${i.qty}`)
+  );
+
+  const reexpanded = await call("POST", `/offers/${slotOfferId}/sections/${slotSectionId}/reexpand`, {
+    params: { cameras: 30 },
+  });
+  ok("sekcja przeliczona", reexpanded.status === 200, reexpanded.error);
+  ok(
+    "30 kamer → rejestrator 32-kanałowy zamiast 16",
+    reexpanded.data.items.length === 2 &&
+      reexpanded.data.items[0].qty === 30 &&
+      reexpanded.data.items[1].name === `${PREFIX} Rejestrator 32ch`,
+    reexpanded.data.items.map((i: any) => `${i.name}=${i.qty}`)
+  );
+  ok(
+    "nowa wartość parametru zapisana na sekcji",
+    JSON.parse(reexpanded.data.sections[0].params).cameras === 30,
+    reexpanded.data.sections[0].params
+  );
+
+  const emptySection = await call("POST", `/offers/${slotOfferId}/sections`, {
+    category: "inne",
+    title: `${PREFIX} Ręczna`,
+  });
+  const emptySectionId: number =
+    emptySection.data.sections.find((x: any) => x.id !== slotSectionId).id;
+  const reexpandManual = await call(
+    "POST",
+    `/offers/${slotOfferId}/sections/${emptySectionId}/reexpand`,
+    { params: { cameras: 10 } }
+  );
+  ok("przeliczenie sekcji spoza pakietu → 400", reexpandManual.status === 400, reexpandManual);
+
+  await call("POST", `/offers/${slotOfferId}/send`);
+  const reexpandSent = await call("POST", `/offers/${slotOfferId}/sections/${slotSectionId}/reexpand`, {
+    params: { cameras: 8 },
+  });
+  ok("przeliczenie sekcji w wysłanej ofercie → 409", reexpandSent.status === 409, reexpandSent);
 
   // --- Akceptacja: zlecenie + szkic WZ -------------------------------------
   const stockBefore = db

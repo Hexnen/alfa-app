@@ -135,6 +135,11 @@ const sections: NavItem[] = [
       { name: "Godziny", href: "/kadry/godziny" },
       { name: "Pracownicy", href: "/kadry/pracownicy" },
       { name: "Obiekty", href: "/kadry/obiekty" },
+      {
+        name: "Działy",
+        href: "/kadry/dzialy",
+        desc: "Słownik działów firmy do wpisów godzin",
+      },
       { name: "Normy", href: "/kadry/normy" },
     ],
   },

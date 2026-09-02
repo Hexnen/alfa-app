@@ -2158,8 +2158,22 @@ export interface Service {
   description: string | null;
   active: boolean;
   position: number;
+  /** Login (email) osoby, która założyła pozycję katalogu. */
+  createdBy: string | null;
+  /** Login (email) osoby, która ostatnia zapisała pozycję. */
+  updatedBy: string | null;
+  /**
+   * Kiedy ostatnio zmieniła się stawka — `cost` albo `price` (nie kiedy
+   * ktokolwiek dotknął rekordu; od tego jest `updatedAt`). null = nie wiadomo,
+   * co reguła z `lib/price-age.ts` traktuje jak stawkę przeterminowaną.
+   */
+  priceUpdatedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  /** Nazwa autora rozwiązana przez backend; surowy login, gdy konta już nie ma. */
+  createdByLabel?: string | null;
+  /** Nazwa ostatniego edytora — jak `createdByLabel`. */
+  updatedByLabel?: string | null;
   // --- wyliczane przez backend (src/lib/margin.ts) ---
   marginAmount: number | null;
   marginPct: number | null;
@@ -2275,6 +2289,8 @@ export interface Offer {
   salespersonId: number | null;
   companyId: number | null;
   discountPct: number;
+  /** Przewidywany czas kontraktu (mies.) — okres, na którym liczy się marża. */
+  contractMonths: number | null;
   leaseMode: OfferLeaseMode;
   leaseMonths: number | null;
   leaseAnnualRate: number | null;
@@ -2324,6 +2340,12 @@ export interface OfferItem {
   stock: number | null;
   /** Aktualna cena w kartotece, gdy odjechała od migawki. null = zgodna. */
   priceDrift: number | null;
+  /**
+   * Kiedy w kartotece źródła (towar albo usługa) ostatnio zmieniła się cena.
+   * Wiek liczy `lib/price-age.ts` — próg zależy od `source`. null dla pozycji
+   * wpisanych ręcznie, bez źródła.
+   */
+  priceUpdatedAt?: string | null;
   // --- widoczne tylko z uprawnieniem do kosztów ---
   unitCost?: number | null;
   lineCost?: number | null;
@@ -2349,8 +2371,10 @@ export interface OfferTotals {
   /** Opcje dodatkowe, rozdzielone na strumienie (poza kwotą do zapłaty). */
   optionsOneTime: number;
   optionsMonthly: number;
-  /** Okres, na którym liczona jest marża: długość dzierżawy albo 12 mies. */
+  /** Okres, na którym liczona jest marża: czas kontraktu, dzierżawy albo 12 mies. */
   marginHorizonMonths: number;
+  /** Skąd wziął się ten okres — ekran ma powiedzieć wprost, czym jest liczba. */
+  horizonSource?: "contract" | "lease" | "default";
   horizonRevenue: number;
   // --- widoczne tylko z uprawnieniem do kosztów ---
   /** Koszt wdrożenia: co firma wykłada na starcie (sprzęt + robocizna). */
@@ -2362,6 +2386,14 @@ export interface OfferTotals {
   horizonCost?: number | null;
   margin?: OfferMargin | null;
   belowMinMargin?: boolean;
+  /** Stawka prowizji handlowca z oferty (%); null = brak handlowca albo stawki. */
+  salesCommissionPct?: number | null;
+  /** Prowizja handlowca w kwocie, w okresie `marginHorizonMonths`. */
+  salesCommission?: number | null;
+  /** Zysk firmy po odjęciu prowizji. */
+  companyProfit?: number | null;
+  /** Ten zysk jako procent przychodu w okresie. */
+  companyProfitPct?: number | null;
 }
 
 /** Znacznik zakresu spoza kategorii sekcji — dzierżawa jest parametrem oferty. */
@@ -2370,6 +2402,10 @@ export const OFFER_SCOPE_LEASE = "dzierzawa";
 /** Wiersz listy ofert — nagłówek z policzonymi sumami i faktycznym zakresem. */
 export interface OfferListRow extends Offer {
   totals: OfferTotals;
+  /** Handlowiec prowadzący — rozwiązany na backendzie, bo kartoteka jest za osobnym kluczem. */
+  salespersonName?: string | null;
+  /** Autor dokumentu: nazwa użytkownika, a gdy konta już nie ma — jego login. */
+  createdByLabel?: string | null;
   /**
    * Czego oferta NAPRAWDĘ dotyczy: kategorie sekcji z pozycjami + „abonament"
    * przy pozycjach miesięcznych + „dzierzawa" przy aktywnej dzierżawie.
@@ -2401,6 +2437,7 @@ export interface OfferInput {
   salespersonId?: number | null;
   companyId?: number | null;
   discountPct?: number;
+  contractMonths?: number | null;
   leaseMode?: OfferLeaseMode;
   leaseMonths?: number | null;
   leaseAnnualRate?: number | null;
@@ -2447,6 +2484,11 @@ export interface OfferPackageItem {
   qtyPerParam: number;
   paramKey: string | null;
   qtyRound: OfferQtyRounding;
+  /** Slot wariantów („Rejestrator"); null = pozycja wchodzi zawsze. */
+  slot: string | null;
+  /** Zakres parametru, przy którym ten wariant wygrywa slot; null = strona otwarta. */
+  paramMin: number | null;
+  paramMax: number | null;
   unitPriceOverride: number | null;
 }
 
@@ -2466,6 +2508,9 @@ export interface OfferPackageItemInput {
   qtyPerParam?: number;
   paramKey?: string | null;
   qtyRound?: OfferQtyRounding;
+  slot?: string | null;
+  paramMin?: number | null;
+  paramMax?: number | null;
   unitPriceOverride?: number | null;
 }
 
@@ -2503,6 +2548,11 @@ export const offersApi = {
 
   async get(id: number) {
     return request<ApiResponse<OfferDetail>>(`/offers/${id}`);
+  },
+
+  /** Oferta spod adresu strony („of202608014") — do wejścia z linku i po odświeżeniu. */
+  async getByNumber(slug: string) {
+    return request<ApiResponse<OfferDetail>>(`/offers/number/${encodeURIComponent(slug)}`);
   },
 
   /**
@@ -2602,6 +2652,17 @@ export const offersApi = {
     return request<ApiResponse<OfferDetail>>(`/offers/${id}/sections/${sectionId}`, {
       method: "PUT",
       body: JSON.stringify(data),
+    });
+  },
+
+  /**
+   * Przeliczenie sekcji dla nowej wartości parametru — podmienia WSZYSTKIE
+   * pozycje sekcji zgodnie z przepisem pakietu (ręczne zmiany przepadają).
+   */
+  async reexpandSection(id: number, sectionId: number, params: Record<string, number>) {
+    return request<ApiResponse<OfferDetail>>(`/offers/${id}/sections/${sectionId}/reexpand`, {
+      method: "POST",
+      body: JSON.stringify({ params }),
     });
   },
 
@@ -3165,6 +3226,45 @@ export interface HrObject {
   employeesCount: number;
 }
 
+/**
+ * Dział firmy — rodzeństwo pozycji kadrowej, nie jej odmiana. Wiersz godzin
+ * wskazuje obiekt ALBO dział; dział nie mapuje się na kartotekę, bo z definicji
+ * dotyczy całej firmy, a nie jednego klienta.
+ */
+export interface HrDepartment {
+  id: number;
+  /** Surowa nazwa działu — to ona idzie do edycji i do POST/PUT. */
+  name: string;
+  /**
+   * Etykieta gotowa do wyświetlenia (`ALFA GROUP:Handlowy`), złożona na
+   * serwerze. Front NIE skleja jej sam: nazwa firmy siedzi w ustawieniach za
+   * `requireAdmin`, więc Kadry nie mają jak jej przeczytać.
+   */
+  label: string;
+  /**
+   * Dział-pula: jego koszt rozdziela się na wszystkie dozorowane obiekty
+   * (centrum monitorowania obsługuje wszystkich klientów naraz). Backend
+   * pilnuje, żeby taki dział był co najwyżej jeden.
+   */
+  isCmaPool: boolean;
+  sortOrder: number;
+  active: boolean;
+  /** Suma godzin z CAŁEJ historii — waga działu w zestawieniu. */
+  hoursTotal: number;
+  /** Ilu różnych pracowników kiedykolwiek księgowało godziny na tym dziale. */
+  employeesCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Ciało POST/PUT działu — PUT przyjmuje dowolny podzbiór pól. */
+export interface HrDepartmentInput {
+  name?: string;
+  isCmaPool?: boolean;
+  sortOrder?: number;
+  active?: boolean;
+}
+
 /** Pracownik kadr w wersji do listy wyboru (bez danych płacowych). */
 export interface HrEmployeeRef {
   id: number;
@@ -3185,6 +3285,11 @@ export interface HrHoursEntry {
   id: number;
   employeeId: number;
   objectId: number | null;
+  /**
+   * Dział, którego dotyczą godziny. Rozłączny z `objectId` — wpis wskazuje
+   * obiekt ALBO dział ALBO nic; wysłanie obu naraz backend odrzuca (400).
+   */
+  departmentId: number | null;
   objectUncertain: boolean;
   year: number;
   month: number;
@@ -3198,6 +3303,8 @@ export interface HrHoursEntry {
   notes: string;
   employeeName: string;
   objectName: string;
+  /** Gotowa etykieta działu z prefiksem firmy; pusty string, gdy brak działu. */
+  departmentName: string;
   // Znacznik ostatniego zapisu — edycja inline odsyła go jako
   // `expectedUpdatedAt`, żeby nie nadpisać zmiany zrobionej w innej karcie (409).
   updatedAt: string;
@@ -3206,6 +3313,8 @@ export interface HrHoursEntry {
 export interface HrHoursInput {
   employeeId: number | string;
   objectId?: number | string | null;
+  /** Rozłączny z `objectId` — oba niepuste naraz to 400 z backendu. */
+  departmentId?: number | string | null;
   year: number;
   month: number;
   nightHours?: number | string | null;
@@ -3399,6 +3508,31 @@ export const updateHrObject = (
 export const deleteHrObject = (id: number) =>
   request<ApiResponse<null>>(`/hr/objects/${id}`, { method: "DELETE" });
 
+export const getHrDepartments = (onlyActive = false) =>
+  request<ApiResponse<HrDepartment[]>>(
+    `/hr/departments${onlyActive ? "?active=true" : ""}`,
+  );
+export const createHrDepartment = (data: HrDepartmentInput) =>
+  request<ApiResponse<HrDepartment>>("/hr/departments", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+export const updateHrDepartment = (id: number, data: HrDepartmentInput) =>
+  request<ApiResponse<HrDepartment>>(`/hr/departments/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+/**
+ * Usunięcie działu. Bez `force` backend odmawia (409), gdy na dziale wiszą
+ * godziny — kasowanie ma być decyzją świadomą, a nie skutkiem ubocznym
+ * `ON DELETE SET NULL`, po którym wiersze cicho tracą przypisanie.
+ */
+export const deleteHrDepartment = (id: number, force = false) =>
+  request<ApiResponse<null>>(
+    `/hr/departments/${id}${force ? "?force=1" : ""}`,
+    { method: "DELETE" },
+  );
+
 /**
  * Ustawia (albo zdejmuje przy `null`) mapowanie pozycji kadrowej na obiekt
  * z kartoteki. Osobny endpoint od zapisu nazwy, żeby edycja nazwy nie czyściła
@@ -3527,8 +3661,22 @@ export interface WarehouseItem {
   isAsset: boolean;
   barcode: string | null;
   isArchived: boolean;
+  /** Login (email) osoby, która założyła kartotekę. */
+  createdBy: string | null;
+  /** Login (email) osoby, która ostatnia zapisała kartotekę. */
+  updatedBy: string | null;
+  /**
+   * Kiedy ostatnio zmieniła się CENA (zakupu albo sprzedaży) — nie kiedy
+   * ktokolwiek dotknął rekordu (od tego jest `updatedAt`). null = nie wiadomo,
+   * co reguła z `lib/price-age.ts` traktuje jak cenę przeterminowaną.
+   */
+  priceUpdatedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  /** Nazwa autora rozwiązana przez backend; surowy login, gdy konta już nie ma. */
+  createdByLabel?: string | null;
+  /** Nazwa ostatniego edytora — jak `createdByLabel`. */
+  updatedByLabel?: string | null;
   // --- pola wyliczane przez backend (src/lib/margin.ts), tylko do odczytu ---
   /** Cena sprzedaży użyta w praktyce: własna albo z narzutu. */
   effectiveSalePrice: number | null;
@@ -5254,6 +5402,11 @@ export const KM_SOURCE_LABEL: Record<CompanyKmSource, string> = {
 };
 
 export interface CompanySettingsValues {
+  /**
+   * Nazwa firmy. Poza nagłówkami wydruków steruje prefiksem etykiet działów
+   * w Kadrach (`ALFA GROUP:Handlowy`) — pusta wartość znaczy „bez prefiksu”.
+   */
+  companyName: string;
   officeAddress: string;
   officeCity: string;
   officePostcode: string;
@@ -5354,6 +5507,7 @@ export interface CompanyDistanceTest {
 
 /** Domyślne wartości używane, dopóki backend nie zwróci swoich. */
 export const COMPANY_FALLBACK_VALUES: CompanySettingsValues = {
+  companyName: "",
   officeAddress: "",
   officeCity: "",
   officePostcode: "",
@@ -5416,6 +5570,7 @@ function coerceCompanyValues(raw: unknown): CompanySettingsValues {
   const fb = COMPANY_FALLBACK_VALUES;
   const kmSource = asStr(v.kmSource, fb.kmSource);
   return {
+    companyName: asStr(v.companyName, fb.companyName),
     officeAddress: asStr(v.officeAddress, fb.officeAddress),
     officeCity: asStr(v.officeCity, fb.officeCity),
     officePostcode: asStr(v.officePostcode, fb.officePostcode),

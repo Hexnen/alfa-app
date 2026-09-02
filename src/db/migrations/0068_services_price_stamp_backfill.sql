@@ -1,0 +1,11 @@
+-- Wiek stawki dla usług, które istniały przed wprowadzeniem `price_updated_at`.
+--
+-- Ta sama sytuacja co w kartotece towarów (0066): `updated_at` to jedyny ślad,
+-- jaki mamy — nikt nie zapisywał osobno momentu zmiany stawki, więc nie da się
+-- odróżnić poprawki nazwy od podniesienia robocizny. Stempel z `updated_at`
+-- jest górnym oszacowaniem (stawka jest co najwyżej tak świeża jak rekord),
+-- ale to lepsze niż NULL, po którym cały katalog robocizny naraz wyglądałby
+-- na „nie wiadomo od kiedy".
+--
+-- Kolejne zmiany `cost`/`price` stempluje już API (src/routes/services.ts).
+UPDATE `services` SET `price_updated_at` = `updated_at` WHERE `price_updated_at` IS NULL;

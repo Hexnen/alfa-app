@@ -106,18 +106,18 @@ function restoreMarkups() {
 const MK = { uop: 2, zlecenieZua: 1.5, zlecenieZza: 1.2, officeDefault: 1.8 };
 
 /**
- * Pozycje kadrowe, którym test CHWILOWO zdjął `is_cma_pool` (żeby sprawdzić, że bez
- * puli nic się nie sypie). Trzymamy ich id poza `main()`, bo gdyby test wywalił się
- * w środku tej sekcji, produkcyjna pozycja „CMA" zostałaby wyłączona — a wtedy cała
- * firma po cichu przestałaby rozdzielać koszt centrum.
+ * Działy, którym test CHWILOWO zdjął `is_cma_pool` (żeby sprawdzić, że bez puli nic
+ * się nie sypie). Trzymamy ich id poza `main()`, bo gdyby test wywalił się w środku
+ * tej sekcji, produkcyjny dział „CMA" zostałby wyłączony — a wtedy cała firma po cichu
+ * przestałaby rozdzielać koszt centrum.
  */
 const disabledPools: number[] = [];
 
 function restoreCmaPools() {
   if (!disabledPools.length) return;
-  db.update(schema.hrObjects)
+  db.update(schema.hrDepartments)
     .set({ isCmaPool: true })
-    .where(inArray(schema.hrObjects.id, disabledPools))
+    .where(inArray(schema.hrDepartments.id, disabledPools))
     .run();
   disabledPools.length = 0;
 }
@@ -158,6 +158,7 @@ function cleanup() {
     db.delete(schema.hrEmployees).where(inArray(schema.hrEmployees.id, empIds)).run();
   }
   db.delete(schema.hrObjects).where(like(schema.hrObjects.name, `${PREFIX}%`)).run();
+  db.delete(schema.hrDepartments).where(like(schema.hrDepartments.name, `${PREFIX}%`)).run();
 
   const objIds = db
     .select({ id: schema.objects.id })
@@ -383,9 +384,11 @@ async function main() {
   // OFI + SSWiN — obie ścieżki naraz: własna załoga PLUS udział w centrum.
   const oBoth = cmaObj("OFICMA", { hasOfi: true, hasSswin: true });
 
-  // Pula centrum monitorowania — pozycja kadrowa bez wskazania obiektu.
-  const [hroCma] = db
-    .insert(schema.hrObjects)
+  // Pula centrum monitorowania — DZIAŁ, nie pozycja obiektowa. Godziny działowe
+  // z definicji nie należą do żadnego obiektu; pula rozdziela ich koszt po
+  // wszystkich dozorowanych jednostkach.
+  const [depCma] = db
+    .insert(schema.hrDepartments)
     .values({ name: `${PREFIX}CMA`, isCmaPool: true })
     .returning()
     .all();
@@ -397,7 +400,16 @@ async function main() {
     .all();
 
   /** Pracownik z jedną umową, jedną wypłatą i wszystkimi godzinami na jednej pozycji. */
-  const singlePosition = (name: string, amount: number, hrObjectId: number) => {
+  /**
+   * Pracownik z jedną umową, jedną wypłatą i wszystkimi godzinami na JEDNYM przypisaniu.
+   * Przypisanie podaje się jako `{ objectId }` albo `{ departmentId }` — dokładnie tak,
+   * jak wygląda wiersz godzin po rozdzieleniu obiektów i działów.
+   */
+  const singlePosition = (
+    name: string,
+    amount: number,
+    assignment: { objectId?: number; departmentId?: number }
+  ) => {
     const [e] = db
       .insert(schema.hrEmployees)
       .values({ fullName: `${PREFIX}${name}`, kind: "ochrona", active: true })
@@ -420,12 +432,19 @@ async function main() {
       .values({ contractId: ct.id, year: m1.year, month: m1.month, mainAmount: amount })
       .run();
     db.insert(schema.hrHours)
-      .values({ employeeId: e.id, objectId: hrObjectId, year: m1.year, month: m1.month, workedHours: 100 })
+      .values({
+        employeeId: e.id,
+        objectId: assignment.objectId ?? null,
+        departmentId: assignment.departmentId ?? null,
+        year: m1.year,
+        month: m1.month,
+        workedHours: 100,
+      })
       .run();
     return e;
   };
-  singlePosition("Dyzurny", 3600, hroCma.id); // cały koszt idzie do puli CMA
-  singlePosition("Ofi", 2000, hroOfi.id); // cały koszt idzie WPROST na oBoth
+  singlePosition("Dyzurny", 3600, { departmentId: depCma.id }); // cały koszt idzie do puli CMA
+  singlePosition("Ofi", 2000, { objectId: hroOfi.id }); // cały koszt idzie WPROST na oBoth
 
   clearPersonnelCostCache();
 
@@ -775,19 +794,22 @@ async function main() {
       k5?.personnelCmaCost > 0 && near(k5?.personnelDirectCost, 2000),
     k5);
 
-  // (h) brak pozycji z is_cma_pool → mechanizm nieaktywny, nic się nie psuje
+  // (h) brak działu z is_cma_pool → mechanizm nieaktywny, nic się nie psuje
   const poolIds = db
-    .select({ id: schema.hrObjects.id })
-    .from(schema.hrObjects)
-    .where(eq(schema.hrObjects.isCmaPool, true))
+    .select({ id: schema.hrDepartments.id })
+    .from(schema.hrDepartments)
+    .where(eq(schema.hrDepartments.isCmaPool, true))
     .all()
     .map((r) => r.id);
   disabledPools.push(...poolIds);
-  db.update(schema.hrObjects).set({ isCmaPool: false }).where(inArray(schema.hrObjects.id, poolIds)).run();
+  db.update(schema.hrDepartments)
+    .set({ isCmaPool: false })
+    .where(inArray(schema.hrDepartments.id, poolIds))
+    .run();
   const noPool = await cmaCall(); // i znowu: odcisk ma to złapać sam
   const npInfo = noPool.totals.personnel.cma;
   const npRow = (n: string) => noPool.rows.find((r: any) => r.name === `${PREFIX}${n}`);
-  ok("Bez pozycji-puli: pool = 0, perUnit = 0, żadnych udziałów — i zero wyjątków",
+  ok("Bez działu-puli: pool = 0, perUnit = 0, żadnych udziałów — i zero wyjątków",
     npInfo.poolPositions === 0 && npInfo.pool === 0 && npInfo.perUnit === 0 &&
       npRow("CAM4")?.personnelCmaCost === 0 && npRow("SSWIN")?.personnelCmaCost === 0,
     npInfo);

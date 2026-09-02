@@ -9,6 +9,7 @@ import {
   type MonitoredObject,
   type ObjectCatalogEntry,
 } from "@/lib/api";
+import { catalogLabel } from "@/lib/labels";
 import { usePerms } from "@/auth/permissions";
 import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
 
@@ -73,14 +74,6 @@ function summarizeDevices(devices: string | null): DeviceSummary {
     byVendor: [...counts].sort((a, b) => b[1] - a[1]),
   };
 }
-
-/**
- * Etykieta obiektu z kartoteki w liście wyboru. Sama nazwa nie wystarcza —
- * kartoteka ma obiekty o bliźniaczych nazwach u różnych klientów, więc miasto
- * i kontrahent są tu częścią identyfikacji, a nie ozdobą.
- */
-const catalogLabel = (o: ObjectCatalogEntry) =>
-  [o.name, o.city, o.contractorName].filter(Boolean).join(" · ");
 
 /** Select w komórce tabeli — te same wymiary co w mapowaniu kadrowym. */
 const TABLE_SELECT_CLS =

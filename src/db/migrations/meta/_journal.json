@@ -442,6 +442,69 @@
       "when": 1788174273799,
       "tag": "0062_quiet_senator_kelly",
       "breakpoints": true
+    },
+    {
+      "idx": 63,
+      "version": "6",
+      "when": 1788242933259,
+      "tag": "0063_greedy_the_watchers",
+      "breakpoints": true
+    },
+    {
+      "idx": 64,
+      "version": "6",
+      "when": 1788266878772,
+      "tag": "0064_married_secret_warriors",
+      "breakpoints": true
+    },
+    {
+      "idx": 65,
+      "version": "6",
+      "when": 1788268056049,
+      "tag": "0065_noisy_sandman",
+      "breakpoints": true
+    },
+    {
+      "idx": 66,
+      "version": "6",
+      "when": 1788268100000,
+      "tag": "0066_warehouse_price_stamp_backfill",
+      "breakpoints": true
+    },
+    {
+      "idx": 67,
+      "version": "6",
+      "when": 1788268200586,
+      "tag": "0067_workable_silvermane",
+      "breakpoints": true
+    },
+    {
+      "idx": 68,
+      "version": "6",
+      "when": 1788268250000,
+      "tag": "0068_services_price_stamp_backfill",
+      "breakpoints": true
+    },
+    {
+      "idx": 69,
+      "version": "6",
+      "when": 1788354345792,
+      "tag": "0069_friendly_pixie",
+      "breakpoints": true
+    },
+    {
+      "idx": 70,
+      "version": "6",
+      "when": 1788354400000,
+      "tag": "0070_hr_departments_backfill",
+      "breakpoints": true
+    },
+    {
+      "idx": 71,
+      "version": "6",
+      "when": 1788354423396,
+      "tag": "0071_easy_bulldozer",
+      "breakpoints": true
     }
   ]
 }

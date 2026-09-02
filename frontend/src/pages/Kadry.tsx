@@ -15,8 +15,10 @@ import {
   HrPayrollForm,
 } from "@/components/KadryForms";
 import { HrHoursTab } from "@/components/kadry/HoursTab";
+import { DepartmentsTab } from "@/components/kadry/DepartmentsTab";
 import { TABLE_SELECT_CLS, hrs, money } from "@/components/kadry/shared";
 import { Th } from "@/components/kadry/parts";
+import { catalogLabel } from "@/lib/labels";
 import { printHrStatement } from "@/lib/hrPrint";
 import { usePerms } from "@/auth/permissions";
 import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
@@ -51,6 +53,7 @@ import {
   deleteHrObject,
   getHrObjectCatalog,
   setHrObjectMapping,
+  getHrDepartments,
   getHrContracts,
   createHrContract,
   updateHrContract,
@@ -70,6 +73,7 @@ import {
   type HrEmployeeInput,
   type HrObject,
   type HrObjectRef,
+  type HrDepartment,
   type HrContract,
   type HrContractInput,
   type HrMonthNorm,
@@ -102,30 +106,25 @@ const BONUS_SHORT: Record<string, string> = {
 
 /**
  * Pozycje słownika kadrowego, które NIE są obiektem chronionym, tylko kosztem
- * ogólnym firmy: techniczne (`#BIURO`, `#zlecenie`) i wspólne (`CMA` — centrum
- * monitorowania obsługujące wszystkich klientów naraz). Mapowanie ich na
- * pojedynczy obiekt zrzuciłoby cały koszt centrali na jednego klienta, więc
- * zostają niezmapowane celowo.
+ * technicznym firmy: `#BIURO`, `#zlecenie`. Mapowanie ich na pojedynczy obiekt
+ * zrzuciłoby koszt centrali na jednego klienta, więc zostają niezmapowane
+ * celowo.
+ *
+ * Praca działowa (dawna pozycja `CMA` i reszta) NIE należy już tutaj — ma
+ * własny słownik w Kadry → Działy. Rozpoznawanie po nazwie było zresztą pułapką:
+ * nowa pozycja nazwana „CMA" dostawałaby etykietę „koszt wspólny", mimo że pula
+ * kosztów siedzi teraz przy dziale i jest oznaczona flagą, a nie nazwą.
  */
-function overheadKind(name: string): "techniczna" | "ogolna" | null {
-  if (name.trim().startsWith("#")) return "techniczna";
-  if (name.trim().toUpperCase() === "CMA") return "ogolna";
-  return null;
+function overheadKind(name: string): "techniczna" | null {
+  return name.trim().startsWith("#") ? "techniczna" : null;
 }
-
-/**
- * Etykieta obiektu z kartoteki w liście wyboru. Sama nazwa nie wystarcza —
- * kartoteka ma obiekty o bliźniaczych nazwach u różnych klientów, więc miasto
- * i kontrahent są tu częścią identyfikacji, a nie ozdobą.
- */
-const catalogLabel = (o: HrObjectRef) =>
-  [o.name, o.city, o.contractorName].filter(Boolean).join(" · ");
 
 const KADRY_TABS = [
   "wynagrodzenia",
   "godziny",
   "pracownicy",
   "obiekty",
+  "dzialy",
   "normy",
 ] as const;
 
@@ -154,6 +153,8 @@ export function Kadry() {
   const [objects, setObjects] = useState<HrObject[]>([]);
   /** Kartoteka obiektów — lista wyboru przy mapowaniu pozycji kadrowych. */
   const [objectCatalog, setObjectCatalog] = useState<HrObjectRef[]>([]);
+  /** Działy firmy — druga grupa w selekcie przypisania godzin + zakładka Działy. */
+  const [departments, setDepartments] = useState<HrDepartment[]>([]);
   const [contracts, setContracts] = useState<HrContract[]>([]);
   /** Słownik spółek — źródło listy wyboru w umowie i podpowiedzi w biurze. */
   const [companies, setCompanies] = useState<Company[]>([]);
@@ -247,18 +248,20 @@ export function Kadry() {
   }, [year, month, hoursEditable]);
 
   const loadDictionaries = useCallback(async () => {
-    const [e, o, c, comp, cat] = await Promise.all([
+    const [e, o, c, comp, cat, dep] = await Promise.all([
       getHrEmployees(),
       getHrObjects(),
       getHrContracts(),
       getCompanies(),
       getHrObjectCatalog(),
+      getHrDepartments(),
     ]);
     setEmployees(e.data ?? []);
     setObjects(o.data ?? []);
     setContracts(c.data ?? []);
     setCompanies(comp.data ?? []);
     setObjectCatalog(cat.data ?? []);
+    setDepartments(dep.data ?? []);
   }, []);
 
   const loadNorms = useCallback(async () => {
@@ -412,8 +415,15 @@ export function Kadry() {
               ...r,
               ...saved,
               employeeName: r.employeeName,
+              // Obie etykiety liczymy od nowa (nie doklejamy do starych):
+              // przypisanie jest rozłączne, więc po przepięciu obiekt→dział
+              // to drugie MUSI wyzerować się od razu. Zostawienie starej
+              // wartości pokazywałoby obie naraz aż do cichego odświeżenia.
               objectName:
                 objects.find((o) => o.id === saved.objectId)?.name ?? "",
+              departmentName:
+                departments.find((d) => d.id === saved.departmentId)?.label ??
+                "",
             }
           : r,
       ),
@@ -1124,6 +1134,7 @@ export function Kadry() {
           <HrHoursTab
             rows={hours}
             objects={objects}
+            departments={departments}
             editable={editable}
             loading={loading}
             monthNav={monthNav}
@@ -1601,8 +1612,10 @@ export function Kadry() {
               <p className="text-xs text-muted-foreground">
                 Słownik kadrowy powstał niezależnie od kartoteki i nazwy się nie
                 pokrywają, więc powiązanie ustawia się ręcznie. Pozycje
-                techniczne (#BIURO, #zlecenie) i wspólne (CMA) zostaw
-                niezmapowane — to koszt ogólny firmy, nie koszt obiektu.
+                techniczne (#BIURO, #zlecenie) zostaw niezmapowane — to koszt
+                ogólny firmy, nie koszt obiektu. Praca działowa (CMA, Handlowy,
+                Księgowość…) ma własny słownik w Kadry → Działy i we wpisie
+                godzin wybiera się ją zamiast obiektu.
               </p>
             </CardContent>
           </Card>
@@ -1650,9 +1663,7 @@ export function Kadry() {
                           {r.name}
                           {overhead && (
                             <span className="ml-2 rounded bg-muted px-1.5 py-0.5 text-[11px] font-normal">
-                              {overhead === "techniczna"
-                                ? "pozycja techniczna"
-                                : "koszt wspólny"}
+                              pozycja techniczna
                             </span>
                           )}
                         </td>
@@ -1740,6 +1751,24 @@ export function Kadry() {
               </table>
             </CardContent>
           </Card>
+        </TabsContent>
+
+        {/* ==================== DZIAŁY ==================== */}
+        {/* Słownik działów firmy — druga (obok obiektów) możliwość przypisania
+            wiersza godzin. Cała tabela siedzi w DepartmentsTab: ten plik ma
+            już swoje 1900 linii. */}
+        <TabsContent value="dzialy" className="space-y-4">
+          <DepartmentsTab
+            departments={departments}
+            editable={editable}
+            loading={loading}
+            // Miesiąc odświeżamy razem ze słownikiem: zmiana nazwy działu
+            // zmienia etykiety już wpisanych wierszy godzin, a usunięcie
+            // działu z `force` zdejmuje im przypisanie.
+            onChanged={async () => {
+              await Promise.all([loadDictionaries(), loadMonth()]);
+            }}
+          />
         </TabsContent>
 
         {/* ==================== NORMY ==================== */}
@@ -1863,6 +1892,9 @@ export function Kadry() {
           entry={hoursEdit}
           employees={hoursEdit ? employees : activeEmployees}
           objects={objects.filter((o) => o.active || o.id === hoursEdit?.objectId)}
+          departments={departments.filter(
+            (d) => d.active || d.id === hoursEdit?.departmentId,
+          )}
           year={year}
           month={month}
         />

@@ -82,6 +82,9 @@ export function NoCostEmpty({ what }: { what: string }) {
  * wszystkie kwoty są „netto".
  *
  * Dwie rzeczy, których nie wolno przemilczeć:
+ *  0. „Godziny poza obiektami" to dwie rzeczy naraz: pozycje kadrowe bez
+ *     mapowania ORAZ godziny działowe (Kadry → Działy), których zmapować się
+ *     nie da — dział z definicji nie należy do jednego klienta.
  *  1. Bez mapowania `hr_objects.object_id` → obiekt koszt osobowy wynosi zero
  *     i CAŁA ta funkcja milczy. Zero wygląda wtedy jak wynik („tani obiekt"),
  *     a jest dziurą w danych — dlatego zamiast przypisu leci wtedy komunikat

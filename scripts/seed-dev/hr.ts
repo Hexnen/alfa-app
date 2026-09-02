@@ -364,7 +364,15 @@ export function seedHr(outerTx?: Tx): HrSeedCounts {
 
   interface HoursTemplate {
     employeeId: number;
-    rows: Array<{ objectId: number | null; night: boolean; worked: number }>;
+    // Przypisanie niesiemy w całości: po rozdzieleniu obiektów i działów sam
+    // `objectId` gubiłby dyżurnych CMA (ich godziny wiszą na dziale), a seedowana
+    // baza pokazywałaby pulę centrum monitorowania równą zeru.
+    rows: Array<{
+      objectId: number | null;
+      departmentId: number | null;
+      night: boolean;
+      worked: number;
+    }>;
   }
   const templates: HoursTemplate[] = [];
   for (const emp of [...employees].sort((a, b) => a.id - b.id)) {
@@ -384,6 +392,7 @@ export function seedHr(outerTx?: Tx): HrSeedCounts {
       employeeId: emp.id,
       rows: first.map((r) => ({
         objectId: r.objectId,
+        departmentId: r.departmentId,
         night: (r.nightHours ?? 0) > 0,
         worked: avgWorked > 0 ? avgWorked : 160,
       })),
@@ -415,8 +424,13 @@ export function seedHr(outerTx?: Tx): HrSeedCounts {
     // w miesiącach „FILL" — z pustych zaczepów, które import już tam położył.
     // Dzięki temu wypełnienie ląduje na tych samych obiektach, które aplikacja
     // przeniosła z poprzedniego miesiąca, a nie na wymyślonych posterunkach.
-    const protos: Array<{ employeeId: number; objectId: number | null; night: boolean; worked: number }> =
-      [];
+    const protos: Array<{
+      employeeId: number;
+      objectId: number | null;
+      departmentId: number | null;
+      night: boolean;
+      worked: number;
+    }> = [];
     if (isFill) {
       const stubs = existingHours
         .filter(
@@ -433,6 +447,7 @@ export function seedHr(outerTx?: Tx): HrSeedCounts {
         protos.push({
           employeeId: s.employeeId,
           objectId: s.objectId,
+          departmentId: s.departmentId,
           night: false,
           worked: scaleByEmployee.get(s.employeeId)!,
         });
@@ -465,6 +480,7 @@ export function seedHr(outerTx?: Tx): HrSeedCounts {
           id: 0,
           employeeId: proto.employeeId,
           objectId: proto.objectId,
+          departmentId: proto.departmentId,
           objectUncertain: false,
           year,
           month,
@@ -488,6 +504,7 @@ export function seedHr(outerTx?: Tx): HrSeedCounts {
       newHours.push({
         employeeId: h.employeeId,
         objectId: h.objectId,
+        departmentId: h.departmentId,
         objectUncertain: false,
         year: h.year,
         month: h.month,

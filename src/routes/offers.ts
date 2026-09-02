@@ -21,7 +21,7 @@
  */
 import { Hono, type Context } from "hono";
 import { db, schema } from "../db/index.js";
-import { eq, and, asc, desc, like, inArray, ne, type SQL } from "drizzle-orm";
+import { eq, and, asc, desc, like, inArray, ne, sql, type SQL } from "drizzle-orm";
 import type { ApiResponse } from "../types/index.js";
 import {
   OFFER_ITEM_BILLINGS,
@@ -205,7 +205,16 @@ function versionNumber(baseNumber: string, version: number): string {
  * Buduje `PriceSource` z aktualnych kartotek. Ładujemy komplet za jednym razem:
  * katalogi są małe (setki pozycji), a pakiet i tak sięga po wiele indeksów naraz.
  */
-function priceSourceSync(dbx: DbOrTx, markupPct: number): PriceSource {
+function priceSourceSync(
+  dbx: DbOrTx,
+  markupPct: number
+): PriceSource & {
+  /** Wiek ceny w kartotece towaru; poza `PriceSource`, bo pakietom niepotrzebny. */
+  priceUpdatedAt: (
+    source: OfferItemSource,
+    refId: number | null
+  ) => string | null;
+} {
   const items = dbx.select().from(schema.warehouseItems).all();
   const svcs = dbx.select().from(schema.services).all();
   const byItem = new Map(items.map((i) => [i.id, i]));
@@ -237,6 +246,12 @@ function priceSourceSync(dbx: DbOrTx, markupPct: number): PriceSource {
         const s = bySvc.get(id);
         return s ? { name: s.name, unit: s.unit } : null;
       }
+      return null;
+    },
+    priceUpdatedAt: (source, id) => {
+      if (id === null) return null;
+      if (source === "warehouse") return byItem.get(id)?.priceUpdatedAt ?? null;
+      if (source === "service") return bySvc.get(id)?.priceUpdatedAt ?? null;
       return null;
     },
   };
@@ -296,6 +311,11 @@ const COST_FIELDS = [
   "horizonCost",
   "margin",
   "belowMinMargin",
+  // Prowizja i zysk firmy to liczby wewnętrzne — jadą tą samą ścieżką co koszty.
+  "salesCommissionPct",
+  "salesCommission",
+  "companyProfit",
+  "companyProfitPct",
 ] as const;
 
 /**
@@ -338,6 +358,13 @@ export interface OfferDetail {
     stock: number | null;
     /** Aktualna cena w kartotece, gdy odjechała od migawki na ofercie. */
     priceDrift: number | null;
+    /**
+     * Kiedy w kartotece (towaru albo usługi) ostatnio zmieniła się cena —
+     * sygnał, że pozycja jest wyceniona ze starego cennika, nawet gdy
+     * `priceDrift` jest pusty (cena w kartotece też mogła nie być od dawna
+     * potwierdzana). null dla pozycji wpisanych ręcznie, bez źródła.
+     */
+    priceUpdatedAt: string | null;
   })[];
   totals: OfferTotals;
 }
@@ -361,7 +388,26 @@ function loadOfferSync(dbx: DbOrTx, id: number): OfferDetail {
     .all();
 
   const { values } = getCompanyConfig();
-  const totals = computeOffer(offer, sections, items, values.minMarginPct);
+  /*
+   * Stawka prowizji jest w kartotece handlowca, nie na ofercie — bierzemy ją
+   * przy odczycie, żeby zmiana stawki od razu przeliczała otwarte dokumenty
+   * (tak samo jak narzut magazynowy przelicza ceny).
+   */
+  const salesCommissionPct =
+    offer.salespersonId === null
+      ? null
+      : (dbx
+          .select({ rate: schema.salespeople.commissionRate })
+          .from(schema.salespeople)
+          .where(eq(schema.salespeople.id, offer.salespersonId))
+          .all()[0]?.rate ?? null);
+  const totals = computeOffer(
+    offer,
+    sections,
+    items,
+    values.minMarginPct,
+    salesCommissionPct
+  );
 
   // Stany magazynowe i rozjazd cen — wyłącznie dla pozycji towarowych.
   const warehouseIds = items
@@ -398,6 +444,7 @@ function loadOfferSync(dbx: DbOrTx, id: number): OfferDetail {
         stock: it.warehouseItemId !== null ? stockByItem.get(it.warehouseItemId) ?? 0 : null,
         priceDrift:
           current !== null && Math.abs(current - it.unitPrice) > 0.005 ? current : null,
+        priceUpdatedAt: source.priceUpdatedAt(it.source, refId),
       };
     }),
     totals,
@@ -420,12 +467,15 @@ interface PackageItemInput {
   qtyPerParam: number;
   paramKey: string | null;
   qtyRound: OfferQtyRounding;
+  slot: string | null;
+  paramMin: number | null;
+  paramMax: number | null;
   unitPriceOverride: number | null;
 }
 
 function parsePackageItems(raw: unknown): PackageItemInput[] {
   if (!Array.isArray(raw)) return [];
-  return raw.map((entry, i) => {
+  const parsed = raw.map((entry, i) => {
     if (typeof entry !== "object" || entry === null)
       throw new ApiError(400, `Pozycja ${i + 1}: oczekiwano obiektu`);
     const e = entry as Record<string, unknown>;
@@ -441,6 +491,23 @@ function parsePackageItems(raw: unknown): PackageItemInput[] {
     if (source === "manual" && !name)
       throw new ApiError(400, `Pozycja ${i + 1}: pozycja ręczna musi mieć nazwę`);
 
+    const slot = str(e.slot) || null;
+    const paramMin = num(e.paramMin, `Pozycja ${i + 1}: początek zakresu`, null);
+    const paramMax = num(e.paramMax, `Pozycja ${i + 1}: koniec zakresu`, null);
+    // Zakres poza slotem nie miałby czego rozstrzygać — byłby drugim, cichym
+    // mechanizmem warunkowania pozycji obok slotów. Pozycja warunkowa bez
+    // alternatyw to slot z jednym wariantem i tak się ją zapisuje.
+    if (!slot && (paramMin !== null || paramMax !== null))
+      throw new ApiError(
+        400,
+        `Pozycja ${i + 1}: zakres działa tylko w slocie — nazwij slot albo wyczyść zakres`
+      );
+    if (paramMin !== null && paramMax !== null && paramMin > paramMax)
+      throw new ApiError(
+        400,
+        `Pozycja ${i + 1}: zakres od ${paramMin} do ${paramMax} jest pusty — ta pozycja nigdy by nie weszła`
+      );
+
     return {
       source,
       warehouseItemId,
@@ -453,9 +520,55 @@ function parsePackageItems(raw: unknown): PackageItemInput[] {
       qtyPerParam: qtyNum(e.qtyPerParam, `Pozycja ${i + 1}: mnożnik parametru`, 0) ?? 0,
       paramKey: str(e.paramKey) || null,
       qtyRound: oneOf(e.qtyRound, OFFER_QTY_ROUNDINGS, "none"),
+      slot,
+      paramMin,
+      paramMax,
       unitPriceOverride: num(e.unitPriceOverride, `Pozycja ${i + 1}: cena`, null),
     };
   });
+  assertSlotRangesSane(parsed);
+  return parsed;
+}
+
+/**
+ * Sprawdza SLOTY pakietu: w jednej grupie wariantów zakresy nie mogą na siebie
+ * nachodzić.
+ *
+ * Przy nakładających się zakresach `pickSlotVariants` bierze pierwszy pasujący
+ * wiersz, więc drugi wariant nie wszedłby NIGDY — i to bez śladu. Lepiej nie
+ * przyjąć takiego pakietu, niż wydać ofertę z cicho pominiętym rejestratorem.
+ *
+ * Dziury w pokryciu przepuszczamy: „poniżej czterech kamer nie dajemy
+ * rejestratora" to sensowny przepis. Ostrzega o nich edytor pakietu.
+ */
+function assertSlotRangesSane(items: PackageItemInput[]) {
+  const bySlot = new Map<string, { idx: number; it: PackageItemInput }[]>();
+  items.forEach((it, idx) => {
+    if (!it.slot) return;
+    const group = bySlot.get(it.slot) ?? [];
+    group.push({ idx, it });
+    bySlot.set(it.slot, group);
+  });
+
+  for (const [slot, group] of bySlot) {
+    for (let a = 0; a < group.length; a++) {
+      for (let b = a + 1; b < group.length; b++) {
+        const x = group[a];
+        const y = group[b];
+        // Przedziały domknięte: rozłączne są tylko wtedy, gdy jeden kończy się
+        // PRZED początkiem drugiego. NULL = strona otwarta, czyli ±nieskończoność.
+        const disjoint =
+          (x.it.paramMax !== null && y.it.paramMin !== null && x.it.paramMax < y.it.paramMin) ||
+          (y.it.paramMax !== null && x.it.paramMin !== null && y.it.paramMax < x.it.paramMin);
+        if (!disjoint)
+          throw new ApiError(
+            400,
+            `Slot „${slot}": zakresy pozycji ${x.idx + 1} i ${y.idx + 1} nachodzą na siebie — ` +
+              "przy tej samej liczbie pasowałyby oba warianty, a wejdzie tylko pierwszy"
+          );
+      }
+    }
+  }
 }
 
 function parsePackageHead(body: Record<string, unknown>): Partial<NewOfferPackage> {
@@ -526,6 +639,32 @@ app.get("/config", async (c) =>
         leaseAnnualRate: values.leaseAnnualRate,
       },
     });
+  })
+);
+
+/**
+ * Oferta spod ADRESU STRONY: „of202608014" → OF/2026/08/014.
+ *
+ * Numer jest tym, czym oferta posługuje się na zewnątrz (mail, telefon,
+ * wydruk), więc to on stoi w URL-u — nie techniczne id. Slug powstaje przez
+ * zdjęcie ukośników i myślników, żeby adres dało się przekleić bez kodowania;
+ * wersje („-w2") zostają rozróżnialne, bo litera i cyfra zostają w środku.
+ *
+ * Montowane PRZED `/:id`, inaczej „number" trafiłoby w parametr.
+ */
+app.get("/number/:slug", async (c) =>
+  guard(c, () => {
+    const slug = str(c.req.param("slug")).toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (!slug) throw new ApiError(400, "Pusty adres oferty");
+    const row = db
+      .select({ id: schema.offers.id })
+      .from(schema.offers)
+      .where(
+        sql`lower(replace(replace(${schema.offers.number}, '/', ''), '-', '')) = ${slug}`
+      )
+      .all()[0];
+    if (!row) throw new ApiError(404, "Nie znaleziono oferty o tym adresie");
+    return respond(c, loadOfferSync(db, row.id));
   })
 );
 
@@ -738,6 +877,13 @@ function parseOfferHead(
     salespersonId: keep("salespersonId", () => optId(body.salespersonId, "identyfikator handlowca"), current?.salespersonId ?? null),
     companyId: keep("companyId", () => optId(body.companyId, "identyfikator spółki"), current?.companyId ?? null),
     discountPct: keep("discountPct", () => pct(body.discountPct, "Rabat"), current?.discountPct ?? 0),
+    // Przewidywany czas kontraktu: liczba miesięcy albo nic. `optId` pilnuje,
+    // że to dodatnia liczba całkowita — „0 miesięcy" to nie kontrakt, tylko puste pole.
+    contractMonths: keep(
+      "contractMonths",
+      () => optId(body.contractMonths, "przewidywany czas kontraktu"),
+      current?.contractMonths ?? null
+    ),
     leaseMode,
     leaseMonths: leaseMode === "custom" ? leaseMonths : null,
     leaseAnnualRate,
@@ -840,6 +986,29 @@ app.get("/", async (c) =>
     const { values } = getCompanyConfig();
     const today = todayISO();
 
+    /*
+     * NAZWY, NIE IDENTYFIKATORY. Lista pokazuje handlowca i autora dokumentu,
+     * więc rozwiązujemy je na backendzie: handlowiec to `salesperson_id`,
+     * a `created_by` trzyma login z sesji. Front nie może tego dołożyć sam,
+     * bo kartoteka handlowców stoi za osobnym uprawnieniem — bez tego
+     * handlowiec z dostępem tylko do Ofert widziałby puste kolumny.
+     * Dwa małe zapytania zamiast N+1 na wiersz.
+     */
+    const salesById = new Map(
+      db
+        .select()
+        .from(schema.salespeople)
+        .all()
+        .map((sp) => [sp.id, `${sp.firstName} ${sp.lastName}`.trim()])
+    );
+    const userByEmail = new Map(
+      db
+        .select({ email: schema.users.email, displayName: schema.users.displayName })
+        .from(schema.users)
+        .all()
+        .map((u) => [u.email.toLowerCase(), u.displayName || u.email])
+    );
+
     const data = rows.map((r) => {
       const sections = allSections.filter((s) => s.offerId === r.id);
       const items = allItems.filter((i) => i.offerId === r.id);
@@ -847,6 +1016,12 @@ app.get("/", async (c) =>
         ...r,
         status: effectiveStatus(r, today),
         scope: scopeOf(r, sections, items),
+        salespersonName:
+          r.salespersonId === null ? null : salesById.get(r.salespersonId) ?? null,
+        // Login zostaje, gdy konto zniknęło z bazy — lepszy ślad niż kreska.
+        createdByLabel: r.createdBy
+          ? userByEmail.get(r.createdBy.toLowerCase()) ?? r.createdBy
+          : null,
         totals: computeOffer(r, sections, items, values.minMarginPct),
       };
     });
@@ -1352,19 +1527,134 @@ app.delete("/:id/sections/:sid", async (c) =>
     const offerId = requireId(c.req.param("id"), "identyfikator oferty");
     const sid = requireId(c.req.param("sid"), "identyfikator sekcji");
     db.transaction((tx) => {
-      loadEditableOfferSync(tx, offerId);
+      const offer = loadEditableOfferSync(tx, offerId);
       const section = tx
         .select()
         .from(schema.offerSections)
         .where(and(eq(schema.offerSections.id, sid), eq(schema.offerSections.offerId, offerId)))
         .all()[0];
       if (!section) throw new ApiError(404, "Nie znaleziono sekcji");
+      const count = tx
+        .select({ id: schema.offerItems.id })
+        .from(schema.offerItems)
+        .where(eq(schema.offerItems.sectionId, sid))
+        .all().length;
       // Pozycje lecą kaskadą po `section_id`.
       tx.delete(schema.offerSections).where(eq(schema.offerSections.id, sid)).run();
+
+      /*
+       * ŚLAD PO KASOWANIU. Dodawanie sekcji zapisywało się w dzienniku, a
+       * usuwanie nie — po zniknięciu całej sekcji z oferty nie dało się
+       * ustalić ani kiedy, ani kto. To najbardziej nieodwracalna operacja
+       * w tym module, więc ma zostawiać wpis jak każda inna.
+       */
+      logActivity(tx, {
+        entityType: "offer",
+        entityId: offerId,
+        objectId: offer.objectId,
+        user: getUser(c),
+        action: "updated",
+        summary: `Usunięto sekcję „${section.title}" (${count} poz.) z oferty ${offer.number}`,
+      });
     });
     return respond(c, loadOfferSync(db, offerId), "Sekcja usunięta");
   })
 );
+
+/**
+ * PRZELICZENIE SEKCJI dla nowej wartości parametru — „było 8 kamer, jest 20".
+ *
+ * Sekcja pamięta parametry, którymi rozwinięto pakiet (`offer_sections.params`),
+ * ale do tej pory nie dało się ich zmienić: trzeba było usunąć sekcję i dodać
+ * pakiet od nowa. Przy SLOTACH to za mało — zmiana liczby kamer ma podmienić
+ * rejestrator na inny model, a nie tylko przeskalować ilości.
+ *
+ * Pozycje sekcji lecą w całości i wracają z pakietu: to jest przeliczenie
+ * PRZEPISU, nie łatanie różnic. Ręczne poprawki w tej sekcji przepadają i front
+ * pyta o to wprost przed wywołaniem.
+ */
+app.post("/:id/sections/:sid/reexpand", async (c) => {
+  const body = await c.req.json<Record<string, unknown>>().catch(() => ({}));
+  return guard(c, () => {
+    const offerId = requireId(c.req.param("id"), "identyfikator oferty");
+    const sid = requireId(c.req.param("sid"), "identyfikator sekcji");
+    const b = body as Record<string, unknown>;
+    const paramValues = parseParamValues(JSON.stringify(b.params ?? {}));
+
+    db.transaction((tx) => {
+      const offer = loadEditableOfferSync(tx, offerId);
+      const section = tx
+        .select()
+        .from(schema.offerSections)
+        .where(and(eq(schema.offerSections.id, sid), eq(schema.offerSections.offerId, offerId)))
+        .all()[0];
+      if (!section) throw new ApiError(404, "Nie znaleziono sekcji");
+      if (section.packageId === null)
+        throw new ApiError(
+          400,
+          `Sekcja „${section.title}" nie pochodzi z pakietu — nie ma czego przeliczyć`
+        );
+
+      const pkg = tx
+        .select()
+        .from(schema.offerPackages)
+        .where(eq(schema.offerPackages.id, section.packageId))
+        .all()[0];
+      if (!pkg)
+        throw new ApiError(404, "Pakiet, z którego powstała sekcja, już nie istnieje");
+
+      const pkgItems = tx
+        .select()
+        .from(schema.offerPackageItems)
+        .where(eq(schema.offerPackageItems.packageId, pkg.id))
+        .all();
+      const { values } = getCompanyConfig();
+      const expanded = expandPackage(
+        pkg,
+        pkgItems,
+        paramValues,
+        priceSourceSync(tx, values.warehouseMarkup)
+      );
+      if (expanded.missingPrices.length)
+        throw new ApiError(
+          400,
+          `Brak ceny w kartotece: ${expanded.missingPrices.join(", ")} — uzupełnij ją przed przeliczeniem`
+        );
+
+      tx.delete(schema.offerItems).where(eq(schema.offerItems.sectionId, sid)).run();
+      expanded.drafts.forEach((d) => {
+        tx.insert(schema.offerItems)
+          .values({ ...d, offerId, sectionId: sid })
+          .run();
+      });
+      tx.update(schema.offerSections)
+        .set({ params: JSON.stringify(paramValues) })
+        .where(eq(schema.offerSections.id, sid))
+        .run();
+
+      // W podsumowaniu zmiany liczy się wartość PARAMETRU, nie liczba pozycji —
+      // po niej poznaje się, dlaczego kwota sekcji podskoczyła.
+      const describe = (raw: string) => {
+        const v = parseParamValues(raw);
+        const parts = Object.entries(v).map(([k, n]) => `${k}: ${n}`);
+        return parts.length ? parts.join(", ") : "bez parametrów";
+      };
+      logActivity(tx, {
+        entityType: "offer",
+        entityId: offerId,
+        objectId: offer.objectId,
+        user: getUser(c),
+        action: "updated",
+        summary:
+          `Przeliczono sekcję „${section.title}" w ofercie ${offer.number} ` +
+          `(${describe(section.params)} → ${describe(JSON.stringify(paramValues))}), ` +
+          `${expanded.drafts.length} poz.`,
+      });
+    });
+
+    return respond(c, loadOfferSync(db, offerId), "Sekcja przeliczona");
+  });
+});
 
 /** Zapis sekcji jako pakiet wielokrotnego użytku (tryb sztywny). */
 app.post("/:id/sections/:sid/save-as-package", async (c) => {

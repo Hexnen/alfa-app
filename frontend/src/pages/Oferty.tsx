@@ -6,6 +6,7 @@
  * a są to małe słowniki, które w trakcie składania oferty i tak się nie zmieniają.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
 import { FileText, Package, Plus, Trash2, Pencil, Archive } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -13,6 +14,7 @@ import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { usePerms } from "@/auth/permissions";
 import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
+import { tip } from "@/components/ui/tooltip";
 import {
   getCompanies,
   getSalespeople,
@@ -30,15 +32,16 @@ import {
   type StockEntry,
   type WarehouseItem,
 } from "@/lib/api";
-import { pillClass } from "@/lib/calendar-labels";
+import { fmtRelative, fmtTimestamp, pillClass } from "@/lib/calendar-labels";
 import { OfferEditor } from "@/components/offers/OfferEditor";
-import { PackageForm } from "@/components/offers/PackageForm";
+import { PackageEditor } from "@/components/offers/PackageEditor";
 import {
   OFFER_CATEGORY_META,
   OFFER_KIND_LABEL,
   OFFER_STATUS_META,
   fmtPct,
   fmtPln,
+  offerSlug,
   scopeLabel,
 } from "@/components/offers/offersShared";
 
@@ -51,6 +54,14 @@ const selectClass =
 export function Oferty() {
   const { canEdit } = usePerms();
   const editable = canEdit("technical/oferty");
+  /*
+   * OFERTA MA WŁASNY ADRES (/technical/oferty/of202608014), a nie stan lokalny:
+   * link do dokumentu daje się wysłać na maila, odświeżenie strony zostaje na
+   * ofercie, a „wstecz" w przeglądarce wraca na listę. W URL-u stoi NUMER —
+   * to jego widzi klient na wydruku — a nie techniczne id.
+   */
+  const { slug } = useParams<{ slug: string }>();
+  const navigate = useNavigate();
 
   const [tab, setTab] = useState("oferty");
   const [rows, setRows] = useState<OfferListRow[]>([]);
@@ -154,17 +165,36 @@ export function Oferty() {
     return m;
   }, [stock]);
 
-  const openOffer = async (id: number) => {
-    try {
-      const res = await offersApi.get(id);
-      if (res.data) {
-        setDetail(res.data);
-        setOpenId(id);
-      }
-    } catch (err) {
-      alertError(err, "Błąd wczytywania oferty");
+  /** Wejście w ofertę to nawigacja — resztę robi efekt czytający `slug`. */
+  const openOffer = (number: string) => navigate(`/technical/oferty/${offerSlug(number)}`);
+
+  /*
+   * Adres → dokument. Jedno miejsce, w którym oferta się wczytuje: wejście
+   * z listy, z linku i po odświeżeniu przechodzą tą samą ścieżką.
+   */
+  useEffect(() => {
+    if (!slug) {
+      setOpenId(null);
+      setDetail(null);
+      return;
     }
-  };
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await offersApi.getByNumber(slug);
+        if (cancelled || !res.data) return;
+        setDetail(res.data);
+        setOpenId(res.data.offer.id);
+      } catch (err) {
+        if (cancelled) return;
+        alertError(err, "Nie znaleziono oferty pod tym adresem");
+        navigate("/technical/oferty", { replace: true });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [slug, navigate]);
 
   const visible = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -183,7 +213,7 @@ export function Oferty() {
     try {
       const res = await offersApi.create({ date: new Date().toISOString().slice(0, 10) });
       await loadOffers();
-      if (res.data) await openOffer(res.data.id);
+      if (res.data) openOffer(res.data.number);
     } catch (err) {
       alertError(err, "Nie udało się utworzyć oferty");
     }
@@ -218,12 +248,36 @@ export function Oferty() {
           onChange={(next) => {
             setDetail(next);
             loadOffers();
+            // „Nowa wersja" tworzy INNY dokument (OF/…-w2) — adres musi za nim
+            // pójść, inaczej odświeżenie wróciłoby do wersji poprzedniej.
+            if (offerSlug(next.offer.number) !== slug) {
+              navigate(`/technical/oferty/${offerSlug(next.offer.number)}`, { replace: true });
+            }
           }}
-          onBack={() => {
-            setOpenId(null);
-            setDetail(null);
-          }}
+          onBack={() => navigate("/technical/oferty")}
           onReloadPackages={loadPackages}
+        />
+      </div>
+    );
+  }
+
+  // --- Widok edytora pakietu (osobny ekran jak edytor oferty: przepis bywa
+  // długi, a wiersz ma sześć nastaw i w oknie modalnym nie mieścił się w linii) ---
+  if (pkgFormOpen) {
+    return (
+      <div className="space-y-4">
+        {!editable && <ReadOnlyBanner className="mb-4" />}
+        <PackageEditor
+          key={editingPkg?.id ?? "new"}
+          pkg={editingPkg}
+          warehouseItems={warehouseItems}
+          services={services}
+          onBack={() => setPkgFormOpen(false)}
+          onSubmit={async (data) => {
+            if (editingPkg) await offersApi.updatePackage(editingPkg.id, data);
+            else await offersApi.createPackage(data);
+            await loadPackages();
+          }}
         />
       </div>
     );
@@ -297,6 +351,9 @@ export function Oferty() {
                       <th className="px-3 py-2 font-medium">Klient / obiekt</th>
                       <th className="px-3 py-2 font-medium">Zakres</th>
                       <th className="px-3 py-2 font-medium">Status</th>
+                      <th className="px-3 py-2 font-medium">Handlowiec</th>
+                      <th className="px-3 py-2 font-medium">Utworzył</th>
+                      <th className="px-3 py-2 font-medium">Zmieniono</th>
                       <th className="px-3 py-2 text-right font-medium">Jednorazowo</th>
                       <th className="px-3 py-2 text-right font-medium">Miesięcznie</th>
                       <th className="px-3 py-2 text-right font-medium">Marża</th>
@@ -307,7 +364,7 @@ export function Oferty() {
                     {loading ? (
                       <tr>
                         <td
-                          colSpan={editable ? 8 : 7}
+                          colSpan={editable ? 11 : 10}
                           className="px-3 py-8 text-center text-muted-foreground"
                         >
                           Ładowanie…
@@ -316,7 +373,7 @@ export function Oferty() {
                     ) : visible.length === 0 ? (
                       <tr>
                         <td
-                          colSpan={editable ? 8 : 7}
+                          colSpan={editable ? 11 : 10}
                           className="px-3 py-8 text-center text-muted-foreground"
                         >
                           Brak ofert. Zacznij od „Nowa oferta”.
@@ -329,7 +386,7 @@ export function Oferty() {
                           <tr
                             key={o.id}
                             className="cursor-pointer border-b last:border-0 hover:bg-muted/40"
-                            onClick={() => openOffer(o.id)}
+                            onClick={() => openOffer(o.number)}
                           >
                             <td className="px-3 py-2">
                               <div className="font-medium">{o.number}</div>
@@ -356,6 +413,36 @@ export function Oferty() {
                                 <span className={pillClass("neutral", { className: "ml-1" })}>
                                   w{o.version}
                                 </span>
+                              )}
+                            </td>
+                            <td className="px-3 py-2 text-xs">
+                              {o.salespersonName || <span className="text-muted-foreground">—</span>}
+                            </td>
+                            {/* Autor i data powstania w jednej kolumnie: to jedna
+                                informacja („kto i kiedy to założył"), a osobna
+                                kolumna na samą datę rozpychałaby tabelę. Pełny
+                                znacznik czasu siedzi w tooltipie, bo „2 dni temu"
+                                czyta się szybciej niż „30.08.2026 14:12". */}
+                            <td className="px-3 py-2 text-xs">
+                              <div>
+                                {o.createdByLabel || (
+                                  <span className="text-muted-foreground">—</span>
+                                )}
+                              </div>
+                              <div
+                                className="text-muted-foreground"
+                                {...tip(fmtTimestamp(o.createdAt))}
+                              >
+                                {fmtRelative(o.createdAt)}
+                              </div>
+                            </td>
+                            <td className="px-3 py-2 text-xs text-muted-foreground">
+                              {o.updatedAt && o.updatedAt !== o.createdAt ? (
+                                <span {...tip(fmtTimestamp(o.updatedAt))}>
+                                  {fmtRelative(o.updatedAt)}
+                                </span>
+                              ) : (
+                                <span {...tip("Dokument nie był zmieniany od utworzenia")}>—</span>
                               )}
                             </td>
                             <td className="px-3 py-2 text-right tabular-nums">
@@ -522,21 +609,6 @@ export function Oferty() {
         </TabsContent>
       </Tabs>
 
-      {pkgFormOpen && (
-        <PackageForm
-          key={editingPkg?.id ?? "new"}
-          open={pkgFormOpen}
-          pkg={editingPkg}
-          warehouseItems={warehouseItems}
-          services={services}
-          onClose={() => setPkgFormOpen(false)}
-          onSubmit={async (data) => {
-            if (editingPkg) await offersApi.updatePackage(editingPkg.id, data);
-            else await offersApi.createPackage(data);
-            await loadPackages();
-          }}
-        />
-      )}
     </div>
   );
 }

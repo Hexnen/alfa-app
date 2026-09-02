@@ -84,6 +84,9 @@ function pkgItem(over: Partial<OfferPackageItem>): OfferPackageItem {
     qtyPerParam: 0,
     paramKey: null,
     qtyRound: "none",
+    slot: null,
+    paramMin: null,
+    paramMax: null,
     unitPriceOverride: null,
     ...over,
   } as OfferPackageItem;
@@ -180,6 +183,233 @@ const overridden = expandPackage(
   priceSource
 ).drafts;
 ok("cena narzucona przez pakiet wygrywa z katalogową", overridden[0]?.unitPrice === 333, overridden[0]);
+
+// ---------------------------------------------------------------------------
+// Sloty — z grupy wariantów wchodzi JEDEN, wybrany zakresem parametru
+// ---------------------------------------------------------------------------
+
+/** Katalog ze wszystkimi trzema rejestratorami: 2 = 8ch, 3 = 16ch, 4 = 32ch. */
+const slotPrices: PriceSource = {
+  cost: (source, id) => (source === "warehouse" && id ? id * 100 : null),
+  price: (source, id) => (source === "warehouse" && id ? id * 200 : null),
+  label: (source, id) => {
+    if (source !== "warehouse") return null;
+    if (id === 1) return { name: "Kamera IP 4MP", unit: "szt" };
+    if (id === 2) return { name: "Rejestrator 8ch", unit: "szt" };
+    if (id === 3) return { name: "Rejestrator 16ch", unit: "szt" };
+    if (id === 4) return { name: "Rejestrator 32ch", unit: "szt" };
+    return null;
+  },
+};
+
+const slotItems: OfferPackageItem[] = [
+  pkgItem({ source: "warehouse", warehouseItemId: 1, qtyPerParam: 1, paramKey: "cameras" }),
+  pkgItem({
+    source: "warehouse",
+    warehouseItemId: 2,
+    qtyBase: 1,
+    paramKey: "cameras",
+    slot: "Rejestrator",
+    paramMax: 8,
+  }),
+  pkgItem({
+    source: "warehouse",
+    warehouseItemId: 3,
+    qtyBase: 1,
+    paramKey: "cameras",
+    slot: "Rejestrator",
+    paramMin: 9,
+    paramMax: 16,
+  }),
+  pkgItem({
+    source: "warehouse",
+    warehouseItemId: 4,
+    qtyBase: 1,
+    paramKey: "cameras",
+    slot: "Rejestrator",
+    paramMin: 17,
+  }),
+];
+
+const atCameras = (n: number, items = slotItems) =>
+  expandPackage({ mode: "parametric", params: PARAMS_JSON }, items, { cameras: n }, slotPrices)
+    .drafts;
+const recordersAt = (n: number, items = slotItems) =>
+  atCameras(n, items).filter((d) => d.name.startsWith("Rejestrator"));
+
+for (const [cameras, expected] of [
+  [1, "Rejestrator 8ch"],
+  [8, "Rejestrator 8ch"],
+  [9, "Rejestrator 16ch"],
+  [16, "Rejestrator 16ch"],
+  [17, "Rejestrator 32ch"],
+  [30, "Rejestrator 32ch"],
+] as const) {
+  const got = recordersAt(cameras);
+  ok(
+    `${cameras} kamer → ${expected}, i tylko on`,
+    got.length === 1 && got[0]?.name === expected && got[0]?.qty === 1,
+    got
+  );
+}
+
+ok(
+  "slot nie rusza pozycji spoza slotu",
+  atCameras(12).length === 2 && atCameras(12)[0]?.qty === 12,
+  atCameras(12)
+);
+
+// Dziura w zakresach: żaden wariant nie obejmuje 4 kamer.
+const gapItems = slotItems.filter((i) => i.warehouseItemId !== 2);
+ok(
+  "brak pasującego wariantu → slot nie wnosi nic, reszta pakietu wchodzi",
+  recordersAt(4, gapItems).length === 0 && atCameras(4, gapItems).length === 1,
+  atCameras(4, gapItems)
+);
+
+// Pakiet sztywny nie ma parametrów — zakresów nie da się rozstrzygnąć.
+const fixedSlots = expandPackage({ mode: "fixed", params: "[]" }, slotItems, {}, slotPrices).drafts;
+ok(
+  "pakiet sztywny bierze pierwszy wariant slotu, nie wszystkie",
+  fixedSlots.filter((d) => d.name.startsWith("Rejestrator")).length === 1 &&
+    fixedSlots.some((d) => d.name === "Rejestrator 8ch"),
+  fixedSlots
+);
+
+// Wariant bez własnego klucza parametru — pakiet ma jeden, więc się rozstrzyga.
+const keylessSlot = expandPackage(
+  { mode: "parametric", params: PARAMS_JSON },
+  [
+    pkgItem({ source: "warehouse", warehouseItemId: 2, qtyBase: 1, slot: "R", paramMax: 8 }),
+    pkgItem({ source: "warehouse", warehouseItemId: 3, qtyBase: 1, slot: "R", paramMin: 9 }),
+  ],
+  { cameras: 12 },
+  slotPrices
+).drafts;
+ok(
+  "wariant bez paramKey rozstrzyga się jedynym parametrem pakietu",
+  keylessSlot.length === 1 && keylessSlot[0]?.name === "Rejestrator 16ch",
+  keylessSlot
+);
+
+ok(
+  "pakiet bez slotów działa jak dotąd",
+  expandPackage({ mode: "parametric", params: PARAMS_JSON }, cctvItems, { cameras: 8 }, priceSource)
+    .drafts.length === 3,
+  null
+);
+
+
+// ---------------------------------------------------------------------------
+// Przewidywany czas kontraktu: ustawia okres i przycina raty dzierżawy
+// ---------------------------------------------------------------------------
+
+{
+  const sections: SectionCalcInput[] = [{ id: 1, isOptional: false, variantGroup: null, variantSelected: true }];
+  const items: ItemCalcInput[] = [
+    { sectionId: 1, qty: 1, unitPrice: 1200, unitCost: 600, discountPct: 0, kind: "material", billing: "one_time", isOptional: false },
+    { sectionId: 1, qty: 1, unitPrice: 100, unitCost: 40, discountPct: 0, kind: "subscription", billing: "monthly", isOptional: false },
+  ];
+  const bez: OfferCalcInput = {
+    discountPct: 0,
+    leaseMode: "none",
+    leaseMonths: null,
+    leaseAnnualRate: null,
+    leaseIncludeLabour: false,
+  };
+
+  const domyslny = computeOffer(bez, sections, items, 0);
+  ok("bez kontraktu i dzierżawy → 12 mies.", domyslny.marginHorizonMonths === 12, domyslny.marginHorizonMonths);
+  ok("…i źródło okresu to „default”", domyslny.horizonSource === "default", domyslny.horizonSource);
+
+  const kontrakt = computeOffer({ ...bez, contractMonths: 36 }, sections, items, 0);
+  ok("kontrakt 36 mies. ustawia okres", kontrakt.marginHorizonMonths === 36, kontrakt.marginHorizonMonths);
+  ok("…źródło okresu to „contract”", kontrakt.horizonSource === "contract", kontrakt.horizonSource);
+  ok(
+    "przychód = jednorazowe + abonament × 36",
+    kontrakt.horizonRevenue === 1200 + 100 * 36,
+    kontrakt.horizonRevenue
+  );
+
+  // Kontrakt DŁUŻSZY niż dzierżawa: rata kończy się z umową, abonament leci dalej.
+  const zDzierzawa: OfferCalcInput = {
+    discountPct: 0,
+    leaseMode: "y2",
+    leaseMonths: null,
+    leaseAnnualRate: 120,
+    leaseIncludeLabour: false,
+    contractMonths: 36,
+  };
+  const mix = computeOffer(zDzierzawa, sections, items, 0);
+  const rata = mix.leaseMonthlyNet;
+  ok("dzierżawa działa (jest rata)", rata > 0, rata);
+  ok(
+    "raty tylko przez 24 mies. dzierżawy, abonament przez 36",
+    mix.horizonRevenue === Math.round((mix.oneTimePayable + rata * 24 + 100 * 36) * 100) / 100,
+    { revenue: mix.horizonRevenue, rata, oneTime: mix.oneTimePayable }
+  );
+
+  // Bez kontraktu okres nadal bierze się z dzierżawy — stare zachowanie bez zmian.
+  const samaDzierzawa = computeOffer({ ...zDzierzawa, contractMonths: null }, sections, items, 0);
+  ok("bez kontraktu okres z dzierżawy (24)", samaDzierzawa.marginHorizonMonths === 24, samaDzierzawa.marginHorizonMonths);
+  ok("…źródło okresu to „lease”", samaDzierzawa.horizonSource === "lease", samaDzierzawa.horizonSource);
+}
+
+// ---------------------------------------------------------------------------
+// Prowizja handlowca: przychód × stawka, a zysk firmy to marża PO prowizji
+// ---------------------------------------------------------------------------
+
+{
+  const sections: SectionCalcInput[] = [{ id: 1, isOptional: false, variantGroup: null, variantSelected: true }];
+  const items: ItemCalcInput[] = [
+    { sectionId: 1, qty: 1, unitPrice: 10000, unitCost: 6000, discountPct: 0, kind: "material", billing: "one_time", isOptional: false },
+  ];
+  const base: OfferCalcInput = {
+    discountPct: 0,
+    leaseMode: "none",
+    leaseMonths: null,
+    leaseAnnualRate: null,
+    leaseIncludeLabour: false,
+  };
+
+  const bez = computeOffer(base, sections, items, 0, null);
+  ok("bez stawki: prowizja null", bez.salesCommission === null, bez.salesCommission);
+  ok(
+    "bez stawki: zysk firmy = marża",
+    bez.companyProfit === bez.margin?.amount,
+    { profit: bez.companyProfit, margin: bez.margin?.amount }
+  );
+
+  // Zysk oferty = 10 000 − 6 000 = 4 000; prowizja to procent OD NIEGO, nie od ceny.
+  const z = computeOffer(base, sections, items, 0, 5);
+  ok("prowizja 5% od zysku 4000 = 200", z.salesCommission === 200, z.salesCommission);
+  ok("zysk firmy = 4000 − 200", z.companyProfit === 3800, z.companyProfit);
+  ok("marża nie zmienia się przez prowizję", z.margin?.marginPct === 40, z.margin);
+  ok("zysk firmy jako % przychodu = 38", z.companyProfitPct === 38, z.companyProfitPct);
+
+  // Zysk obejmuje CAŁY okres, więc prowizja też: abonament dokłada się do podstawy.
+  const monthly: ItemCalcInput[] = [
+    ...items,
+    { sectionId: 1, qty: 1, unitPrice: 100, unitCost: 30, discountPct: 0, kind: "subscription", billing: "monthly", isOptional: false },
+  ];
+  const rok = computeOffer(base, sections, monthly, 0, 10);
+  ok(
+    "prowizja 10% od zysku roku (4000 + 12 × 70 = 4840)",
+    rok.salesCommission === 484,
+    { commission: rok.salesCommission, margin: rok.margin?.amount }
+  );
+
+  const zeroRate = computeOffer(base, sections, items, 0, 0);
+  ok("stawka 0% to brak prowizji, nie zero złotych", zeroRate.salesCommission === null, zeroRate.salesCommission);
+
+  // Bez kosztu nie ma zysku, więc nie ma z czego liczyć prowizji.
+  const bezKosztu: ItemCalcInput[] = [
+    { sectionId: 1, qty: 1, unitPrice: 10000, unitCost: null, discountPct: 0, kind: "material", billing: "one_time", isOptional: false },
+  ];
+  const nieznany = computeOffer(base, sections, bezKosztu, 0, 5);
+  ok("brak kosztu → prowizja null, nie zero", nieznany.salesCommission === null, nieznany.salesCommission);
+  ok("…i zysk firmy też null", nieznany.companyProfit === null, nieznany.companyProfit);
+}
 
 // ---------------------------------------------------------------------------
 // Kalkulacja oferty

@@ -1,0 +1,1 @@
+ALTER TABLE `offers` ADD `contract_months` integer;

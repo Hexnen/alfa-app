@@ -270,9 +270,26 @@ export function AdminCompany() {
 
       <SectionCard
         id="adres"
-        title="Adres biura"
-        description="Punkt startowy kilometrów. Z adresu wyliczamy współrzędne, a z nich dystans biuro → obiekt przy uzupełnianiu realizacji."
+        title="Firma i adres biura"
+        description="Nazwa firmy oraz punkt startowy kilometrów. Z adresu wyliczamy współrzędne, a z nich dystans biuro → obiekt przy uzupełnianiu realizacji."
       >
+        <Field
+          id="company-name"
+          label="Nazwa firmy"
+          source={source("companyName")}
+          dirty={isDirty("companyName")}
+          description="Prefiks etykiet działów w Kadrach → Godziny (np. „ALFA GROUP:Handlowy”). Puste pole = dział pokazuje się samą nazwą."
+        >
+          <Input
+            id="company-name"
+            data-testid="company-name"
+            className="max-w-md"
+            value={val("companyName")}
+            placeholder="np. ALFA GROUP"
+            onChange={(e) => setField("companyName", e.target.value)}
+          />
+        </Field>
+
         <div className="grid gap-4 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)_minmax(0,1.5fr)]">
           <Field
             id="company-address"

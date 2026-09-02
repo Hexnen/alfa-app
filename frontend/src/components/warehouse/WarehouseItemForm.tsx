@@ -1,4 +1,7 @@
 import { useMemo, useState } from "react";
+import { fmtRelative, fmtTimestamp } from "@/lib/calendar-labels";
+import { tip } from "@/components/ui/tooltip";
+import { isPriceStale, priceAgeLabel } from "@/lib/price-age";
 import { ImageOff, RotateCcw, Upload, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -455,6 +458,36 @@ export function WarehouseItemForm({
               </div>
             </div>
           </div>
+
+          {/* Ślad edycji i wiek ceny przy przyciskach: przy sporze o cenę
+              pierwsze pytanie brzmi „kto to zmienił i kiedy", a nie „ile
+              wynosi" — i ma być pod ręką bez wchodzenia do dziennika. */}
+          {item && (
+            <p className="text-[11px] text-muted-foreground">
+              Utworzył {item.createdByLabel || "—"},{" "}
+              <span {...tip(fmtTimestamp(item.createdAt))}>{fmtRelative(item.createdAt)}</span>
+              {item.updatedAt !== item.createdAt && (
+                <>
+                  {" · "}Zmienił {item.updatedByLabel || "—"},{" "}
+                  <span {...tip(fmtTimestamp(item.updatedAt))}>{fmtRelative(item.updatedAt)}</span>
+                </>
+              )}
+              {(item.purchasePrice !== null || item.salePrice !== null) && (
+                <>
+                  {" · "}
+                  <span
+                    className={
+                      isPriceStale(item.priceUpdatedAt, "warehouse")
+                        ? "font-medium text-red-600"
+                        : undefined
+                    }
+                  >
+                    {priceAgeLabel(item.priceUpdatedAt, "warehouse")}
+                  </span>
+                </>
+              )}
+            </p>
+          )}
 
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose}>

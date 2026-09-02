@@ -30,6 +30,9 @@ export const TABS: TabDef[] = [
   // biuro trafiło do Wynagrodzeń. Stare klucze mapuje backend.
   { key: "kadry/pracownicy", label: "Pracownicy", group: "Kadry" },
   { key: "kadry/obiekty", label: "Obiekty", group: "Kadry" },
+  // Słownik działów firmy — osobny klucz od obiektów, bo to inny byt: godziny
+  // działu są kosztem ogólnym, nie kosztem klienta.
+  { key: "kadry/dzialy", label: "Działy", group: "Kadry" },
   { key: "kadry/normy", label: "Normy", group: "Kadry" },
   { key: "cma/raporty", label: "Raporty", group: "CMA" },
   { key: "cma/trendy", label: "Trendy", group: "CMA" },

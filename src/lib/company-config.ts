@@ -74,6 +74,11 @@ export const DEFAULT_AUTOFILL_FIELDS: AutofillField[] = AUTOFILL_FIELDS.filter(
 // ---------------------------------------------------------------------------
 
 export interface CompanySettingsValues {
+  /**
+   * Nazwa firmy — prefiks etykiety działu kadrowego („ALFA GROUP:Handlowy”).
+   * Pusta = etykieta to sama nazwa działu. Patrz `departmentLabel()`.
+   */
+  companyName: string;
   /** Ulica i numer biura (punkt startowy kalkulacji km). */
   officeAddress: string;
   officeCity: string;
@@ -174,6 +179,7 @@ export type CompanySettingField = keyof CompanySettingsValues;
 export type Source = "db" | "default";
 
 export const COMPANY_DEFAULTS: CompanySettingsValues = {
+  companyName: "",
   officeAddress: "",
   officeCity: "",
   officePostcode: "",
@@ -407,6 +413,7 @@ const autofillFieldsField: CompanyFieldDef<AutofillField[]> = {
 };
 
 export const COMPANY_FIELDS: { [K in CompanySettingField]: CompanyFieldDef<CompanySettingsValues[K]> } = {
+  companyName: stringField("company.name", "Nazwa firmy", 80),
   officeAddress: stringField("company.office_address", "Adres biura"),
   officeCity: stringField("company.office_city", "Miejscowość biura", 80),
   officePostcode: stringField("company.office_postcode", "Kod pocztowy biura", 12),
@@ -485,6 +492,25 @@ export function isAutofillField(field: AutofillField, values: Pick<CompanySettin
 export function officeAddressLine(values: Pick<CompanySettingsValues, "officeAddress" | "officeCity" | "officePostcode">): string {
   const tail = [values.officePostcode, values.officeCity].map((s) => s.trim()).filter(Boolean).join(" ");
   return [values.officeAddress.trim(), tail].filter(Boolean).join(", ");
+}
+
+/**
+ * Etykieta działu kadrowego: „ALFA GROUP:Handlowy” (bez spacji wokół dwukropka).
+ *
+ * DLACZEGO SKŁADAMY JĄ NA SERWERZE, a nie w komponencie Kadr: `company.name` żyje
+ * w `app_settings` za `requireAdmin` (src/routes/admin-company.ts), więc front Kadr
+ * NIE MA JAK jej przeczytać — kadrowa nie jest adminem. Dorabianie publicznego
+ * endpointu na jeden string byłoby drugą drogą do tych samych ustawień; zamiast tego
+ * `GET /hr/departments` i `GET /hr/hours` zwracają etykietę gotową. Reguła istnieje
+ * wtedy w jednym miejscu i ta sama etykieta wychodzi w godzinach, wydrukach
+ * i eksportach — bez ryzyka, że któryś z nich zapisze dwukropek inaczej.
+ */
+export function departmentLabel(
+  name: string,
+  values: Pick<CompanySettingsValues, "companyName">,
+): string {
+  const company = values.companyName.trim();
+  return company ? `${company}:${name}` : name;
 }
 
 /** Słowniki dla panelu admina (meta w GET /admin/company/settings). */

@@ -6,6 +6,11 @@
  * 8 montaży i 1 uruchomienie. Dzięki temu jeden zapisany pakiet obsługuje
  * każdą wielkość instalacji, zamiast mnożyć warianty 4/8/16 w bibliotece.
  *
+ * Drugi mechanizm to SLOTY: „Rejestrator" to jedno miejsce w zestawie, w którym
+ * przy 1–8 kamerach wchodzi 8-kanałowy, przy 9–16 szesnastokanałowy, a wyżej
+ * 32-kanałowy. Nie zmienia się ilość, tylko KTÓRY towar wchodzi — patrz
+ * `pickSlotVariants`.
+ *
  * Funkcje są CZYSTE — nie dotykają bazy, więc dają się przetestować wprost
  * (scripts/test-offer-calc.ts). Ceny i koszty podaje wołający przez `priceSource`.
  */
@@ -15,6 +20,7 @@ import type {
   OfferItemSource,
   OfferPackage,
   OfferPackageItem,
+  OfferPackageMode,
 } from "../db/schema.js";
 import { round2 } from "./margin.js";
 
@@ -130,6 +136,78 @@ export function qtyFor(
   return Math.round(raw * 1e6) / 1e6;
 }
 
+/**
+ * Wartość parametru, którym steruje się dana pozycja.
+ *
+ * Gdy pozycja nie nazywa parametru, a pakiet ma DOKŁADNIE JEDEN — bierzemy ten
+ * jeden. Slot założony zanim ktoś przypisał klucz dalej się przez to rozstrzyga,
+ * zamiast po cichu wypadać z oferty. Brak wartości to 0, tak samo jak w `qtyFor`.
+ */
+function paramValueFor(
+  item: Pick<OfferPackageItem, "paramKey">,
+  params: Record<string, number>,
+  defs: OfferPackageParam[]
+): number {
+  const key = item.paramKey ?? (defs.length === 1 ? defs[0].key : null);
+  if (!key) return 0;
+  const v = params[key];
+  return Number.isFinite(v) ? v : 0;
+}
+
+/**
+ * Czy wariant obejmuje daną wartość parametru. Granice WŁĄCZNIE.
+ *
+ * Epsilon jak w `qtyFor`: 0,125 × 8 daje 0.9999999999999999 i bez zapasu
+ * wartość na samej granicy progu wypadłaby po złej stronie.
+ */
+export function variantCovers(
+  item: Pick<OfferPackageItem, "paramMin" | "paramMax">,
+  value: number
+): boolean {
+  const eps = 1e-9;
+  if (item.paramMin !== null && value < item.paramMin - eps) return false;
+  if (item.paramMax !== null && value > item.paramMax + eps) return false;
+  return true;
+}
+
+/**
+ * Rozstrzyga SLOTY: z każdej grupy wariantów zostawia ten jeden, którego zakres
+ * obejmuje wartość parametru. Pozycje bez slotu przechodzą nietknięte.
+ *
+ * Gdy żaden wariant nie pasuje, slot NIE WNOSI NIC — dziura w zakresach jest
+ * decyzją autora pakietu („poniżej 4 kamer nie robimy rejestratora"), a nie
+ * błędem czasu wykonania. Ostrzega o niej edytor pakietu, nie ta funkcja.
+ *
+ * Pakiet `fixed` nie ma parametrów, więc zakresów nie da się rozstrzygnąć:
+ * bierzemy PIERWSZY wariant slotu. Trzy rejestratory naraz na jednej ofercie
+ * byłyby gorszym błędem niż jeden nietrafiony.
+ */
+export function pickSlotVariants(
+  items: OfferPackageItem[],
+  params: Record<string, number>,
+  defs: OfferPackageParam[],
+  mode: OfferPackageMode
+): OfferPackageItem[] {
+  const sorted = [...items].sort((a, b) => a.position - b.position || a.id - b.id);
+  const takenSlots = new Set<string>();
+  const out: OfferPackageItem[] = [];
+
+  for (const item of sorted) {
+    if (!item.slot) {
+      out.push(item);
+      continue;
+    }
+    if (takenSlots.has(item.slot)) continue;
+    const fits =
+      mode === "fixed" || variantCovers(item, paramValueFor(item, params, defs));
+    if (!fits) continue;
+    takenSlots.add(item.slot);
+    out.push(item);
+  }
+
+  return out;
+}
+
 function refIdOf(item: Pick<OfferPackageItem, "source" | "warehouseItemId" | "serviceId">) {
   if (item.source === "warehouse") return item.warehouseItemId ?? null;
   if (item.source === "service") return item.serviceId ?? null;
@@ -168,7 +246,9 @@ export function expandPackage(
 
   const drafts: OfferItemDraft[] = [];
   const missingPrices: string[] = [];
-  const sorted = [...items].sort((a, b) => a.position - b.position || a.id - b.id);
+  // Sloty rozstrzygamy PRZED liczeniem ilości: przy 12 kamerach do pętli ma
+  // wejść wyłącznie rejestrator 16-kanałowy, a nie wszystkie trzy warianty.
+  const sorted = pickSlotVariants(items, params, defs, pkg.mode);
 
   for (const item of sorted) {
     const qty =

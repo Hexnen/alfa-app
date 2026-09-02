@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  AlertTriangle,
   Archive,
   ArchiveRestore,
   ArrowLeftRight,
@@ -46,7 +47,9 @@ import {
   totalStockFor,
   warehouseLabel,
 } from "@/components/warehouse/warehouseShared";
-import { pillClass } from "@/lib/calendar-labels";
+import { fmtRelative, fmtTimestamp, pillClass } from "@/lib/calendar-labels";
+import { isPriceStale, priceAgeLabel } from "@/lib/price-age";
+import { tip } from "@/components/ui/tooltip";
 
 const alertError = (err: unknown, fallback: string) =>
   window.alert(err instanceof Error ? err.message : fallback);
@@ -829,6 +832,8 @@ export function Warehouse() {
                         Min. stan
                       </th>
                       <th className="px-3 py-2 font-medium">Oznaczenia</th>
+                      <th className="px-3 py-2 font-medium">Utworzył</th>
+                      <th className="px-3 py-2 font-medium">Zmienił</th>
                       {editable && (
                         <th className="px-3 py-2 text-right font-medium">
                           Akcje
@@ -840,7 +845,7 @@ export function Warehouse() {
                     {loading ? (
                       <tr>
                         <td
-                          colSpan={editable ? 10 : 9}
+                          colSpan={editable ? 12 : 11}
                           className="px-3 py-8 text-center text-muted-foreground"
                         >
                           Ładowanie…
@@ -849,125 +854,220 @@ export function Warehouse() {
                     ) : visibleItems.length === 0 ? (
                       <tr>
                         <td
-                          colSpan={editable ? 10 : 9}
+                          colSpan={editable ? 12 : 11}
                           className="px-3 py-8 text-center text-muted-foreground"
                         >
                           Kartoteka towarów jest pusta.
                         </td>
                       </tr>
                     ) : (
-                      visibleItems.map((item) => (
-                        <tr
-                          key={item.id}
-                          className={`border-b last:border-0 ${
-                            item.isArchived ? "opacity-60" : ""
-                          }`}
-                        >
-                          <td className="px-3 py-2">{photoThumb(item)}</td>
-                          <td className="px-3 py-2">
-                            <div className="font-medium">{item.name}</div>
-                            {(item.sku || item.manufacturer) && (
-                              <div className="text-xs text-muted-foreground">
-                                {[item.manufacturer, item.sku]
-                                  .filter(Boolean)
-                                  .join(" · ")}
-                              </div>
-                            )}
-                          </td>
-                          <td className="px-3 py-2 text-muted-foreground">
-                            {item.category || "—"}
-                          </td>
-                          <td className="px-3 py-2">{item.unit}</td>
-                          <td className="px-3 py-2 text-right tabular-nums">
-                            {fmtPlnOrDash(item.purchasePrice)}
-                          </td>
-                          <td className="px-3 py-2 text-right tabular-nums">
-                            {fmtPlnOrDash(item.effectiveSalePrice)}
-                            {item.salePriceAuto &&
-                              item.effectiveSalePrice !== null && (
-                                <span
-                                  className="ml-1 rounded bg-muted px-1 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground"
-                                  title={`Liczona z narzutu ${warehouseMarkup}% — towar nie ma własnej ceny`}
-                                >
-                                  auto
-                                </span>
-                              )}
-                          </td>
-                          <td
-                            className="px-3 py-2 text-right tabular-nums"
-                            title={
-                              item.marginAmount !== null
-                                ? `Zysk ${fmtPln(item.marginAmount)} na ${item.unit}`
-                                : "Brak ceny zakupu — marży nie da się policzyć"
-                            }
+                      visibleItems.map((item) => {
+                        /* Towar bez żadnej ceny NIE jest przeterminowany: brak
+                           kwoty to nie jest stara kwota, nie ma czego pilnować
+                           ani czym straszyć. Alarm zapalamy dopiero wtedy, gdy
+                           cena istnieje, a stempel `priceUpdatedAt` mówi, że
+                           nikt jej nie potwierdzał od pół roku (lub go nie ma —
+                           to reguła z lib/price-age.ts). */
+                        const hasPrice =
+                          item.purchasePrice !== null ||
+                          item.effectiveSalePrice !== null;
+                        const priceStale =
+                          hasPrice && isPriceStale(item.priceUpdatedAt, "warehouse");
+                        const priceTip = priceStale
+                          ? tip(priceAgeLabel(item.priceUpdatedAt, "warehouse"))
+                          : null;
+                        // Czerwień tylko na komórce, która faktycznie pokazuje
+                        // kwotę — kreska „brak ceny" nie ma się co czerwienić.
+                        const staleCell = (value: number | null) =>
+                          priceStale && value !== null
+                            ? "font-medium text-red-600"
+                            : "";
+                        return (
+                          <tr
+                            key={item.id}
+                            className={`border-b last:border-0 ${
+                              item.isArchived ? "opacity-60" : ""
+                            }`}
                           >
-                            {item.marginPct !== null ? (
-                              <>
-                                {fmtPct(item.marginPct)}
-                                <span className="text-muted-foreground">
-                                  {" / "}
-                                  {fmtPct(item.markupPct)}
-                                </span>
-                              </>
-                            ) : (
-                              "—"
-                            )}
-                          </td>
-                          <td className="px-3 py-2 text-right">
-                            {item.minStock != null
-                              ? fmtQty(item.minStock)
-                              : "—"}
-                          </td>
-                          <td className="px-3 py-2">
-                            <div className="flex flex-wrap gap-1">
-                              {item.isAsset && (
-                                <span className={pillClass("violet")}>zwrotny</span>
-                              )}
-                              {item.isArchived && (
-                                <span className={pillClass("muted")}>archiwum</span>
-                              )}
-                            </div>
-                          </td>
-                          {editable && (
+                            <td className="px-3 py-2">{photoThumb(item)}</td>
                             <td className="px-3 py-2">
-                              <div className="flex justify-end gap-1">
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  title="Edytuj"
-                                  onClick={() => {
-                                    setEditingItem(item);
-                                    setItemFormOpen(true);
-                                  }}
+                              <div className="font-medium">{item.name}</div>
+                              {(item.sku || item.manufacturer) && (
+                                <div className="text-xs text-muted-foreground">
+                                  {[item.manufacturer, item.sku]
+                                    .filter(Boolean)
+                                    .join(" · ")}
+                                </div>
+                              )}
+                            </td>
+                            <td className="px-3 py-2 text-muted-foreground">
+                              {item.category || "—"}
+                            </td>
+                            <td className="px-3 py-2">{item.unit}</td>
+                            <td
+                              className={`px-3 py-2 text-right tabular-nums ${staleCell(
+                                item.purchasePrice
+                              )}`}
+                            >
+                              {priceStale && item.purchasePrice !== null ? (
+                                <span
+                                  className="inline-flex items-center gap-1"
+                                  {...priceTip}
                                 >
-                                  <Pencil className="h-4 w-4" />
-                                </Button>
-                                {item.isArchived ? (
-                                  <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    title="Przywróć z archiwum"
-                                    onClick={() => handleItemRestore(item)}
+                                  <AlertTriangle className="h-3 w-3" />
+                                  {fmtPlnOrDash(item.purchasePrice)}
+                                </span>
+                              ) : (
+                                fmtPlnOrDash(item.purchasePrice)
+                              )}
+                            </td>
+                            {/* nowrap: z ikoną ostrzeżenia kwota i plakietka
+                                „auto" przestają się mieścić w jednej linii
+                                i komórka rozjeżdża się na dwa wiersze. */}
+                            <td
+                              className={`whitespace-nowrap px-3 py-2 text-right tabular-nums ${staleCell(
+                                item.effectiveSalePrice
+                              )}`}
+                            >
+                              {priceStale && item.effectiveSalePrice !== null ? (
+                                <span
+                                  className="inline-flex items-center gap-1"
+                                  {...priceTip}
+                                >
+                                  <AlertTriangle className="h-3 w-3" />
+                                  {fmtPlnOrDash(item.effectiveSalePrice)}
+                                </span>
+                              ) : (
+                                fmtPlnOrDash(item.effectiveSalePrice)
+                              )}
+                              {item.salePriceAuto &&
+                                item.effectiveSalePrice !== null && (
+                                  <span
+                                    className="ml-1 rounded bg-muted px-1 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground"
+                                    title={`Liczona z narzutu ${warehouseMarkup}% — towar nie ma własnej ceny`}
                                   >
-                                    <ArchiveRestore className="mr-1 h-4 w-4" />
-                                    Przywróć
-                                  </Button>
-                                ) : (
-                                  <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    title="Archiwizuj"
-                                    className="text-muted-foreground hover:text-destructive"
-                                    onClick={() => handleItemArchive(item)}
-                                  >
-                                    <Archive className="h-4 w-4" />
-                                  </Button>
+                                    auto
+                                  </span>
+                                )}
+                            </td>
+                            <td
+                              className="px-3 py-2 text-right tabular-nums"
+                              title={
+                                item.marginAmount !== null
+                                  ? `Zysk ${fmtPln(item.marginAmount)} na ${item.unit}`
+                                  : "Brak ceny zakupu — marży nie da się policzyć"
+                              }
+                            >
+                              {item.marginPct !== null ? (
+                                <>
+                                  {fmtPct(item.marginPct)}
+                                  <span className="text-muted-foreground">
+                                    {" / "}
+                                    {fmtPct(item.markupPct)}
+                                  </span>
+                                </>
+                              ) : (
+                                "—"
+                              )}
+                            </td>
+                            <td className="px-3 py-2 text-right">
+                              {item.minStock != null
+                                ? fmtQty(item.minStock)
+                                : "—"}
+                            </td>
+                            <td className="px-3 py-2">
+                              <div className="flex flex-wrap gap-1">
+                                {item.isAsset && (
+                                  <span className={pillClass("violet")}>zwrotny</span>
+                                )}
+                                {item.isArchived && (
+                                  <span className={pillClass("muted")}>archiwum</span>
                                 )}
                               </div>
                             </td>
-                          )}
-                        </tr>
-                      ))
+                            {/* Autor i data w jednej kolumnie — dokładnie ten sam
+                                układ co w tabeli ofert, żeby „kto i kiedy" czytało
+                                się tak samo w obu modułach. Pełny znacznik czasu
+                                siedzi w dymku, bo „2 dni temu" czyta się szybciej
+                                niż „30.08.2026 14:12". */}
+                            <td className="px-3 py-2 text-xs">
+                              <div>
+                                {item.createdByLabel || (
+                                  <span className="text-muted-foreground">—</span>
+                                )}
+                              </div>
+                              <div
+                                className="whitespace-nowrap text-muted-foreground"
+                                {...tip(fmtTimestamp(item.createdAt))}
+                              >
+                                {fmtRelative(item.createdAt)}
+                              </div>
+                            </td>
+                            <td className="px-3 py-2 text-xs">
+                              {item.updatedAt && item.updatedAt !== item.createdAt ? (
+                                <>
+                                  <div>
+                                    {item.updatedByLabel || (
+                                      <span className="text-muted-foreground">—</span>
+                                    )}
+                                  </div>
+                                  <div
+                                    className="whitespace-nowrap text-muted-foreground"
+                                    {...tip(fmtTimestamp(item.updatedAt))}
+                                  >
+                                    {fmtRelative(item.updatedAt)}
+                                  </div>
+                                </>
+                              ) : (
+                                <span
+                                  className="text-muted-foreground"
+                                  {...tip("Kartoteka nie była zmieniana od utworzenia")}
+                                >
+                                  —
+                                </span>
+                              )}
+                            </td>
+                            {editable && (
+                              <td className="px-3 py-2">
+                                <div className="flex justify-end gap-1">
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    title="Edytuj"
+                                    onClick={() => {
+                                      setEditingItem(item);
+                                      setItemFormOpen(true);
+                                    }}
+                                  >
+                                    <Pencil className="h-4 w-4" />
+                                  </Button>
+                                  {item.isArchived ? (
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      title="Przywróć z archiwum"
+                                      onClick={() => handleItemRestore(item)}
+                                    >
+                                      <ArchiveRestore className="mr-1 h-4 w-4" />
+                                      Przywróć
+                                    </Button>
+                                  ) : (
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      title="Archiwizuj"
+                                      className="text-muted-foreground hover:text-destructive"
+                                      onClick={() => handleItemArchive(item)}
+                                    >
+                                      <Archive className="h-4 w-4" />
+                                    </Button>
+                                  )}
+                                </div>
+                              </td>
+                            )}
+                          </tr>
+                        );
+                      })
                     )}
                   </tbody>
                 </table>

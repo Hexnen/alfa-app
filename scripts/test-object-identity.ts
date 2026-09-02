@@ -66,11 +66,31 @@ ok(
 
 console.log("\n— rejestry pomocnicze —");
 
-// 5. Pozycja kadrowa nie może być jednocześnie pulą CMA i wskazywać obiekt:
-//    ten sam koszt policzyłby się dwa razy.
+// 5. Przypisanie godzin jest ROZŁĄCZNE: wiersz wskazuje obiekt albo dział, nigdy
+//    oba naraz. Ten sam koszt policzyłby się dwa razy — raz na obiekcie, raz
+//    w koszcie ogólnym działu. W SQLite nie ma na to CHECK-a (wymagałby przebudowy
+//    największej tabeli w module), więc niezmiennika pilnuje API i ta asercja.
 ok(
-  "żadna pozycja kadrowa nie jest naraz pulą CMA i mapowaniem na obiekt",
-  count("select count(*) c from hr_objects where is_cma_pool = 1 and object_id is not null") === 0
+  "żaden wpis godzin nie wskazuje naraz obiektu i działu",
+  count("select count(*) c from hr_hours where object_id is not null and department_id is not null") === 0
+);
+
+// 5a. Pula centrum monitorowania jest z definicji JEDNA. Kod agregujący zniesie
+//     wiele (liczy zbiór id), ale operacyjnie oznaczałoby to, że koszt dwóch
+//     działów rozdziela się na te same obiekty — po cichu, bez żadnego sygnału.
+ok(
+  "co najwyżej jeden dział jest pulą CMA",
+  count("select count(*) c from hr_departments where is_cma_pool = 1") <= 1
+);
+
+// 5b. Dział wskazywany przez godziny musi istnieć. FK tego pilnuje, ale migracje
+//     ręczne omijają ORM — a to właśnie migracja przeniosła CMA z pozycji
+//     obiektowych na dział.
+ok(
+  "godziny wskazują istniejące działy",
+  count(`select count(*) c from hr_hours h
+         where h.department_id is not null
+           and not exists (select 1 from hr_departments d where d.id = h.department_id)`) === 0
 );
 
 // 6. Mapowania wskazują istniejące obiekty (FK tego pilnuje, ale sprawdzamy też

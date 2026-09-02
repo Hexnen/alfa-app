@@ -28,6 +28,7 @@
 
 import { and, eq, inArray, like } from "drizzle-orm";
 import { schema } from "../../src/db/index.js";
+import { pickSlotVariants } from "../../src/lib/offer-packages.js";
 import {
   MARKER,
   addDays,
@@ -151,6 +152,11 @@ interface PkgItemDef {
   qtyBase?: number;
   qtyPerParam?: number;
   round?: "none" | "up";
+  /** Slot wariantów: z pozycji o tej samej etykiecie wchodzi dokładnie jedna. */
+  slot?: string;
+  /** Zakres parametru, przy którym ten wariant wygrywa slot (włącznie). */
+  min?: number;
+  max?: number;
 }
 
 interface PkgDef {
@@ -173,17 +179,22 @@ const PACKAGE_DEFS: PkgDef[] = [
     name: "CCTV Dahua — instalacja podstawowa",
     category: "cctv",
     manufacturer: "Dahua",
-    description: "Kamery kopułowe 4MP, rejestrator PoE i dysk. Rejestrator i dysk dobierają się co osiem kamer.",
+    description: "Kamery kopułowe 4MP, rejestrator PoE i dysk. Rejestrator dobiera się do liczby kamer (8 / 16 / 32 kanały), dysk co osiem kamer.",
     mode: "parametric",
     param: { key: "cameras", label: "Liczba kamer", default: 8, min: 1, max: 64 },
     items: [
       { match: "Kamera IP kopułowa 4MP 2.8mm", brand: "Dahua", kind: "material", qtyPerParam: 1 },
-      { match: "Rejestrator NVR 8 kanałów PoE", brand: "Dahua", kind: "material", qtyPerParam: 0.125, round: "up" },
+      // SLOT „Rejestrator": nie zmienia się ilość, tylko model — do 8 kamer
+      // 8-kanałowy, 9–16 szesnastokanałowy, wyżej 32-kanałowy.
+      { match: "Rejestrator NVR 8 kanałów PoE", brand: "Dahua", kind: "material", qtyBase: 1, slot: "Rejestrator", max: 8 },
+      { match: "Rejestrator NVR 16 kanałów PoE", brand: "Dahua", kind: "material", qtyBase: 1, slot: "Rejestrator", min: 9, max: 16 },
+      { match: "Rejestrator NVR 32 kanały", kind: "material", qtyBase: 1, slot: "Rejestrator", min: 17 },
       { match: "Dysk HDD 4TB Surveillance", kind: "material", qtyPerParam: 0.125, round: "up" },
       { match: "Switch PoE 8 portów 120W", kind: "material", qtyPerParam: 0.125, round: "up" },
       { match: "Skrętka UTP kat.6 drut żelowana", kind: "material", qtyPerParam: 35 },
       { match: "Montaż kamery IP", kind: "labour", qtyPerParam: 1 },
-      { match: "Montaż i konfiguracja rejestratora", kind: "labour", qtyPerParam: 0.125, round: "up" },
+      // Rejestrator jest jeden (slot wyżej), więc i montaż jeden — nie co osiem kamer.
+      { match: "Montaż i konfiguracja rejestratora", kind: "labour", qtyBase: 1 },
       { match: "Uruchomienie systemu CCTV", kind: "labour", qtyBase: 1 },
       { match: "Konfiguracja zdalnego podglądu", kind: "labour", qtyBase: 1 },
     ],
@@ -602,6 +613,9 @@ export function seedOffers(outerTx?: Tx): OffersCounts {
             qtyPerParam: def.mode === "fixed" ? 0 : it.qtyPerParam ?? 0,
             paramKey: def.mode === "fixed" ? null : def.param?.key ?? null,
             qtyRound: it.round ?? "none",
+            slot: it.slot ?? null,
+            paramMin: it.min ?? null,
+            paramMax: it.max ?? null,
           })
           .run();
         counts.packageItems++;
@@ -722,8 +736,17 @@ export function seedOffers(outerTx?: Tx): OffersCounts {
           .orderBy(schema.offerPackageItems.position)
           .all();
 
+        // Sloty rozstrzyga ta sama funkcja co API — bez niej zasiane oferty
+        // dostałyby wszystkie trzy rejestratory naraz.
+        const chosen = pickSlotVariants(
+          pkgItems,
+          built.def.param ? { [built.def.param.key]: paramValue } : {},
+          built.def.param ? [built.def.param] : [],
+          built.def.mode,
+        );
+
         let position = 0;
-        for (const pi of pkgItems) {
+        for (const pi of chosen) {
           const qty =
             built.def.mode === "fixed"
               ? pi.qtyBase

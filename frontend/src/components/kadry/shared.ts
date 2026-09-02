@@ -1,4 +1,5 @@
-// Wspólne drobiazgi tabel modułu Kadry: formatery i konwersja pól liczbowych.
+// Wspólne drobiazgi tabel modułu Kadry: formatery, konwersja pól liczbowych
+// i kodowanie przypisania wiersza godzin.
 // Trzyma je jeden plik, bo korzystają z nich i ekran Kadr, i formularze,
 // i siatka godzin — trzy kopie tych samych funkcji rozjeżdżały się w zapisie
 // liczb (przecinek vs kropka) i w zaokrągleniach.
@@ -27,4 +28,42 @@ export const fieldToNum = (v: string): number | null => {
   if (v.trim() === "") return null;
   const n = parseFloat(v.replace(",", "."));
   return Number.isFinite(n) ? n : null;
+};
+
+// --- przypisanie wiersza godzin: obiekt ALBO dział ---
+
+/**
+ * Wiersz godzin wskazuje obiekt albo dział — dwa rozłączne słowniki w jednym
+ * `<select>`. Wartością opcji jest TOKEN, a nie samo id: numeracja obu tabel
+ * zaczyna się od 1, więc „5" nie odróżniłoby obiektu od działu, a sztuczki
+ * w rodzaju ujemnych id dla działów przeciekłyby stąd wprost do payloadu.
+ */
+export interface Assignment {
+  objectId: number | null;
+  departmentId: number | null;
+}
+
+export const NO_ASSIGNMENT: Assignment = { objectId: null, departmentId: null };
+
+/** Wiersz → token `""` (brak) / `o:<id>` (obiekt) / `d:<id>` (dział). */
+export const formatAssignment = (row: Partial<Assignment>): string =>
+  row.departmentId != null
+    ? `d:${row.departmentId}`
+    : row.objectId != null
+      ? `o:${row.objectId}`
+      : "";
+
+/**
+ * Token → para id. Zawsze zwraca OBA pola (jedno `null`), żeby wywołujący
+ * wysłał komplet: PUT nadpisuje cały wiersz, więc pominięcie drugiego pola
+ * zostawiłoby stare przypisanie i wpis wskazywałby jednocześnie obiekt i dział
+ * (backend odbija to jako 400).
+ */
+export const parseAssignment = (token: string): Assignment => {
+  const raw = (token ?? "").trim();
+  const id = Number(raw.slice(2));
+  if (!Number.isInteger(id) || id <= 0) return { ...NO_ASSIGNMENT };
+  if (raw.startsWith("o:")) return { objectId: id, departmentId: null };
+  if (raw.startsWith("d:")) return { objectId: null, departmentId: id };
+  return { ...NO_ASSIGNMENT };
 };

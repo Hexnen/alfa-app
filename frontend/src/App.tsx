@@ -91,6 +91,8 @@ function AuthedApp() {
           <Route path="/technical/magazyn" element={<Warehouse />} />
           <Route path="/technical/uslugi" element={<Uslugi />} />
           <Route path="/technical/oferty" element={<Oferty />} />
+          {/* Oferta ma własny adres z numeru: /technical/oferty/of202608014 */}
+          <Route path="/technical/oferty/:slug" element={<Oferty />} />
           <Route path="/technical/:tab" element={<Technical />} />
           {/* Legacy paths → new locations under Techniczny */}
           <Route

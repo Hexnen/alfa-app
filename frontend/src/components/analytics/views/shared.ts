@@ -254,8 +254,8 @@ export function costSplitLabel(personnelCost: number, otherCost: number): string
  *
  * Liczby same w sobie nic nie mówią, dopóki nie wiadomo, ILE miesięcy faktycznie
  * weszło do średniej i JAKA część godzin w ogóle trafiła na obiekty. Miesiąc bez
- * wypłat i pracownik z całym etatem na CMA wyglądają w kwocie identycznie —
- * jak niski koszt.
+ * wypłat i pracownik z całym etatem na dziale (CMA, Handlowy) wyglądają w kwocie
+ * identycznie — jak niski koszt.
  */
 export function personnelNote(p: PersonnelInfo): string {
   // Miesiąc z wierszami płacowymi, ale bez kwot, jest POMIJANY w średniej.
@@ -279,7 +279,11 @@ export function personnelNote(p: PersonnelInfo): string {
   );
   if (p.unmappedHoursShare > 0) {
     parts.push(
-      `${pct(p.unmappedHoursShare * 100)} godzin poza obiektami (koszt ogólny)`
+      // „Poza obiektami" to od czasu wydzielenia działów DWIE rzeczy: pozycje
+      // kadrowe bez mapowania i godziny działowe (Handlowy, Księgowość…).
+      // Sam „brak mapowania" wysyłałby czytelnika mapować coś, czego zmapować
+      // się nie da — dział z definicji nie należy do jednego klienta.
+      `${pct(p.unmappedHoursShare * 100)} godzin poza obiektami — pozycje niezmapowane i działy firmy (koszt ogólny)`
     );
   }
   return `${parts.join(", ")}.`;

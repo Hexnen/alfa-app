@@ -85,6 +85,7 @@ const API_TAB_MAP: { prefix: string; tabs: string[] }[] = [
       "kadry/godziny",
       "kadry/pracownicy",
       "kadry/obiekty",
+      "kadry/dzialy",
       "kadry/normy",
     ],
   },

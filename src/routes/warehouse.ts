@@ -269,6 +269,39 @@ function assertItemStockZeroSync(tx: Tx, itemId: number, unit: string) {
   }
 }
 
+/**
+ * Login (email) → nazwa użytkownika, rozwiązywane JEDNYM zapytaniem po całej
+ * tabeli `users`, a nie zapytaniem na wiersz listy (N+1 przy 500 towarach).
+ * Ten sam wzorzec co w liście ofert (src/routes/offers.ts, `userByEmail`).
+ */
+function userLabelByEmail(): (email: string | null) => string | null {
+  const byEmail = new Map(
+    db
+      .select({ email: schema.users.email, displayName: schema.users.displayName })
+      .from(schema.users)
+      .all()
+      .map((u) => [u.email.toLowerCase(), u.displayName || u.email])
+  );
+  // Surowy login zostaje, gdy konto zniknęło z bazy — lepszy ślad niż kreska.
+  return (email) => (email ? byEmail.get(email.toLowerCase()) ?? email : null);
+}
+
+/**
+ * Czy cena FAKTYCZNIE się zmieniła. `null` i `0` to dwie różne rzeczy
+ * (null = „nikt nie podał", 0 = „za darmo"), więc porównanie musi być ścisłe —
+ * `a != b` uznałoby przejście z NULL na 0 za brak zmiany i cena „za darmo"
+ * odziedziczyłaby stary stempel.
+ */
+function priceChanged(
+  before: { purchasePrice: number | null; salePrice: number | null },
+  after: { purchasePrice?: number | null; salePrice?: number | null }
+): boolean {
+  return (
+    (after.purchasePrice ?? null) !== before.purchasePrice ||
+    (after.salePrice ?? null) !== before.salePrice
+  );
+}
+
 // Lista towarów (domyślnie bez zarchiwizowanych).
 // Do każdego wiersza doklejamy wyliczone pola cenowe — cena sprzedaży z narzutu
 // oraz marża i narzut. Liczymy tutaj, a nie w bazie, żeby zmiana globalnego
@@ -283,9 +316,12 @@ app.get("/items", async (c) => {
     )
     .orderBy(asc(schema.warehouseItems.name));
   const { values } = getCompanyConfig();
+  const userLabel = userLabelByEmail();
   const data = rows.map((r) => ({
     ...r,
     ...pricingFor(r, values.warehouseMarkup),
+    createdByLabel: userLabel(r.createdBy),
+    updatedByLabel: userLabel(r.updatedBy),
   }));
   return c.json({ success: true, data });
 });
@@ -358,12 +394,33 @@ app.post("/items", async (c) => {
     if (conflict) return jsonError(c, 400, conflict);
   }
 
+  const user = getUser(c);
+  // Stempel wieku ceny tylko wtedy, gdy jakąś cenę faktycznie podano —
+  // kartoteka założona bez cen ma pustą datę, a nie „cena z dziś".
+  const hasPrice = data.purchasePrice !== null || data.salePrice !== null;
+
   try {
     const result = await db
       .insert(schema.warehouseItems)
-      .values(data as NewWarehouseItem)
+      .values({
+        ...data,
+        createdBy: user?.email ?? null,
+        priceUpdatedAt: hasPrice ? nowISO() : null,
+      } as NewWarehouseItem)
       .returning();
-    return c.json({ success: true, data: result[0], message: "Towar dodany" }, 201);
+    const label = userLabelByEmail();
+    return c.json(
+      {
+        success: true,
+        data: {
+          ...result[0],
+          createdByLabel: label(result[0].createdBy),
+          updatedByLabel: label(result[0].updatedBy),
+        },
+        message: "Towar dodany",
+      },
+      201
+    );
   } catch (err) {
     // Wyścig z równoległym zapisem tego samego SKU — pre-check przeszedł,
     // INSERT dostał UNIQUE; mapujemy na ten sam 400 co pre-check.
@@ -402,6 +459,8 @@ app.put("/items/:id", async (c) => {
       ? existing[0].isArchived
       : Boolean(body.isArchived);
 
+  const user = getUser(c);
+
   try {
     const result = db.transaction((tx) => {
       const cur = tx
@@ -415,14 +474,35 @@ app.put("/items/:id", async (c) => {
       if (isArchived && !cur.isArchived) {
         assertItemStockZeroSync(tx, id, data.unit ?? cur.unit);
       }
+      // Wiek ceny przestawia WYŁĄCZNIE zmiana ceny. Poprawka nazwy czy
+      // kategorii ma zostawić stempel w spokoju, inaczej cały katalog
+      // wyglądałby na świeżo wyceniony po jednym porządkowaniu opisów.
+      // Porównanie ze stanem odczytanym W TEJ transakcji, nie z `existing`
+      // sprzed niej — równoległy zapis mógł już zmienić cenę.
+      const stampPrice = priceChanged(cur, data);
       return tx
         .update(schema.warehouseItems)
-        .set({ ...data, isArchived, updatedAt: nowISO() })
+        .set({
+          ...data,
+          isArchived,
+          updatedBy: user?.email ?? null,
+          ...(stampPrice ? { priceUpdatedAt: nowISO() } : {}),
+          updatedAt: nowISO(),
+        })
         .where(eq(schema.warehouseItems.id, id))
         .returning()
         .get();
     });
-    return c.json({ success: true, data: result, message: "Towar zaktualizowany" });
+    const label = userLabelByEmail();
+    return c.json({
+      success: true,
+      data: {
+        ...result,
+        createdByLabel: label(result.createdBy),
+        updatedByLabel: label(result.updatedBy),
+      },
+      message: "Towar zaktualizowany",
+    });
   } catch (err) {
     if (err instanceof ApiError) return jsonError(c, err.status, err.message);
     if (data.sku && isSkuUniqueViolation(err)) {

@@ -1,0 +1,11 @@
+-- Wiek ceny dla towarów, które istniały przed wprowadzeniem `price_updated_at`.
+--
+-- `updated_at` to jedyny sygnał, jaki mamy o wieku ceny tych wierszy: nikt nie
+-- zapisywał osobno momentu zmiany cennika, więc nie da się odtworzyć, kiedy
+-- naprawdę poprawiono cenę, a kiedy tylko nazwę albo kategorię. Stempel z
+-- `updated_at` jest więc górnym oszacowaniem — cena jest co najwyżej tak
+-- świeża, jak sam rekord, a zwykle starsza. To lepsze niż NULL, który UI
+-- pokazałby jako „nie wiadomo" dla całego istniejącego katalogu naraz.
+--
+-- Kolejne zmiany cen stempluje już API (src/routes/warehouse.ts).
+UPDATE `warehouse_items` SET `price_updated_at` = `updated_at` WHERE `price_updated_at` IS NULL;

@@ -7,7 +7,7 @@
  * naprzemiennie („kamera, montaż kamery, kamera…”). Rozdzielenie ich na dwie
  * kontrolki zmuszałoby do ciągłego przełączania kontekstu.
  */
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Package, Wrench } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import type { Service, WarehouseItem } from "@/lib/api";
@@ -44,6 +44,17 @@ export function OfferItemPicker({
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
   const blurTimer = useRef<number | null>(null);
+  const boxRef = useRef<HTMLDivElement>(null);
+
+  /*
+   * KIERUNEK LISTY. Wyszukiwarka stoi na dole sekcji, często tuż nad lepkim
+   * paskiem podsumowania — lista otwierana w dół wychodziła poza ekran i
+   * pierwsze podpowiedzi lądowały pod paskiem albo za krawędzią kafelka.
+   * Mierzymy miejsce pod polem i nad nim, wybieramy stronę z większym zapasem
+   * i tniemy wysokość do tego, co faktycznie zostało. Mierzymy też przy
+   * przewijaniu, bo strona jedzie pod otwartą listą.
+   */
+  const [drop, setDrop] = useState<{ up: boolean; maxH: number }>({ up: false, maxH: 288 });
 
   const suggestions = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -69,6 +80,27 @@ export function OfferItemPicker({
     ].slice(0, MAX_SUGGESTIONS * 2);
   }, [query, items, services]);
 
+  const showList = open && suggestions.length > 0;
+  useEffect(() => {
+    if (!showList) return;
+    const measure = () => {
+      const el = boxRef.current;
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      const below = window.innerHeight - r.bottom - 16;
+      const above = r.top - 16;
+      const up = below < 220 && above > below;
+      setDrop({ up, maxH: Math.max(140, Math.min(288, up ? above : below)) });
+    };
+    measure();
+    window.addEventListener("scroll", measure, true);
+    window.addEventListener("resize", measure);
+    return () => {
+      window.removeEventListener("scroll", measure, true);
+      window.removeEventListener("resize", measure);
+    };
+  }, [showList, suggestions.length]);
+
   const pick = (picked: PickedItem) => {
     onPick(picked);
     setQuery("");
@@ -76,7 +108,7 @@ export function OfferItemPicker({
   };
 
   return (
-    <div className="relative">
+    <div className="relative" ref={boxRef}>
       <Input
         value={query}
         disabled={disabled}
@@ -91,8 +123,13 @@ export function OfferItemPicker({
           blurTimer.current = window.setTimeout(() => setOpen(false), 150);
         }}
       />
-      {open && suggestions.length > 0 && (
-        <div className="absolute z-20 mt-1 max-h-72 w-full overflow-y-auto rounded-md border bg-background shadow-lg">
+      {showList && (
+        <div
+          className={`absolute z-30 w-full overflow-y-auto rounded-md border bg-background shadow-lg ${
+            drop.up ? "bottom-full mb-1" : "mt-1"
+          }`}
+          style={{ maxHeight: drop.maxH }}
+        >
           {suggestions.map((s) =>
             s.type === "warehouse" ? (
               <button

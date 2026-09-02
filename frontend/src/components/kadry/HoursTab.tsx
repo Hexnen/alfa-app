@@ -19,7 +19,9 @@ import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
@@ -38,11 +40,20 @@ import {
 } from "lucide-react";
 import {
   updateHrHours,
+  type HrDepartment,
   type HrHoursEntry,
   type HrHoursInput,
   type HrObject,
 } from "@/lib/api";
-import { TABLE_SELECT_CLS, fieldToNum, hrs, money, numToField } from "./shared";
+import {
+  TABLE_SELECT_CLS,
+  fieldToNum,
+  formatAssignment,
+  hrs,
+  money,
+  numToField,
+  parseAssignment,
+} from "./shared";
 import { SortTh, Th, type SortDir } from "./parts";
 
 /** Pola liczbowe wiersza — kolejność zgodna z kolumnami tabeli. */
@@ -54,18 +65,23 @@ type NumericField =
   | "maxHours"
   | "deductions"
   | "bonuses";
-type EditableField = NumericField | "objectId" | "notes";
+/**
+ * `assignment` to JEDNO pole logiczne obejmujące obiekt i dział: w wierszu
+ * mieszka pod nim jeden select, jeden brudnopis i jedna komórka nawigacji
+ * Enterem, mimo że w payloadzie rozkłada się na dwa rozłączne id.
+ */
+type EditableField = NumericField | "assignment" | "notes";
 
 /** Stan wypełnienia wiersza — filtr „co jeszcze zostało do zrobienia". */
 type FillFilter = "all" | "filled" | "empty" | "uncertain";
 
 /** Kolumny, po których wolno sortować (notatka i akcje nie mają sensu). */
-type SortKey = "employee" | "object" | NumericField;
+type SortKey = "employee" | "assignment" | NumericField;
 
 /** Domyślny kierunek kolumny — godziny i kwoty czyta się od największych. */
 const DEFAULT_DIR: Record<SortKey, SortDir> = {
   employee: "asc",
-  object: "asc",
+  assignment: "asc",
   nightHours: "desc",
   workedHours: "desc",
   uwHours: "desc",
@@ -81,9 +97,18 @@ const EDIT_MODE_KEY = "kadry:godziny:tryb-edycji";
 const isFilled = (r: HrHoursEntry) =>
   (r.workedHours ?? 0) > 0 || (r.uwHours ?? 0) > 0 || (r.l4Hours ?? 0) > 0;
 
+/**
+ * Etykieta przypisania wiersza. Dział wygrywa z obiektem, bo pola są rozłączne
+ * i wypełniony `departmentName` znaczy, że obiektu tu nie ma. Jedna funkcja na
+ * szukajkę, sortowanie i podgląd — trzy kopie rozjechałyby wyniki filtrów
+ * z tym, co widać w tabeli.
+ */
+const assignmentLabel = (r: HrHoursEntry) => r.departmentName || r.objectName || "";
+
 const rowToInput = (r: HrHoursEntry): HrHoursInput => ({
   employeeId: r.employeeId,
   objectId: r.objectId,
+  departmentId: r.departmentId,
   year: r.year,
   month: r.month,
   nightHours: r.nightHours,
@@ -97,7 +122,7 @@ const rowToInput = (r: HrHoursEntry): HrHoursInput => ({
 });
 
 const cellValue = (r: HrHoursEntry, field: EditableField): string => {
-  if (field === "objectId") return r.objectId == null ? "" : String(r.objectId);
+  if (field === "assignment") return formatAssignment(r);
   if (field === "notes") return r.notes ?? "";
   return numToField(r[field]);
 };
@@ -105,6 +130,7 @@ const cellValue = (r: HrHoursEntry, field: EditableField): string => {
 export function HrHoursTab({
   rows,
   objects,
+  departments,
   editable,
   loading,
   monthNav,
@@ -115,6 +141,8 @@ export function HrHoursTab({
 }: {
   rows: HrHoursEntry[];
   objects: HrObject[];
+  /** Słownik działów — druga grupa w selekcie przypisania. */
+  departments: HrDepartment[];
   editable: boolean;
   loading: boolean;
   /** Przełącznik miesiąca — wspólny dla całego modułu, wstawiany w pasek. */
@@ -127,7 +155,11 @@ export function HrHoursTab({
 }) {
   const [search, setSearch] = useState("");
   const [employeeFilter, setEmployeeFilter] = useState<"all" | number>("all");
-  const [objectFilter, setObjectFilter] = useState<"all" | "none" | number>("all");
+  /**
+   * Filtr przypisania na tych samych tokenach co komórka: `all` — wszystko,
+   * `none` — ani obiekt, ani dział, `o:<id>` / `d:<id>` — konkretna pozycja.
+   */
+  const [assignmentFilter, setAssignmentFilter] = useState<string>("all");
   const [fillFilter, setFillFilter] = useState<FillFilter>("all");
   const [sort, setSort] = useState<SortKey>("employee");
   const [dir, setDir] = useState<SortDir>("asc");
@@ -185,33 +217,53 @@ export function HrHoursTab({
       .sort((a, b) => a.name.localeCompare(b.name, "pl"));
   }, [rows]);
 
-  // Lista obiektów w filtrze pochodzi z wpisów miesiąca, a nie z całego
-  // słownika: filtr ma zawężać to, co widać, a nie oferować puste wyniki.
-  const objectOptions = useMemo(() => {
-    const m = new Map<number, string>();
-    for (const r of rows) if (r.objectId != null) m.set(r.objectId, r.objectName);
-    return [...m.entries()]
-      .map(([id, name]) => ({ id, name }))
-      .sort((a, b) => a.name.localeCompare(b.name, "pl"));
+  // Listy w filtrze pochodzą z wpisów miesiąca, a nie z całego słownika:
+  // filtr ma zawężać to, co widać, a nie oferować puste wyniki. Obiekty
+  // i działy są rozdzielone, bo w selekcie stoją w osobnych grupach.
+  const assignmentOptions = useMemo(() => {
+    const objs = new Map<string, string>();
+    const deps = new Map<string, string>();
+    for (const r of rows) {
+      if (r.departmentId != null) deps.set(formatAssignment(r), assignmentLabel(r));
+      else if (r.objectId != null) objs.set(formatAssignment(r), assignmentLabel(r));
+    }
+    const toList = (m: Map<string, string>) =>
+      [...m.entries()]
+        .map(([token, label]) => ({ token, label }))
+        .sort((a, b) => a.label.localeCompare(b.label, "pl"));
+    return { objects: toList(objs), departments: toList(deps) };
   }, [rows]);
 
   /** Obiekty do wyboru w komórce: aktywne + ten już wpisany w wierszu. */
   const objectChoices = (row: HrHoursEntry) =>
     objects.filter((o) => o.active || o.id === row.objectId);
 
+  /**
+   * Działy do wyboru w komórce — ta sama reguła co przy obiektach:
+   * zdezaktywowany dział znika z podpowiedzi, ale musi zostać widoczny
+   * na wierszu, który już go używa, inaczej select pokazałby pustkę.
+   */
+  const departmentChoices = (row: HrHoursEntry) =>
+    departments.filter((d) => d.active || d.id === row.departmentId);
+
   const visible = useMemo(() => {
     const q = search.trim().toLowerCase();
     const filtered = rows.filter((r) => {
       if (
         q &&
-        !`${r.employeeName} ${r.objectName} ${r.notes ?? ""}`
+        !`${r.employeeName} ${assignmentLabel(r)} ${r.notes ?? ""}`
           .toLowerCase()
           .includes(q)
       )
         return false;
       if (employeeFilter !== "all" && r.employeeId !== employeeFilter) return false;
-      if (objectFilter === "none" && r.objectId != null) return false;
-      if (typeof objectFilter === "number" && r.objectId !== objectFilter) return false;
+      if (assignmentFilter === "none" && formatAssignment(r) !== "") return false;
+      if (
+        assignmentFilter !== "all" &&
+        assignmentFilter !== "none" &&
+        formatAssignment(r) !== assignmentFilter
+      )
+        return false;
       if (fillFilter === "filled" && !isFilled(r)) return false;
       if (fillFilter === "empty" && isFilled(r)) return false;
       if (fillFilter === "uncertain" && !r.objectUncertain) return false;
@@ -223,37 +275,38 @@ export function HrHoursTab({
     const blank = (r: HrHoursEntry) =>
       sort === "employee"
         ? false
-        : sort === "object"
-          ? r.objectName === ""
+        : sort === "assignment"
+          ? assignmentLabel(r) === ""
           : r[sort] == null;
     const factor = dir === "asc" ? 1 : -1;
     return [...filtered].sort((a, b) => {
       if (blank(a) !== blank(b)) return blank(a) ? 1 : -1;
       let d = 0;
       if (sort === "employee") d = a.employeeName.localeCompare(b.employeeName, "pl");
-      else if (sort === "object") d = a.objectName.localeCompare(b.objectName, "pl");
+      else if (sort === "assignment")
+        d = assignmentLabel(a).localeCompare(assignmentLabel(b), "pl");
       else d = (a[sort] ?? 0) - (b[sort] ?? 0);
       return (
         d * factor ||
         // Remis rozstrzyga stała kolejność, żeby wiersze nie skakały przy
         // każdym zapisie (jedna osoba ma zwykle kilka wpisów w miesiącu).
         a.employeeName.localeCompare(b.employeeName, "pl") ||
-        a.objectName.localeCompare(b.objectName, "pl") ||
+        assignmentLabel(a).localeCompare(assignmentLabel(b), "pl") ||
         a.id - b.id
       );
     });
-  }, [rows, search, employeeFilter, objectFilter, fillFilter, sort, dir]);
+  }, [rows, search, employeeFilter, assignmentFilter, fillFilter, sort, dir]);
 
   const filtersActive =
     search !== "" ||
     employeeFilter !== "all" ||
-    objectFilter !== "all" ||
+    assignmentFilter !== "all" ||
     fillFilter !== "all";
 
   const clearFilters = () => {
     setSearch("");
     setEmployeeFilter("all");
-    setObjectFilter("all");
+    setAssignmentFilter("all");
     setFillFilter("all");
   };
 
@@ -267,7 +320,7 @@ export function HrHoursTab({
     `${visible.length}${visible.length === rows.length ? "" : ` z ${rows.length}`} wpisów`,
     `${hrs(sum((r) => r.workedHours))} h wypracowanych`,
     emptyCount > 0 ? `${emptyCount} bez godzin` : null,
-    uncertainCount > 0 ? `${uncertainCount} do potwierdzenia obiektu` : null,
+    uncertainCount > 0 ? `${uncertainCount} do potwierdzenia przypisania` : null,
   ]
     .filter(Boolean)
     .join(" · ");
@@ -298,11 +351,11 @@ export function HrHoursTab({
   const commit = async (r: HrHoursEntry, field: EditableField, value: string) => {
     const before = cellValue(r, field);
     const normalized =
-      field === "objectId" || field === "notes"
+      field === "assignment" || field === "notes"
         ? value.trim()
         : numToField(fieldToNum(value));
     const beforeNormalized =
-      field === "objectId" || field === "notes"
+      field === "assignment" || field === "notes"
         ? before.trim()
         : numToField(fieldToNum(before));
     if (normalized === beforeNormalized) {
@@ -312,8 +365,14 @@ export function HrHoursTab({
 
     const payload = rowToInput(r);
     if (field === "notes") payload.notes = value;
-    else if (field === "objectId") payload.objectId = value ? Number(value) : null;
-    else payload[field] = fieldToNum(value);
+    else if (field === "assignment") {
+      // Wysyłamy OBA pola (jedno zawsze null): PUT nadpisuje cały wiersz, więc
+      // przełączenie obiekt→dział musi jawnie wyzerować poprzednie
+      // przypisanie — inaczej wpis wskazywałby oba naraz i backend odbiłby 400.
+      const { objectId, departmentId } = parseAssignment(value);
+      payload.objectId = objectId;
+      payload.departmentId = departmentId;
+    } else payload[field] = fieldToNum(value);
 
     setSaving((p) => ({ ...p, [r.id]: true }));
     setErrors((p) => {
@@ -441,7 +500,7 @@ export function HrHoursTab({
         <div className="relative min-w-[200px] max-w-xs flex-1">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input
-            placeholder="Szukaj: pracownik / obiekt / notatka…"
+            placeholder="Szukaj: pracownik / obiekt / dział / notatka…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             className="pl-10"
@@ -466,23 +525,33 @@ export function HrHoursTab({
           </SelectContent>
         </Select>
 
-        <Select
-          value={objectFilter === "all" || objectFilter === "none" ? objectFilter : String(objectFilter)}
-          onValueChange={(v) =>
-            setObjectFilter(v === "all" || v === "none" ? v : parseInt(v))
-          }
-        >
-          <SelectTrigger className="w-[210px]" data-testid="hours-filter-object">
-            <SelectValue placeholder="Obiekt" />
+        <Select value={assignmentFilter} onValueChange={setAssignmentFilter}>
+          <SelectTrigger className="w-[230px]" data-testid="hours-filter-assignment">
+            <SelectValue placeholder="Obiekt / dział" />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="all">Wszystkie obiekty</SelectItem>
-            <SelectItem value="none">Bez obiektu</SelectItem>
-            {objectOptions.map((o) => (
-              <SelectItem key={o.id} value={String(o.id)}>
-                {o.name}
-              </SelectItem>
-            ))}
+            <SelectItem value="all">Wszystkie przypisania</SelectItem>
+            <SelectItem value="none">Bez przypisania</SelectItem>
+            {assignmentOptions.objects.length > 0 && (
+              <SelectGroup>
+                <SelectLabel>Obiekty</SelectLabel>
+                {assignmentOptions.objects.map((o) => (
+                  <SelectItem key={o.token} value={o.token}>
+                    {o.label}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            )}
+            {assignmentOptions.departments.length > 0 && (
+              <SelectGroup>
+                <SelectLabel>Działy</SelectLabel>
+                {assignmentOptions.departments.map((d) => (
+                  <SelectItem key={d.token} value={d.token}>
+                    {d.label}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            )}
           </SelectContent>
         </Select>
 
@@ -494,7 +563,7 @@ export function HrHoursTab({
             <SelectItem value="all">Wszystkie wpisy</SelectItem>
             <SelectItem value="filled">Z godzinami</SelectItem>
             <SelectItem value="empty">Bez godzin</SelectItem>
-            <SelectItem value="uncertain">Obiekt do potwierdzenia</SelectItem>
+            <SelectItem value="uncertain">Przypisanie do potwierdzenia</SelectItem>
           </SelectContent>
         </Select>
 
@@ -571,13 +640,13 @@ export function HrHoursTab({
                   tip="Pracownik, którego dotyczy wpis (jedna osoba może mieć kilka wpisów w miesiącu — sumują się). Zmiana osoby tylko w formularzu wpisu."
                 />
                 <SortTh
-                  label="Obiekt"
-                  sortKey="object"
+                  label="Obiekt / dział"
+                  sortKey="assignment"
                   sort={sort}
                   dir={dir}
                   onSort={toggleSort}
                   testIdPrefix="hours-sort"
-                  tip="Obiekt (posterunek) — informacyjny, nie wpływa na kalkulację wypłaty"
+                  tip="Obiekt (posterunek) albo dział firmy — wpis wskazuje jedno albo drugie. Informacyjne, nie wpływa na kalkulację wypłaty; godziny działu są kosztem ogólnym, nie kosztem klienta."
                 />
                 <SortTh
                   label="Nocne"
@@ -681,8 +750,12 @@ export function HrHoursTab({
                       {r.employeeName}
                     </td>
                     <td className="px-1.5 py-1">
+                      {/* Jeden select na dwa słowniki: natywny, więc optgroup
+                          działa bez obejść, a wartością opcji jest token
+                          `o:`/`d:` — samo id nie odróżniłoby obiektu 5 od
+                          działu 5. */}
                       <select
-                        data-cell={`${idx}:objectId`}
+                        data-cell={`${idx}:assignment`}
                         className={cn(
                           TABLE_SELECT_CLS,
                           "h-8",
@@ -690,21 +763,30 @@ export function HrHoursTab({
                         )}
                         title={
                           r.objectUncertain
-                            ? "Przeniesione z poprzedniego miesiąca — zapis wpisu potwierdza obiekt"
+                            ? "Przeniesione z poprzedniego miesiąca — zapis wpisu potwierdza przypisanie"
                             : undefined
                         }
-                        value={shown(r, "objectId")}
+                        value={shown(r, "assignment")}
                         onChange={(e) => {
-                          setDraft(r, "objectId", e.target.value);
-                          void commit(r, "objectId", e.target.value);
+                          setDraft(r, "assignment", e.target.value);
+                          void commit(r, "assignment", e.target.value);
                         }}
                       >
                         <option value="">—</option>
-                        {objectChoices(r).map((o) => (
-                          <option key={o.id} value={o.id}>
-                            {o.name}
-                          </option>
-                        ))}
+                        <optgroup label="Obiekty">
+                          {objectChoices(r).map((o) => (
+                            <option key={o.id} value={`o:${o.id}`}>
+                              {o.name}
+                            </option>
+                          ))}
+                        </optgroup>
+                        <optgroup label="Działy">
+                          {departmentChoices(r).map((d) => (
+                            <option key={d.id} value={`d:${d.id}`}>
+                              {d.label}
+                            </option>
+                          ))}
+                        </optgroup>
                       </select>
                     </td>
                     {numCell(r, idx, "nightHours")}
@@ -761,10 +843,10 @@ export function HrHoursTab({
                       {r.employeeName}
                     </td>
                     <td className="px-3 py-2">
-                      {r.objectName || "—"}
+                      {r.departmentName || r.objectName || "—"}
                       {r.objectUncertain && (
                         <span
-                          title="Przeniesione z poprzedniego miesiąca — potwierdź obiekt zapisując wpis"
+                          title="Przeniesione z poprzedniego miesiąca — potwierdź przypisanie zapisując wpis"
                           className="ml-1.5 cursor-help font-semibold text-amber-600"
                         >
                           ?

@@ -82,6 +82,35 @@ function parseBody(body: Record<string, unknown>): {
   };
 }
 
+/**
+ * Login (email) → nazwa użytkownika, rozwiązywane JEDNYM zapytaniem po całej
+ * tabeli `users`, a nie zapytaniem na wiersz (N+1 przy setkach pozycji).
+ * Ten sam wzorzec co w liście ofert i w kartotece magazynu.
+ */
+function userLabelByEmail(): (email: string | null) => string | null {
+  const byEmail = new Map(
+    db
+      .select({ email: schema.users.email, displayName: schema.users.displayName })
+      .from(schema.users)
+      .all()
+      .map((u) => [u.email.toLowerCase(), u.displayName || u.email])
+  );
+  // Surowy login zostaje, gdy konto zniknęło z bazy — lepszy ślad niż kreska.
+  return (email) => (email ? byEmail.get(email.toLowerCase()) ?? email : null);
+}
+
+/**
+ * Czy stawka FAKTYCZNIE się zmieniła. W usłudze cena to PARA (`cost` i `price`)
+ * — przeterminowany koszt własny psuje marżę tak samo jak przeterminowana cena
+ * sprzedaży, więc stempel przestawia zmiana którejkolwiek z nich.
+ */
+function priceChanged(
+  before: { cost: number; price: number },
+  after: { cost?: number; price?: number }
+): boolean {
+  return after.cost !== before.cost || after.price !== before.price;
+}
+
 /** Dokleja marżę i narzut — liczone, nigdy nie zapisywane (src/lib/margin.ts). */
 function withMargin<T extends { cost: number; price: number }>(row: T) {
   const m = marginOf(row.cost, row.price);
@@ -165,7 +194,12 @@ app.get("/", async (c) => {
     .where(filters.length ? and(...filters) : undefined)
     .orderBy(asc(schema.services.position), asc(schema.services.name));
 
-  const rows2 = rows.map(withMargin);
+  const label = userLabelByEmail();
+  const rows2 = rows.map((r) => ({
+    ...withMargin(r),
+    createdByLabel: label(r.createdBy),
+    updatedByLabel: label(r.updatedBy),
+  }));
   return c.json({
     success: true,
     data: canSeeServiceCosts(c) ? rows2 : rows2.map(stripCosts),
@@ -186,13 +220,29 @@ app.post("/", async (c) => {
     data.position = rows.length + 1;
   }
 
+  // Stawka jest w usłudze zawsze (`cost`/`price` mają NOT NULL DEFAULT 0),
+  // więc nowa pozycja od razu dostaje stempel — inaczej katalog założony dziś
+  // wyglądałby na przeterminowany.
   const result = await db
     .insert(schema.services)
-    .values(data as NewService)
+    .values({
+      ...data,
+      createdBy: getUser(c)?.email ?? null,
+      priceUpdatedAt: new Date().toISOString(),
+    } as NewService)
     .returning();
 
+  const label = userLabelByEmail();
   return c.json(
-    { success: true, data: withMargin(result[0]), message: "Usługa dodana" },
+    {
+      success: true,
+      data: {
+        ...withMargin(result[0]),
+        createdByLabel: label(result[0].createdBy),
+        updatedByLabel: label(result[0].updatedBy),
+      },
+      message: "Usługa dodana",
+    },
     201
   );
 });
@@ -219,15 +269,30 @@ app.put("/:id", async (c) => {
     return c.json<ApiResponse<null>>({ success: false, error }, 400);
   }
 
+  // Wiek stawki przestawia WYŁĄCZNIE zmiana `cost`/`price`. Poprawka nazwy czy
+  // opisu ma zostawić stempel w spokoju — inaczej jedno porządkowanie katalogu
+  // odmładzałoby wszystkie stawki naraz i alert o przeterminowaniu zamilkłby.
+  const stampPrice = priceChanged(existing[0], data);
+  const now = new Date().toISOString();
   const result = await db
     .update(schema.services)
-    .set({ ...data, updatedAt: new Date().toISOString() })
+    .set({
+      ...data,
+      updatedBy: getUser(c)?.email ?? null,
+      ...(stampPrice ? { priceUpdatedAt: now } : {}),
+      updatedAt: now,
+    })
     .where(eq(schema.services.id, id))
     .returning();
 
+  const label = userLabelByEmail();
   return c.json({
     success: true,
-    data: withMargin(result[0]),
+    data: {
+      ...withMargin(result[0]),
+      createdByLabel: label(result[0].createdBy),
+      updatedByLabel: label(result[0].updatedBy),
+    },
     message: "Usługa zaktualizowana",
   });
 });

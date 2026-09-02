@@ -15,6 +15,7 @@ import {
 import type {
   Company,
   HrBonusType,
+  HrDepartment,
   HrEmployeeKind,
   HrChannel,
   HrContract,
@@ -30,8 +31,14 @@ import type {
   HrPayrollRow,
   HrPayrollSaveInput,
 } from "@/lib/api";
-// pola liczbowe (puste = null, przecinek dozwolony) — wspólne z tabelami Kadr
-import { fieldToNum, numToField } from "./kadry/shared";
+// pola liczbowe (puste = null, przecinek dozwolony) oraz kodowanie przypisania
+// wiersza godzin (obiekt albo dział) — wspólne z tabelami Kadr
+import {
+  fieldToNum,
+  formatAssignment,
+  numToField,
+  parseAssignment,
+} from "./kadry/shared";
 
 const SELECT_CLS =
   "flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm";
@@ -220,6 +227,7 @@ export function HrHoursForm({
   entry,
   employees,
   objects,
+  departments,
   year,
   month,
 }: {
@@ -229,6 +237,8 @@ export function HrHoursForm({
   entry?: HrHoursEntry | null;
   employees: HrEmployee[];
   objects: HrObject[];
+  /** Działy do drugiej grupy w selekcie przypisania. */
+  departments: HrDepartment[];
   year: number;
   month: number;
 }) {
@@ -236,8 +246,10 @@ export function HrHoursForm({
   const [employeeId, setEmployeeId] = useState(
     entry ? String(entry.employeeId) : "",
   );
-  const [objectId, setObjectId] = useState(
-    entry?.objectId ? String(entry.objectId) : "",
+  // Jeden stan na obiekt i dział — pola są rozłączne, więc trzymanie dwóch
+  // niezależnych selectów pozwalałoby wypełnić oba i dostać 400 przy zapisie.
+  const [assignment, setAssignment] = useState(
+    entry ? formatAssignment(entry) : "",
   );
   const [fields, setFields] = useState({
     nightHours: numToField(entry?.nightHours),
@@ -257,9 +269,13 @@ export function HrHoursForm({
     e.preventDefault();
     setLoading(true);
     try {
+      // Oba id lecą zawsze (jedno null): zapis nadpisuje cały wiersz, więc
+      // przełączenie obiekt→dział musi jawnie wyzerować poprzednie pole.
+      const { objectId, departmentId } = parseAssignment(assignment);
       await onSubmit({
         employeeId,
-        objectId: objectId || null,
+        objectId,
+        departmentId,
         year: entry?.year ?? year,
         month: entry?.month ?? month,
         nightHours: fieldToNum(fields.nightHours),
@@ -307,23 +323,35 @@ export function HrHoursForm({
               </select>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="hrh-obj">Obiekt</Label>
+              <Label htmlFor="hrh-obj">Obiekt / dział</Label>
+              {/* Dwa słowniki w jednym natywnym selekcie: wartością opcji jest
+                  token `o:`/`d:`, bo obie tabele numerują się od 1 i samo id
+                  nie odróżniłoby obiektu od działu. */}
               <select
                 id="hrh-obj"
-                value={objectId}
-                onChange={(e) => setObjectId(e.target.value)}
+                value={assignment}
+                onChange={(e) => setAssignment(e.target.value)}
                 className={SELECT_CLS}
               >
                 <option value="">—</option>
-                {objects.map((o) => (
-                  <option key={o.id} value={o.id}>
-                    {o.name}
-                  </option>
-                ))}
+                <optgroup label="Obiekty">
+                  {objects.map((o) => (
+                    <option key={o.id} value={`o:${o.id}`}>
+                      {o.name}
+                    </option>
+                  ))}
+                </optgroup>
+                <optgroup label="Działy">
+                  {departments.map((d) => (
+                    <option key={d.id} value={`d:${d.id}`}>
+                      {d.label}
+                    </option>
+                  ))}
+                </optgroup>
               </select>
               {entry?.objectUncertain && (
                 <p className="text-xs text-amber-600">
-                  Obiekt przeniesiony z poprzedniego miesiąca — potwierdź
+                  Przypisanie przeniesione z poprzedniego miesiąca — potwierdź
                 </p>
               )}
             </div>
@@ -335,7 +363,7 @@ export function HrHoursForm({
               label="Wypracowane"
               value={fields.workedHours}
               onChange={set("workedHours")}
-              hint="Godziny wypracowane na obiekcie w miesiącu"
+              hint="Godziny wypracowane na obiekcie albo w dziale w miesiącu"
             />
             <NumField
               id="hrh-night"

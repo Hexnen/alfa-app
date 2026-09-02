@@ -36,6 +36,19 @@ export const OFFER_CATEGORY_META: Record<
   inne: { label: "Inne", tone: "muted" },
 };
 
+/**
+ * Kolory kategorii jako klasy Tailwind — pasek i kafel ikony w nagłówku dialogu,
+ * dokładnie tak, jak `EVENT_TYPE_UI` robi to dla typów wydarzeń w kalendarzu.
+ */
+export const OFFER_CATEGORY_UI: Record<OfferSectionCategory, { bar: string; soft: string }> = {
+  cctv: { bar: "bg-sky-500", soft: "bg-sky-500/15 text-sky-700 dark:text-sky-300" },
+  sswin: { bar: "bg-violet-500", soft: "bg-violet-500/15 text-violet-700 dark:text-violet-300" },
+  kd: { bar: "bg-indigo-500", soft: "bg-indigo-500/15 text-indigo-700 dark:text-indigo-300" },
+  wideoweryfikacja: { bar: "bg-teal-500", soft: "bg-teal-500/15 text-teal-700 dark:text-teal-300" },
+  abonament: { bar: "bg-emerald-500", soft: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300" },
+  inne: { bar: "bg-slate-500", soft: "bg-slate-500/15 text-slate-700 dark:text-slate-300" },
+};
+
 export const OFFER_ITEM_KIND_LABEL: Record<OfferItemKind, string> = {
   material: "Sprzęt",
   labour: "Robocizna",
@@ -78,6 +91,15 @@ export const OFFER_QUICK_CATEGORIES: OfferSectionCategory[] = [
   "wideoweryfikacja",
   "abonament",
 ];
+
+/**
+ * Adres oferty w URL-u: „OF/2026/08/014" → „of202608014".
+ *
+ * Numer, nie id — to jego klient widzi na wydruku i po nim szuka. Backend
+ * odwzorowuje tę samą regułę w SQL (`GET /offers/number/:slug`).
+ */
+export const offerSlug = (number: string): string =>
+  number.toLowerCase().replace(/[^a-z0-9]/g, "");
 
 const plnFormat = new Intl.NumberFormat("pl-PL", { style: "currency", currency: "PLN" });
 

@@ -4,6 +4,15 @@
 // stawki, ręczne nadpisania formuł) i biuro. Na końcu weryfikacja:
 // kalkulacja aplikacji vs wartości wyliczone w arkuszu (kolumny V/W/X).
 //
+// UWAGA po rozdzieleniu obiektów i działów: arkusz „Obiekty" trzyma w jednej
+// kolumnie także pozycje, które obiektami nie są („CMA"). Ten skrypt zakłada je
+// jako wiersze `hr_objects` i wiąże z nimi godziny — czyli PONOWNE uruchomienie
+// odtworzy pozycję „CMA" w słowniku obiektów, mimo że migracja 0070 przeniosła ją
+// do `hr_departments` razem z flagą puli centrum monitorowania. Skutek: koszt
+// centrum przestaje się rozdzielać na dozorowane obiekty i wraca hack po nazwie.
+// Przed kolejnym importem historycznym trzeba dołożyć tu mapę nazw działowych na
+// `hr_hours.department_id`. Skrypt jest jednorazowy, więc świadomie tego nie robimy.
+//
 // Uruchomienie (Node 22 — better-sqlite3):
 //   PATH="/config/.nvm/versions/node/v22.22.0/bin:$PATH" npx tsx scripts/import-kadry-master-2026.ts
 import { readFileSync } from "node:fs";

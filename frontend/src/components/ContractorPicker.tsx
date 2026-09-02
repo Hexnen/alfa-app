@@ -17,6 +17,8 @@ interface ContractorPickerProps {
   required?: boolean;
   disabled?: boolean;
   id?: string;
+  /** Klasa pola — pozwala wpiąć wyszukiwarkę w gęsty formularz (niższy input). */
+  inputClassName?: string;
 }
 
 /**
@@ -33,6 +35,7 @@ export function ContractorPicker({
   required = false,
   disabled = false,
   id = "contractor-picker",
+  inputClassName,
 }: ContractorPickerProps) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<Contractor[]>([]);
@@ -129,7 +132,7 @@ export function ContractorPicker({
   };
 
   return (
-    <div className="space-y-2" ref={boxRef}>
+    <div className={label ? "space-y-2" : ""} ref={boxRef}>
       {label && (
         <Label htmlFor={id}>
           {label} {required && <span className="text-red-500">*</span>}
@@ -152,7 +155,7 @@ export function ContractorPicker({
             setOpen(true);
           }}
           onKeyDown={handleKeyDown}
-          className="pr-9"
+          className={inputClassName ? `pr-9 ${inputClassName}` : "pr-9"}
         />
         <div className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground">
           {loading ? (

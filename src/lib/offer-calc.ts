@@ -30,6 +30,8 @@ export interface OfferCalcInput {
   leaseMonths: number | null;
   leaseAnnualRate: number | null;
   leaseIncludeLabour: boolean;
+  /** Przewidywany czas kontraktu (mies.); null = okres jak dotąd. */
+  contractMonths?: number | null;
 }
 
 /** Fragment sekcji potrzebny do rozstrzygnięcia, czy jej pozycje się liczą. */
@@ -99,17 +101,35 @@ export interface OfferTotals {
   optionsMonthly: number;
 
   /**
-   * Okres (w miesiącach), na którym liczona jest marża — długość dzierżawy,
-   * a bez dzierżawy 12 miesięcy. Front i wydruk podpisują nim marżę, żeby nie
-   * było wątpliwości, czego dotyczy procent.
+   * Okres (w miesiącach), na którym liczona jest marża: przewidywany czas
+   * kontraktu, a gdy go nie podano — długość dzierżawy, a bez niej 12 miesięcy.
+   * Front i wydruk podpisują nim marżę, żeby nie było wątpliwości, czego
+   * dotyczy procent.
    */
   marginHorizonMonths: number;
+  /** Skąd wziął się ten okres — ekran ma powiedzieć wprost, czym jest liczba. */
+  horizonSource: "contract" | "lease" | "default";
   /** Przychód i koszt w tym okresie — z nich liczy się `margin`. */
   horizonRevenue: number;
   horizonCost: number | null;
 
   /** Marża całej oferty w okresie `marginHorizonMonths`; null przy nieznanym koszcie. */
   margin: Margin | null;
+
+  /*
+   * PODZIAŁ ZYSKU. Marża mówi, ile zostaje na ofercie RAZEM; nie mówi, ile
+   * z tego zostaje firmie, bo handlowiec ma prowizję od przychodu. Rozdzielamy
+   * to na dwie liczby, żeby na dole oferty dało się przeczytać wprost: tyle
+   * kosztuje wdrożenie, tyle zarabia firma, tyle zarabia handlowiec.
+   */
+  /** Stawka prowizji handlowca przypisanego do oferty (%); null = brak handlowca albo stawki. */
+  salesCommissionPct: number | null;
+  /** Prowizja w kwocie: procent od ZYSKU oferty w okresie `marginHorizonMonths`. */
+  salesCommission: number | null;
+  /** Zysk firmy po odjęciu prowizji; null przy nieznanym koszcie. */
+  companyProfit: number | null;
+  /** Ten zysk jako procent przychodu w okresie — „marża po prowizji". */
+  companyProfitPct: number | null;
   /** Czy marża spadła poniżej progu `company.min_margin_pct`. */
   belowMinMargin: boolean;
 }
@@ -171,7 +191,9 @@ export function computeOffer(
   offer: OfferCalcInput,
   sections: SectionCalcInput[],
   items: ItemCalcInput[],
-  minMarginPct = 0
+  minMarginPct = 0,
+  /** Stawka prowizji handlowca z oferty (%); null = brak handlowca albo stawki. */
+  salesCommissionPct: number | null = null
 ): OfferTotals {
   const byId = new Map(sections.map((s) => [s.id, s]));
 
@@ -258,13 +280,59 @@ export function computeOffer(
    * całą umowę — dlatego horyzont to długość dzierżawy, a nie sztywne 12
    * miesięcy. Bez dzierżawy zostaje rok, czyli tyle samo, co dotąd.
    */
-  const horizon = (leaseActive ? leaseMonthsOf(offer) : null) ?? 12;
-  const horizonRevenue = round2(oneTimePayable + monthlyTotal * horizon);
+  /*
+   * OKRES. Przewidywany czas kontraktu wygrywa, bo to świadoma deklaracja „jak
+   * długo klient zostanie". Bez niego zostaje stara reguła: przy dzierżawie
+   * sprzęt kupujemy raz, a przychód spływa ratami przez całą umowę, więc
+   * horyzont to długość dzierżawy; bez dzierżawy rok.
+   */
+  const leaseHorizon = leaseActive ? leaseMonthsOf(offer) : null;
+  const contractMonths =
+    offer.contractMonths && offer.contractMonths > 0 ? Math.round(offer.contractMonths) : null;
+  const horizon = contractMonths ?? leaseHorizon ?? 12;
+  const horizonSource: OfferTotals["horizonSource"] =
+    contractMonths !== null ? "contract" : leaseHorizon !== null ? "lease" : "default";
+
+  /*
+   * RATA DZIERŻAWY KOŃCZY SIĘ Z UMOWĄ, abonament leci dalej. Przy kontrakcie
+   * dłuższym niż dzierżawa (24 mies. dzierżawy w 36-miesięcznym kontrakcie)
+   * mnożenie całej kwoty miesięcznej przez horyzont dopisywałoby raty, których
+   * klient nigdy nie zapłaci.
+   */
+  const leaseMonthsPaid = Math.min(horizon, leaseHorizon ?? horizon);
+  const horizonRevenue = round2(
+    oneTimePayable + leaseMonthlyNet * leaseMonthsPaid + monthlyPriceNet * horizon
+  );
   const horizonCost =
     oneTimeCost === null || monthlyCost === null
       ? null
       : round2(oneTimeCost + monthlyCost * horizon);
   const margin = marginOf(horizonCost, horizonRevenue);
+
+  /*
+   * PROWIZJA LICZY SIĘ Z ZYSKU, nie z przychodu: handlowiec dostaje procent od
+   * tego, co oferta faktycznie zarobiła w okresie `horizon`, a nie od kwoty,
+   * którą klient zapłacił. Rabat i drogi sprzęt uderzają więc w prowizję tak
+   * samo, jak uderzają w firmę — sprzedaż poniżej kosztów przestaje się opłacać
+   * obu stronom.
+   *
+   * BEZ ZNANEGO KOSZTU NIE MA PROWIZJI (null, nie zero): skoro nie wiemy, ile
+   * oferta zarabia, nie wiemy też, ile z tego należy się handlowcowi. Zero
+   * wyglądałoby na policzone.
+   *
+   * UWAGA: Analityka liczy prowizję portfela od PRZYCHODU (revenue × rate) —
+   * to inna definicja tej samej stawki i te dwie liczby nie są porównywalne.
+   */
+  const salesCommission =
+    salesCommissionPct === null || salesCommissionPct <= 0 || margin === null
+      ? null
+      : round2((margin.amount * salesCommissionPct) / 100);
+  const companyProfit =
+    margin === null ? null : round2(margin.amount - (salesCommission ?? 0));
+  const companyProfitPct =
+    companyProfit === null || horizonRevenue <= 0
+      ? null
+      : round2((companyProfit / horizonRevenue) * 100);
 
   return {
     oneTimePrice,
@@ -283,9 +351,14 @@ export function computeOffer(
     optionsOneTime,
     optionsMonthly,
     marginHorizonMonths: horizon,
+    horizonSource,
     horizonRevenue,
     horizonCost,
     margin,
+    salesCommissionPct,
+    salesCommission,
+    companyProfit,
+    companyProfitPct,
     belowMinMargin:
       minMarginPct > 0 &&
       // Rabat 100% daje przychód 0, `marginOf` zwraca wtedy null („nie da się

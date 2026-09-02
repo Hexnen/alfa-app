@@ -1041,6 +1041,18 @@ export const services = sqliteTable("services", {
   description: text("description"),
   active: integer("active", { mode: "boolean" }).default(true).notNull(),
   position: integer("position").default(0).notNull(),
+  /** Kto założył pozycję katalogu — login (email), jak `offers.created_by`. */
+  createdBy: text("created_by"),
+  /** Kto ostatni zapisał pozycję — login (email). */
+  updatedBy: text("updated_by"),
+  /**
+   * Kiedy OSTATNIO zmieniła się cena — czyli `cost` ALBO `price`, bo w usłudze
+   * stawka to para (koszt robocizny i cena sprzedaży) i przeterminowanie
+   * jednej psuje marżę tak samo jak drugiej. Nie zmienia się przy poprawce
+   * nazwy czy opisu — od tego jest `updated_at`, po którym nie da się poznać,
+   * czy stawka jest jeszcze aktualna. NULL = nie wiadomo kiedy.
+   */
+  priceUpdatedAt: text("price_updated_at"),
   createdAt: text("created_at")
     .default(sql`(datetime('now'))`)
     .notNull(),
@@ -1187,20 +1199,14 @@ export const hrObjects = sqliteTable("hr_objects", {
    * niezależnie od kartoteki i nazwy nie pokrywają się ani w jednym przypadku
    * („PUŁAWSKA 233" vs „Magazyn Centralny Kraków-Płaszów"). Bez tego ogniwa
    * nie da się przypisać wynagrodzeń do obiektu — mapowanie robi się ręcznie
-   * w Kadry → Obiekty. Pozycje techniczne (#BIURO, CMA) zostają niezmapowane
-   * celowo: to koszt ogólny, nie koszt konkretnego obiektu.
+   * w Kadry → Obiekty. Pozycje techniczne (#BIURO, #zlecenie) zostają
+   * niezmapowane celowo: to koszt ogólny, nie koszt konkretnego obiektu.
+   * Praca działowa (CMA, handlowy, …) nie mieszka już tutaj — ma własny
+   * słownik `hrDepartments` i własną kolumnę w `hrHours`.
    */
   objectId: integer("object_id").references(() => objects.id, {
     onDelete: "set null",
   }),
-  /**
-   * Pozycja jest PULĄ CENTRUM MONITOROWANIA. Jej koszt nie należy do żadnego
-   * pojedynczego obiektu — rozdziela się po wszystkich dozorowanych jednostkach
-   * (SSWiN, wideorecepcja i każda kamera liczą się po jednym). Domyślnie false;
-   * w praktyce ustawia się to na jednej pozycji („CMA", 31 tys. godzin).
-   * Wyklucza się z `objectId`: pula nie wskazuje obiektu.
-   */
-  isCmaPool: integer("is_cma_pool", { mode: "boolean" }).default(false).notNull(),
   active: integer("active", { mode: "boolean" }).default(true).notNull(),
   createdAt: text("created_at")
     .default(sql`(datetime('now'))`)
@@ -1212,6 +1218,37 @@ export const hrObjects = sqliteTable("hr_objects", {
 
 export type HrObject = typeof hrObjects.$inferSelect;
 export type NewHrObject = typeof hrObjects.$inferInsert;
+
+// Działy firmy — słownik z Kadry → Działy
+//
+// Rodzeństwo `hrObjects`, nie kartoteki: godziny wskazują ALBO obiekt (posterunek),
+// ALBO dział (praca, która nie należy do żadnego obiektu — handlowy, księgowość,
+// zarząd). Dlatego dział nie ma `objectId` i nie da się go zmapować do kartoteki.
+// Wcześniej rolę działów pełniły pozycje słownika obiektów rozpoznawane po nazwie
+// (prefiks "#", literalne "CMA") — nazwa przestała być kluczem.
+export const hrDepartments = sqliteTable("hr_departments", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull().unique(),
+  /**
+   * Dział jest PULĄ CENTRUM MONITOROWANIA. Jego koszt nie należy do żadnego
+   * pojedynczego obiektu — rozdziela się po wszystkich dozorowanych jednostkach
+   * (SSWiN, wideorecepcja i każda kamera liczą się po jednym). W praktyce flagę
+   * nosi jeden dział („CMA"). Flaga, a nie nazwa: CRUD pozwala dział przemianować,
+   * a rozpoznawanie po nazwie zepsułoby wtedy po cichu alokację kosztów.
+   */
+  isCmaPool: integer("is_cma_pool", { mode: "boolean" }).default(false).notNull(),
+  sortOrder: integer("sort_order").default(0).notNull(), // kolejność na liście wyboru
+  active: integer("active", { mode: "boolean" }).default(true).notNull(),
+  createdAt: text("created_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+  updatedAt: text("updated_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+});
+
+export type HrDepartment = typeof hrDepartments.$inferSelect;
+export type NewHrDepartment = typeof hrDepartments.$inferInsert;
 
 // Normy godzin na miesiąc (arkusz "Rok": kolumny Praca / Zlecenie)
 export const hrMonthNorms = sqliteTable("hr_month_norms", {
@@ -1231,17 +1268,26 @@ export const hrMonthNorms = sqliteTable("hr_month_norms", {
 export type HrMonthNorm = typeof hrMonthNorms.$inferSelect;
 export type NewHrMonthNorm = typeof hrMonthNorms.$inferInsert;
 
-// Wypracowane godziny — wpis miesięczny pracownik×obiekt
+// Wypracowane godziny — wpis miesięczny pracownik×(obiekt albo dział)
 // (arkusz "Wypracowane godziny"; może być kilka wpisów na osobę w miesiącu)
 export const hrHours = sqliteTable("hr_hours", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   employeeId: integer("employee_id")
     .notNull()
     .references(() => hrEmployees.id, { onDelete: "cascade" }),
+  /**
+   * Przypisanie wpisu. `objectId` i `departmentId` WYKLUCZAJĄ SIĘ: wiersz wskazuje
+   * obiekt albo dział, albo nic (praca nieprzypisana). Rozłączności pilnuje
+   * `parseHours` w src/routes/hr.ts (400 przy obu naraz) i asercja w
+   * scripts/test-object-identity.ts — SQLite CHECK wymagałby przebudowy tabeli.
+   */
   objectId: integer("object_id").references(() => hrObjects.id, {
     onDelete: "set null",
   }),
-  // Wpis przeniesiony z poprzedniego miesiąca — obiekt do potwierdzenia
+  departmentId: integer("department_id").references(() => hrDepartments.id, {
+    onDelete: "set null",
+  }),
+  // Wpis przeniesiony z poprzedniego miesiąca — przypisanie do potwierdzenia
   // (zapis wpisu przez użytkownika zdejmuje flagę)
   objectUncertain: integer("object_uncertain", { mode: "boolean" })
     .default(false)
@@ -1400,6 +1446,19 @@ export const warehouseItems = sqliteTable("warehouse_items", {
   isArchived: integer("is_archived", { mode: "boolean" })
     .default(false)
     .notNull(),
+  /** Kto założył kartotekę — login (email), jak `offers.created_by`. */
+  createdBy: text("created_by"),
+  /** Kto ostatni zapisał kartotekę — login (email). */
+  updatedBy: text("updated_by"),
+  /**
+   * Kiedy OSTATNIO zmieniła się cena (zakupu albo sprzedaży) — nie kiedy
+   * ktokolwiek dotknął rekordu. `updated_at` przestawia się przy poprawce
+   * literówki w nazwie czy zmianie kategorii i przez to nie mówi nic
+   * o aktualności cennika; bez osobnego stempla nie da się odróżnić towaru
+   * z ceną potwierdzoną wczoraj od takiego z ceną sprzed dwóch lat.
+   * NULL = ceny nigdy nie ustawiono (albo nie wiadomo kiedy).
+   */
+  priceUpdatedAt: text("price_updated_at"),
   createdAt: text("created_at")
     .default(sql`(datetime('now'))`)
     .notNull(),
@@ -1649,6 +1708,17 @@ export const offers = sqliteTable(
 
     /** Rabat na CAŁY dokument (%), obok rabatów na pojedynczych pozycjach. */
     discountPct: real("discount_pct").default(0).notNull(),
+
+    /**
+     * PRZEWIDYWANY CZAS KONTRAKTU w miesiącach — jak długo klient ma zostać.
+     *
+     * To założenie handlowca, nie zobowiązanie klienta (od tego jest dzierżawa),
+     * ale właśnie ono decyduje, ile warta jest oferta z abonamentem: te same
+     * 460 zł miesięcznie przez rok i przez trzy lata to dwie różne transakcje.
+     * Ustawia OKRES, na którym liczy się marża, zysk i prowizja; NULL = zostaje
+     * dotychczasowa reguła (długość dzierżawy, a bez niej 12 miesięcy).
+     */
+    contractMonths: integer("contract_months"),
 
     // --- Dzierżawa: jeden zestaw parametrów na całą ofertę ---
     leaseMode: text("lease_mode", { enum: OFFER_LEASE_MODES })
@@ -1904,6 +1974,26 @@ export const offerPackageItems = sqliteTable(
     qtyRound: text("qty_round", { enum: OFFER_QTY_ROUNDINGS })
       .default("none")
       .notNull(),
+
+    /**
+     * SLOT — jedno miejsce w zestawie („Rejestrator"), w którym pakiet WYBIERA
+     * wariant zamiast dodawać wszystkie. Wiersze o tej samej etykiecie tworzą
+     * grupę; NULL = zwykła pozycja, wchodzi zawsze.
+     *
+     * Tym różni się od mnożnika: przy 9–16 kamerach nie zmienia się ILOŚĆ
+     * rejestratorów, tylko KTÓRY rejestrator wchodzi na ofertę. Bez slotów
+     * trzeba było trzymać trzy niemal identyczne pakiety w bibliotece.
+     */
+    slot: text("slot"),
+    /**
+     * Zakres wartości parametru z `paramKey`, przy którym ten wariant wygrywa
+     * slot — granice WŁĄCZNIE, NULL = strona otwarta. Ma sens tylko razem ze
+     * `slot` (route pilnuje) i zakresy w jednym slocie nie mogą na siebie
+     * nachodzić, bo wybór stałby się zależny od kolejności wierszy.
+     */
+    paramMin: real("param_min"),
+    paramMax: real("param_max"),
+
     /** Cena narzucona przez pakiet; NULL = weź aktualną ze źródła. */
     unitPriceOverride: real("unit_price_override"),
   },
