@@ -1,0 +1,1 @@
+ALTER TABLE `hr_employees` ADD `department_id` integer REFERENCES hr_departments(id) ON DELETE SET NULL;

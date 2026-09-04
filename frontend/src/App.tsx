@@ -37,6 +37,7 @@ import { AdminAssistant } from "./pages/AdminAssistant";
 import { AdminCalendar } from "./pages/AdminCalendar";
 import { AdminCompany } from "./pages/AdminCompany";
 import { PublicOrderForm } from "./pages/PublicOrderForm";
+import { PublicOffer } from "./pages/PublicOffer";
 import { useAuth } from "./auth/AuthProvider";
 import { usePerms, tabKeyForPath } from "./auth/permissions";
 import AuthScreen from "./auth/AuthScreen";
@@ -47,6 +48,8 @@ function App() {
       <Routes>
         {/* Public, unauthenticated intake form (external Alfa branding) */}
         <Route path="/formularz/zlecenie" element={<PublicOrderForm />} />
+        {/* Public, unauthenticated client-facing offer (link + print/PDF) */}
+        <Route path="/oferta/:token" element={<PublicOffer />} />
         {/* Everything else goes through the authenticated app shell */}
         <Route path="/*" element={<AuthedApp />} />
       </Routes>

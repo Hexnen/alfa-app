@@ -7,7 +7,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { FileText, Package, Plus, Trash2, Pencil, Archive } from "lucide-react";
+import { AlignLeft, FileText, Package, Plus, Trash2, Pencil, Archive } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -27,6 +27,7 @@ import {
   type OfferPackage,
   type OfferPackageDetail,
   type OfferStatus,
+  type OfferText,
   type Salesperson,
   type Service,
   type StockEntry,
@@ -35,6 +36,7 @@ import {
 import { fmtRelative, fmtTimestamp, pillClass } from "@/lib/calendar-labels";
 import { OfferEditor } from "@/components/offers/OfferEditor";
 import { PackageEditor } from "@/components/offers/PackageEditor";
+import { TextEditor } from "@/components/offers/TextEditor";
 import {
   OFFER_CATEGORY_META,
   OFFER_KIND_LABEL,
@@ -50,6 +52,13 @@ const alertError = (err: unknown, fallback: string) =>
 
 const selectClass =
   "flex h-10 rounded-md border border-input bg-background px-3 py-2 text-sm";
+
+/** Pierwsze ~80 znaków treści opisu w jednej linii — tyle, żeby poznać wzorzec. */
+const excerpt = (body: string): string => {
+  const flat = (body || "").replace(/\s+/g, " ").trim();
+  if (!flat) return "— pusta treść —";
+  return flat.length > 80 ? `${flat.slice(0, 80)}…` : flat;
+};
 
 export function Oferty() {
   const { canEdit } = usePerms();
@@ -74,6 +83,8 @@ export function Oferty() {
 
   // Słowniki
   const [packages, setPackages] = useState<OfferPackage[]>([]);
+  /** Biblioteka powtarzalnych opisów handlowych — działa jak pakiety, tylko tekstowa. */
+  const [texts, setTexts] = useState<OfferText[]>([]);
   const [warehouseItems, setWarehouseItems] = useState<WarehouseItem[]>([]);
   const [services, setServices] = useState<Service[]>([]);
   const [salespeople, setSalespeople] = useState<Salesperson[]>([]);
@@ -85,6 +96,8 @@ export function Oferty() {
 
   const [pkgFormOpen, setPkgFormOpen] = useState(false);
   const [editingPkg, setEditingPkg] = useState<OfferPackageDetail | null>(null);
+  const [textFormOpen, setTextFormOpen] = useState(false);
+  const [editingText, setEditingText] = useState<OfferText | null>(null);
   /** Słowniki, których nie udało się wczytać — mówimy o tym wprost, zamiast po cichu degradować. */
   const [unavailable, setUnavailable] = useState<string[]>([]);
 
@@ -104,6 +117,11 @@ export function Oferty() {
     setPackages(res.data || []);
   }, []);
 
+  const loadTexts = useCallback(async () => {
+    const res = await offersApi.listTexts();
+    setTexts(res.data || []);
+  }, []);
+
   useEffect(() => {
     loadOffers();
   }, [loadOffers]);
@@ -120,8 +138,9 @@ export function Oferty() {
    */
   useEffect(() => {
     (async () => {
-      const [pkgs, items, svcs, sales, comps, stockRes, cfg] = await Promise.allSettled([
+      const [pkgs, txts, items, svcs, sales, comps, stockRes, cfg] = await Promise.allSettled([
         offersApi.listPackages(),
+        offersApi.listTexts(),
         warehouseApi.getItems(),
         servicesApi.list(),
         getSalespeople(true),
@@ -143,6 +162,7 @@ export function Oferty() {
       };
 
       take(pkgs, "pakiety", (v) => setPackages(v));
+      take(txts, "opisy", (v) => setTexts(v));
       take(items, "magazyn", (v) => setWarehouseItems(v));
       take(svcs, "usługi", (v) => setServices(v));
       take(sales, "handlowcy", (v) => setSalespeople(v));
@@ -240,6 +260,7 @@ export function Oferty() {
           minMarginPct={minMarginPct}
           defaultLeaseRate={defaultLeaseRate}
           packages={packages}
+          texts={texts}
           warehouseItems={warehouseItems}
           services={services}
           salespeople={salespeople}
@@ -283,6 +304,26 @@ export function Oferty() {
     );
   }
 
+  // --- Widok edytora opisu (osobny ekran: treść pisze się obok podglądu
+  // wydruku, a w oknie modalnym te dwie kolumny nie miały gdzie stanąć) ---
+  if (textFormOpen) {
+    return (
+      <div className="space-y-4">
+        {!editable && <ReadOnlyBanner className="mb-4" />}
+        <TextEditor
+          key={editingText?.id ?? "new"}
+          text={editingText}
+          onBack={() => setTextFormOpen(false)}
+          onSubmit={async (data) => {
+            if (editingText) await offersApi.updateText(editingText.id, data);
+            else await offersApi.createText(data);
+            await loadTexts();
+          }}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-4">
       <div>
@@ -310,6 +351,9 @@ export function Oferty() {
           </TabsTrigger>
           <TabsTrigger value="pakiety">
             <Package className="mr-1 h-4 w-4" /> Pakiety
+          </TabsTrigger>
+          <TabsTrigger value="opisy">
+            <AlignLeft className="mr-1 h-4 w-4" /> Opisy
           </TabsTrigger>
         </TabsList>
 
@@ -589,6 +633,125 @@ export function Oferty() {
                                         await loadPackages();
                                       } catch (err) {
                                         alertError(err, "Błąd archiwizacji pakietu");
+                                      }
+                                    }}
+                                  >
+                                    <Archive className="h-4 w-4" />
+                                  </Button>
+                                </div>
+                              </td>
+                            )}
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* --- Biblioteka opisów --- */}
+        <TabsContent value="opisy" className="space-y-3">
+          <div className="flex items-center gap-2">
+            <p className="text-sm text-muted-foreground">
+              Powtarzalne teksty handlowe — warunki gwarancji, zakres wsparcia,
+              warunki płatności. Dołączenie na ofertę kopiuje treść, więc późniejsza
+              poprawka wzorca nie zmieni dokumentu, który klient już dostał.
+            </p>
+            {editable && (
+              <Button
+                className="ml-auto shrink-0"
+                onClick={() => {
+                  setEditingText(null);
+                  setTextFormOpen(true);
+                }}
+              >
+                <Plus className="mr-1 h-4 w-4" /> Nowy opis
+              </Button>
+            )}
+          </div>
+
+          <Card>
+            <CardContent className="p-0">
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="border-b bg-muted/50 text-left text-xs text-muted-foreground">
+                    <tr>
+                      <th className="px-3 py-2 font-medium">Opis</th>
+                      <th className="px-3 py-2 font-medium">Kategoria</th>
+                      <th className="px-3 py-2 font-medium">Domyślny</th>
+                      {editable && <th className="px-3 py-2 text-right font-medium">Akcje</th>}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {texts.length === 0 ? (
+                      <tr>
+                        <td
+                          colSpan={editable ? 4 : 3}
+                          className="px-3 py-8 text-center text-muted-foreground"
+                        >
+                          Biblioteka jest pusta. Dodaj opis, a będziesz go dokładać
+                          na oferty jednym kliknięciem.
+                        </td>
+                      </tr>
+                    ) : (
+                      texts.map((t) => {
+                        const meta = OFFER_CATEGORY_META[t.category];
+                        return (
+                          <tr key={t.id} className="border-b last:border-0">
+                            <td className="px-3 py-2">
+                              <div className="font-medium">{t.name}</div>
+                              {/* Skrót z SUROWEJ treści — markery markdownu w tej
+                                  linii mówią więcej o składni niż o tym, co w opisie
+                                  stoi, a chodzi o rozpoznanie wzorca w dwie sekundy. */}
+                              <div className="text-xs text-muted-foreground">
+                                {excerpt(t.body)}
+                              </div>
+                            </td>
+                            <td className="px-3 py-2">
+                              <span className={pillClass(meta.tone)}>{meta.label}</span>
+                            </td>
+                            <td className="px-3 py-2">
+                              {t.isDefault ? (
+                                <span className={pillClass("emerald")}>na każdej ofercie</span>
+                              ) : (
+                                <span className="text-muted-foreground">—</span>
+                              )}
+                            </td>
+                            {editable && (
+                              <td className="px-3 py-2">
+                                <div className="flex justify-end gap-1">
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    title="Edytuj"
+                                    onClick={async () => {
+                                      try {
+                                        const res = await offersApi.getText(t.id);
+                                        setEditingText(res.data ?? null);
+                                        setTextFormOpen(true);
+                                      } catch (err) {
+                                        alertError(err, "Błąd wczytywania opisu");
+                                      }
+                                    }}
+                                  >
+                                    <Pencil className="h-4 w-4" />
+                                  </Button>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="text-muted-foreground hover:text-destructive"
+                                    title="Archiwizuj"
+                                    onClick={async () => {
+                                      if (!window.confirm(`Zarchiwizować opis „${t.name}”?`))
+                                        return;
+                                      try {
+                                        await offersApi.archiveText(t.id);
+                                        await loadTexts();
+                                      } catch (err) {
+                                        alertError(err, "Błąd archiwizacji opisu");
                                       }
                                     }}
                                   >

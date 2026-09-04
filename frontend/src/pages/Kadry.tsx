@@ -177,6 +177,13 @@ export function Kadry() {
   const [employeeKind, setEmployeeKind] = useState<"all" | "ochrona" | "biuro">(
     "all",
   );
+  /**
+   * Kartoteka: filtr po dziale. `all` = bez filtra, `none` = osoby BEZ działu
+   * (to one wymagają uzupełnienia), liczba = id konkretnego działu.
+   */
+  const [employeeDept, setEmployeeDept] = useState<"all" | "none" | number>(
+    "all",
+  );
   /** Rozwinięci pracownicy w kartotece (umowy + biuro pod wierszem). */
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   /** Pracownik podstawiany w nowej umowie / nowym wpisie biura. */
@@ -352,17 +359,27 @@ export function Kadry() {
     return employees.filter((e) => {
       const ctrs = contractsByEmployee.get(e.id) ?? [];
       if (employeeKind !== "all" && e.kind !== employeeKind) return false;
+      if (employeeDept === "none" && e.departmentId != null) return false;
+      if (typeof employeeDept === "number" && e.departmentId !== employeeDept)
+        return false;
       if (!q) return true;
       const haystack = [
         e.fullName,
         e.code,
         e.notes,
+        e.departmentName,
         ...ctrs.map((c) => c.company),
         ...(e.officeCompanies ?? []),
       ];
       return haystack.some((v) => (v ?? "").toLowerCase().includes(q));
     });
-  }, [employees, employeeFilter, employeeKind, contractsByEmployee]);
+  }, [
+    employees,
+    employeeFilter,
+    employeeKind,
+    employeeDept,
+    contractsByEmployee,
+  ]);
 
   const visibleContractsCount = employeesVisible.reduce(
     (s, e) => s + (contractsByEmployee.get(e.id)?.length ?? 0),
@@ -1191,6 +1208,27 @@ export function Kadry() {
                 </button>
               ))}
             </div>
+            {/* Dział pracownika: „bez działu" jest osobną opcją, bo to ona
+                wskazuje kartoteki do uzupełnienia. */}
+            <select
+              value={employeeDept === "all" ? "all" : String(employeeDept)}
+              onChange={(e) => {
+                const v = e.target.value;
+                setEmployeeDept(
+                  v === "all" || v === "none" ? v : Number(v),
+                );
+              }}
+              className="h-10 rounded-md border border-input bg-background px-3 py-2 text-sm"
+              title="Filtr po dziale z kartoteki pracownika"
+            >
+              <option value="all">Wszystkie działy</option>
+              <option value="none">Bez działu</option>
+              {departments.map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.label}
+                </option>
+              ))}
+            </select>
             <Button
               variant="outline"
               onClick={() =>
@@ -1232,7 +1270,7 @@ export function Kadry() {
           </div>
           <Card>
             <CardContent className="overflow-x-auto p-0">
-              <table className="w-full min-w-[860px] text-sm">
+              <table className="w-full min-w-[960px] text-sm">
                 <thead className="border-b bg-muted/50 text-xs uppercase tracking-wide text-muted-foreground">
                   <tr>
                     <Th className="w-8" />
@@ -1244,6 +1282,9 @@ export function Kadry() {
                     </Th>
                     <Th tip="Ochrona = osoba z umową kadrową; Biuro = osoba rozliczana w zestawieniu biura (wybrany miesiąc)">
                       Rodzaj
+                    </Th>
+                    <Th tip="Macierzysty dział z kartoteki — podpowiadany przy nowym wpisie godzin, ale wpis można rozliczyć na obiekcie">
+                      Dział
                     </Th>
                     <Th tip="Spółki z umów i z rozliczenia biura — rozwiń wiersz, aby wejść w szczegóły">
                       Spółki
@@ -1259,7 +1300,7 @@ export function Kadry() {
                   {employeesVisible.length === 0 ? (
                     <tr>
                       <td
-                        colSpan={8}
+                        colSpan={9}
                         className="px-3 py-8 text-center text-muted-foreground"
                       >
                         {loading ? "Ładowanie…" : "Brak pracowników"}
@@ -1318,6 +1359,9 @@ export function Kadry() {
                               </div>
                             </td>
                             <td className="px-3 py-2 text-xs text-muted-foreground">
+                              {r.departmentName || "—"}
+                            </td>
+                            <td className="px-3 py-2 text-xs text-muted-foreground">
                               {[
                                 ...new Set([
                                   ...rowContracts.map((c) => c.company),
@@ -1373,7 +1417,7 @@ export function Kadry() {
                           </tr>
                           {isOpen && (
                             <tr className="border-b bg-muted/20">
-                              <td colSpan={8} className="px-3 py-3">
+                              <td colSpan={9} className="px-3 py-3">
                                 <div className="space-y-4">
                                   {/* --- UMOWY pracownika --- */}
                                   <div className="space-y-2">
@@ -1906,6 +1950,7 @@ export function Kadry() {
           onClose={() => setEmployeeFormOpen(false)}
           onSubmit={handleEmployeeSubmit}
           employee={employeeEdit}
+          departments={departments}
         />
       )}
       {contractFormOpen && (

@@ -15,7 +15,7 @@ import cameraModelsRoutes from "./camera-models.js";
 import protocolsRoutes from "./protocols.js";
 import quotesRoutes from "./quotes.js";
 import servicesRoutes from "./services.js";
-import offersRoutes from "./offers.js";
+import offersRoutes, { offersPublicRoutes } from "./offers.js";
 import cmaRoutes from "./cma.js";
 import monitoringRoutes from "./monitoring.js";
 import monitoredObjectsRoutes from "./monitored-objects.js";
@@ -50,6 +50,10 @@ api.route("/public", publicRoutes);
 // --- KALENDARZ: publiczny feed ICS (auth po tokenie użytkownika w query) ---
 // GET /calendar/feed.ics?token=... — montowane PRZED requireAuth, jak /public.
 api.route("/calendar", calendarPublicRoutes);
+
+// --- OFERTY: dokument dla klienta spod linku (auth po tokenie w ścieżce) ---
+// GET /public-offer/:token — montowane PRZED requireAuth, jak /public.
+api.route("/", offersPublicRoutes);
 
 // --- Wszystkie pozostałe trasy API — chronione sesją ---
 api.use("*", requireAuth);

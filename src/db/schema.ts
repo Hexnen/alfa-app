@@ -870,7 +870,7 @@ export const cameraModels = sqliteTable("camera_models", {
   name: text("name").notNull(), // Nazwa / model kamery
   manufacturer: text("manufacturer").default("").notNull(), // Producent
   // Typ geometryczny (spójny z designerem): tubowa / kopułkowa / PTZ / 360°
-  type: text("camera_type", { enum: ["bullet", "dome", "ptz", "pano"] })
+  type: text("camera_type", { enum: ["bullet", "dome", "ptz", "pano", "lpr"] })
     .default("bullet")
     .notNull(),
   resolution: text("resolution").default("").notNull(), // Rozdzielczość (np. 4MP, 8MP)
@@ -1176,6 +1176,18 @@ export const hrEmployees = sqliteTable("hr_employees", {
   kind: text("kind", { enum: ["ochrona", "biuro"] })
     .default("ochrona")
     .notNull(),
+  /**
+   * Dział firmy, do którego należy osoba. NIEZALEŻNY od przypisania pojedynczego
+   * wpisu godzin (`hrHours.departmentId`): tam dział mówi, CZEGO dotyczyła praca
+   * w danym miesiącu, tutaj — gdzie człowiek pracuje na stałe.
+   *
+   * Bez tego pola biura nie dało się przypisać do działu w ogóle: pracownicy
+   * `kind = "biuro"` rozliczają się przez `hrOfficePayroll`, więc nie mają ani
+   * jednego wiersza w `hrHours`, na którym dział mógłby zawisnąć.
+   */
+  departmentId: integer("department_id").references(() => hrDepartments.id, {
+    onDelete: "set null",
+  }),
   active: integer("active", { mode: "boolean" }).default(true).notNull(),
   notes: text("notes").default("").notNull(),
   createdAt: text("created_at")
@@ -1742,6 +1754,16 @@ export const offers = sqliteTable(
     ),
 
     notes: text("notes"),
+
+    /**
+     * Token linku dla klienta (`/oferta/<token>`). NULL = oferta nieudostępniona.
+     *
+     * To JEDYNE, co chroni dokument — pod tym adresem nie ma żadnej innej
+     * autoryzacji, więc token musi być losowy i długi (24 bajty z `randomBytes`).
+     * Wyzerowanie kolumny natychmiast odbiera klientowi dostęp.
+     */
+    shareToken: text("share_token"),
+
     createdBy: text("created_by"), // login (email) użytkownika
     createdAt: text("created_at")
       .default(sql`(datetime('now'))`)
@@ -1755,6 +1777,9 @@ export const offers = sqliteTable(
     objectIdIdx: index("offers_object_id_idx").on(t.objectId),
     statusIdx: index("offers_status_idx").on(t.status),
     parentIdIdx: index("offers_parent_id_idx").on(t.parentId),
+    // Unikalny, ale kolumna jest nullowalna — w SQLite wiele NULL-i nie koliduje,
+    // więc oferty nieudostępnione nie blokują się nawzajem.
+    shareTokenIdx: uniqueIndex("offers_share_token_uidx").on(t.shareToken),
   })
 );
 
@@ -2004,6 +2029,85 @@ export const offerPackageItems = sqliteTable(
 
 export type OfferPackageItem = typeof offerPackageItems.$inferSelect;
 export type NewOfferPackageItem = typeof offerPackageItems.$inferInsert;
+
+/**
+ * Biblioteka OPISÓW — powtarzalne teksty handlowe (warunki gwarancji, zakres
+ * wsparcia, warunki płatności), wklejane na ofertę jednym kliknięciem.
+ *
+ * Analogia pakietu: to WZORZEC, a nie treść dokumentu. Dołączenie opisu na
+ * ofertę KOPIUJE tekst do `offerTextBlocks`, bo moduł stoi na zamrożeniu —
+ * poprawiona dziś gwarancja nie może przepisać wstecz oferty, którą klient
+ * dostał w zeszłym miesiącu.
+ */
+export const offerTexts = sqliteTable("offer_texts", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  /** Nazwa W BIBLIOTECE („Gwarancja 24 mies."), nie nagłówek na wydruku. */
+  name: text("name").notNull(),
+  category: text("category", { enum: OFFER_SECTION_CATEGORIES })
+    .default("inne")
+    .notNull(),
+  /** Nagłówek drukowany nad treścią; pusty = blok bez nagłówka. */
+  title: text("title").default("").notNull(),
+  /**
+   * Treść w prostym markdownie. Backend trzyma ją jako zwykły tekst i niczego
+   * w niej nie interpretuje — składnię rozwija dopiero front przy wydruku.
+   */
+  body: text("body").default("").notNull(),
+  /** Wchodzi na KAŻDĄ nową ofertę (warunki płatności, klauzula RODO). */
+  isDefault: integer("is_default", { mode: "boolean" }).default(false).notNull(),
+  active: integer("active", { mode: "boolean" }).default(true).notNull(),
+  position: integer("position").default(0).notNull(),
+  createdAt: text("created_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+  updatedAt: text("updated_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+});
+
+export type OfferText = typeof offerTexts.$inferSelect;
+export type NewOfferText = typeof offerTexts.$inferInsert;
+
+/**
+ * Opis NA KONKRETNEJ OFERCIE — pełna kopia treści, nie referencja do katalogu.
+ *
+ * Dzięki temu wydruk jest samowystarczalny: da się go odtworzyć co do
+ * przecinka nawet po tym, jak wzorzec w bibliotece zmieniono albo schowano.
+ */
+export const offerTextBlocks = sqliteTable(
+  "offer_text_blocks",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    offerId: integer("offer_id")
+      .notNull()
+      .references(() => offers.id, { onDelete: "cascade" }),
+    /**
+     * ŚLAD POCHODZENIA — z którego wzorca wzięto treść (NULL = blok napisany
+     * ręcznie na tej ofercie). `set null`, bo archiwizacja wzorca nie ma prawa
+     * ruszyć wystawionej oferty; treść i tak leży w kolumnach obok.
+     */
+    textId: integer("text_id").references(
+      (): AnySQLiteColumn => offerTexts.id,
+      { onDelete: "set null" }
+    ),
+    title: text("title").default("").notNull(),
+    /** Markdown, jak w katalogu — migawka z chwili dołączenia opisu. */
+    body: text("body").default("").notNull(),
+    position: integer("position").default(0).notNull(),
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+    updatedAt: text("updated_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+  },
+  (t) => ({
+    offerIdIdx: index("offer_text_blocks_offer_id_idx").on(t.offerId),
+  })
+);
+
+export type OfferTextBlock = typeof offerTextBlocks.$inferSelect;
+export type NewOfferTextBlock = typeof offerTextBlocks.$inferInsert;
 
 // ============================================================================
 // KALENDARZ (dział techniczny) — wydarzenia, serie cykliczne, przypisani technicy

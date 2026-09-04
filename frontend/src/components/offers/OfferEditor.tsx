@@ -8,16 +8,25 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   AlertTriangle,
+  AlignLeft,
   ArrowLeft,
   Ban,
   Building2,
   Check,
+  ChevronDown,
+  ChevronUp,
   CopyPlus,
+  Eye,
   FileText,
+  Link2,
+  Lock,
+  Plus,
   Printer,
   RefreshCw,
   Send,
+  Share2,
   StickyNote,
+  Trash2,
   Wallet,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -25,10 +34,12 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
-import { tip } from "@/components/ui/tooltip";
+import { blockTooltips, tip } from "@/components/ui/tooltip";
+import { ContextMenu, type ContextMenuItem } from "@/components/ui/context-menu";
 import { ContractorPicker } from "@/components/ContractorPicker";
 import {
   offersApi,
+  offerShareUrl,
   parsePackageParams,
   type Company,
   type OfferDetail,
@@ -36,14 +47,19 @@ import {
   type OfferLeaseMode,
   type OfferPackage,
   type OfferSectionCategory,
+  type OfferText,
+  type OfferTextBlock,
   type Salesperson,
   type Service,
   type WarehouseItem,
 } from "@/lib/api";
 import { pillClass } from "@/lib/calendar-labels";
-import { printOffer } from "@/lib/offerPrint";
+import { hasClientContent, printOffer } from "@/lib/offerPrint";
 import { AddPackageDialog } from "./AddPackageDialog";
+import { AddTextDialog } from "./AddTextDialog";
 import { OfferSectionCard } from "./OfferSectionCard";
+import { OfferPreviewDialog } from "./OfferPreviewDialog";
+import { RepriceDialog } from "./RepriceDialog";
 import { Section } from "./offersUi";
 import {
   OFFER_CATEGORY_META,
@@ -63,6 +79,13 @@ interface OfferEditorProps {
   /** Domyślny procent roczny dzierżawy z ustawień firmy — podpowiedź przy włączaniu. */
   defaultLeaseRate: number;
   packages: OfferPackage[];
+  /**
+   * Biblioteka wzorców opisów — PROPSEM, tak samo jak pakiety i pozostałe
+   * słowniki. Strona ładuje je raz przy wejściu (patrz komentarz na górze
+   * `Oferty.tsx`), więc drugie zapytanie z edytora byłoby pracą bez powodu,
+   * a brak uprawnienia trafiłby w ciszę zamiast do bannera „nie masz dostępu".
+   */
+  texts: OfferText[];
   warehouseItems: WarehouseItem[];
   services: Service[];
   salespeople: Salesperson[];
@@ -89,6 +112,7 @@ export function OfferEditor({
   minMarginPct,
   defaultLeaseRate,
   packages,
+  texts,
   warehouseItems,
   services,
   salespeople,
@@ -99,6 +123,8 @@ export function OfferEditor({
   onReloadPackages,
 }: OfferEditorProps) {
   const { offer, sections, items, totals } = detail;
+  /** Bloki opisów doklejone do dokumentu — kopie treści, nie odwołania do wzorców. */
+  const textBlocks = detail.texts ?? [];
   // Oferta zamknięta jest tylko do odczytu, nawet gdy użytkownik ma prawo edycji —
   // zmiany robi się przez nową wersję (pilnuje tego też backend, zwracając 409).
   const frozen = offer.status !== "draft";
@@ -162,6 +188,19 @@ export function OfferEditor({
   });
   const [busy, setBusy] = useState(false);
   const [addCategory, setAddCategory] = useState<OfferSectionCategory | null>(null);
+  const [repriceOpen, setRepriceOpen] = useState(false);
+  const [addTextOpen, setAddTextOpen] = useState(false);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  /** Współrzędne otwartego menu „Udostępnij"; null = zamknięte. */
+  const [shareMenu, setShareMenu] = useState<{ x: number; y: number } | null>(null);
+  /*
+   * ContextMenu nasłuchuje `mousedown` na dokumencie w fazie PRZECHWYTYWANIA,
+   * więc zamyka się, ZANIM zadziała handler przycisku — `stopPropagation()` tego
+   * nie powstrzyma. Bez tego stempla klik w „Udostępnij" przy otwartym menu
+   * zamykałby je i natychmiast otwierał z powrotem, czyli przycisk nigdy nie
+   * zamknąłby własnego menu.
+   */
+  const shareClosedAt = useRef(0);
   /*
    * NAGŁÓWEK ZWINIĘTY DOMYŚLNIE, gdy dane już są. Klient, obiekt i termin
    * ustawia się raz, a potem pracuje się nad pozycjami — trzymanie dziewięciu
@@ -175,6 +214,8 @@ export function OfferEditor({
     // Uwagi zostają rozwinięte, gdy coś w nich stoi — to treść dla klienta,
     // nie ustawienie, i chowanie jej pod chevron kosztowałoby więcej, niż daje.
     notes: !!(offer.notes ?? "").trim(),
+    // Opisy tak samo jak uwagi: skoro jakiś blok już stoi na ofercie, ma być widać.
+    texts: (detail.texts ?? []).length > 0,
   });
 
   /*
@@ -202,6 +243,15 @@ export function OfferEditor({
     () => items.some((i) => i.kind === "material" && i.billing === "one_time"),
     [items]
   );
+
+  /*
+   * Menu „Udostępnij" nachodzi na sąsiednie przyciski paska, a te mają dymki
+   * przez `{...tip(...)}` — bez tego dymek wyskakiwałby spod otwartego menu.
+   */
+  useEffect(() => {
+    blockTooltips("offer-share", shareMenu !== null);
+    return () => blockTooltips("offer-share", false);
+  }, [shareMenu]);
 
   const run = async (fn: () => Promise<void>) => {
     setBusy(true);
@@ -240,6 +290,37 @@ export function OfferEditor({
         setForm(formFrom(offer));
         throw err;
       }
+    });
+
+  /*
+   * OPISY — operacje na blokach dokumentu.
+   *
+   * Każda z nich zwraca cały dokument (`OfferDetail`), więc jedyne, co robimy
+   * z odpowiedzią, to `onChange` — stan bloków żyje w `detail`, nie tutaj.
+   * `patchTextBlock` celowo NIE idzie przez `run`: wiersz musi zobaczyć błąd,
+   * żeby cofnąć swoje pole do wartości z serwera.
+   */
+  const patchTextBlock = async (blockId: number, patch: { title?: string; body?: string }) => {
+    const res = await offersApi.updateTextBlock(offer.id, blockId, patch);
+    if (res.data) onChange(res.data);
+  };
+
+  const moveTextBlock = (index: number, dir: -1 | 1) =>
+    run(async () => {
+      const ids = textBlocks.map((b) => b.id);
+      const target = index + dir;
+      if (target < 0 || target >= ids.length) return;
+      [ids[index], ids[target]] = [ids[target], ids[index]];
+      const res = await offersApi.reorderTextBlocks(offer.id, ids);
+      if (res.data) onChange(res.data);
+    });
+
+  const removeTextBlock = (block: OfferTextBlock) =>
+    run(async () => {
+      const what = block.title.trim() || "ten opis";
+      if (!window.confirm(`Usunąć „${what}" z oferty?`)) return;
+      const res = await offersApi.removeTextBlock(offer.id, block.id);
+      if (res.data) onChange(res.data);
     });
 
   const statusMeta = OFFER_STATUS_META[offer.status];
@@ -290,6 +371,107 @@ export function OfferEditor({
           .join(" · ");
 
   /*
+   * UDOSTĘPNIANIE. Wersja dokumentu przestaje być skutkiem ubocznym uprawnień:
+   * wcześniej jedyny przycisk „Drukuj" dawał wersję z kosztami każdemu, kto ma
+   * klucz `technical/oferty-koszty`, więc handlowiec nie miał JAK wydrukować
+   * papieru dla klienta. Teraz odbiorcę wybiera się jawnie.
+   */
+  const clientReady = hasClientContent(detail);
+  const printClient = () => printOffer(detail, { audience: "client", company });
+
+  const openShare = (e: React.MouseEvent<HTMLButtonElement>) => {
+    if (Date.now() - shareClosedAt.current < 200) return; // ten klik właśnie zamknął menu
+    const r = e.currentTarget.getBoundingClientRect();
+    setShareMenu({ x: r.left, y: r.bottom + 4 });
+  };
+  const closeShare = () => {
+    shareClosedAt.current = Date.now();
+    setShareMenu(null);
+  };
+
+  /** Zapisuje token w dokumencie, żeby menu od razu pokazało „Wyłącz link". */
+  const setToken = (shareToken: string | null) =>
+    onChange({ ...detail, offer: { ...offer, shareToken } });
+
+  const copyShareLink = () =>
+    run(async () => {
+      const res = await offersApi.share(offer.id);
+      const token = res.data?.token ?? null;
+      setToken(token);
+      const url = token ? offerShareUrl(token) : "";
+      try {
+        await navigator.clipboard.writeText(url);
+        window.alert(`Link dla klienta skopiowany do schowka:\n\n${url}`);
+      } catch {
+        // Schowek bywa zablokowany (brak HTTPS, uprawnienia) — wtedy pokazujemy
+        // adres do ręcznego skopiowania zamiast udawać, że się udało.
+        window.prompt("Skopiuj link dla klienta:", url);
+      }
+    });
+
+  const disableShareLink = () =>
+    run(async () => {
+      if (
+        !window.confirm(
+          "Wyłączyć link dla klienta? Adres, który już wysłałeś, przestanie działać."
+        )
+      )
+        return;
+      await offersApi.unshare(offer.id);
+      setToken(null);
+    });
+
+  const shareItems: ContextMenuItem[] = [
+    {
+      key: "preview",
+      label: "Podgląd dla klienta",
+      icon: Eye,
+      hint: "wersja zewnętrzna",
+      disabled: !clientReady,
+      onSelect: () => setPreviewOpen(true),
+    },
+    {
+      key: "print-client",
+      label: "Drukuj zewnętrznie",
+      icon: Printer,
+      hint: "bez kosztów",
+      disabled: !clientReady,
+      onSelect: printClient,
+    },
+    { key: "sep-1", label: null, separator: true },
+    {
+      key: "print-internal",
+      label: "Drukuj wewnętrznie",
+      icon: Lock,
+      // Nawet bez kosztów wersja wewnętrzna różni się od klienckiej: zostają
+      // uwagi, niewybrane warianty i skos przez kartkę.
+      hint: showCosts ? "z kosztami i marżą" : "wersja robocza",
+      onSelect: () => printOffer(detail, { audience: "internal", withCosts: showCosts, company }),
+    },
+    { key: "sep-2", label: null, separator: true },
+    {
+      key: "share-link",
+      label: offer.shareToken ? "Kopiuj link dla klienta" : "Utwórz link dla klienta",
+      icon: Link2,
+      hint: frozen ? undefined : "najpierw wyślij ofertę",
+      // Robocza oferta zmienia się pod ręką — backend też odmówi (409).
+      disabled: !frozen || !clientReady,
+      onSelect: copyShareLink,
+    },
+    ...(offer.shareToken
+      ? [
+          {
+            key: "share-off",
+            label: "Wyłącz link",
+            icon: Ban,
+            destructive: true,
+            onSelect: disableShareLink,
+          } satisfies ContextMenuItem,
+        ]
+      : []),
+  ];
+
+  /*
    * AKCJE DOKUMENTU stoją w górnym pasku, nie w podsumowaniu na dole. Wcześniej
    * „Wyślij" i „Akceptuj" jechały razem z kwotami w lepkim pasku, przez co przy
    * długiej ofercie przycisk kończący sprawę leżał pod pozycjami — a pasek
@@ -300,24 +482,20 @@ export function OfferEditor({
       <Button
         variant="outline"
         size="sm"
-        onClick={() => printOffer(detail, { withCosts: showCosts, company })}
+        onClick={openShare}
+        {...tip("Podgląd, wydruk i link dla klienta — albo wersja wewnętrzna z kosztami")}
       >
-        <Printer className="mr-1 h-4 w-4" /> Drukuj
+        <Share2 className="mr-1 h-4 w-4" /> Udostępnij
       </Button>
       {canEdit && (
         <Button
           variant="outline"
           size="sm"
           disabled={busy}
-          onClick={() =>
-            run(async () => {
-              const res = await offersApi.reprice(offer.id);
-              if (res.data) onChange(res.data);
-              window.alert(res.message ?? "Ceny przeliczone");
-            })
-          }
+          onClick={() => setRepriceOpen(true)}
+          {...tip("Podmienia ceny pozycji na aktualne z kartoteki (magazyn i usługi) — przed zapisem pokażemy, co się zmieni")}
         >
-          <RefreshCw className="mr-1 h-4 w-4" /> Przelicz ceny
+          <RefreshCw className="mr-1 h-4 w-4" /> Aktualizuj
         </Button>
       )}
       {canEdit && (
@@ -836,6 +1014,77 @@ onChange={(e) => {
         </CardContent>
       </Card>
 
+      {/* --- Opisy ---
+          Stoją POD uwagami, bo tak samo drukują się na ofercie: kolejność na
+          ekranie ma odpowiadać kolejności na papierze, inaczej przestawianie
+          bloków strzałkami byłoby zgadywanką. Treść jest KOPIĄ wzorca — poprawka
+          w bibliotece nie zmieni dokumentu, który klient już dostał. */}
+      <Card>
+        <CardContent className="p-3">
+          <Section
+            id="of-texts-sec"
+            icon={AlignLeft}
+            title="Opisy na ofercie"
+            summary={
+              textBlocks.length
+                ? `${textBlocks.length} ${textBlocks.length === 1 ? "blok" : "bloki"}`
+                : "brak"
+            }
+            open={openHead.texts}
+            onToggle={() => setOpenHead((p) => ({ ...p, texts: !p.texts }))}
+          >
+            {textBlocks.length === 0 ? (
+              <p className="text-xs text-muted-foreground">
+                Powtarzalne teksty handlowe — warunki gwarancji, zakres wsparcia,
+                warunki płatności. Wydrukują się na dole oferty, pod uwagami.
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {textBlocks.map((block, i) => (
+                  <TextBlockRow
+                    key={block.id}
+                    block={block}
+                    canEdit={canEdit}
+                    isFirst={i === 0}
+                    isLast={i === textBlocks.length - 1}
+                    onPatch={(patch) => patchTextBlock(block.id, patch)}
+                    onMove={(dir) => moveTextBlock(i, dir)}
+                    onRemove={() => removeTextBlock(block)}
+                  />
+                ))}
+              </div>
+            )}
+
+            {canEdit && (
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={busy}
+                  onClick={() => setAddTextOpen(true)}
+                >
+                  <Plus className="mr-1 h-4 w-4" /> Dodaj opis
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={busy}
+                  onClick={() =>
+                    run(async () => {
+                      const res = await offersApi.addTextBlock(offer.id, {});
+                      if (res.data) onChange(res.data);
+                    })
+                  }
+                  {...tip("Pusty blok do napisania na miejscu — tylko na tej ofercie, bez zapisu do biblioteki")}
+                >
+                  <Plus className="mr-1 h-4 w-4" /> Własny opis
+                </Button>
+              </div>
+            )}
+          </Section>
+        </CardContent>
+      </Card>
+
       {/* --- Lepkie podsumowanie ---
           `sticky`, nie `fixed`: pasek ma trzymać się KOLUMNY TREŚCI. Pozycja
           `fixed inset-x-0` rozciągałaby go na całe okno i wsuwała lewą część
@@ -1032,6 +1281,156 @@ onChange={(e) => {
           }}
         />
       )}
+
+      <AddTextDialog
+        open={addTextOpen}
+        texts={texts}
+        onClose={() => setAddTextOpen(false)}
+        onAdd={async (textIds) => {
+          // Po kolei, nie równolegle: bloki mają stanąć na ofercie w tej samej
+          // kolejności, w której zostały zaznaczone.
+          for (const textId of textIds) {
+            const res = await offersApi.addTextBlock(offer.id, { textId });
+            if (res.data) onChange(res.data);
+          }
+        }}
+      />
+
+      <RepriceDialog
+        open={repriceOpen}
+        offerId={offer.id}
+        showCosts={showCosts}
+        onClose={() => setRepriceOpen(false)}
+        onApply={async (itemIds) => {
+          // Bez `run`: błąd ma zostać w modalu (obok listy, którą użytkownik
+          // właśnie ogląda), a nie wyskoczyć alertem po zamknięciu.
+          const res = await offersApi.reprice(offer.id, itemIds);
+          if (res.data) onChange(res.data);
+        }}
+      />
+
+      <ContextMenu
+        open={shareMenu !== null}
+        x={shareMenu?.x ?? 0}
+        y={shareMenu?.y ?? 0}
+        items={shareItems}
+        onClose={closeShare}
+        header="Udostępnij ofertę"
+        headerIcon={Share2}
+        subheader={offer.number}
+        // Domyślne 18rem ucina „Podgląd dla klienta" i „Drukuj wewnętrznie",
+        // bo etykieta dzieli wiersz z podpowiedzią po prawej.
+        className="max-w-[26rem]"
+      />
+
+      <OfferPreviewDialog
+        open={previewOpen}
+        detail={detail}
+        company={company}
+        onClose={() => setPreviewOpen(false)}
+        onPrint={printClient}
+      />
+    </div>
+  );
+}
+
+/**
+ * Jeden blok opisu na ofercie.
+ *
+ * WŁASNY STAN NA WIERSZ, inicjowany z propsa i przypięty do `key={block.id}` —
+ * z tego samego powodu, dla którego formularz nagłówka synchronizuje się tylko
+ * przy zmianie dokumentu. Każda mutacja gdziekolwiek na ofercie (ilość pozycji,
+ * cena, przestawienie bloku) wraca całym `OfferDetail` i przerysowuje ten wiersz;
+ * gdyby pola czytały wprost z propsa, tekst pisany w tle znikałby w połowie zdania.
+ * Zapis idzie na blur i TYLKO gdy wartość różni się od serwerowej, a nieudany
+ * zapis cofa pole do tego, co naprawdę stoi w bazie.
+ */
+function TextBlockRow({
+  block,
+  canEdit,
+  isFirst,
+  isLast,
+  onPatch,
+  onMove,
+  onRemove,
+}: {
+  block: OfferTextBlock;
+  canEdit: boolean;
+  isFirst: boolean;
+  isLast: boolean;
+  onPatch: (patch: { title?: string; body?: string }) => Promise<void>;
+  onMove: (dir: -1 | 1) => void;
+  onRemove: () => void;
+}) {
+  const [title, setTitle] = useState(block.title);
+  const [body, setBody] = useState(block.body);
+
+  const flush = async (patch: { title?: string; body?: string }) => {
+    try {
+      await onPatch(patch);
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : "Nie udało się zapisać opisu");
+      setTitle(block.title);
+      setBody(block.body);
+    }
+  };
+
+  return (
+    <div className="space-y-1.5 rounded-md border p-2">
+      <div className="flex items-center gap-1.5">
+        <Input
+          className="h-8 text-sm font-medium"
+          placeholder="Nagłówek na wydruku (opcjonalny)"
+          aria-label="Nagłówek opisu"
+          value={title}
+          disabled={!canEdit}
+          onChange={(e) => setTitle(e.target.value)}
+          onBlur={() => title !== block.title && void flush({ title })}
+        />
+        {canEdit && (
+          <div className="flex shrink-0 items-center">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-8 w-8 p-0 text-muted-foreground"
+              disabled={isFirst}
+              onClick={() => onMove(-1)}
+              {...tip("Wyżej — kolejność bloków jest ta sama na wydruku")}
+            >
+              <ChevronUp className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-8 w-8 p-0 text-muted-foreground"
+              disabled={isLast}
+              onClick={() => onMove(1)}
+              {...tip("Niżej")}
+            >
+              <ChevronDown className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-8 w-8 p-0 text-muted-foreground hover:text-destructive"
+              onClick={onRemove}
+              {...tip("Usuń opis z tej oferty — wzorzec w bibliotece zostaje")}
+            >
+              <Trash2 className="h-4 w-4" />
+            </Button>
+          </div>
+        )}
+      </div>
+      <Textarea
+        rows={6}
+        className="font-mono text-sm"
+        aria-label="Treść opisu"
+        placeholder="Treść w prostym markdownie: ## nagłówek, - lista, **pogrubienie**"
+        value={body}
+        disabled={!canEdit}
+        onChange={(e) => setBody(e.target.value)}
+        onBlur={() => body !== block.body && void flush({ body })}
+      />
     </div>
   );
 }

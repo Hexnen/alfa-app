@@ -85,7 +85,13 @@
   /* winieta u dołu panelu — miękkie domknięcie „obudowy przyrządu" (treść zostaje nad nią, z-index:1) */
   #side::after{content:'';position:absolute;left:0;right:0;bottom:0;height:120px;pointer-events:none;z-index:0;background:linear-gradient(transparent,var(--vignette))}
   /* zakładki pionowo („zakładeczki") na lewej krawędzi panelu bocznego — matowa, ciemniejsza szyna (bez graticule) */
-  .side-tabs{display:flex;flex-direction:column;border-right:1px solid var(--line);flex:0 0 auto;background:linear-gradient(180deg,#0c1424,#0b111d);position:relative;z-index:3}   /* > .side-body(1) — menu .opt-menu otwierają się nad treścią panelu, inaczej klik trafia w .side-body */
+  /* Szyna zakładek jest wyższa niż okno (11 zakładek + akcje ≈ 1050 px, do tego nagłówek ~89 px),
+     więc na typowym 1080p bez zoomu nie mieści się w viewporcie. Bez własnego przewijania nadmiar
+     wylewał się poza #side (overflow:visible) na cały dokument: przyciski zapisu/wydruku lądowały
+     pod krawędzią okna, a klik w dolną zakładkę przewijał stronę i „rozjeżdżał" layout. */
+  .side-tabs{display:flex;flex-direction:column;border-right:1px solid var(--line);flex:0 0 auto;background:linear-gradient(180deg,#0c1424,#0b111d);position:relative;z-index:3;min-height:0;overflow-y:auto;overflow-x:hidden;scrollbar-width:none}   /* > .side-body(1) — menu .opt-menu otwierają się nad treścią panelu, inaczej klik trafia w .side-body */
+  .side-tabs::-webkit-scrollbar{width:0;height:0}
+  .side-tabs>button[data-tab],.side-tabs .tabcell{flex:0 0 auto}
   .side-tabs button[data-tab]{position:relative;writing-mode:vertical-rl;text-orientation:mixed;transform:rotate(180deg);background:none;border:none;border-right:3px solid transparent;color:var(--muted);padding:.8rem .3rem;font-family:var(--font-head);font-size:12px;cursor:pointer;white-space:nowrap;letter-spacing:.08em;transition:color var(--t),border-color var(--t),background var(--t)}
   /* hover: krótki znacznik-tick przy prawej krawędzi (kreska w --brand-line) */
   .side-tabs button[data-tab]::before{content:'';position:absolute;right:0;top:50%;height:0;width:3px;background:var(--brand-line);transform:translateY(-50%);transition:height var(--t)}
@@ -93,8 +99,8 @@
   .side-tabs button[data-tab]:hover::before{height:16px}
   .side-tabs button[data-tab].active{color:var(--brand);border-right-color:var(--brand);background:linear-gradient(90deg,var(--brand-soft),transparent);box-shadow:inset 3px 0 0 var(--brand-line),inset 0 0 22px -8px var(--brand)}
   .side-tabs button[data-tab].active::before{height:0}
-  .side-actions{margin-top:auto;display:flex;flex-direction:column;gap:.2rem;padding:.4rem .25rem;border-top:1px solid var(--line)}
-  .side-act{display:flex;align-items:center;justify-content:center;width:30px;height:30px;margin:0 auto;background:none;border:none;color:var(--muted);font-size:18px;line-height:1;cursor:pointer;padding:0;border-radius:6px;transition:color var(--t),background var(--t),transform .1s}
+  .side-actions{margin-top:auto;display:flex;flex-direction:column;gap:.2rem;padding:.4rem .25rem;border-top:1px solid var(--line);position:sticky;bottom:0;flex:0 0 auto;background:linear-gradient(180deg,#0c1424,#0b111d)}   /* zapis/wczytanie/wydruk zawsze pod ręką, nawet gdy zakładki są przewinięte */
+  .side-act{display:flex;align-items:center;justify-content:center;width:30px;height:30px;margin:0 auto;background:none;border:none;color:var(--muted);font-size:18px;line-height:1;cursor:pointer;padding:0;border-radius:6px;flex:0 0 auto;transition:color var(--t),background var(--t),transform .1s}
   .side-act:hover{color:var(--brand);background:var(--brand-soft)}
   .side-act:active{transform:scale(.9)}
   .side-status{cursor:default}
@@ -271,6 +277,55 @@
   .zdrag{cursor:grab;color:var(--muted);user-select:none;margin-right:.3rem;font-size:13px}
   .trow.dragging{opacity:.45}
   .trow.drop-into td{box-shadow:inset 0 2px 0 0 var(--accent)}
+  /* ── grupy kamer (zakładka Lista): nagłówek grupy = wiersz tabeli, kamery grupy pod nim ── */
+  #camTable tr.grp-row>td{padding:.42rem .26rem .3rem;border-bottom:1px solid var(--line);background:var(--brand-soft)}
+  #camTable tr.hid-grp{display:none}
+  .grp-head{display:flex;align-items:center;gap:.35rem}
+  .grp-caret{cursor:pointer;color:var(--muted);display:inline-flex;transition:transform .15s,color var(--t)}
+  .grp-caret:hover{color:var(--txt)}
+  .grp-row.collapsed .grp-caret{transform:rotate(-90deg)}
+  .grp-color{width:19px;height:19px;flex:0 0 auto;padding:0;border:1px solid var(--line);border-radius:4px;background:none;cursor:pointer}
+  .grp-color::-webkit-color-swatch-wrapper{padding:1px}
+  .grp-color::-webkit-color-swatch{border:none;border-radius:3px}
+  .grp-name{font-weight:700;font-size:12px}
+  .grp-row.grp-none .grp-name{color:var(--muted);font-weight:600;background:none;border-color:transparent}
+  .grp-row.drop-into>td{box-shadow:inset 0 0 0 2px var(--accent)}
+  .grp-row.dragging>td{opacity:.45}
+  .cdrag{cursor:grab;color:var(--muted);user-select:none;margin-right:.2rem;opacity:.45;transition:opacity var(--t)}
+  .trow:hover .cdrag,.trow.sel .cdrag{opacity:1}
+  /* ── zaznaczanie wielu kamer (Shift / Ctrl + klik) ── */
+  #camTable tr.trow{user-select:none}                      /* Shift+klik ma zaznaczać wiersze, nie tekst */
+  #camTable tr.msel td{background:rgba(96,165,250,.16)}
+  #camTable tr.msel td:first-child{box-shadow:inset 3px 0 0 #60a5fa}
+  #camTable tr.msel .cdrag{opacity:1}
+  #camSelBar{display:flex;align-items:center;gap:.35rem;margin-bottom:.5rem;padding:.3rem .4rem;border:1px solid var(--brand-line);border-radius:var(--r);background:var(--brand-soft)}
+  #camSelBar .csb-label{flex:1 1 auto;min-width:0;font-size:11.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  #camSelBar .btn{flex:0 0 auto;padding:.22rem .34rem;font-size:11.5px;line-height:1}
+  /* ── menu kontekstowe listy kamer (PPM) — wygląd .opt-menu, ale zakotwiczone w kursorze ── */
+  .ctx-menu{position:fixed;top:0;left:0;z-index:2400;min-width:196px}
+  .ctx-menu button{display:flex;align-items:center;gap:.45rem;position:relative}
+  .ctx-menu .ctx-title{font-family:var(--font-head);font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.07em;color:var(--kicker);padding:.3rem .6rem .35rem}
+  .ctx-menu .chev{margin-left:auto;opacity:.55;transform:rotate(-90deg)}
+  .ctx-sub{min-width:172px;max-height:62vh;overflow:auto}
+  .ctx-swatches{display:grid;grid-template-columns:repeat(5,1fr);gap:.3rem;padding:.4rem .5rem}
+  .ctx-sw{width:22px;height:22px;padding:0;border:1px solid var(--line);border-radius:5px;cursor:pointer;transition:transform .1s}
+  .ctx-sw:hover{transform:scale(1.14)}
+  .ctx-menu .grp-dot{width:10px;height:10px;border-radius:2px;flex:0 0 auto}
+  .ctx-color{position:absolute;opacity:0;width:1px;height:1px;pointer-events:none}
+  /* ── zrzuty do wydruku ── */
+  /* kafle bez animacji rozjaśniania: bez tego zrzut łapie je w połowie przejścia = „jaśniejsze placki" */
+  body.capturing .leaflet-tile{opacity:1!important;transition:none!important}
+  /* strona grupy: pinezki kamer nad wszystkim — nad symbolami punktów i podpisami (tooltipPane=650) */
+  .leaflet-container.cams-top .leaflet-marker-pane{z-index:680}
+  /* nakładka postępu — zasłania przestawianą mapę, użytkownik widzi tylko pasek */
+  #printProg{position:fixed;inset:0;z-index:4000;display:none;flex-direction:column;align-items:center;justify-content:center;gap:.85rem;
+    background:rgba(8,13,24,.965);backdrop-filter:blur(3px);color:var(--txt);text-align:center;padding:1rem}
+  #printProg.on{display:flex}
+  #printProg .pp-title{font-family:var(--font-head);font-size:15px;font-weight:700;letter-spacing:.02em}
+  #printProg .pp-step{font-size:12px;color:var(--muted);min-height:1.2em}
+  #printProg .pp-bar{width:min(420px,72vw);height:6px;border-radius:999px;background:var(--panel2);border:1px solid var(--line);overflow:hidden}
+  #printProg .pp-fill{height:100%;width:0;border-radius:999px;background:linear-gradient(90deg,var(--brand),var(--accent));transition:width .25s ease}
+  #printProg .pp-hint{font-size:11px;color:var(--muted);opacity:.8}
   .plan-row{background:var(--card);border:1px solid var(--card-line);border-radius:var(--r);padding:.6rem;margin-bottom:.6rem;transition:border-color var(--t),transform .12s,box-shadow var(--t)}
   .plan-row:hover{transform:translateY(-1px);border-color:var(--brand-line);box-shadow:var(--sh-1)}
   .plan-row.sel{border-color:var(--brand);box-shadow:0 0 0 1px var(--brand),0 6px 18px -8px rgba(0,0,0,.6)}
@@ -495,7 +550,6 @@
   /* przełącznik podpisów na mapie (nazwy kamer/punktów/obszarów/kabli) */
   #map.hide-labels .leaflet-tooltip.cam-label{display:none}
   .print-only{display:none}
-  #printDoc{display:none}
 
   @media (prefers-reduced-motion:reduce){*{animation-duration:.001ms!important;animation-delay:0ms!important;transition-duration:.001ms!important}}
 
@@ -546,7 +600,7 @@
   .zr-val{min-width:46px;text-align:center;font-family:var(--font-mono);font-size:10.5px;line-height:1.2;color:#cbd5e1;background:rgba(15,23,42,.92);border:1px solid var(--line);border-radius:8px;padding:.22rem .3rem;box-shadow:0 8px 24px -12px rgba(0,0,0,.6);user-select:none;white-space:nowrap}
 
   @media print{
-    html{background:#fff!important}   /* kanwa poniżej #printDoc maluje się tłem html — bez tego ciemny pas na ostatniej stronie */
+    html{background:#fff!important}   /* ciemne tło aplikacji nie może przebić na kartkę */
     .no-print,header .toolbar,.side-tabs,.legend,#tab-cam,#tab-history,#tab-snapshots,.leaflet-control-zoom,.plan-handle,.zone-vertex,.zone-subtabs,.zdrag,.pane-head{display:none!important}
     .card,.sec-head,details.opt-details,.hint{background:none!important;border:none!important;box-shadow:none!important;padding-left:0!important;color:#333!important}
     /* wygaś dekoracje „instrumentu" w druku — wydruk pozostaje czysty czarno-biały */
@@ -573,6 +627,9 @@
     .field{margin-bottom:.2rem}
     .empty,.del-x,.hint{display:none!important}
     .tabpane::before{display:block;font-weight:700;font-size:14px;color:#000;margin-bottom:6px;border-bottom:2px solid #000;padding-bottom:2px}
+    #camTable tr.hid-grp{display:table-row!important}   /* w druku grupy są zawsze rozwinięte */
+    .grp-caret,.cdrag,.grp-color{display:none!important}
+    #camTable tr.grp-row>td{background:none!important;font-weight:700;border-bottom:1px solid #999!important}
     #tab-list::before{content:"Kamery"}
     #tab-punkty::before{content:"Punkty (szlabany / budki / NVR)"}
     #tab-zones::before{content:"Obszary do wyceny"}
@@ -581,34 +638,7 @@
     #tab-info .field,#tab-info .hint{display:none}
     #printNotes{display:block;white-space:pre-wrap;font-family:inherit;font-size:12px;line-height:1.5;color:#000;margin:0}
     #objInfo{display:none!important}   /* surową textareę zastępuje #printNotes — inaczej drukuje się ciemne pudełko z uciętą treścią */
-    /* nasz wydruk per-obszar (mapki + dane) — aktywny tylko przy body.printing-doc */
-    body.printing-doc #app{display:none!important}
-    body.printing-doc #printDoc{display:block!important}
-    /* strony mapek: pozioma kartka, mapa wypełnia całą powierzchnię (obraz już wykadrowany do proporcji kartki) */
-    @page{size:A4 landscape;margin:6mm}
-    .print-page{page-break-after:always;break-after:page}
-    .print-page:last-child{page-break-after:auto}
-    .print-map-page{position:relative;width:100%;height:100vh;overflow:hidden;background:#fff}
-    .print-map-page img{position:absolute;inset:0;width:100%;height:100%;object-fit:fill;display:block}
-    /* mały „chip" z podpisem w rogu — zamiast dużej belki nagłówka */
-    .print-cap{position:absolute;left:6px;bottom:6px;display:flex;align-items:center;gap:6px;
-      background:rgba(255,255,255,.88);border:1px solid #000;border-radius:6px;padding:3px 8px;
-      font-weight:700;font-size:11px;color:#000;max-width:70%}
-    .print-cap img{position:static;width:auto;height:18px;object-fit:contain;inset:auto}
-    /* strona danych (mode 'full') zachowuje klasyczny nagłówek */
-    .print-head{display:flex;align-items:center;gap:10px;border-bottom:2px solid #000;padding-bottom:6px;margin-bottom:10px;font-weight:700;color:#000}
-    .print-head img{height:34px}
-    #printDoc,#printDoc *{color:#000!important}
-    #printDoc,#printDoc .print-page,#printDoc .print-sec,#printDoc .print-head,#printDoc h2,#printDoc pre{background:#fff!important}
-    #printDoc .print-cap,#printDoc .swatch,#printDoc .pt-dot{print-color-adjust:exact;-webkit-print-color-adjust:exact}
-    #printDoc h2{font-size:14px;margin:0 0 6px;border-bottom:2px solid #000;padding-bottom:2px;page-break-after:avoid}
-    /* duże tabele mogą się łamać między stronami — inaczej pierwsza strona danych wychodzi pusta */
-    #printDoc .print-sec{page-break-inside:auto;margin-bottom:14px}
-    #printDoc table{width:100%;border-collapse:collapse;font-size:12px;display:table!important}
-    #printDoc thead{display:table-header-group}
-    #printDoc tr{page-break-inside:avoid}
-    #printDoc th,#printDoc td{border:1px solid #000!important;background:#fff!important;padding:.25rem .3rem;text-align:left}
-    #printDoc pre{white-space:pre-wrap;font-family:inherit;font-size:12px;line-height:1.5;margin:0}
+    .grp-row .count-chip{display:none!important}   /* licznik kamer w grupie to element ekranu, nie wydruku */
   }
 </style>
 <!-- Ikony: Lucide (lucide.dev) — ISC License, Copyright (c) 2020 Lucide Contributors. Fork Feather Icons (c) 2013-2023 Cole Bemis (MIT). Animacje: autorski silnik CSS/SMIL. -->
@@ -996,13 +1026,17 @@ select.dd-native{position:absolute!important;width:1px!important;height:1px!impo
           </div>
           <span class="side-act side-status" id="saveStatus" title="Stan zapisu"></span>
           <div class="side-sep"></div>
-          <button class="side-act" id="btnSave" title="Zapisz"><span class="ico" data-anim="save"><svg viewBox="0 0 24 24"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg></span></button>
-          <button class="side-act" id="btnLoad" title="Wczytaj"><span class="ico" data-anim="folderopen"><svg viewBox="0 0 24 24"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/></svg></span></button>
+          <!-- jedno menu na wszystkie operacje plikowe (zapis/wczytanie/wydruk) — szyna musi się zmieścić w niskich viewportach -->
           <div class="opt-wrap">
-            <button class="side-act" id="btnPrint" title="Drukuj / PDF"><span class="ico" data-anim="print"><svg viewBox="0 0 24 24"><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><path d="M6 9V3a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v6"/><rect x="6" y="14" width="12" height="8" rx="1"/></svg></span></button>
-            <div class="opt-menu" id="printMenu">
-              <button id="btnPrintMaps"><span class="ico"><svg viewBox="0 0 24 24"><path d="M13 13.74a2 2 0 0 1-2 0L2.5 8.87a1 1 0 0 1 0-1.74L11 2.26a2 2 0 0 1 2 0l8.5 4.87a1 1 0 0 1 0 1.74z"/><path d="m20 14.285 1.5.845a1 1 0 0 1 0 1.74L13 21.74a2 2 0 0 1-2 0l-8.5-4.87a1 1 0 0 1 0-1.74l1.5-.845"/></svg></span> Sam plan (mapki)</button>
-              <button id="btnPrintFull"><span class="ico"><svg viewBox="0 0 24 24"><path d="M6 2h8l4 4v16H6z"/><path d="M14 2v4h4"/><path d="M9 13h6M9 17h6"/></svg></span> Wersja opisowa</button>
+            <button class="side-act" id="btnFile" title="Plik: zapis, wczytanie, wydruk"><span class="ico" data-anim="folderopen"><svg viewBox="0 0 24 24"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2z"/></svg></span></button>
+            <div class="opt-menu" id="fileMenu">
+              <button id="btnSave"><span class="ico" data-anim="save"><svg viewBox="0 0 24 24"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg></span> Zapisz projekt (JSON)</button>
+              <button id="btnLoad"><span class="ico" data-anim="folderopen"><svg viewBox="0 0 24 24"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/></svg></span> Wczytaj projekt (JSON)</button>
+              <div class="opt-sep"></div>
+              <button id="btnPrintMaps" title="Same plansze map — PDF otwiera się od razu w oknie druku"><span class="ico"><svg viewBox="0 0 24 24"><path d="M13 13.74a2 2 0 0 1-2 0L2.5 8.87a1 1 0 0 1 0-1.74L11 2.26a2 2 0 0 1 2 0l8.5 4.87a1 1 0 0 1 0 1.74z"/><path d="m20 14.285 1.5.845a1 1 0 0 1 0 1.74L13 21.74a2 2 0 0 1-2 0l-8.5-4.87a1 1 0 0 1 0-1.74l1.5-.845"/></svg></span> Drukuj plan (mapki)</button>
+              <button id="btnPrintFull" title="Plansze, strony grup i dane projektu — PDF otwiera się od razu w oknie druku"><span class="ico"><svg viewBox="0 0 24 24"><path d="M6 2h8l4 4v16H6z"/><path d="M14 2v4h4"/><path d="M9 13h6M9 17h6"/></svg></span> Drukuj wersję opisową</button>
+              <div class="opt-sep"></div>
+              <button id="btnPdf" title="Gotowy plik PDF z zakładkami — spis treści otwiera się w panelu bocznym czytnika"><span class="ico"><svg viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z"/><path d="M15 2v5h5"/><path d="M9 13h2a1.5 1.5 0 0 1 0 3H9zm0 0v5"/><path d="M14 18v-5h1.5a2.5 2.5 0 0 1 0 5z"/></svg></span> Pobierz PDF (spis treści)</button>
             </div>
           </div>
         </div>
@@ -1046,6 +1080,7 @@ select.dd-native{position:absolute!important;width:1px!important;height:1px!impo
                     <option value="dome">Kopułkowa (kierunkowa)</option>
                     <option value="ptz">PTZ (obrotowa)</option>
                     <option value="pano">Panoramiczna 360°</option>
+                    <option value="lpr">LPR (tablice rejestracyjne)</option>
                   </select>
                 </div>
                 <div class="field" style="flex:0 0 60px">
@@ -1182,8 +1217,9 @@ select.dd-native{position:absolute!important;width:1px!important;height:1px!impo
 
         <!-- LISTA -->
         <div class="tabpane" id="tab-list">
-          <div class="pane-head no-print"><h3>Kamery</h3><span class="count-chip" id="camCount">0</span></div>
+          <div class="pane-head no-print"><span style="display:flex;align-items:center;gap:.5rem"><h3>Kamery</h3><span class="count-chip" id="camCount">0</span></span><button class="btn" id="btnNewCamGroup" title="Utwórz grupę kamer — potem przeciągnij do niej kamery za uchwyt"><span class="ico" data-anim="plus"><svg viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M12 5v14"/></svg></span> Grupa</button></div>
           <div id="listEmpty" class="empty"><span class="empty-ico"><span class="ico ic-drawable" style="--dl:130"><svg viewBox="0 0 24 24"><path d="M16.75 12h3.632a1 1 0 0 1 .894 1.447l-2.034 4.069a1 1 0 0 1-1.708.134l-2.124-2.97"/><path d="M17.106 9.053a1 1 0 0 1 .447 1.341l-3.106 6.211a1 1 0 0 1-1.342.447L3.61 12.3a2.92 2.92 0 0 1-1.3-3.91L3.69 5.6a2.92 2.92 0 0 1 3.92-1.3z"/><path d="M2 19h3.76a2 2 0 0 0 1.8-1.1L9 15"/><path d="M2 21v-4"/><path d="M7 9h.01"/></svg></span></span><span class="empty-title">Brak kamer</span><span class="empty-cta">Naciśnij <b>K</b> lub <b><span class="ico"><svg viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M12 5v14"/></svg></span> Kamera</b> i wskaż miejsce na mapie.</span></div>
+          <div id="camSelBar" class="no-print" style="display:none"><span class="count-chip" id="camSelCount">0</span><span class="csb-label" id="camSelLabel">zaznaczonych kamer</span><input type="color" id="camSelColor" class="grp-color" title="Wspólny kolor zaznaczonych kamer"><button class="btn ghost-danger" id="camSelDel" title="Usuń zaznaczone kamery"><span class="ico" data-anim="lidshake"><svg viewBox="0 0 24 24"><path d="M10 11v6"/><path d="M14 11v6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></span></button><button class="btn" id="camSelClear" title="Wyczyść zaznaczenie (Esc)"><span class="ico"><svg viewBox="0 0 24 24"><path d="m18 6-12 12"/><path d="m6 6 12 12"/></svg></span></button></div>
           <table id="camTable" style="display:none">
             <thead><tr><th>#</th><th>Nazwa</th><th class="type-cell">Typ</th><th class="num">FOV</th><th class="num">Zasięg</th><th></th></tr></thead>
             <tbody></tbody>
@@ -1197,7 +1233,8 @@ select.dd-native{position:absolute!important;width:1px!important;height:1px!impo
             </label>
             <button class="btn" id="btnRenumber" style="width:100%;margin-top:.4rem"><span class="ico" data-anim="renumber"><svg viewBox="0 0 24 24"><path d="M11 5h10"/><path d="M11 12h10"/><path d="M11 19h10"/><path d="M4 4h1v5"/><path d="M4 9h2"/><path d="M6.5 20H3.4c0-1 2.6-1.925 2.6-3.5a1.5 1.5 0 0 0-2.6-1.02"/></svg></span> Przenumeruj po kolei (1…N)</button>
           </div>
-          <p class="hint" style="margin-top:.8rem">Kliknij wiersz, aby edytować i podświetlić na mapie. Nowa kamera dostaje najniższy wolny numer.</p>
+          <p class="hint" style="margin-top:.8rem">Kliknij wiersz, aby edytować i podświetlić na mapie. <b>Shift+klik</b> zaznacza zakres, <b>Ctrl/⌘+klik</b> dokłada pojedyncze — zaznaczanie nie przełącza na kamerę. Nowa kamera dostaje najniższy wolny numer.</p>
+          <details class="opt-details"><summary>Grupy i zaznaczanie</summary><p class="hint" style="border:none;padding-left:0">Kliknij <b>Grupa</b>, aby dodać nagłówek — nazwę wpisujesz wprost w wierszu. Przeciągnij kamerę za uchwyt <b>⠿</b> na nagłówek grupy (dołącza na koniec) albo na inny wiersz (wstawia przed nim); upuszczenie na <b>Bez grupy</b> wypina kamerę. Uchwyt przy nazwie grupy zmienia kolejność grup. <b>Kolor</b> obok nazwy maluje wszystkie kamery w grupie — kamera dołączająca do grupy przejmuje jej kolor. Strzałka zwija grupę (w druku grupy są zawsze rozwinięte). Usunięcie grupy <b>nie usuwa kamer</b> — wracają do „Bez grupy”.<br><b>Zaznaczanie wielu:</b> <b>Shift+klik</b> = zakres, <b>Ctrl/⌘+klik</b> = dokładanie pojedynczych, klik w licznik sekcji = cała sekcja, <b>Esc</b> czyści. Zaznaczenie nie przełącza na kamerę; piny zaznaczonych świecą na mapie, a przeciągnięcie jednego wiersza ciągnie całą paczkę. <b>PPM</b> na wierszu (na kamerze lub na całym zaznaczeniu): <b>Przenieś do grupy</b>, <b>Zmień kolor kamer</b> i <b>Zmień typ kamer</b> (tubowa / kopułka / PTZ / 360° — panorama sama ustawia pełne 360°, a powrót do innego typu wraca do 90°).</p></details>
         </div>
 
         <!-- PUNKTY -->
@@ -1317,6 +1354,7 @@ select.dd-native{position:absolute!important;width:1px!important;height:1px!impo
                   <option value="dome">Kopułkowa (kierunkowa)</option>
                   <option value="ptz">PTZ (obrotowa)</option>
                   <option value="pano">Panoramiczna 360°</option>
+                  <option value="lpr">LPR (tablice rejestracyjne)</option>
                 </select>
               </div>
               <div class="field"><label>Oznaczenie / opis</label><input type="text" id="tResolution" placeholder="np. 4MP"></div>
@@ -1434,6 +1472,12 @@ const DEFAULT_CENTER = [52.2297, 21.0122]; // Warszawa — nowy projekt bez zapi
 const DEFAULT_ZOOM = 12;
 const STORAGE_KEY = "monitoring_project_" + (PROJECT_ID || "local") + "_v1";
 let PROJECT_NAME = "";
+let AUTHOR_NAME = "";           // „wykonawca projektu" w stopce wydruku — displayName zalogowanego użytkownika
+const COMPANY_NAME = "Alfa Group sp. z o.o.";
+if (PROJECT_ID) fetch('/api/auth/me',{cache:'no-store'})
+  .then(r=>r.ok?r.json():null)
+  .then(d=>{ AUTHOR_NAME=(d&&d.user&&d.user.displayName||'').trim(); })
+  .catch(()=>{});
 const PALETTE = ["#22d3ee","#f59e0b","#34d399","#a78bfa","#f472b6","#fb7185","#60a5fa","#facc15","#4ade80","#f97316"];
 const CAM_COLOR = "#22d3ee"; // jednolity kolor wszystkich kamer (można zmienić na pojedynczej)
 
@@ -1539,6 +1583,7 @@ const POINT_TYPES = {
 /* === FUNDAMENT KONTROLEK — helpery === */
 const ICON={
  bullet:'<svg viewBox="0 0 24 24"><rect x="3" y="9" width="13" height="6" rx="3"/><path d="M16 12h3"/><path d="M9.5 15v3"/></svg>',
+ lpr:'<svg viewBox="0 0 24 24"><rect x="2" y="8" width="12" height="8" rx="1.5"/><path d="M5 11h1"/><path d="M8 11h1"/><path d="M11 11h1"/><path d="M5 13.5h6"/><circle cx="18.5" cy="12" r="2.5"/></svg>',
  dome:'<svg viewBox="0 0 24 24"><path d="M4 15a8 8 0 0 1 16 0"/><line x1="3" y1="15" x2="21" y2="15"/><circle cx="12" cy="13" r="1.6"/></svg>',
  ptz:'<svg viewBox="0 0 24 24"><circle cx="12" cy="13" r="4"/><path d="M12 5a8 8 0 0 1 7 4"/><path d="M19 5v4h-4"/></svg>',
  pano:'<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="1.6"/><path d="M12 5v3M12 16v3M5 12h3M16 12h3"/></svg>',
@@ -1560,6 +1605,8 @@ const ICON={
  moon:'<svg viewBox="0 0 24 24"><path d="M20 14a8 8 0 1 1-9-11 6 6 0 0 0 9 11z"/></svg>',
  scale:'<svg viewBox="0 0 24 24"><path d="M12 4v16M7 20h10M6 4h12"/><path d="M6 4l-3 7h6zM18 4l-3 7h6z"/></svg>',
  chartDown:'<svg viewBox="0 0 24 24"><path d="M4 5v14h16"/><polyline points="7,9 11,13 14,10 19,15"/></svg>',
+ chevDown:'<svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>',
+ palette:'<svg viewBox="0 0 24 24"><circle cx="13.5" cy="6.5" r=".8" fill="currentColor" stroke="none"/><circle cx="17.5" cy="10.5" r=".8" fill="currentColor" stroke="none"/><circle cx="6.5" cy="12.5" r=".8" fill="currentColor" stroke="none"/><circle cx="8.5" cy="7.5" r=".8" fill="currentColor" stroke="none"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2"/></svg>',
  folder:'<svg viewBox="0 0 24 24"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/></svg>',
  printer:'<svg viewBox="0 0 24 24"><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><path d="M6 9V3a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v6"/><rect x="6" y="14" width="12" height="8" rx="1"/></svg>',
  gear:'<svg viewBox="0 0 24 24"><path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/><circle cx="12" cy="12" r="3"/></svg>',
@@ -1589,7 +1636,7 @@ const ICON={
  lockOpen:'<svg viewBox="0 0 24 24"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>'
 };
 function ico(k,cls){return '<span class="ico '+(cls||'')+'">'+(ICON[k]||'')+'</span>';}
-const TYPE_META={bullet:{label:'Tubowa',icon:'bullet'},dome:{label:'Kopułka',icon:'dome'},ptz:{label:'PTZ',icon:'ptz'},pano:{label:'360°',icon:'pano'}};
+const TYPE_META={bullet:{label:'Tubowa',icon:'bullet'},dome:{label:'Kopułka',icon:'dome'},ptz:{label:'PTZ',icon:'ptz'},pano:{label:'360°',icon:'pano'},lpr:{label:'LPR',icon:'lpr'}};
 /* Owija input[type=number] w kompaktowy stepper (−/+), sufiks jednostki, kółko myszy, Enter=zatwierdź/Esc=przywróć.
    Zachowuje input#id; przyciski dispatchują 'input'+'change' (1:1 z listenerami). Respektuje disabled/readOnly. */
 function enhanceNumber(input,opts){
@@ -2134,11 +2181,14 @@ function updateSelHandles(){ if(!selected)return; if(isClustered(selected)) clea
 
 /* ============ WYBÓR / FORMULARZ ============ */
 // Podświetl płatek wybranej kamery na żywo (pełny kolor zamiast białego obrysu) — bez przebudowy ikon.
+/* Zaznaczenie wielu kamer na liście (Shift/Ctrl+klik). Deklaracja tutaj, bo markSel() poniżej
+   podświetla piny także dla zaznaczenia hurtowego — obsługa jest w sekcji LISTA. */
+let camSel=new Set(), camAnchor=null;
 function markSel(){
   cameras.forEach(c=>{
     const pin=c.marker&&c.marker._icon&&c.marker._icon.querySelector('.cam-pin');
     if(!pin) return;
-    const on=c===selected;
+    const on=c===selected||camSel.has(c.id);
     pin.classList.toggle('sel',on);
     pin.style.borderColor=on?c.color:'';
     pin.style.color=on?c.color:'';
@@ -2279,6 +2329,7 @@ document.querySelector('#rangeField .slider-row').appendChild(fRangeStep.wrap);
 el('btnDupCam').onclick=()=>{ if(!selected)return; const s=selected; camSeq++; const num=nextCamNum(); const c={...s, id:'c'+Date.now()+camSeq, num, name:'K'+num, lat:s.lat+0.0002, lng:s.lng+0.0002, marker:undefined, cover:undefined, coverVis:undefined, perimeterZone:undefined}; clampFov(c); cameras.push(c); drawCam(c); selectCam(c); refreshList(); restackCameras(); save(); try{fName.focus();fName.select();}catch(_){ } };
 el('btnDelCam').onclick=()=>{if(selected)uiConfirm('Usunąć kamerę: '+selected.name+'?',{danger:true}).then(ok=>{if(ok&&selected)delCam(selected);});};
 el('btnRenumber').onclick=renumberCameras;
+el('btnNewCamGroup').onclick=addCamGroup;
 el('fAutoRenumber').onchange=()=>{autoRenumber=el('fAutoRenumber').checked;if(selected)syncForm(selected);if(autoRenumber)renumberCameras();else save();};
 function delCam(cam){
   map.removeLayer(cam.marker); if(cam.cover)map.removeLayer(cam.cover); if(cam.coverVis)map.removeLayer(cam.coverVis);
@@ -2297,25 +2348,380 @@ function renumberCameras(){          // uporządkuj numery kamer 1…N wg kolejn
   });
   refreshList(); if(selected)syncForm(selected); save();
 }
+/* ====== GRUPY KAMER (zakładka Lista) ======
+   Grupa to etykieta porządkowa: nazwa, kolor (nadawany wszystkim kamerom w grupie) i stan
+   zwinięcia. Kolejność widziana na liście = kolejność w tablicy `cameras` — po każdej zmianie
+   przynależności sortujemy tablicę wg kolejności grup („Bez grupy” na końcu), dzięki czemu
+   „Przenumeruj 1…N”, wydruk i zestawienia idą dokładnie w kolejności z listy. */
+let camGroups=[], camGroupSeq=0, camNoneCollapsed=false;
+let dragCams=[], dragGrp=null;   // przeciągana paczka kamer (1 lub całe zaznaczenie)
+function camGroupById(id){return camGroups.find(g=>g.id===id)||null;}
+// kamery sekcji; gid=null => „Bez grupy” (łapie też sieroty po skasowanej grupie)
+function groupCams(gid){
+  if(gid==null){const known=new Set(camGroups.map(g=>g.id));return cameras.filter(c=>!c.group||!known.has(c.group));}
+  return cameras.filter(c=>c.group===gid);
+}
+function sortCamerasByGroup(){
+  const ord=new Map(camGroups.map((g,i)=>[g.id,i]));
+  const rank=c=>ord.has(c.group)?ord.get(c.group):camGroups.length;   // bez grupy / sierota => na koniec
+  cameras=cameras.map((c,i)=>({c,i})).sort((a,b)=>rank(a.c)-rank(b.c)||a.i-b.i).map(x=>x.c);
+}
+function afterCamGroupChange(){
+  sortCamerasByGroup(); restackCameras();
+  if(autoRenumber)renumberCameras(); else {refreshList(); save();}   // renumberCameras robi refreshList()+save()
+  if(selected)syncForm(selected);
+}
+function addCamGroup(){
+  camGroupSeq++;
+  const g={id:'g'+Date.now()+camGroupSeq,name:'Grupa '+camGroupSeq,color:PALETTE[(camGroupSeq-1)%PALETTE.length],collapsed:false};
+  camGroups.push(g); sortCamerasByGroup(); refreshList(); save();
+  const inp=document.querySelector('#camTable tr[data-grp="'+g.id+'"] .grp-name');
+  if(inp){inp.focus();inp.select();}
+}
+function delCamGroup(g){
+  const n=groupCams(g.id).length;
+  const doDel=()=>{cameras.forEach(c=>{if(c.group===g.id)delete c.group;});camGroups=camGroups.filter(x=>x!==g);afterCamGroupChange();};
+  if(n)uiConfirm('Usunąć grupę „'+g.name+'”? Kamery ('+n+') zostają na liście i wracają do „Bez grupy”.').then(ok=>{if(ok)doDel();});
+  else doDel();
+}
+// kamera dołączająca do grupy przejmuje jej kolor — kolor grupy to kolor jej kamer
+function setCamGroup(cam,gid){
+  if(gid)cam.group=gid; else delete cam.group;
+  const g=camGroupById(cam.group);
+  if(g&&g.color&&cam.color!==g.color){cam.color=g.color;drawCam(cam);}
+}
+function moveCamsBefore(list,dst){        // upuszczenie na wiersz kamery: ta sama sekcja, wstaw PRZED nią
+  if(!list.length||list.includes(dst))return;
+  const gid=(dst.group&&camGroupById(dst.group))?dst.group:null;
+  list.forEach(c=>setCamGroup(c,gid));
+  cameras=cameras.filter(c=>!list.includes(c));
+  const i=cameras.indexOf(dst);
+  cameras.splice(i<0?cameras.length:i,0,...list);
+  afterCamGroupChange();
+}
+function moveCamsToGroup(list,gid){       // upuszczenie na nagłówek sekcji: na koniec tej sekcji
+  if(!list.length)return;
+  list.forEach(c=>setCamGroup(c,gid));
+  cameras=cameras.filter(c=>!list.includes(c));
+  const sect=cameras.filter(c=>gid==null?(!c.group||!camGroupById(c.group)):c.group===gid);
+  const last=sect[sect.length-1];
+  cameras.splice(last?cameras.indexOf(last)+1:cameras.length,0,...list);
+  afterCamGroupChange();
+}
+
+/* ====== ZAZNACZANIE WIELU KAMER ======
+   Shift+klik = zakres od ostatnio klikniętego wiersza, Ctrl/⌘+klik = dokładanie pojedynczych.
+   Zaznaczanie NIE przełącza na zakładkę „Kamera" ani nie przesuwa mapy — służy do operacji
+   hurtowych: przeciągnięcia całej paczki do grupy, wspólnego koloru, usunięcia zaznaczonych.
+   Piny zaznaczonych kamer świecą na mapie (markSel). */
+function camSelList(){return cameras.filter(c=>camSel.has(c.id));}
+function clearCamSel(){if(!camSel.size)return;camSel.clear();camAnchor=null;markSel();refreshList();}
+function toggleCamSel(c){camSel.has(c.id)?camSel.delete(c.id):camSel.add(c.id);camAnchor=c;markSel();refreshList();}
+function rangeCamSel(c){
+  const rows=[...document.querySelectorAll('#camTable tr.trow:not(.hid-grp)')].map(r=>r.dataset.cam);  // zakres po WIDOCZNYCH wierszach (zwinięte grupy pomijamy)
+  const b=rows.indexOf(c.id); if(b<0)return;
+  const a=camAnchor?rows.indexOf(camAnchor.id):-1;
+  if(a<0){camSel.add(c.id);camAnchor=c;}
+  else{const lo=Math.min(a,b),hi=Math.max(a,b);for(let i=lo;i<=hi;i++)camSel.add(rows[i]);}
+  markSel(); refreshList();
+}
+function selectSectionCams(gid){          // klik w licznik sekcji: zaznacz / odznacz całą sekcję
+  const list=groupCams(gid);
+  const all=list.length&&list.every(c=>camSel.has(c.id));
+  list.forEach(c=>all?camSel.delete(c.id):camSel.add(c.id));
+  camAnchor=list[list.length-1]||null; markSel(); refreshList();
+}
+const plKamer=n=>{const d=n%10,s=n%100;return n===1?'zaznaczona kamera':(d>=2&&d<=4&&!(s>=12&&s<=14))?'zaznaczone kamery':'zaznaczonych kamer';};
+function updateCamSelBar(){
+  const bar=el('camSelBar'); if(!bar)return;
+  bar.style.display=camSel.size?'flex':'none';
+  el('camSelCount').textContent=camSel.size;
+  el('camSelLabel').textContent=plKamer(camSel.size);
+  const first=camSelList()[0];                 // próbnik startuje od koloru pierwszej zaznaczonej
+  if(first)el('camSelColor').value=first.color;
+}
+function delSelectedCams(){
+  const list=camSelList(); if(!list.length)return;
+  uiConfirm('Usunąć zaznaczone kamery ('+list.length+')?',{danger:true}).then(ok=>{
+    if(!ok)return;
+    list.forEach(c=>{map.removeLayer(c.marker);if(c.cover)map.removeLayer(c.cover);if(c.coverVis)map.removeLayer(c.coverVis);});
+    cameras=cameras.filter(c=>!list.includes(c));
+    if(selected&&list.includes(selected)){selected=null;clearHandles();el('camEmpty').style.display='block';el('camEdit').style.display='none';}
+    camSel.clear(); camAnchor=null;
+    if(autoRenumber)renumberCameras(); else {refreshList();save();}
+    restackCameras();
+  });
+}
+el('camSelClear').onclick=clearCamSel;
+el('camSelDel').onclick=delSelectedCams;
+el('camSelColor').oninput=()=>{                 // wspólny kolor dla zaznaczonych — bez przebudowy listy (otwarty próbnik)
+  const v=el('camSelColor').value;
+  camSelList().forEach(c=>{
+    c.color=v; drawCam(c);
+    const sw=document.querySelector('#camTable tr[data-cam="'+c.id+'"] .swatch'); if(sw)sw.style.background=v;
+  });
+  if(selected&&camSel.has(selected.id)&&window.fColor)fColor.value=v;
+};
+el('camSelColor').onchange=()=>{markSel();restackCameras();save();};
+document.addEventListener('keydown',e=>{ if(e.key==='Escape'&&camSel.size&&!document.querySelector('.modal-overlay'))clearCamSel(); });
+
+/* ====== MENU KONTEKSTOWE LISTY KAMER (PPM) ======
+   Działa na kamerze pod kursorem, a gdy ta należy do zaznaczenia — na całym zaznaczeniu
+   (PPM poza zaznaczeniem zawęża je do klikniętej kamery, jak w menedżerach plików).
+   Akcje: „Przenieś do grupy" (podmenu z grupami + Bez grupy + Nowa grupa…) oraz
+   „Zmień kolor kamer" (paleta + własny kolor) i „Zmień typ kamer" (cztery typy z TYPE_META). */
+let ctxCams=[];
+function closeCamCtxSub(){const s=el('camCtxSub'); if(s){s.classList.remove('open');s.style.display='none';}}
+function closeCamCtx(){const m=el('camCtxMenu'); if(m){m.classList.remove('open');m.style.display='none';} closeCamCtxSub();}
+function ensureCamCtx(){
+  let m=el('camCtxMenu'); if(m)return m;
+  const mk=(id,cls)=>{const d=document.createElement('div');d.id=id;d.className='opt-menu ctx-menu no-print'+(cls||'');document.body.appendChild(d);return d;};
+  m=mk('camCtxMenu',''); mk('camCtxSub',' ctx-sub');
+  document.addEventListener('mousedown',e=>{if(!e.target.closest('#camCtxMenu')&&!e.target.closest('#camCtxSub'))closeCamCtx();});
+  document.addEventListener('keydown',e=>{if(e.key==='Escape')closeCamCtx();});
+  window.addEventListener('resize',closeCamCtx);
+  return m;
+}
+function placeCtx(box,x,y){                 // pozycja przy kursorze, przycięta do okna
+  box.style.display='block'; box.classList.add('open'); box.style.left='0px'; box.style.top='0px';
+  const w=box.offsetWidth,h=box.offsetHeight,pad=8;
+  box.style.left=Math.max(pad,Math.min(x,window.innerWidth-w-pad))+'px';
+  box.style.top=Math.max(pad,Math.min(y,window.innerHeight-h-pad))+'px';
+}
+// Podmenu obok menu głównego: domyślnie po prawej, a przy krawędzi okna (panel jest przy prawym
+// brzegu) po lewej — nigdy NA menu, bo zasłonięta pozycja gubi hover.
+function placeCtxSub(anchor){
+  const sub=el('camCtxSub'), m=el('camCtxMenu').getBoundingClientRect(), r=anchor.getBoundingClientRect(), pad=8;
+  sub.style.display='block'; sub.classList.add('open'); sub.style.left='0px'; sub.style.top='0px';
+  const w=sub.offsetWidth,h=sub.offsetHeight;
+  let x=m.right+4;
+  if(x+w>window.innerWidth-pad)x=m.left-w-4;
+  sub.style.left=Math.round(Math.max(pad,x))+'px';
+  sub.style.top=Math.round(Math.max(pad,Math.min(r.top-4,window.innerHeight-h-pad)))+'px';
+}
+function applyCamColor(list,col,live){
+  list.forEach(c=>{c.color=col;drawCam(c);});
+  markSel();
+  if(live){   // podgląd z otwartego próbnika — bez przebudowy listy
+    list.forEach(c=>{const sw=document.querySelector('#camTable tr[data-cam="'+c.id+'"] .swatch');if(sw)sw.style.background=col;});
+  }else{ restackCameras(); refreshList(); save(); }
+  if(selected&&list.includes(selected)&&window.fColor)fColor.value=col;
+}
+function openCamCtxGroups(anchor){
+  const s=el('camCtxSub'), targets=ctxCams.slice(); s.innerHTML='';
+  const row=(label,color,fn)=>{
+    const b=document.createElement('button');
+    const dot='<span class="grp-dot" style="'+(color?('background:'+color):'background:transparent;border:1px dashed var(--muted)')+'"></span>';
+    b.innerHTML=dot+'<span>'+label+'</span>';
+    b.onclick=ev=>{ev.stopPropagation();closeCamCtx();fn();};
+    s.appendChild(b);
+  };
+  camGroups.forEach(g=>row(g.name||'Grupa',g.color,()=>moveCamsToGroup(targets,g.id)));
+  row('Bez grupy',null,()=>moveCamsToGroup(targets,null));
+  const sep=document.createElement('div'); sep.className='opt-sep'; s.appendChild(sep);
+  const nb=document.createElement('button'); nb.innerHTML=ico('plus')+'<span>Nowa grupa…</span>';
+  nb.onclick=ev=>{
+    ev.stopPropagation(); closeCamCtx();
+    uiPrompt('Nazwa nowej grupy:','Grupa '+(camGroupSeq+1)).then(name=>{
+      if(name===null)return;
+      camGroupSeq++;
+      camGroups.push({id:'g'+Date.now()+camGroupSeq,name:(name||'').trim()||('Grupa '+camGroupSeq),color:PALETTE[(camGroupSeq-1)%PALETTE.length],collapsed:false});
+      moveCamsToGroup(targets,camGroups[camGroups.length-1].id);
+    });
+  };
+  s.appendChild(nb);
+  placeCtxSub(anchor);
+}
+function openCamCtxColors(anchor){
+  const s=el('camCtxSub'), targets=ctxCams.slice(); s.innerHTML='';
+  const grid=document.createElement('div'); grid.className='ctx-swatches';
+  PALETTE.forEach(col=>{
+    const b=document.createElement('button'); b.className='ctx-sw'; b.style.background=col; b.title=col;
+    b.onclick=ev=>{ev.stopPropagation();closeCamCtx();applyCamColor(targets,col);};
+    grid.appendChild(b);
+  });
+  s.appendChild(grid);
+  const sep=document.createElement('div'); sep.className='opt-sep'; s.appendChild(sep);
+  const own=document.createElement('button'); own.innerHTML=ico('palette')+'<span>Inny kolor…</span>';
+  const inp=document.createElement('input'); inp.type='color'; inp.className='ctx-color';
+  inp.value=(targets[0]&&targets[0].color)||PALETTE[0];
+  inp.oninput=()=>applyCamColor(targets,inp.value,true);
+  inp.onchange=()=>{closeCamCtx();applyCamColor(targets,inp.value);};
+  own.appendChild(inp);
+  own.onclick=ev=>{ev.stopPropagation();inp.click();};
+  s.appendChild(own);
+  placeCtxSub(anchor);
+}
+function openCamCtxTypes(anchor){
+  const s=el('camCtxSub'), targets=ctxCams.slice(); s.innerHTML='';
+  const apply=t=>{
+    targets.forEach(c=>{
+      c.type=t;
+      // panorama nie ma stożka, więc wymusza pełny obrót; przy wyjściu z niej wracamy do 90°,
+      // bo clampFov sam nie odróżni celowo szerokiego kąta od resztki po 360°
+      if(t==='pano')c.fov=360; else if(c.fov>=360)c.fov=90;
+      clampFov(c); drawCam(c);
+    });
+    restackCameras(); refreshList(); save();
+    if(selected&&targets.includes(selected)){syncForm(selected);positionHandles(selected);}
+  };
+  Object.keys(TYPE_META).forEach(k=>{
+    const b=document.createElement('button');
+    b.innerHTML=ico(TYPE_META[k].icon)+'<span>'+TYPE_META[k].label+'</span>';
+    b.onclick=ev=>{ev.stopPropagation();closeCamCtx();apply(k);};
+    s.appendChild(b);
+  });
+  placeCtxSub(anchor);
+}
+function openCamCtx(x,y,targets){
+  ctxCams=targets;
+  const m=ensureCamCtx(); closeCamCtxSub(); m.innerHTML='';
+  const t=document.createElement('div'); t.className='ctx-title';
+  t.textContent=targets.length===1?targets[0].name:('Zaznaczone: '+targets.length);
+  m.appendChild(t);
+  const item=(label,iconKey,open)=>{
+    const b=document.createElement('button');
+    b.innerHTML=ico(iconKey)+'<span>'+label+'</span><span class="chev">'+ico('chevDown')+'</span>';
+    b.onclick=ev=>{ev.stopPropagation();open(b);};
+    b.onmouseenter=()=>open(b);
+    m.appendChild(b);
+  };
+  item('Przenieś do grupy','folder',openCamCtxGroups);
+  item('Zmień kolor kamer','palette',openCamCtxColors);
+  item('Zmień typ kamer','cctv',openCamCtxTypes);
+  placeCtx(m,x,y);
+}
+function moveGroupBefore(src,dst){
+  camGroups=camGroups.filter(g=>g!==src);
+  const i=camGroups.indexOf(dst);
+  camGroups.splice(i<0?camGroups.length:i,0,src);
+  afterCamGroupChange();
+}
+function clearCamDropMarks(){document.querySelectorAll('#camTable .drop-into').forEach(x=>x.classList.remove('drop-into'));}
+
 function refreshList(){
+  if(camGroups.length)sortCamerasByGroup();   // kolejność tablicy zawsze == kolejność widoczna (nowe/duplikowane kamery lądują w swojej sekcji)
+  if(camSel.size){const ids=new Set(cameras.map(c=>c.id));camSel.forEach(id=>{if(!ids.has(id))camSel.delete(id);});}   // sprzątnij po skasowanych kamerach
   const tb=document.querySelector('#camTable tbody'); tb.innerHTML='';
-  document.getElementById('listEmpty').style.display=cameras.length?'none':'block';
-  document.getElementById('camTable').style.display=cameras.length?'table':'none';
+  const has=cameras.length||camGroups.length;
+  document.getElementById('listEmpty').style.display=has?'none':'block';
+  document.getElementById('camTable').style.display=has?'table':'none';
   document.getElementById('camCount').textContent=cameras.length;
-  const typeName={bullet:'Tubowa',dome:'Kopułka',ptz:'PTZ',pano:'360°'};
-  cameras.forEach(c=>{
-    const tr=document.createElement('tr'); tr.className='trow';
+  const typeName=Object.fromEntries(Object.entries(TYPE_META).map(([k,v])=>[k,v.label]));
+
+  // nagłówek sekcji; g=null => „Bez grupy” (bez koloru i bez kasowania)
+  const grpRow=g=>{
+    const collapsed=g?!!g.collapsed:camNoneCollapsed;
+    const tr=document.createElement('tr');
+    tr.className='grp-row'+(g?'':' grp-none')+(collapsed?' collapsed':'');
+    if(g)tr.dataset.grp=g.id;
+    const td=document.createElement('td'); td.colSpan=6;
+    const head=document.createElement('div'); head.className='grp-head';
+    const caret=document.createElement('span'); caret.className='grp-caret'; caret.innerHTML=ico('chevDown');
+    caret.title=collapsed?'Rozwiń grupę':'Zwiń grupę';
+    caret.onclick=()=>{if(g)g.collapsed=!collapsed;else camNoneCollapsed=!collapsed;refreshList();save();};
+    head.appendChild(caret);
+    if(g){
+      const grip=document.createElement('span'); grip.className='zdrag'; grip.innerHTML=ico('grip');
+      grip.title='Przeciągnij, aby zmienić kolejność grup'; grip.draggable=true;
+      grip.ondragstart=e=>{dragGrp=g;dragCams=[];e.dataTransfer.effectAllowed='move';e.dataTransfer.setData('text/plain','g');try{e.dataTransfer.setDragImage(tr,12,12);}catch(_){}tr.classList.add('dragging');};
+      grip.ondragend=()=>{dragGrp=null;tr.classList.remove('dragging');clearCamDropMarks();};
+      head.appendChild(grip);
+      const col=document.createElement('input'); col.type='color'; col.className='grp-color';
+      col.value=g.color||PALETTE[0]; col.title='Kolor grupy — maluje wszystkie kamery w grupie';
+      col.oninput=()=>{      // bez refreshList(): otwarty próbnik koloru nie może stracić swojego <input>
+        g.color=col.value;
+        groupCams(g.id).forEach(c=>{
+          c.color=col.value; drawCam(c);
+          const sw=tb.querySelector('tr[data-cam="'+c.id+'"] .swatch'); if(sw)sw.style.background=col.value;
+        });
+        if(selected&&selected.group===g.id&&window.fColor)fColor.value=col.value;
+      };
+      col.onchange=()=>{restackCameras();save();};
+      head.appendChild(col);
+    }
+    const name=document.createElement('input'); name.className='mini grp-name'; name.draggable=false;
+    if(g){
+      name.value=g.name; name.title='Nazwa grupy';
+      name.oninput=()=>{g.name=name.value;};
+      name.onchange=save;
+      name.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();name.blur();}else if(e.key==='Escape'){e.preventDefault();name.value=g.name;name.blur();}});
+    }else{
+      name.value='Bez grupy'; name.readOnly=true; name.tabIndex=-1; name.title='Kamery nieprzypisane do żadnej grupy';
+      const sp=document.createElement('span'); sp.style.cssText='width:43px;flex:0 0 auto'; head.appendChild(sp);   // wyrównanie do nagłówków grup (uchwyt + próbnik koloru)
+    }
+    head.appendChild(name);
+    const chip=document.createElement('span'); chip.className='count-chip'; chip.textContent=groupCams(g?g.id:null).length;
+    chip.style.cursor='pointer'; chip.title='Zaznacz / odznacz wszystkie kamery w tej sekcji';
+    chip.onclick=()=>selectSectionCams(g?g.id:null);
+    head.appendChild(chip);
+    if(g){
+      const x=document.createElement('span'); x.className='del-x'; x.innerHTML=ico('close'); x.title='Usuń grupę (kamery zostają)';
+      x.onclick=()=>delCamGroup(g);
+      head.appendChild(x);
+    }
+    td.appendChild(head); tr.appendChild(td);
+    // cel upuszczenia: kamera => na koniec tej sekcji, grupa => zmiana kolejności grup
+    tr.ondragover=e=>{
+      if(dragCams.length){e.preventDefault();e.dataTransfer.dropEffect='move';tr.classList.add('drop-into');}
+      else if(dragGrp&&g&&dragGrp!==g){e.preventDefault();e.dataTransfer.dropEffect='move';tr.classList.add('drop-into');}
+    };
+    tr.ondragleave=()=>tr.classList.remove('drop-into');
+    tr.ondrop=e=>{
+      e.preventDefault(); tr.classList.remove('drop-into');
+      if(dragCams.length)moveCamsToGroup(dragCams,g?g.id:null);
+      else if(dragGrp&&g&&dragGrp!==g)moveGroupBefore(dragGrp,g);
+    };
+    return tr;
+  };
+
+  const camRow=(c,hidden)=>{
+    const tr=document.createElement('tr'); tr.className='trow'+(hidden?' hid-grp':'')+(camSel.has(c.id)?' msel':''); tr.dataset.cam=c.id;
     const vr=visRange(c);   // zasięg widoczności (kalkulowany) — „—" gdy brak danych optyki
     const night=(vr!=null&&+c.ir>0)?Math.min(vr,Math.round(+c.ir)):null;   // noc = min(kryterium, IR)
-    tr.innerHTML=`<td><span class="swatch" style="background:${c.color}"></span>${c.num}</td>`+
+    tr.innerHTML=`<td style="white-space:nowrap"><span class="cdrag" data-grip title="Przeciągnij: do grupy lub na inne miejsce listy">${ico('grip')}</span><span class="swatch" style="background:${c.color}"></span>${c.num}</td>`+
       `<td class="cam-name" title="${c.name}">${c.name}</td><td class="type-cell" title="${typeName[c.type]}">${ico(TYPE_META[c.type].icon,'type-ico')}</td>`+
       `<td class="num">${c.type==='pano'?'360°':c.fov+'°'}</td>`+
       `<td class="num" title="Zasięg analityki (projektowany) / widoczność (kalkulowana) · księżyc = zasięg nocny (IR)">${c.range} m<div style="font-size:10px;color:var(--muted);font-weight:400">${vr==null?'—':vr+' m'+(night!=null&&night<vr?' <span style="color:var(--accent2)">'+ico('moon')+night+'</span>':'')}</div></td>`+
       `<td style="text-align:right;white-space:nowrap"><span class="del-x" title="Usuń kamerę" data-del>${ico('close')}</span></td>`;
-    tr.onclick=(e)=>{if(e.target.closest('.del-x'))return;selectCam(c);map.panTo([c.lat,c.lng]);};
+    tr.onmousedown=e=>{if(e.shiftKey)e.preventDefault();};   // Shift+klik nie ma zaznaczać tekstu
+    tr.oncontextmenu=e=>{
+      e.preventDefault(); e.stopPropagation();
+      if(!camSel.has(c.id)){camSel.clear();camSel.add(c.id);camAnchor=c;markSel();refreshList();}   // PPM poza zaznaczeniem => zawęź do tej kamery
+      openCamCtx(e.clientX,e.clientY,camSelList());
+    };
+    tr.onclick=e=>{
+      if(e.target.closest('.del-x')||e.target.closest('.cdrag'))return;
+      if(e.shiftKey){rangeCamSel(c);return;}                 // zakres — bez skoku na kamerę
+      if(e.ctrlKey||e.metaKey){toggleCamSel(c);return;}      // dokładanie pojedynczych
+      const had=camSel.size; camSel.clear(); camAnchor=c;
+      selectCam(c); map.panTo([c.lat,c.lng]);
+      if(had)refreshList();
+    };
     const dx=tr.querySelector('[data-del]'); if(dx)dx.onclick=e=>{e.stopPropagation(); uiConfirm('Usunąć kamerę: '+c.name+'?',{danger:true}).then(ok=>{if(ok)delCam(c);});};
-    tb.appendChild(tr);
+    const gp=tr.querySelector('[data-grip]');
+    gp.draggable=true;
+    gp.ondragstart=e=>{
+      dragCams=(camSel.has(c.id)&&camSel.size>1)?camSelList():[c];   // przeciąganie zaznaczonego wiersza ciągnie CAŁE zaznaczenie
+      dragGrp=null; e.dataTransfer.effectAllowed='move'; e.dataTransfer.setData('text/plain','c');
+      try{e.dataTransfer.setDragImage(tr,12,12);}catch(_){}
+      dragCams.forEach(x=>{const r=tb.querySelector('tr[data-cam="'+x.id+'"]');if(r)r.classList.add('dragging');});
+    };
+    gp.ondragend=()=>{dragCams=[];tb.querySelectorAll('tr.dragging').forEach(r=>r.classList.remove('dragging'));clearCamDropMarks();};
+    tr.ondragover=e=>{if(!dragCams.length||dragCams.includes(c))return;e.preventDefault();e.dataTransfer.dropEffect='move';tr.classList.add('drop-into');};
+    tr.ondragleave=()=>tr.classList.remove('drop-into');
+    tr.ondrop=e=>{e.preventDefault();tr.classList.remove('drop-into');moveCamsBefore(dragCams,c);};
+    return tr;
+  };
+
+  camGroups.forEach(g=>{
+    tb.appendChild(grpRow(g));
+    groupCams(g.id).forEach(c=>tb.appendChild(camRow(c,!!g.collapsed)));
   });
+  const loose=groupCams(null);
+  if(camGroups.length)tb.appendChild(grpRow(null));   // nagłówek „Bez grupy” dopiero, gdy istnieją grupy
+  loose.forEach(c=>tb.appendChild(camRow(c,camGroups.length?camNoneCollapsed:false)));
+  updateCamSelBar();
   refreshCamDrag();   // po każdej odbudowie listy ustaw prawo przesuwania kamer wg aktywnej zakładki
 }
 
@@ -2549,24 +2955,6 @@ function refreshZones(){
   document.getElementById('zoneTotLabel').textContent=zoneSubTab==='main'?'RAZEM główne':'RAZEM poboczne';
 }
 // widok do wydruku: oba rodzaje w jednej tabeli z nagłówkami i podsumowaniami
-function renderZonesGroupedForPrint(){
-  const tb=document.querySelector('#zoneTable tbody'); tb.innerHTML='';
-  document.getElementById('zoneTable').style.display=zones.length?'table':'none';
-  document.getElementById('zoneEmpty').style.display=zones.length?'none':'block';
-  const grp=(title,arr)=>{
-    if(!arr.length)return;
-    const hr=document.createElement('tr');const c=document.createElement('td');c.colSpan=3;c.textContent=title;
-    c.style.cssText='font-weight:700;text-transform:uppercase;font-size:10.5px;padding-top:.5rem';hr.appendChild(c);tb.appendChild(hr);
-    let s=0;arr.forEach(z=>{s+=z.area;tb.appendChild(zoneRow(z));});
-    const sr=document.createElement('tr');sr.innerHTML=`<td class="tot">Σ (${arr.length})</td><td class="tot">${fmtArea(s)}</td><td></td>`;tb.appendChild(sr);
-  };
-  grp('Obszary główne', zones.filter(isMainZone));
-  grp('Obszary poboczne (do wyceny)', zones.filter(z=>!isMainZone(z)));
-  const side=zones.filter(z=>!isMainZone(z));
-  document.getElementById('zoneCount').textContent=side.length;
-  document.getElementById('zoneTot').textContent=fmtArea(side.reduce((a,z)=>a+z.area,0));
-  document.getElementById('zoneTotLabel').textContent='RAZEM poboczne';
-}
 
 /* ============ PLANY (nakładki rastrowe) ============ */
 /* Każdy plan: {dbId,name,data,sw:[lat,lng],ne:[lat,lng],rotation,opacity,visible,layer,baseHalfLat,baseHalfLng,sizePct,meta}.
@@ -3610,13 +3998,15 @@ document.querySelectorAll('.tab-eye').forEach(b=>{b.innerHTML=ICON.eye;b.onclick
 
 /* ====== GLOBALNE PRZEŁĄCZNIKI WARSTW POKRYCIA: 📐 Analityka / 👁 Widoczność ====== */
 // warstwy jednej kamery wg oka kategorii + przełączników (marker zostaje pod kontrolą klastrowania: pomijamy ukryte w kulce)
+let printCamOnly=null;   // zrzut strony grupy: pokazujemy TYLKO kamery z tego zbioru (id), reszta znika z mapy
 function applyCamLayerVis(c){
   const setL=(l,want)=>{if(!l)return; if(want){if(!map.hasLayer(l))l.addTo(map);} else if(map.hasLayer(l))map.removeLayer(l);};
-  setL(c.marker,catVisible.cam&&!c._hidden);
-  setL(c.cover,catVisible.cam&&layerToggles.analytics);
+  const on=catVisible.cam&&(!printCamOnly||printCamOnly.has(c.id));
+  setL(c.marker,on&&!c._hidden);
+  setL(c.cover,on&&layerToggles.analytics);
   if(c.coverVis){
     const was=map.hasLayer(c.coverVis);
-    setL(c.coverVis,catVisible.cam&&layerToggles.visibility);
+    setL(c.coverVis,on&&layerToggles.visibility);
     if(!was&&map.hasLayer(c.coverVis))c.coverVis.eachLayer(l=>l.bringToBack&&l.bringToBack());   // świeżo pokazana grupa stref → pod warstwę analityki
   }
 }
@@ -3706,12 +4096,14 @@ el('objInfo').addEventListener('input',save);
 function serialize(){
   const o={
     center:[map.getCenter().lat,map.getCenter().lng], zoom:map.getZoom(), base:baseSel.value,
-    seq:{cam:camSeq,pt:ptSeq,zone:zoneSeq},
+    seq:{cam:camSeq,pt:ptSeq,zone:zoneSeq,grp:camGroupSeq},
     info:el('objInfo').value, pricePerM:el('pricePerM').value, slack:el('cableSlack').value,
     objPin:objPin,
     autoRenumber,
     layerToggles:{...layerToggles},
-    cameras:cameras.map(c=>({id:c.id,num:c.num,name:c.name,type:c.type,lat:c.lat,lng:c.lng,az:c.az,fov:c.fov,range:c.range,height:c.height,mpx:c.mpx,focal:c.focal,sensor:c.sensor,dori:c.dori,ir:c.ir,sky:c.sky,tilt:c.tilt,tiltAuto:c.tiltAuto,model:c.model,notes:c.notes,color:c.color,perimeterZone:c.perimeterZone})),
+    cameras:cameras.map(c=>({id:c.id,num:c.num,name:c.name,type:c.type,lat:c.lat,lng:c.lng,az:c.az,fov:c.fov,range:c.range,height:c.height,mpx:c.mpx,focal:c.focal,sensor:c.sensor,dori:c.dori,ir:c.ir,sky:c.sky,tilt:c.tilt,tiltAuto:c.tiltAuto,model:c.model,notes:c.notes,color:c.color,perimeterZone:c.perimeterZone,group:c.group||null})),
+    camGroups:camGroups.map(g=>({id:g.id,name:g.name,color:g.color,collapsed:!!g.collapsed})),
+    camNoneCollapsed,
     points:points.map(p=>({id:p.id,num:p.num,type:p.type,name:p.name,lat:p.lat,lng:p.lng})),
     cables:cables.map(c=>({id:c.id,label:c.label,len:c.len,pts:c.pts})),
     zones:zones.map(z=>({id:z.id,kind:isMainZone(z)?'main':'side',name:z.name,color:z.color,pts:z.pts,area:z.area})),
@@ -3747,8 +4139,7 @@ function serverSave(){
   },600);
 }
 let _printing=false;   // trwa przygotowanie wydruku — zrzuty przestawiają mapę na dziesiątki sekund, taki widok nie może trafić do zapisu
-let _printPrevView=null;   // ustawione = trwa natywny druk (prepPrint przestawił mapę) — ten widok też nie może trafić do zapisu
-function save(){if(_printing||_printPrevView)return;updateCounts();try{localStorage.setItem(STORAGE_KEY,JSON.stringify(serialize()));}catch(e){} if(SERVER)serverSave(); histRecord();}
+function save(){if(_printing)return;updateCounts();try{localStorage.setItem(STORAGE_KEY,JSON.stringify(serialize()));}catch(e){} if(SERVER)serverSave(); histRecord();}
 /* autozapis na żywo: przy każdej zmianie (save()), dodatkowo co 4 s i przy zamknięciu karty */
 window.addEventListener('beforeunload',save);
 setInterval(save,4000);
@@ -3758,13 +4149,15 @@ function loadState(d){
   cables.forEach(c=>map.removeLayer(c.line));
   zones.forEach(z=>{if(z.poly)map.removeLayer(z.poly);});
   overlays.forEach(o=>{if(o.layer)map.removeLayer(o.layer);});
-  cameras=[];points=[];cables=[];zones=[];overlays=[];clearHandles();clearPlanHandles();clearZoneHandles();selected=null;selectedOverlay=null;selectedZone=null;startArea();
+  cameras=[];points=[];cables=[];zones=[];overlays=[];camGroups=[];dragCam=null;dragGrp=null;clearHandles();clearPlanHandles();clearZoneHandles();selected=null;selectedOverlay=null;selectedZone=null;startArea();
   if(d.base&&(bases[d.base]||d.base===BASE_NONE))setBase(d.base);
   if(d.center)map.setView(d.center,d.zoom||DEFAULT_ZOOM);
   camSeq=d.seq?.cam||0; ptSeq=d.seq?.pt||{}; zoneSeq=d.seq?.zone||0;
+  camGroups=(d.camGroups||[]).map(g=>({id:g.id,name:g.name||'Grupa',color:g.color||PALETTE[0],collapsed:!!g.collapsed}));
+  camGroupSeq=d.seq?.grp||camGroups.length; camNoneCollapsed=!!d.camNoneCollapsed;
   el('objInfo').value=d.info||DEFAULT_INFO;
   setObjPin(d.objPin||null,false);
-  el('pricePerM').value=d.pricePerM||0; el('cableSlack').value=d.slack||10;
+  el('pricePerM').value=d.pricePerM||''; el('cableSlack').value=d.slack||10;   // '' (a nie 0) — inaczej odtworzony stan różni się od zapisanego i pierwszy save() po cofnięciu dorabia lewy wpis historii, ucinając redo
   layerToggles={analytics:true,visibility:true,blind:true,...(d.layerToggles||{})};   // przed rysowaniem kamer — respektują stan przełączników (stare projekty → domyślne)
   autoRenumber=d.autoRenumber!==false; el('fAutoRenumber').checked=autoRenumber;
   (d.cameras||[]).forEach(c=>{const cam={...CAM_DEFAULTS,...c};clampFov(cam);cameras.push(cam);drawCam(cam);});   // CAM_DEFAULTS = optyka dla starych projektów; fov przycięty do kąta optyki
@@ -3781,6 +4174,7 @@ function loadState(d){
     const ov={dbId:null,name:o.name,data:o.data,sw:o.sw,ne:o.ne,rotation:o.rotation||0,opacity:o.opacity==null?0.7:o.opacity,visible:o.visible!==false,locked:o.locked===true,layer:null,meta:parseOvMeta(o.meta)};
     initBaseSize(ov); overlays.push(ov); drawOverlay(ov);
   });
+  sortCamerasByGroup();   // widok listy = kolejność w `cameras`; stare projekty (bez grup) zostają bez zmian
   refreshList(); refreshPoints(); refreshCable(); refreshZones(); renderPlans(); restackCameras(); applyLayerToggles();
   savedPerim=d.perim||null;             // ustawienia Perymetru odtworzy IIFE szablonów (applyPerimSel), gdy zbuduje listy
   if(typeof applyPerimSel==='function')applyPerimSel();
@@ -3997,28 +4391,11 @@ el('snapList').onclick=e=>{
 };
 snapLoad();
 
-/* przenieś notatki do elementu drukowanego (pełna treść, bez ucinania) — ścieżka natywnego Ctrl+P */
-function prepPrint(){
-  if(document.body.classList.contains('printing-doc'))return;   // nasz wydruk per-obszar — nie ruszaj złapanego dokumentu
-  el('printNotes').textContent=el('objInfo').value;
-  renderZonesGroupedForPrint();
-  // dopasuj widok mapy do PIERWSZEGO obszaru głównego (np. całego terenu budowy), aby zmieścił się w wydruku
-  const mainZ=zones.find(isMainZone);
-  if(mainZ&&mainZ.poly){
-    if(!_printPrevView)_printPrevView={center:map.getCenter(),zoom:map.getZoom()};   // drugi beforeprint z rzędu nie może nadpisać oryginalnego widoku
-    map.invalidateSize();   // synchronicznie — snapshot do druku powstaje zaraz po beforeprint, setTimeout by się spóźnił
-    map.fitBounds(mainZ.poly.getBounds().pad(.04),{animate:false});
-  }
-}
-window.addEventListener('beforeprint',prepPrint);
-window.addEventListener('afterprint',()=>{
-  if(document.body.classList.contains('printing-doc'))return;
-  refreshZones();
-  map.invalidateSize();
-  if(_printPrevView){map.setView(_printPrevView.center,_printPrevView.zoom,{animate:false});_printPrevView=null;}
-});
+/* Natywny Ctrl+P to już tylko awaryjny wydruk panelu (dokument projektu robi PDF) — przenosimy
+   do niego pełną treść notatek, bo textarea drukuje się jako ucięte, ciemne pudełko. */
+window.addEventListener('beforeprint',()=>{el('printNotes').textContent=el('objInfo').value;});
 
-/* ============ WYDRUK PER-OBSZAR (mapki + opcjonalnie dane) ============ */
+/* ============ ZRZUTY MAP DO DOKUMENTU PDF ============ */
 // czeka aż warstwa bazowa realnie skończy pobierać kafle — sam event 'load' pada też, gdy kafle skończyły błędem,
 // dlatego dodatkowo pollujemy layer._loading; zwraca true=osiadła, false=timeout
 function waitBaseLoad(layer,ms){
@@ -4071,21 +4448,76 @@ function minAreaRect(pts){
 const CAP=2400;                 // bok kwadratowego pola zrzutu (px) — duży, by kafle miały ostrość po powiększeniu
 const PAGE_AR=297/210;          // proporcje A4 poziomo (szer./wys.)
 const OUT_W=2400, OUT_H=Math.round(OUT_W/PAGE_AR);   // rozdzielczość obrazu strony (~200 dpi na A4)
+const GRP_AR=297/140;   // strona grupy: pas mapy u góry (~134 mm na A4 poziomo), pod nim spis kamer grupy
 const BLANK_PX='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';   // 1×1 przezroczysty
-async function rasterMap(mapEl,skipLabels){
+/* dom-to-image inline'uje każdy <img> POBIERAJĄC go ponownie z sieci. Przy ~170 kaflach na stronę
+   to główny koszt zrzutu, a gdy któryś pobór nie zdąży albo padnie, biblioteka wstawia przezroczysty
+   placeholder — kafel znika, prześwituje białe tło i wychodzi „blada plansza" (przy kolejnej stronie
+   kafel jest już w cache, więc ta sama okolica wygląda dobrze). Kafle mamy wczytane w pamięci, więc
+   podmieniamy im src na data: URL z canvasu — rasteryzacja idzie wtedy bez ani jednego żądania. */
+const tileDataCache=new Map();   // src kafla → data: URL; ten sam kafel wraca na kolejnych stronach, więc kodujemy raz
+function inlineTiles(box,sel){
+  const undo=[], cv=document.createElement('canvas'), cx=cv.getContext('2d');
+  box.querySelectorAll(sel||'img.leaflet-tile').forEach(t=>{
+    const src=t.getAttribute('src');
+    if(!src||/^data:/.test(src)||!(t.complete&&t.naturalWidth>0))return;
+    let url=tileDataCache.get(src);
+    if(!url){
+      try{
+        cv.width=t.naturalWidth; cv.height=t.naturalHeight;
+        cx.clearRect(0,0,cv.width,cv.height); cx.drawImage(t,0,0);
+        url=cv.toDataURL('image/jpeg',0.9);           // rzuci SecurityError, gdy kafel przyszedł bez CORS
+      }catch(_){ return; }                            // kafel bez CORS — zostaje oryginalny src, biblioteka spróbuje po swojemu
+      tileDataCache.set(src,url);
+    }
+    undo.push([t,src]); t.setAttribute('src',url);
+  });
+  return ()=>undo.forEach(([t,s])=>t.setAttribute('src',s));
+}
+async function rasterMap(mapEl,skipLabels,capW,capH){
   // dom-to-image-more: natywny SVG foreignObject → transformy leafleta stosuje przeglądarka (piny trafiają na kafle)
   // pomiń podpis obszaru (zone-label) — obraca się z mapą i staje pionowy; nazwa jest w plakietce w rogu
   // skipLabels (strona przeglądowa) → bez permanentnych etykiet (leaflet-tooltip), zostają piny i obrysy
   // imagePlaceholder: kafel bez CORS (np. Google) → przezroczysty piksel; bez tego biblioteka crashuje i promise NIGDY nie osiada
-  const shot=domtoimage.toPng(mapEl,{width:CAP,height:CAP,bgcolor:'#fff',cacheBust:false,imagePlaceholder:BLANK_PX,
-    filter:n=>!(n.classList&&(n.classList.contains('map-tools')||n.classList.contains('zoom-rail')||n.classList.contains('leaflet-control-zoom')||n.classList.contains('zone-label')||(skipLabels&&n.classList.contains('leaflet-tooltip'))))});
-  const url=await Promise.race([shot,
-    new Promise((_,rej)=>setTimeout(()=>rej(new Error('zrzut mapy nie zakończył się w 30 s — podkład mógł zablokować dostęp cross-origin')),30000))]);
-  const img=new Image();
-  await new Promise((res,rej)=>{img.onload=res;img.onerror=rej;img.src=url;});
-  return img;
+  const opts={width:capW||CAP,height:capH||CAP,bgcolor:'#fff',cacheBust:false,imagePlaceholder:BLANK_PX,
+    filter:n=>!(n.classList&&(n.classList.contains('map-tools')||n.classList.contains('zoom-rail')||n.classList.contains('leaflet-control-zoom')||n.classList.contains('zone-label')||(skipLabels&&n.classList.contains('leaflet-tooltip'))))};
+  // toCanvas omija kodowanie PNG + base64 + ponowne dekodowanie — przy 2400×2400 to sekundy na każdą stronę
+  const restoreTiles=inlineTiles(mapEl);
+  try{
+    const shot=(typeof domtoimage.toCanvas==='function')
+      ? domtoimage.toCanvas(mapEl,opts)
+      : domtoimage.toPng(mapEl,opts).then(url=>new Promise((res,rej)=>{const i=new Image();i.onload=()=>res(i);i.onerror=rej;i.src=url;}));
+    return await Promise.race([shot,
+      new Promise((_,rej)=>setTimeout(()=>rej(new Error('zrzut mapy nie zakończył się w 30 s — podkład mógł zablokować dostęp cross-origin')),30000))]);
+  }finally{ restoreTiles(); }
 }
-async function captureMaps(){
+// ramka kamery na potrzeby kadrowania: stożek analityki (albo sam punkt, gdy warstwy brak)
+function camFrameBounds(c){
+  const l=c.cover;
+  try{
+    if(l&&l.getBounds)return l.getBounds();
+  }catch(_){/* warstwa bez geometrii — zostaje sam punkt */}
+  return L.latLngBounds([[c.lat,c.lng],[c.lat,c.lng]]);
+}
+/* Nakładka postępu: zasłania mapę na czas zrzutów (mapa i tak jest przestawiana na pole 2400×2400)
+   i pokazuje, która strona się liczy. Ma klasę no-print, więc nie trafia do wydruku. */
+function printProgUI(){
+  let box=el('printProg'); if(box)return box;
+  box=document.createElement('div'); box.id='printProg'; box.className='no-print';
+  box.innerHTML='<div class="pp-title">Przygotowuję wydruk</div>'
+    +'<div class="pp-step" id="ppStep"></div>'
+    +'<div class="pp-bar"><div class="pp-fill" id="ppFill"></div></div>'
+    +'<div class="pp-hint">Mapy renderują się w tle — nie zamykaj karty.</div>';
+  document.body.appendChild(box);
+  return box;
+}
+function printProgShow(on){printProgUI().classList.toggle('on',!!on);}
+function printProgSet(done,total,label){
+  printProgUI();
+  el('ppFill').style.width=Math.round(100*Math.min(done,total)/Math.max(1,total))+'%';
+  el('ppStep').textContent=label||'';
+}
+async function captureMaps(mode,onStep){
   const mains=zones.filter(isMainZone);
   // strona 1 = wszystkie strefy główne na jednej mapie (bez obrotu); kolejne strony = pojedyncze strefy główne
   const targets=[];
@@ -4096,6 +4528,12 @@ async function captureMaps(){
     }
     mains.forEach(z=>targets.push({z,bounds:z.poly.getBounds(),name:z.name||'Obszar'}));
   }else targets.push({z:null,bounds:null});
+  // wersja opisowa: dodatkowo zbliżenie na każdą grupę kamer (kadr obejmuje całą grupę wraz ze stożkami)
+  if(mode==='full')camGroups.forEach(g=>{
+    const cams=groupCams(g.id); if(!cams.length)return;
+    const gb=L.latLngBounds([]); cams.forEach(c=>gb.extend(camFrameBounds(c)));
+    targets.push({grp:g,bounds:gb,ar:GRP_AR,name:g.name||'Grupa'});   // pad domyślny (0.8) — zapas na obrót kadru
+  });
   const prevCenter=map.getCenter(), prevZoom=map.getZoom(), prevBaseKey=baseSel.value;
   const shots=[];
   const mapEl=document.getElementById('map');
@@ -4107,16 +4545,49 @@ async function captureMaps(){
   let tileErrors=0, tileWarned=false;
   if(corsBase)corsBase.on('tileerror',()=>tileErrors++);
   // kafle nie osiadły (timeout / błędy pobierania) → jednorazowo spytaj, czy drukować z dziurami w podkładzie
+  const warnTiles=async ()=>{
+    if(tileWarned)return; tileWarned=true;
+    const go=await uiConfirm('Część podkładu mapy nie zdążyła się wczytać — drukować mimo to?',{title:'Wydruk',okText:'Drukuj'});
+    if(!go){const e=new Error('anulowano');e.cancelled=true;throw e;}   // finally niżej przywróci stan mapy
+  };
   const ensureTiles=async ms=>{
     if(standalone)return;
     const ok=await waitBaseLoad(corsBase,ms);
-    if((!ok||tileErrors)&&!tileWarned){
-      tileWarned=true;
-      const go=await uiConfirm('Część podkładu mapy nie zdążyła się wczytać — drukować mimo to?',{title:'Wydruk',okText:'Drukuj'});
-      if(!go){const e=new Error('anulowano');e.cancelled=true;throw e;}   // finally niżej przywróci stan mapy
+    if(!ok||tileErrors)await warnTiles();
+  };
+  /* Leaflet dogrywa kafle PARTIAMI i między turami potrafi na moment zgłosić „nic nie ładuję".
+     Zrzut zrobiony w tej szczelinie ma dziury — prześwituje tło kontenera (#ddd), czyli szare
+     pola. Dlatego wymagamy, żeby warstwa była spokojna DWA razy z rzędu w odstępie 250 ms. */
+  const tilesSettled=async ms=>{
+    if(standalone)return true;
+    const t0=Date.now(); let calm=0;
+    while(Date.now()-t0<ms){
+      const quiet=corsBase._loading===false&&corsBase._noTilesToLoad()
+        &&![...mapEl.querySelectorAll('img.leaflet-tile')].some(i=>!(i.complete&&i.naturalWidth>0));
+      calm=quiet?calm+1:0;
+      if(calm>=2)break;
+      await new Promise(r=>setTimeout(r,250));
     }
+    await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+    return calm>=2;
+  };
+  /* Ostateczna kontrola po fakcie: udział pikseli dokładnie w kolorze tła kontenera (#ddd) w
+     gotowym zrzucie. Zdjęcie z dziurami odrzucamy i powtarzamy — to jedyny test, który nie
+     opiera się na wnętrznościach Leafletu, tylko na tym, co naprawdę wyszło. */
+  const EMPTY_MAX=0.015;
+  const emptyRatio=img=>{
+    const S=240, cv=document.createElement('canvas'); cv.width=S; cv.height=S;
+    const cx=cv.getContext('2d'); cx.drawImage(img,0,0,S,S);
+    const d=cx.getImageData(0,0,S,S).data; let n=0;
+    for(let i=0;i<d.length;i+=4)if(Math.abs(d[i]-221)<4&&Math.abs(d[i+1]-221)<4&&Math.abs(d[i+2]-221)<4)n++;
+    return n/(S*S);
   };
   if(!standalone){map.removeLayer(currentBase); corsBase.addTo(map);}
+  const steps=targets.length+1; let stepNo=0;
+  const step=label=>{onStep&&onStep(stepNo,steps,label);};
+  const prevFade=map.options.fadeAnimation;
+  map.options.fadeAnimation=false;                 // kafle bez rozjaśniania — zrzut nie łapie ich w połowie przejścia
+  document.body.classList.add('capturing');
   try{
     // powiększ mapę do kwadratowego pola zrzutu (sterujemy proporcją / rozdzielczością)
     mapEl.style.cssText='position:fixed;left:0;top:0;z-index:2000;width:'+CAP+'px;height:'+CAP+'px'
@@ -4124,16 +4595,36 @@ async function captureMaps(){
     map.invalidateSize();
     await ensureTiles(15000);
     for(const t of targets){
-      if(t.bounds)map.fitBounds(t.bounds.pad(0.8),{animate:false});   // duży zapas wokół obszaru — miejsce na obrót + na piny przy krawędzi
+      step('Mapa '+(stepNo+1)+' z '+targets.length+' — '+(t.name||'plan sytuacyjny'));
+      if(t.bounds)map.fitBounds(t.bounds.pad(t.pad==null?0.8:t.pad),{animate:false});   // duży zapas wokół obszaru — miejsce na obrót + na piny przy krawędzi
       else map.setView(prevCenter,prevZoom,{animate:false});
-      await new Promise(r=>setTimeout(r,300));   // daj Leafletowi zakolejkować kafle po zmianie widoku
+      await new Promise(r=>setTimeout(r,120));   // daj Leafletowi zakolejkować kafle po zmianie widoku
       await ensureTiles(15000);
+      await tilesSettled(12000);                 // …i dopiero gdy warstwa jest spokojna dwa odczyty z rzędu
       // kąt DŁUGIEJ osi w px kontenera (niezależny od skali) — potrzebny PRZED zrzutem, by wyprostować numery kamer
       const zoneList = t.overview ? mains : (t.z ? [t.z] : []);   // przegląd = wszystkie główne, inaczej pojedyncza
+      const grpCams = t.grp ? groupCams(t.grp.id) : null;
+      // strona grupy pokazuje TYLKO jej kamery — restack po fitBounds mógł przywrócić pozostałe, więc filtr nakładamy tutaj
+      const zTop=[];
+      if(grpCams){
+        printCamOnly=new Set(grpCams.map(c=>c.id)); applyLayerToggles();
+        map.getContainer().classList.add('cams-top');                    // warstwa markerów nad podpisami
+        grpCams.forEach(c=>{ if(c.marker&&c.marker.setZIndexOffset){zTop.push([c.marker,c.marker.options.zIndexOffset||0]); c.marker.setZIndexOffset(10000);} });
+      }
+      // punkty do wyznaczenia kąta długiej osi i kadru: wierzchołki obszaru albo kamery grupy wraz ze stożkami
+      const camPts=c=>{
+        const out=[]; const q=map.latLngToContainerPoint(L.latLng(c.lat,c.lng)); out.push([q.x,q.y]);
+        const b=camFrameBounds(c);
+        [b.getNorthWest(),b.getNorthEast(),b.getSouthEast(),b.getSouthWest()].forEach(ll=>{const w=map.latLngToContainerPoint(ll);out.push([w.x,w.y]);});
+        return out;
+      };
+      let framePts=null;
+      if(t.z)framePts=t.z.pts.map(p=>{const q=map.latLngToContainerPoint(L.latLng(p[0],p[1]));return [q.x,q.y];});
+      else if(grpCams)framePts=grpCams.flatMap(camPts);
+
       let angle=0; const restore=[];
-      if(t.z){
-        const cpx=t.z.pts.map(p=>{const q=map.latLngToContainerPoint(L.latLng(p[0],p[1]));return [q.x,q.y];});
-        angle=minAreaRect(cpx).angle; const angleDeg=angle*180/Math.PI;
+      if(framePts&&framePts.length>1){
+        angle=minAreaRect(framePts).angle; const angleDeg=angle*180/Math.PI;
         // kontr-obrót numerów: dokładam +angle do istniejącego transformu span-u; po ctx.rotate(-angle) numer wyjdzie pionowo (jak plakietka)
         if(catVisible.cam)cameras.forEach(cam=>{
           const sp=cam.marker._icon&&cam.marker._icon.querySelector('.cam-flower span');
@@ -4150,44 +4641,81 @@ async function captureMaps(){
         });
       }
       try{
-        const img=await rasterMap(mapEl,!!t.overview);
+        let img=null, pusto=0;
+        for(let att=0;att<3;att++){
+          if(att){ await tilesSettled(12000); }   // druga i trzecia próba dopiero po dograniu brakujących kafli
+          img=await rasterMap(mapEl,!!t.overview);
+          pusto=standalone?0:emptyRatio(img);
+          if(pusto<EMPTY_MAX)break;
+        }
+        if(pusto>=EMPTY_MAX)await warnTiles();    // trzy podejścia i dalej dziury — powiedz o tym, zamiast po cichu drukować
         const rp=img.width/CAP;   // px kontenera → px obrazu (gdyby dom-to-image zwrócił inny rozmiar)
-        const out=document.createElement('canvas'); out.width=OUT_W; out.height=OUT_H;
-        const ctx=out.getContext('2d'); ctx.fillStyle='#fff'; ctx.fillRect(0,0,OUT_W,OUT_H);
-        if(zoneList.length){
+        const PH=Math.round(OUT_W/(t.ar||PAGE_AR));   // strona grupy jest niższa — pod obrazem mieści się spis kamer
+        const out=document.createElement('canvas'); out.width=OUT_W; out.height=PH;
+        const ctx=out.getContext('2d'); ctx.fillStyle='#fff'; ctx.fillRect(0,0,OUT_W,PH);
+        if(zoneList.length||grpCams){
           // ramka: mieścimy WSZYSTKIE piny (kotwice + margines łezki) oraz wierzchołki stref; przegląd → angle=0 (bez obrotu)
           const rot=(x,y)=>[x*Math.cos(angle)+y*Math.sin(angle), -x*Math.sin(angle)+y*Math.cos(angle)];
           const PINM=40*rp;   // margines: łezka wystaje ~30px nad kotwicę + numer — cała pinezka ma być w kadrze
           let xmin=1e9,xmax=-1e9,ymin=1e9,ymax=-1e9;
           const acc=(x,y,m)=>{const w=rot(x,y);if(w[0]-m<xmin)xmin=w[0]-m;if(w[0]+m>xmax)xmax=w[0]+m;if(w[1]-m<ymin)ymin=w[1]-m;if(w[1]+m>ymax)ymax=w[1]+m;};
-          zoneList.forEach(z=>z.pts.forEach(p=>{const q=map.latLngToContainerPoint(L.latLng(p[0],p[1]));acc(q.x*rp,q.y*rp,0);}));
-          // tylko kamery widoczne w tym zrzucie (kotwica w polu [0,CAP]) — kamery z innych obszarów są poza kadrem, pomijamy
-          if(catVisible.cam)cameras.forEach(cam=>{const q=map.latLngToContainerPoint(L.latLng(cam.lat,cam.lng));
-            if(q.x>=0&&q.x<=CAP&&q.y>=0&&q.y<=CAP)acc(q.x*rp,q.y*rp,PINM);});
-          const hwx=(xmax-xmin)/2, hwy=(ymax-ymin)/2;
+          if(grpCams){
+            grpCams.forEach(cam=>{const q=map.latLngToContainerPoint(L.latLng(cam.lat,cam.lng));acc(q.x*rp,q.y*rp,PINM);
+              camPts(cam).slice(1).forEach(p=>acc(p[0]*rp,p[1]*rp,0));});   // kotwica z marginesem łezki + narożniki stożka
+          }else{
+            zoneList.forEach(z=>z.pts.forEach(p=>{const q=map.latLngToContainerPoint(L.latLng(p[0],p[1]));acc(q.x*rp,q.y*rp,0);}));
+            // tylko kamery widoczne w tym zrzucie (kotwica w polu [0,CAP]) — kamery z innych obszarów są poza kadrem, pomijamy
+            if(catVisible.cam)cameras.forEach(cam=>{const q=map.latLngToContainerPoint(L.latLng(cam.lat,cam.lng));
+              if(q.x>=0&&q.x<=CAP&&q.y>=0&&q.y<=CAP)acc(q.x*rp,q.y*rp,PINM);});
+          }
+          let hwx=(xmax-xmin)/2, hwy=(ymax-ymin)/2;
+          // pas mapy grupy jest znacznie szerszy niż wysoki — rozciągnij ramkę do proporcji strony,
+          // inaczej „mieszczenie" ogranicza wysokość i zbliżenie leci w dół (obok zostają białe pasy)
+          if(grpCams){
+            hwx*=1.04; hwy*=1.04;                                                 // odrobina powietrza — pinezki nie dotykają krawędzi
+            const AR=OUT_W/PH; if(hwx/hwy<AR)hwx=hwy*AR; else hwy=hwx/AR;
+          }
           const wcx=(xmin+xmax)/2, wcy=(ymin+ymax)/2;
           const cx=wcx*Math.cos(angle)-wcy*Math.sin(angle), cy=wcx*Math.sin(angle)+wcy*Math.cos(angle);  // środek ramki → z powrotem do px obrazu
           // skala mieszcząca piny: element ograniczający (pin lub róg obszaru) dopiero dotyka krawędzi kartki
-          const sFit=Math.min(OUT_W/(2*hwx),OUT_H/(2*hwy))*0.98;
+          const sFit=Math.min(OUT_W/(2*hwx),PH/(2*hwy))*0.98;
           // straż pełnego spadu: dociągnij skalę, by obraz pokrył kartkę bez bieli — maks. 6% ponad sFit
           // (mały biały klin w rogu znika; większy, wymagający zgniecenia pinów, zostaje świadomie)
           const c=Math.abs(Math.cos(angle)),sn=Math.abs(Math.sin(angle));
           const dx=Math.abs(cx-img.width/2), dy=Math.abs(cy-img.height/2);
-          const coverX=((OUT_W/2)*c+(OUT_H/2)*sn)/(img.width/2-2-dx);
-          const coverY=((OUT_W/2)*sn+(OUT_H/2)*c)/(img.height/2-2-dy);
-          const s=Math.min(Math.max(sFit,coverX,coverY),sFit*1.06);
-          ctx.translate(OUT_W/2,OUT_H/2); ctx.rotate(-angle); ctx.scale(s,s); ctx.translate(-cx,-cy);
+          const coverX=((OUT_W/2)*c+(PH/2)*sn)/(img.width/2-2-dx);
+          const coverY=((OUT_W/2)*sn+(PH/2)*c)/(img.height/2-2-dy);
+          // strona grupy ma ramkę już w proporcjach kartki — pełny spad wychodzi sam, a dociąganie skali
+          // obcinałoby skrajne pinezki, więc straż spadu zostaje tylko dla stron obszarów
+          const s=grpCams?sFit:Math.min(Math.max(sFit,coverX,coverY),sFit*1.06);
+          ctx.translate(OUT_W/2,PH/2); ctx.rotate(-angle); ctx.scale(s,s); ctx.translate(-cx,-cy);
         }else{
           // brak obszaru głównego: bez obrotu, zmieść całość (contain)
-          const s=Math.min(OUT_W/img.width,OUT_H/img.height);
-          ctx.translate(OUT_W/2,OUT_H/2); ctx.scale(s,s); ctx.translate(-img.width/2,-img.height/2);
+          const s=Math.min(OUT_W/img.width,PH/img.height);
+          ctx.translate(OUT_W/2,PH/2); ctx.scale(s,s); ctx.translate(-img.width/2,-img.height/2);
         }
         ctx.drawImage(img,0,0);
-        shots.push({name:t.name||(t.z?(t.z.name||'Obszar'):'Plan sytuacyjny'),area:(t.overview?'':(t.z?fmtArea(t.z.area):'')),url:out.toDataURL('image/jpeg',0.9)});
-      }finally{ restore.forEach(([n,tr,to])=>{n.style.transform=tr; if(to!==undefined)n.style.transformOrigin=to;}); }   // przywróć oryginalne transformy numerów i etykiet
+        shots.push({
+          name:t.name||(t.z?(t.z.name||'Obszar'):'Plan sytuacyjny'),
+          area:(t.overview?'':(t.z?fmtArea(t.z.area):'')),
+          perim:(!t.overview&&t.z&&t.z.pts?fmtLen(zonePerimeter(t.z.pts)):''),
+          grp:t.grp||null,
+          url:out.toDataURL('image/jpeg',0.9)});
+        stepNo++;
+      }finally{
+        restore.forEach(([n,tr,to])=>{n.style.transform=tr; if(to!==undefined)n.style.transformOrigin=to;});   // przywróć oryginalne transformy numerów i etykiet
+        zTop.forEach(([m,z])=>m.setZIndexOffset(z));
+        map.getContainer().classList.remove('cams-top');
+        if(printCamOnly){printCamOnly=null; applyLayerToggles();}                                             // …i pozostałe kamery na mapie
+      }
     }
+    step('Składanie dokumentu…');
   }finally{
+    document.body.classList.remove('capturing');
+    tileDataCache.clear();                 // kafle w base64 potrafią ważyć kilka MB — nie trzymamy ich po wydruku
+    map.options.fadeAnimation=prevFade;
     mapEl.style.cssText=savedStyle;
+    if(printCamOnly){printCamOnly=null; applyLayerToggles();}   // strażnik: zrzut przerwany błędem nie może zostawić ukrytych kamer
     if(corsBase)map.removeLayer(corsBase);
     if(!standalone)currentBase=bases[prevBaseKey].addTo(map);
     map.invalidateSize();
@@ -4196,94 +4724,294 @@ async function captureMaps(){
   return shots;
 }
 // klon tabeli do wydruku: bez id (nie dubluje żywej tabeli), inputy → tekst, bez kolumny akcji (pusta rubryka po .del-x)
-function printClone(tbl){
-  const c=tbl.cloneNode(true);
-  c.removeAttribute('id');
-  c.querySelectorAll('input').forEach(i=>i.replaceWith(i.value));
-  c.querySelectorAll('tr').forEach(tr=>{
-    const last=tr.cells[tr.cells.length-1]; if(!last)return;
-    if(last.colSpan>1)last.colSpan--;                              // wiersz-nagłówek grupy rozpięty na całą szerokość
-    else if(!last.textContent.trim())tr.deleteCell(-1);            // pusta rubryka akcji
-    else{const sp=[...tr.cells].find(x=>x.colSpan>1);if(sp)sp.colSpan--;}   // ostatnia komórka niesie dane (np. koszt) — zwęź colspan obok
-  });
-  return c;
+/* Kamery na wydruku: płaska lista (nagłówek grupy + jej kamery, na końcu „Bez grupy")
+   rozłożona na DWIE kolumny po pięć rubryk. Kolumny czyta się od góry do dołu: lewa,
+   potem prawa; grupa przechodząca między kolumnami dostaje powtórzony nagłówek „(cd.)". */
+function camPrintItems(){
+  const items=[];
+  camGroups.forEach(g=>{const cams=groupCams(g.id); if(!cams.length)return; items.push({t:'g',g}); cams.forEach(c=>items.push({t:'c',c,g}));});
+  const loose=groupCams(null);
+  if(camGroups.length&&loose.length)items.push({t:'g',g:null});
+  loose.forEach(c=>items.push({t:'c',c,g:null}));
+  return items;
 }
-// zbuduj ukryty #printDoc: strony z mapkami + (dla 'full') strona z danymi
-function buildPrintDoc(shots,mode){
-  let doc=document.getElementById('printDoc');
-  if(!doc){doc=document.createElement('div');doc.id='printDoc';document.body.appendChild(doc);}
-  doc.innerHTML='';
-  const projNum=el('projNum').textContent, projName=el('projName').textContent;
-  const head=extra=>`<div class="print-head"><img src="../alfa-logo.png" alt="Alfa"><span>Projekt ${projNum} — ${projName}</span>${extra}</div>`;
-  shots.forEach(s=>{
-    const pg=document.createElement('div'); pg.className='print-page';
-    const meta=s.area?` · ${s.area}`:'';
-    // strona = mapa na całej powierzchni + mały chip z podpisem w rogu
-    pg.innerHTML=`<div class="print-map-page"><img src="${s.url}">`+
-      `<div class="print-cap"><img src="../alfa-logo.png" alt="Alfa">`+
-      `<span>Projekt ${projNum} — ${projName} · ${s.name}${meta}</span></div></div>`;
-    doc.appendChild(pg);
+
+/* ============ EKSPORT PDF (wektorowy, z zakładkami) ============
+   Drukowanie przez przeglądarkę nie potrafi zapisać zakładek, więc PDF składamy sami — i to
+   NIE jako zrzuty stron: tekst, tabele i linie idą wektorowo (jsPDF), rastrem zostają wyłącznie
+   mapy. Polskie znaki wymagają osadzonego fontu Unicode — standardowe fonty PDF ich nie mają. */
+const PDF={W:297,H:210,M:12};                       // A4 poziomo + marginesy 12 mm
+const PDF_FONT={normal:'https://cdn.jsdelivr.net/npm/@expo-google-fonts/roboto@0.2.3/Roboto_400Regular.ttf',
+                bold:'https://cdn.jsdelivr.net/npm/@expo-google-fonts/roboto@0.2.3/Roboto_700Bold.ttf'};
+let pdfFontData=null, pdfLogo=null;
+function ensureJsPDF(){
+  if(window.jspdf&&window.jspdf.jsPDF)return Promise.resolve();
+  return new Promise((res,rej)=>{
+    const s=document.createElement('script');
+    s.src='https://unpkg.com/jspdf@2.5.2/dist/jspdf.umd.min.js';
+    s.onload=()=>res(); s.onerror=()=>rej(new Error('nie udało się wczytać biblioteki PDF'));
+    document.head.appendChild(s);
   });
-  if(mode==='full'){
-    renderZonesGroupedForPrint();
-    const sec=(title,node)=>{const d=document.createElement('div');d.className='print-sec';d.innerHTML=`<h2>${title}</h2>`;d.appendChild(node);return d;};
-    const pg=document.createElement('div'); pg.className='print-page';
-    pg.innerHTML=head('<span style="margin-left:auto;font-weight:600">Dane projektu</span>');
-    const camT=el('camTable');   if(camT&&camT.style.display!=='none')pg.appendChild(sec('Kamery',printClone(camT)));
-    const ptT=el('pointTable');  if(ptT&&ptT.style.display!=='none')pg.appendChild(sec('Punkty (szlabany / budki / NVR)',printClone(ptT)));
-    const znT=el('zoneTable');   if(znT&&znT.style.display!=='none')pg.appendChild(sec('Obszary do wyceny',printClone(znT)));
-    pg.appendChild(sec('Okablowanie',printClone(el('cableTable'))));
-    const notes=document.createElement('pre'); notes.textContent=el('objInfo').value||'—';
-    pg.appendChild(sec('Notatki z wizji lokalnej',notes));
-    doc.appendChild(pg);
+}
+const b64of=buf=>{const b=new Uint8Array(buf);let s='';const CH=0x8000;
+  for(let i=0;i<b.length;i+=CH)s+=String.fromCharCode.apply(null,b.subarray(i,i+CH));return btoa(s);};
+async function loadPdfAssets(){
+  if(!pdfFontData){
+    const [r,bo]=await Promise.all([fetch(PDF_FONT.normal),fetch(PDF_FONT.bold)]);
+    if(!r.ok||!bo.ok)throw new Error('nie udało się pobrać fontu do PDF (polskie znaki)');
+    pdfFontData={normal:b64of(await r.arrayBuffer()),bold:b64of(await bo.arrayBuffer())};
+  }
+  if(pdfLogo===null){   // logo jako PNG z przezroczystością — canvas bez tła daje alfę, JPEG zrobiłby czarne pudło
+    try{
+      const img=new Image(); img.crossOrigin='anonymous';
+      await new Promise((res,rej)=>{img.onload=res;img.onerror=rej;img.src='../alfa-logo.png';});
+      const cv=document.createElement('canvas'); cv.width=img.naturalWidth; cv.height=img.naturalHeight;
+      cv.getContext('2d').drawImage(img,0,0);
+      pdfLogo=cv.toDataURL('image/png');
+    }catch(_){ pdfLogo=''; }
   }
 }
-// złap mapki, zbuduj dokument, wydrukuj; przywróć stan po afterprint
-async function captureAndPrint(mode){
-  if(_printing)return;   // drugi klik w trakcie zrzutów zapisałby już-podmieniony styl mapy i trwale rozjechał layout
+const pdfTxt=(doc,style,size,gray)=>{doc.setFont('Roboto',style);doc.setFontSize(size);doc.setTextColor(gray==null?30:gray);};
+function pdfSwatch(doc,x,y,color){ try{doc.setFillColor(color||'#888888');}catch(_){doc.setFillColor(136);}
+  doc.roundedRect(x,y,2.6,2.6,.5,.5,'F'); }
+
+/* Jedna ścieżka dla wydruku i pliku: dokument zawsze składa jsPDF, a „drukuj" to ten sam PDF
+   otwarty w czytniku z autoPrint. Dzięki temu marginesy, stopka i łamanie stron są nasze, a nie
+   zależne od ustawień okna druku przeglądarki (to ono narzucało margines i spychało stopkę).
+   mode: 'full' = mapy + grupy + dane, 'maps' = same plansze; action: 'save' | 'print'. */
+/* Druk PDF-a przez UKRYTĄ RAMKĘ, nie przez window.open: składanie dokumentu trwa kilka sekund,
+   więc otwarcie okna dawno wypada z gestu użytkownika i blokery wyskakujących okien je ucinają.
+   Ramka nie jest wyskakującym oknem, więc nic nie ma czego blokować. Gdyby przeglądarka nie
+   umiała wyświetlić PDF-a w ramce (onload nie przyjdzie albo print() rzuci), proponujemy pobranie. */
+function printPdfBlob(doc,nazwa){
+  const stara=el('pdfPrintFrame'); if(stara)stara.remove();
+  const f=document.createElement('iframe'); f.id='pdfPrintFrame';
+  f.style.cssText='position:fixed;right:0;bottom:0;width:1px;height:1px;opacity:0;border:0';
+  let zalatwione=false;
+  const ratunek=()=>{
+    if(zalatwione)return; zalatwione=true;
+    uiConfirm('Ta przeglądarka nie otworzyła okna druku. Pobrać plik PDF i wydrukować go ręcznie?',
+      {title:'Wydruk',okText:'Pobierz PDF'}).then(go=>{if(go)doc.save(nazwa);});
+  };
+  const t=setTimeout(ratunek,5000);
+  f.onload=()=>{
+    clearTimeout(t);
+    try{ zalatwione=true; f.contentWindow.focus(); f.contentWindow.print(); }
+    catch(_){ zalatwione=false; ratunek(); }
+  };
+  f.onerror=()=>{ clearTimeout(t); ratunek(); };
+  document.body.appendChild(f);
+  f.src=doc.output('bloburl');     // blob musi żyć tak długo, jak ramka — dlatego jej nie usuwamy
+}
+async function exportPdf(mode,action){
+  if(_printing)return;
+  mode=mode||'full'; action=action||'save';
   _printing=true;
-  const s=el('saveStatus'); const prevHtml=s?s.innerHTML:'', prevTitle=s?s.title:'';
-  const restoreStatus=()=>{if(s){s.innerHTML=prevHtml;s.title=prevTitle;}};
   try{
-    if(s){s.textContent='⏳'; s.title='Przygotowuję wydruk…';}
+    printProgSet(0,1,'Uruchamiam…'); printProgShow(true);
+    try{ await ensureJsPDF(); await loadPdfAssets(); }catch(e){ uiAlert(e.message||String(e)); return; }
     let shots;
-    try{ shots=await captureMaps(); }
-    catch(err){ restoreStatus(); if(!(err&&err.cancelled))uiAlert('Nie udało się przygotować wydruku mapy: '+err); return; }
-    try{ buildPrintDoc(shots,mode); }
-    catch(err){ restoreStatus(); uiAlert('Nie udało się zbudować dokumentu wydruku: '+err); return; }
-    restoreStatus();
-    document.body.classList.add('printing-doc');
-    const cleanup=()=>{
-      clearTimeout(fallback);   // stary timer awaryjny nie może zdjąć klasy podczas KOLEJNEGO wydruku
-      document.body.classList.remove('printing-doc');
-      window.removeEventListener('afterprint',cleanup);
-      refreshZones();   // buildPrintDoc('full') przegrupował żywą tabelę obszarów pod druk
+    try{ shots=await captureMaps(mode,printProgSet); }
+    catch(err){ if(!(err&&err.cancelled))uiAlert('Nie udało się przygotować map: '+err); return; }
+    printProgSet(1,2,'Składanie PDF…');
+
+    const {jsPDF}=window.jspdf;
+    const doc=new jsPDF({orientation:'landscape',unit:'mm',format:'a4',compress:true});
+    doc.addFileToVFS('Roboto-Regular.ttf',pdfFontData.normal); doc.addFont('Roboto-Regular.ttf','Roboto','normal');
+    doc.addFileToVFS('Roboto-Bold.ttf',pdfFontData.bold);      doc.addFont('Roboto-Bold.ttf','Roboto','bold');
+    doc.setFont('Roboto','normal');
+
+    const projNum=el('projNum').textContent, projName=el('projName').textContent;
+    const foot=(AUTHOR_NAME?('Wykonawca projektu: '+AUTHOR_NAME+' · '):'')+COMPANY_NAME;
+    const CW=PDF.W-2*PDF.M, BOTTOM=PDF.H-PDF.M-6, RH=5.0;
+    let page=1; const toc=[];
+    // nagłówek + stopka (stopka: dół strony, do prawej)
+    const decorate=right=>{
+      if(pdfLogo)doc.addImage(pdfLogo,'PNG',PDF.M,PDF.M-1,8.5,8.5);
+      pdfTxt(doc,'bold',10);
+      doc.text('Projekt '+projNum+' — '+projName,PDF.M+(pdfLogo?10.5:0),PDF.M+5.4);
+      if(right)doc.text(right,PDF.W-PDF.M,PDF.M+5.4,{align:'right'});
+      doc.setDrawColor(30); doc.setLineWidth(.5); doc.line(PDF.M,PDF.M+7.6,PDF.W-PDF.M,PDF.M+7.6);
+      pdfTxt(doc,'normal',7,145);
+      doc.text(foot,PDF.W-PDF.M,PDF.H-PDF.M+5,{align:'right'});
+      return PDF.M+13;
     };
-    window.addEventListener('afterprint',cleanup);
-    const fallback=setTimeout(cleanup,60000);   // awaryjnie, gdyby afterprint nie zadziałał
-    // logo w chipach musi być zdekodowane przed print(), inaczej na wolnym łączu drukuje się puste
-    const doc=document.getElementById('printDoc');
-    await Promise.all([...doc.querySelectorAll('img')].map(i=>i.decode().catch(()=>{})));
-    setTimeout(()=>window.print(),150);
-  }finally{ _printing=false; }
+    const newPage=right=>{ doc.addPage([PDF.W,PDF.H],'landscape'); page++; return decorate(right); };
+
+    /* zwykła tabela: cols=[{t,w,a}], rows=[{c:[…],color,bold} | {span,color}] */
+    function table(y,cols,rows,right){
+      const W=cols.reduce((s,c)=>s+c.w,0), x=PDF.M;
+      const header=yy=>{
+        pdfTxt(doc,'bold',7.5,90); let cx=x;
+        cols.forEach(c=>{doc.text(c.t,c.a==='r'?cx+c.w-1.5:cx+1.5,yy+3.4,{align:c.a==='r'?'right':'left'});cx+=c.w;});
+        doc.setDrawColor(40); doc.setLineWidth(.3); doc.line(x,yy+RH,x+W,yy+RH); return yy+RH;
+      };
+      y=header(y);
+      rows.forEach(r=>{
+        if(y+RH>BOTTOM){ y=header(newPage(right)); }
+        if(r.span!==undefined){
+          doc.setFillColor(238,242,247); doc.rect(x,y,W,RH,'F');
+          let tx=x+1.8; if(r.color){pdfSwatch(doc,tx,y+1.2,r.color);tx+=4;}
+          pdfTxt(doc,'bold',8); doc.text(String(r.span),tx,y+3.6);
+        }else{
+          pdfTxt(doc,r.bold?'bold':'normal',8); let cx=x;
+          r.c.forEach((v,i)=>{const co=cols[i]; let tx=cx+1.5;
+            if(i===0&&r.color){pdfSwatch(doc,tx,y+1.2,r.color);tx+=4;}
+            doc.text(String(v==null?'':v),co.a==='r'?cx+co.w-1.5:tx,y+3.6,{align:co.a==='r'?'right':'left'});cx+=co.w;});
+        }
+        doc.setDrawColor(205); doc.setLineWidth(.1); doc.line(x,y+RH,x+W,y+RH); y+=RH;
+      });
+      return y;
+    }
+    /* kamery w dwóch kolumnach — dokładnie jak na wydruku */
+    const TYPE_PL=Object.fromEntries(Object.entries(TYPE_META).map(([k,v])=>[k,v.label]));
+    function camTable(y,items,right){
+      let half=Math.ceil(items.length/2);
+      if(items[half-1]&&items[half-1].t==='g')half--;
+      const L=items.slice(0,half), R=items.slice(half);
+      if(camGroups.length&&R.length&&R[0].t==='c'&&R[0].g!==undefined)R.unshift({t:'g',g:R[0].g,cd:true});
+      const gap=6, hw=(CW-gap)/2, xs=[PDF.M,PDF.M+hw+gap];
+      const cols=[{t:'#',w:11},{t:'Nazwa',w:hw-79},{t:'Typ',w:20},{t:'FOV',w:14,a:'r'},{t:'Zasięg',w:34,a:'r'}];
+      const W=cols.reduce((s,c)=>s+c.w,0);
+      const heads=yy=>{
+        pdfTxt(doc,'bold',7.5,90);
+        xs.forEach(x0=>{let cx=x0;cols.forEach(c=>{doc.text(c.t,c.a==='r'?cx+c.w-1.5:cx+1.5,yy+3.4,{align:c.a==='r'?'right':'left'});cx+=c.w;});
+          doc.setDrawColor(40);doc.setLineWidth(.3);doc.line(x0,yy+RH,x0+W,yy+RH);});
+        return yy+RH;
+      };
+      y=heads(y);
+      const cell=(x0,it,yy)=>{
+        if(!it)return;
+        if(it.t==='g'){
+          const g=it.g;
+          doc.setFillColor(238,242,247); doc.rect(x0,yy,W,RH,'F');
+          let tx=x0+1.8; if(g){pdfSwatch(doc,tx,yy+1.2,g.color);tx+=4;}
+          pdfTxt(doc,'bold',8); doc.text((g?(g.name||'Grupa'):'Bez grupy')+(it.cd?' (cd.)':''),tx,yy+3.6);
+        }else{
+          const c=it.c, vr=visRange(c);
+          const v=[c.num,c.name,TYPE_PL[c.type]||c.type,c.type==='pano'?'360°':c.fov+'°',c.range+' m'+(vr==null?'':' / '+vr+' m')];
+          pdfTxt(doc,'normal',8); let cx=x0;
+          v.forEach((val,i)=>{const co=cols[i]; let tx=cx+1.5;
+            if(i===0){pdfSwatch(doc,tx,yy+1.2,c.color);tx+=4;}
+            doc.text(String(val),co.a==='r'?cx+co.w-1.5:tx,yy+3.6,{align:co.a==='r'?'right':'left'});cx+=co.w;});
+        }
+        doc.setDrawColor(205); doc.setLineWidth(.1); doc.line(x0,yy+RH,x0+W,yy+RH);
+      };
+      for(let i=0;i<Math.max(L.length,R.length);i++){
+        if(y+RH>BOTTOM)y=heads(newPage(right));
+        cell(xs[0],L[i],y); cell(xs[1],R[i],y); y+=RH;
+      }
+      return y;
+    }
+    const heading=(y,txt,right)=>{ if(y+12>BOTTOM)y=newPage(right); pdfTxt(doc,'bold',11); doc.text(txt,PDF.M,y+3); return y+6; };
+
+    /* ——— strony z mapami (plan sytuacyjny / obszary / grupy) ——— */
+    let first=true;
+    shots.forEach(s=>{
+      const label=s.grp?('Grupa: '+(s.grp.name||'Grupa')):(s.name||'Plan sytuacyjny');
+      let y=first?decorate(label):newPage(label); first=false;
+      const startPage=page;
+      if(s.grp){
+        const gname=s.grp.name||'Grupa', cams=groupCams(s.grp.id);
+        const h=CW/GRP_AR;
+        doc.addImage(s.url,'JPEG',PDF.M,y,CW,h);
+        doc.setDrawColor(120); doc.setLineWidth(.2); doc.rect(PDF.M,y,CW,h);
+        y+=h+7;
+        pdfTxt(doc,'bold',10); pdfSwatch(doc,PDF.M,y-2.7,s.grp.color);
+        doc.text('Kamery grupy — '+gname+' ('+cams.length+')',PDF.M+4.5,y);
+        y=camTable(y+2.5,cams.map(c=>({t:'c',c})),label);
+        toc.push({title:gname,group:true,page:startPage});
+      }else{
+        const boxH=BOTTOM-y-6;
+        let w=CW, h=w/PAGE_AR; if(h>boxH){h=boxH;w=h*PAGE_AR;}
+        const x=PDF.M+(CW-w)/2;
+        doc.addImage(s.url,'JPEG',x,y,w,h);
+        doc.setDrawColor(120); doc.setLineWidth(.2); doc.rect(x,y,w,h);
+        const meta=[s.area,s.perim?'obwód '+s.perim:''].filter(Boolean).join('   ·   ');
+        if(meta){ pdfTxt(doc,'normal',8,110); doc.text(meta,PDF.W/2,y+h+5.5,{align:'center'}); }
+        toc.push({title:s.name||'Plan sytuacyjny',group:false,page:startPage});
+      }
+    });
+
+    /* ——— strona danych (tylko w wersji opisowej) ——— */
+    if(mode==='full'){
+    let y=newPage('Dane projektu'); const dataPage=page;
+    toc.push({title:'Dane projektu',group:false,page:dataPage});
+    if(cameras.length){ y=heading(y,'Kamery','Dane projektu'); y=camTable(y,camPrintItems(),'Dane projektu')+7; }
+    if(points.length){
+      y=heading(y,'Punkty (szlabany / budki / NVR)','Dane projektu');
+      y=table(y,[{t:'Typ',w:70},{t:'Nazwa',w:CW-70}],
+        points.map(p=>({c:[(POINT_TYPES[p.type]||POINT_TYPES.nvr).name,p.name]})),'Dane projektu')+7;
+    }
+    if(zones.length){
+      y=heading(y,'Obszary do wyceny','Dane projektu');
+      const rows=[], sect=(title,arr)=>{
+        if(!arr.length)return;
+        rows.push({span:title}); let s=0;
+        arr.forEach(z=>{s+=z.area; rows.push({c:[z.name,fmtArea(z.area),fmtLen(zonePerimeter(z.pts))],color:z.color});});
+        rows.push({c:['RAZEM ('+arr.length+')',fmtArea(s),''],bold:true});
+      };
+      sect('Obszary główne',zones.filter(isMainZone)); sect('Obszary poboczne',zones.filter(z=>!isMainZone(z)));
+      y=table(y,[{t:'Nazwa',w:CW-84},{t:'Powierzchnia',w:44,a:'r'},{t:'Obwód',w:40,a:'r'}],rows,'Dane projektu')+7;
+    }
+    if(cables.length){
+      y=heading(y,'Okablowanie','Dane projektu');
+      const slack=(+el('cableSlack').value||0)/100, price=+el('pricePerM').value||0;
+      let tot=0,totS=0;
+      const rows=cables.map(c=>{const w=Math.round(c.len*(1+slack));tot+=c.len;totS+=w;return {c:[c.label,c.len+' m',w+' m']};});
+      rows.push({c:['RAZEM',tot+' m',totS+' m'],bold:true});
+      if(price>0)rows.push({c:['Szacunkowy koszt kabla','',(totS*price).toLocaleString('pl-PL')+' zł'],bold:true});
+      y=table(y,[{t:'Odcinek',w:CW-84},{t:'Długość',w:44,a:'r'},{t:'Z zapasem',w:40,a:'r'}],rows,'Dane projektu');
+    }
+    }
+
+    /* ——— numeracja stron: dopiero teraz znamy komplet ——— */
+    const total=doc.getNumberOfPages();
+    for(let i=1;i<=total;i++){
+      doc.setPage(i); pdfTxt(doc,'normal',7,145);
+      doc.text('Strona '+i+' / '+total,PDF.M,PDF.H-PDF.M+5);
+    }
+    /* ——— zakładki: strony grup pod wspólnym węzłem ——— */
+    let grpNode=null;
+    toc.forEach(t=>{
+      if(t.group){
+        if(!grpNode)grpNode=doc.outline.add(null,'Grupy kamer',{pageNumber:t.page});
+        doc.outline.add(grpNode,t.title,{pageNumber:t.page});
+      }else doc.outline.add(null,t.title,{pageNumber:t.page});
+    });
+    const nazwa='plan-monitoringu-'+((PROJECT_NAME||'projekt').toLowerCase().replace(/[^a-z0-9ąćęłńóśźż]+/gi,'-'))+'.pdf';
+    if(action==='print')printPdfBlob(doc,nazwa); else doc.save(nazwa);
+  }catch(err){ uiAlert('Nie udało się zbudować PDF: '+err); }
+  finally{ _printing=false; printProgShow(false); }
 }
-/* menu podręczne 🖨️ (styl jak ⚙️) */
+/* menu podręczne 📁 (styl jak ⚙️) */
 // pozycjonuj menu tak, by mieściło się w viewport: przy dolnej krawędzi otwieraj w górę, przy prawej — w lewo
+// Pozycjonowanie w fixed, bo szyna zakładek ma teraz własny overflow — menu w absolute byłoby przycięte.
+// Logika bez zmian: przy dolnej krawędzi okna rośnij w górę, przy prawej otwieraj w lewo.
 function placeMenu(menu){
-  menu.style.top='0';menu.style.bottom='auto';menu.style.left='calc(100% + 6px)';menu.style.right='auto';
-  const wrap=menu.parentElement.getBoundingClientRect(), h=menu.offsetHeight, w=menu.offsetWidth, pad=8;
-  if(wrap.top+h>window.innerHeight-pad){menu.style.top='auto';menu.style.bottom='0';}          // rośnij w górę od dołu przycisku
-  if(wrap.right+6+w>window.innerWidth-pad){menu.style.left='auto';menu.style.right='calc(100% + 6px)';}
+  const wrap=menu.parentElement.getBoundingClientRect(), pad=8;
+  menu.style.position='fixed'; menu.style.top='0px'; menu.style.left='0px'; menu.style.right='auto'; menu.style.bottom='auto';
+  const h=menu.offsetHeight, w=menu.offsetWidth;
+  const top =(wrap.top+h>window.innerHeight-pad)?Math.max(pad,wrap.bottom-h):wrap.top;
+  const left=(wrap.right+6+w>window.innerWidth-pad)?wrap.left-6-w:wrap.right+6;
+  menu.style.top=top+'px'; menu.style.left=left+'px';
 }
-function closePrintMenu(){document.getElementById('printMenu').classList.remove('open');}
-el('btnPrint').onclick=e=>{e.stopPropagation();const m=el('printMenu');if(m.classList.toggle('open'))placeMenu(m);};
+// menu w fixed nie jedzie z przyciskiem — przy przewinięciu szyny zamykamy je, zamiast zostawiać w powietrzu
+document.addEventListener('scroll',e=>{
+  if(e.target&&e.target.classList&&e.target.classList.contains('side-tabs')){closeFileMenu();closeOptMenu();}
+},true);
+function closeFileMenu(){document.getElementById('fileMenu').classList.remove('open');}
+el('btnFile').onclick=e=>{e.stopPropagation();const m=el('fileMenu');if(m.classList.toggle('open'))placeMenu(m);};
 document.addEventListener('click',e=>{
-  const m=document.getElementById('printMenu');
-  if(m.classList.contains('open')&&!m.contains(e.target)&&!e.target.closest('#btnPrint'))closePrintMenu();
+  const m=document.getElementById('fileMenu');
+  if(m.classList.contains('open')&&!m.contains(e.target)&&!e.target.closest('#btnFile'))closeFileMenu();
 });
-document.addEventListener('keydown',e=>{if(e.key==='Escape')closePrintMenu();});
-el('btnPrintMaps').onclick=()=>{closePrintMenu();captureAndPrint('maps');};
-el('btnPrintFull').onclick=()=>{closePrintMenu();captureAndPrint('full');};
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeFileMenu();});
+// wybór dowolnej pozycji zamyka menu — dzięki temu #btnSave/#btnLoad zachowują swoje własne handlery bez zmian
+el('fileMenu').addEventListener('click',e=>{if(e.target.closest('#fileMenu>button'))closeFileMenu();});
+el('btnPrintMaps').onclick=()=>{closeFileMenu();exportPdf('maps','print');};
+el('btnPrintFull').onclick=()=>{closeFileMenu();exportPdf('full','print');};
+el('btnPdf').onclick=()=>{closeFileMenu();exportPdf();};
 
 /* ============ OPCJE (⚙️) — czyszczenie projektu ============ */
 function closeOptMenu(){document.getElementById('optMenu').classList.remove('open');}
@@ -4296,7 +5024,7 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape')closeOptMenu();});
 function clearAllCameras(silent){        // usuwa wszystkie kamery z mapy i listy
   if(!cameras.length)return;
   cameras.forEach(c=>{map.removeLayer(c.marker);if(c.cover)map.removeLayer(c.cover);if(c.coverVis)map.removeLayer(c.coverVis);});
-  cameras=[]; selected=null; clearHandles();
+  cameras=[]; camGroups=[]; camNoneCollapsed=false; selected=null; clearHandles();
   document.getElementById('camEmpty').style.display='block'; document.getElementById('camEdit').style.display='none';
   refreshList(); restackCameras();
   if(!silent)save();
@@ -4515,7 +5243,7 @@ el('btnDelObjPin').onclick=()=>{ if(!objPin)return; uiConfirm('Usunąć zapisan�
    Odczyt z API z fallbackiem do localStorage, gdy brak połączenia/sesji. */
 (function(){
   const TPL_CACHE_KEY='mon_cam_templates_v1';
-  const TYPE_LABEL={bullet:'Tubowa',dome:'Kopułka',ptz:'PTZ',pano:'360°'};
+  const TYPE_LABEL=Object.fromEntries(Object.entries(TYPE_META).map(([k,v])=>[k,v.label]));
   let templates=[], editingTplId=null;
   const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
   const cacheGet=()=>{try{return JSON.parse(localStorage.getItem(TPL_CACHE_KEY))||[]}catch(_){return[]}};
@@ -5122,7 +5850,7 @@ el('btnDelObjPin').onclick=()=>{ if(!objPin)return; uiConfirm('Usunąć zapisan�
     wrap.style.display=cams.length?'block':'none';
     el('perimCamCount').textContent=cams.length;
     if(!cams.length)return;
-    const typeName={bullet:'Tubowa',dome:'Kopułka',ptz:'PTZ',pano:'360°'};
+    const typeName=Object.fromEntries(Object.entries(TYPE_META).map(([k,v])=>[k,v.label]));
     cams.forEach(c=>{
       const tr=document.createElement('tr'); tr.className='trow'+(selected===c?' sel':'');
       tr.innerHTML=`<td style="width:1%;white-space:nowrap"><span class="swatch" style="background:${c.color}"></span>${c.num}</td>`+

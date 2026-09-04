@@ -1885,7 +1885,7 @@ export async function deletePriceItem(id: number) {
 // Szablony kamer (standardowe modele kamer i ich parametry)
 // ---------------------------------------------------------------------------
 
-export type CameraModelType = "bullet" | "dome" | "ptz" | "pano";
+export type CameraModelType = "bullet" | "dome" | "ptz" | "pano" | "lpr";
 
 export interface CameraModel {
   id: number;
@@ -2298,11 +2298,15 @@ export interface Offer {
   orderId: number | null;
   warehouseDocId: number | null;
   notes: string | null;
+  /** Token linku dla klienta; null = oferta nieudostępniona. */
+  shareToken: string | null;
   createdBy: string | null;
   createdAt: string;
   updatedAt: string;
   /** Liczba miesięcy wynikająca z trybu dzierżawy (12 / 24 / własna). */
   leaseMonthsEffective?: number | null;
+  /** Kto wykonał ofertę: handlowiec prowadzący, a bez niego autor dokumentu. */
+  preparedBy?: string | null;
 }
 
 export interface OfferSection {
@@ -2349,6 +2353,23 @@ export interface OfferItem {
   // --- widoczne tylko z uprawnieniem do kosztów ---
   unitCost?: number | null;
   lineCost?: number | null;
+}
+
+/**
+ * Pozycja, którą ruszy „Aktualizuj" — ceny „przed" i „po" wprost z backendu,
+ * żeby modal pokazywał dokładnie to, co zapisze zatwierdzenie.
+ */
+export interface OfferRepriceChange {
+  itemId: number;
+  sectionTitle: string;
+  name: string;
+  unit: string;
+  qty: number;
+  oldUnitPrice: number;
+  newUnitPrice: number;
+  /** Widoczne tylko z uprawnieniem do kosztów. */
+  oldUnitCost?: number | null;
+  newUnitCost?: number | null;
 }
 
 export interface OfferMargin {
@@ -2420,8 +2441,89 @@ export interface OfferDetail {
   sections: OfferSection[];
   items: OfferItem[];
   totals: OfferTotals;
+  /** Bloki opisowe doklejone do dokumentu — drukują się pod Uwagami. */
+  texts: OfferTextBlock[];
   /** Wypełniane tylko przez akceptację. */
   created?: { orderId: number; orderNumber: string; warehouseDocId: number | null };
+}
+
+/**
+ * Oferta widziana przez klienta spod linku — lustro białej listy z backendu
+ * (`src/routes/offers.ts`). Świadomie NIE zawiera kosztów, marży, uwag
+ * wewnętrznych, handlowca, autora ani niewybranych wariantów: te pola nie
+ * opuszczają serwera, więc nie ma ich nawet w JSON-ie w narzędziach przeglądarki.
+ */
+export interface PublicOfferDetail {
+  offer: {
+    number: string;
+    version: number;
+    date: string;
+    validUntil: string | null;
+    kind: OfferKind;
+    clientName: string;
+    clientNip: string;
+    site: string;
+    address: string;
+    discountPct: number;
+    leaseMode: OfferLeaseMode;
+    leaseMonthsEffective: number | null;
+    preparedBy: string | null;
+  };
+  company: {
+    name: string;
+    fullName: string | null;
+    nip: string | null;
+    regon: string | null;
+    krs: string | null;
+    address: string | null;
+    postalCode: string | null;
+    city: string | null;
+  } | null;
+  sections: { id: number; title: string; position: number; isOptional: boolean }[];
+  items: {
+    sectionId: number;
+    position: number;
+    name: string;
+    unit: string;
+    qty: number;
+    unitPrice: number;
+    discountPct: number;
+    isOptional: boolean;
+    billing: OfferItemBilling;
+    lineTotal: number;
+  }[];
+  texts: { title: string; body: string }[];
+  totals: {
+    oneTimePayable: number;
+    equipmentValue: number;
+    leaseMonthly: number;
+    leaseMonthlyNet: number;
+    monthlyPrice: number;
+    monthlyPriceNet: number;
+    monthlyTotal: number;
+    optionsOneTime: number;
+    optionsMonthly: number;
+  };
+  isExpired: boolean;
+}
+
+/**
+ * Adres oferty dla klienta.
+ *
+ * Składany W PRZEGLĄDARCE, bo tylko ona zna adres, którego naprawdę używa
+ * człowiek. Serwer widzi origin żądania wewnętrznego: w dev vite proxuje `/api`
+ * na `localhost:4001` z `changeOrigin`, a na produkcji przed aplikacją stoi
+ * reverse proxy — w obu przypadkach wyszedłby link działający tylko lokalnie.
+ */
+export function offerShareUrl(token: string): string {
+  return `${window.location.origin}/oferta/${token}`;
+}
+
+/** Oferta spod linku dla klienta — trasa BEZ autoryzacji. */
+export async function fetchPublicOffer(token: string) {
+  return request<ApiResponse<PublicOfferDetail>>(
+    `/public-offer/${encodeURIComponent(token)}`
+  );
 }
 
 export interface OfferInput {
@@ -2525,6 +2627,47 @@ export interface OfferPackageInput {
   items?: OfferPackageItemInput[];
 }
 
+/**
+ * Wzorzec opisu z biblioteki — powtarzalny blok tekstu (warunki gwarancji,
+ * zakres wsparcia), który handlowiec dokleja do oferty. Treść w markdownie,
+ * renderowana przez `lib/markdownLite.ts`.
+ */
+export interface OfferText {
+  id: number;
+  name: string;
+  category: OfferSectionCategory;
+  title: string;
+  body: string;
+  isDefault: boolean;
+  active: boolean;
+  position: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface OfferTextInput {
+  name: string;
+  category?: OfferSectionCategory;
+  title?: string;
+  body?: string;
+  isDefault?: boolean;
+  active?: boolean;
+  position?: number;
+}
+
+/** Opis DOŁĄCZONY do oferty — kopia treści wzorca, nie referencja. */
+export interface OfferTextBlock {
+  id: number;
+  offerId: number;
+  /** Ślad pochodzenia; null dla opisu własnego albo po skasowaniu wzorca. */
+  textId: number | null;
+  title: string;
+  body: string;
+  position: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 /** Bezpieczny parse definicji parametrów pakietu (lustro backendu). */
 export function parsePackageParams(raw: string): OfferPackageParam[] {
   try {
@@ -2598,6 +2741,24 @@ export const offersApi = {
     return request<ApiResponse<OfferDetail>>(`/offers/${id}/reject`, { method: "POST" });
   },
 
+  /**
+   * Wystawia token linku dla klienta (albo zwraca już istniejący). Działa też
+   * na ofercie wysłanej — zamrożenie chroni kwoty, nie sposób dostarczenia.
+   *
+   * Zwraca SAM TOKEN; pełny adres składa `offerShareUrl()`, bo serwer za proxy
+   * nie zna adresu, pod którym ktoś naprawdę używa aplikacji.
+   */
+  async share(id: number) {
+    return request<ApiResponse<{ token: string }>>(`/offers/${id}/share`, {
+      method: "POST",
+    });
+  },
+
+  /** Cofa dostęp — stary link natychmiast przestaje działać. */
+  async unshare(id: number) {
+    return request<ApiResponse<null>>(`/offers/${id}/share`, { method: "DELETE" });
+  },
+
   /** Akceptacja: tworzy zlecenie i szkic WZ w jednej transakcji. */
   async accept(
     id: number,
@@ -2616,8 +2777,17 @@ export const offersApi = {
     });
   },
 
-  async reprice(id: number) {
-    return request<ApiResponse<OfferDetail>>(`/offers/${id}/reprice`, { method: "POST" });
+  /** Podgląd aktualizacji cen — co i z czego na co się zmieni, bez zapisu. */
+  async repricePreview(id: number) {
+    return request<ApiResponse<OfferRepriceChange[]>>(`/offers/${id}/reprice-preview`);
+  },
+
+  /** Bez `itemIds` aktualizuje wszystkie pozycje; z listą — tylko wskazane. */
+  async reprice(id: number, itemIds?: number[]) {
+    return request<ApiResponse<OfferDetail>>(`/offers/${id}/reprice`, {
+      method: "POST",
+      body: JSON.stringify(itemIds ? { itemIds } : {}),
+    });
   },
 
   async addSection(
@@ -2728,6 +2898,43 @@ export const offersApi = {
     });
   },
 
+  /**
+   * Doklejenie opisu do dokumentu. Z `textId` backend kopiuje treść wzorca,
+   * bez niego (albo z własnym `title`/`body`) powstaje opis jednorazowy —
+   * późniejsza edycja wzorca NIE rusza ofert, które już poszły do klienta.
+   */
+  async addTextBlock(id: number, data: { textId?: number | null; title?: string; body?: string }) {
+    return request<ApiResponse<OfferDetail>>(`/offers/${id}/texts`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  },
+
+  async updateTextBlock(
+    id: number,
+    blockId: number,
+    data: { title?: string; body?: string }
+  ) {
+    return request<ApiResponse<OfferDetail>>(`/offers/${id}/texts/${blockId}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    });
+  },
+
+  async removeTextBlock(id: number, blockId: number) {
+    return request<ApiResponse<OfferDetail>>(`/offers/${id}/texts/${blockId}`, {
+      method: "DELETE",
+    });
+  },
+
+  /** Nowa kolejność wydruku — `ids` w docelowej kolejności, od góry. */
+  async reorderTextBlocks(id: number, ids: number[]) {
+    return request<ApiResponse<OfferDetail>>(`/offers/${id}/texts/reorder`, {
+      method: "POST",
+      body: JSON.stringify({ ids }),
+    });
+  },
+
   // --- Biblioteka pakietów ---
   async listPackages(opts: { includeInactive?: boolean; category?: OfferSectionCategory } = {}) {
     const params = new URLSearchParams();
@@ -2757,6 +2964,38 @@ export const offersApi = {
 
   async archivePackage(id: number) {
     return request<ApiResponse<null>>(`/offers/packages/${id}`, { method: "DELETE" });
+  },
+
+  // --- Biblioteka opisów ---
+  async listTexts(opts: { includeInactive?: boolean; category?: OfferSectionCategory } = {}) {
+    const params = new URLSearchParams();
+    if (opts.includeInactive) params.set("includeInactive", "1");
+    if (opts.category) params.set("category", opts.category);
+    const q = params.toString();
+    return request<ApiResponse<OfferText[]>>(`/offers/texts${q ? `?${q}` : ""}`);
+  },
+
+  async getText(id: number) {
+    return request<ApiResponse<OfferText>>(`/offers/texts/${id}`);
+  },
+
+  async createText(data: OfferTextInput) {
+    return request<ApiResponse<OfferText>>("/offers/texts", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  },
+
+  async updateText(id: number, data: OfferTextInput) {
+    return request<ApiResponse<OfferText>>(`/offers/texts/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    });
+  },
+
+  /** DELETE = archiwizacja (active=false) — opisy wpięte w oferty zostają nietknięte. */
+  async archiveText(id: number) {
+    return request<ApiResponse<null>>(`/offers/texts/${id}`, { method: "DELETE" });
   },
 
   /** Oferta z projektu CCTV — liczba kamer bierze się z planu w designerze. */
@@ -3190,6 +3429,14 @@ export interface HrEmployee {
   kind: HrEmployeeKind;
   /** Spółki z rozliczeń biura (cała historia) — liczone przez API. */
   officeCompanies?: string[];
+  /** Macierzysty dział z kartoteki (null = brak przypisania). */
+  departmentId: number | null;
+  /**
+   * Etykieta działu gotowa do wyświetlenia (`ALFA GROUP:Handlowy`), sklejona na
+   * serwerze — pusty string, gdy pracownik nie ma działu. Front jej nie składa,
+   * bo nazwa firmy siedzi w ustawieniach za `requireAdmin`.
+   */
+  departmentName: string;
   active: boolean;
   notes: string;
   createdAt: string;
@@ -3200,6 +3447,8 @@ export interface HrEmployeeInput {
   fullName: string;
   code?: string;
   kind?: HrEmployeeKind;
+  /** Dział pracownika; `null` kasuje przypisanie. */
+  departmentId?: number | null;
   active?: boolean;
   notes?: string;
 }

@@ -505,6 +505,34 @@
       "when": 1788354423396,
       "tag": "0071_easy_bulldozer",
       "breakpoints": true
+    },
+    {
+      "idx": 72,
+      "version": "6",
+      "when": 1788356587361,
+      "tag": "0072_exotic_union_jack",
+      "breakpoints": true
+    },
+    {
+      "idx": 73,
+      "version": "6",
+      "when": 1788360000000,
+      "tag": "0073_hr_employee_departments_backfill",
+      "breakpoints": true
+    },
+    {
+      "idx": 74,
+      "version": "6",
+      "when": 1788520716431,
+      "tag": "0074_lovely_robin_chapel",
+      "breakpoints": true
+    },
+    {
+      "idx": 75,
+      "version": "6",
+      "when": 1788526781203,
+      "tag": "0075_mute_scorpion",
+      "breakpoints": true
     }
   ]
 }

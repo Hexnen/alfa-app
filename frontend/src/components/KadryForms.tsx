@@ -55,6 +55,22 @@ function companyOptions(companies: Company[], current?: string | null): string[]
   return names.sort((a, b) => a.localeCompare(b, "pl"));
 }
 
+/**
+ * Działy do wyboru: aktywne + ten już przypisany, choćby był zarchiwizowany —
+ * inaczej edycja dowolnego innego pola kartoteki po cichu kasowałaby dział.
+ */
+function departmentOptions(
+  departments: HrDepartment[],
+  currentId?: number | null,
+): HrDepartment[] {
+  const list = departments.filter(
+    (d) => d.active || (currentId != null && d.id === currentId),
+  );
+  return [...list].sort(
+    (a, b) => a.sortOrder - b.sortOrder || a.label.localeCompare(b.label, "pl"),
+  );
+}
+
 function NumField({
   id,
   label,
@@ -91,20 +107,25 @@ export function HrEmployeeForm({
   onClose,
   onSubmit,
   employee,
+  departments,
 }: {
   open: boolean;
   onClose: () => void;
   onSubmit: (data: HrEmployeeInput) => Promise<void>;
   employee?: HrEmployee | null;
+  /** Działy firmy — lista wyboru macierzystego działu pracownika. */
+  departments: HrDepartment[];
 }) {
   const [loading, setLoading] = useState(false);
   const [formData, setFormData] = useState<HrEmployeeInput>({
     fullName: employee?.fullName || "",
     code: employee?.code || "",
     kind: employee?.kind || "ochrona",
+    departmentId: employee?.departmentId ?? null,
     notes: employee?.notes || "",
     active: employee?.active ?? true,
   });
+  const deptChoices = departmentOptions(departments, employee?.departmentId);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -161,6 +182,37 @@ export function HrEmployeeForm({
             >
               <option value="ochrona">Ochrona (umowy)</option>
               <option value="biuro">Biuro</option>
+            </select>
+          </div>
+          <div className="space-y-2">
+            <Label
+              htmlFor="hre-dept"
+              title="Macierzysty dział pracownika — podpowiadany przy nowym wpisie godzin"
+              className="cursor-help"
+            >
+              Dział
+            </Label>
+            <select
+              id="hre-dept"
+              value={
+                formData.departmentId == null ? "" : String(formData.departmentId)
+              }
+              onChange={(e) =>
+                setFormData((p) => ({
+                  ...p,
+                  // Pusta opcja = jawny null, nie `undefined`: PUT nadpisuje
+                  // rekord, więc pominięcie pola zostawiłoby stary dział.
+                  departmentId: e.target.value ? Number(e.target.value) : null,
+                }))
+              }
+              className={SELECT_CLS}
+            >
+              <option value="">— brak —</option>
+              {deptChoices.map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.label}
+                </option>
+              ))}
             </select>
           </div>
           <div className="space-y-2">
@@ -265,6 +317,25 @@ export function HrHoursForm({
   const set = (k: keyof typeof fields) => (v: string) =>
     setFields((p) => ({ ...p, [k]: v }));
 
+  /**
+   * Wybór pracownika PODPOWIADA jego macierzysty dział z kartoteki — to tylko
+   * podpowiedź, nie reguła: człowiek z działu technicznego bywa rozliczany na
+   * konkretnym obiekcie, a wtedy dział byłby błędem. Dlatego podstawiamy go
+   * wyłącznie przy NOWYM wpisie i tylko gdy przypisanie jest jeszcze puste —
+   * nigdy nie nadpisujemy tego, co użytkownik już wybrał, ani istniejącego
+   * wiersza (tam dział ustalono kiedyś świadomie).
+   */
+  const handleEmployeeChange = (value: string) => {
+    setEmployeeId(value);
+    if (entry) return;
+    const emp = employees.find((e) => String(e.id) === value);
+    const deptId = emp?.departmentId ?? null;
+    // Dział zarchiwizowany nie ma opcji w selekcie — podstawiony token
+    // pokazałby puste pole, więc podpowiadamy tylko to, co da się wybrać.
+    if (deptId == null || !departments.some((d) => d.id === deptId)) return;
+    setAssignment((prev) => (prev === "" ? `d:${deptId}` : prev));
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
@@ -310,7 +381,7 @@ export function HrHoursForm({
               <select
                 id="hrh-emp"
                 value={employeeId}
-                onChange={(e) => setEmployeeId(e.target.value)}
+                onChange={(e) => handleEmployeeChange(e.target.value)}
                 className={SELECT_CLS}
                 required
               >

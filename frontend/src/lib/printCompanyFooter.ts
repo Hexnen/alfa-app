@@ -15,8 +15,21 @@ import type { Company } from "./api";
 const esc = (s: string | null | undefined) =>
   (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
+/**
+ * Tyle danych spółki, ile potrzebuje stopka — i ani pola więcej.
+ *
+ * Celowo NIE `Company`: ten sam dokument składa też strona publiczna oferty,
+ * która dostaje z backendu wąską projekcję (bez narzutów kadrowych, notatek
+ * i liczników). Pełne `Company` spełnia ten kształt strukturalnie, więc
+ * pozostałe wydruki wołają te funkcje bez żadnej zmiany.
+ */
+export type PrintCompany = Pick<
+  Company,
+  "name" | "fullName" | "nip" | "regon" | "krs" | "address" | "postalCode" | "city"
+>;
+
 /** Adres w jednej linii: „03-876 Warszawa, ul. Matuszewska 20". */
-export function companyAddressLine(company: Company): string {
+export function companyAddressLine(company: PrintCompany): string {
   const cityPart = [company.postalCode, company.city].filter(Boolean).join(" ");
   return [cityPart, company.address].filter(Boolean).join(", ");
 }
@@ -25,7 +38,7 @@ export function companyAddressLine(company: Company): string {
  * Zawartość stopki jako HTML (bez kontenera — opakowanie należy do szablonu).
  * Puste pola są pomijane, żeby nie zostawały sieroty w rodzaju „NIP: ".
  */
-export function companyFooterHtml(company: Company | null): string {
+export function companyFooterHtml(company: PrintCompany | null): string {
   if (!company) return "";
 
   const title = esc(company.fullName || company.name);

@@ -412,6 +412,69 @@ async function main() {
     cost.unmappedHoursShare
   );
 
+  console.log("\n— dział w kartotece pracownika —");
+
+  /**
+   * `hr_employees.department_id` to STAŁE miejsce pracy osoby — pole niezależne od
+   * `hr_hours.department_id` (tam dział mówi, czego dotyczył pojedynczy wpis godzin).
+   * Bez niego pracownik biura nie miałby działu w ogóle: rozlicza się przez
+   * `hr_office_payroll`, więc nie ma ani jednego wiersza godzin.
+   */
+  const empDept = await call("/employees", {
+    method: "POST",
+    body: { fullName: `${PREFIX}Kartotekowy`, kind: "biuro", departmentId: depHandlowy.id },
+  });
+  ok(
+    "POST /employees zapisuje dział kartoteki",
+    empDept.status === 201 && empDept.body?.data?.departmentId === depHandlowy.id,
+    empDept.body?.data
+  );
+
+  const listed = await call("/employees");
+  const listedEmp = (listed.body?.data ?? []).find(
+    (e: any) => e.fullName === `${PREFIX}Kartotekowy`
+  );
+  ok(
+    "GET /employees zwraca GOTOWĄ etykietę działu (z nazwą firmy z ustawień)",
+    listedEmp?.departmentId === depHandlowy.id &&
+      listedEmp?.departmentName === `${COMPANY_NAME}:${PREFIX}Handlowy`,
+    listedEmp
+  );
+  const noDept = (listed.body?.data ?? []).find(
+    (e: any) => e.fullName === `${PREFIX}Przepinany`
+  );
+  ok(
+    "osoba bez działu zostaje na liście z pustą etykietą (LEFT JOIN, nie INNER)",
+    noDept != null && noDept.departmentId === null && noDept.departmentName === "",
+    noDept
+  );
+
+  const badDept = await call("/employees", {
+    method: "POST",
+    body: { fullName: `${PREFIX}ZlyDzial`, departmentId: 99999999 },
+  });
+  ok(
+    "departmentId wskazujące nieistniejący dział → 400",
+    badDept.status === 400 && /dział/i.test(String(badDept.body?.error)),
+    badDept
+  );
+
+  const clearDept = await call(`/employees/${empDept.body?.data?.id}`, {
+    method: "PUT",
+    body: { fullName: `${PREFIX}Kartotekowy`, kind: "biuro", departmentId: null },
+  });
+  ok(
+    "PUT z departmentId = null zdejmuje przypisanie",
+    clearDept.status === 200 &&
+      clearDept.body?.data?.departmentId === null &&
+      clearDept.body?.data?.departmentName === "",
+    clearDept.body?.data
+  );
+  await call(`/employees/${empDept.body?.data?.id}`, {
+    method: "PUT",
+    body: { fullName: `${PREFIX}Kartotekowy`, kind: "biuro", departmentId: depHandlowy.id },
+  });
+
   console.log("\n— usuwanie działu —");
 
   const delBlocked = await call(`/departments/${depHandlowy.id}`, { method: "DELETE" });
@@ -427,6 +490,19 @@ async function main() {
     "?force=1 usuwa dział i odpina godziny (FK SET NULL), nie kasując ich",
     delForced.status === 200 && orphan.length === 0,
     { status: delForced.status, orphan: orphan.length }
+  );
+
+  // Ten sam FK SET NULL stoi na kartotece: skasowanie działu ma zdjąć przypisanie,
+  // a nie usunąć człowieka razem z jego umowami i wypłatami.
+  const afterDelete = db
+    .select()
+    .from(schema.hrEmployees)
+    .where(eq(schema.hrEmployees.id, empDept.body?.data?.id))
+    .get();
+  ok(
+    "usunięcie działu zeruje department_id pracownika, nie kasując osoby",
+    afterDelete != null && afterDelete.departmentId === null,
+    afterDelete
   );
 }
 

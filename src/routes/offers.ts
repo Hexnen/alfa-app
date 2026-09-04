@@ -20,6 +20,7 @@
  * Wszystkie kwoty NETTO.
  */
 import { Hono, type Context } from "hono";
+import { randomBytes } from "node:crypto";
 import { db, schema } from "../db/index.js";
 import { eq, and, asc, desc, like, inArray, ne, sql, type SQL } from "drizzle-orm";
 import type { ApiResponse } from "../types/index.js";
@@ -35,6 +36,7 @@ import {
   OFFER_STATUSES,
   type NewOffer,
   type NewOfferPackage,
+  type NewOfferText,
   type Offer,
   type OfferItem,
   type OfferItemBilling,
@@ -47,6 +49,8 @@ import {
   type OfferSection,
   type OfferSectionCategory,
   type OfferStatus,
+  type OfferText,
+  type OfferTextBlock,
 } from "../db/schema.js";
 import { getUser } from "../middleware/auth.js";
 import { canView } from "../lib/auth/permissions.js";
@@ -60,6 +64,7 @@ import {
   type PriceSource,
 } from "../lib/offer-packages.js";
 import { logActivity, logFieldDiffs } from "../lib/activity-log.js";
+import { createRateLimiter, clientIp } from "../lib/rate-limit.js";
 import { createDocumentSync } from "./warehouse.js";
 import { generateOrderNumber } from "../services/orders.js";
 
@@ -191,6 +196,26 @@ export function nextOfferNumberSync(tx: Tx, date: string): string {
   return `${prefix}${String(maxSeq + 1).padStart(3, "0")}`;
 }
 
+/**
+ * Dokleja do świeżej oferty wszystkie aktywne opisy z flagą „domyślny".
+ *
+ * Treść KOPIUJEMY, tak samo jak przy ręcznym dołożeniu opisu — późniejsza
+ * poprawka wzorca nie ma prawa ruszyć dokumentu, który już powstał.
+ */
+function attachDefaultTextsSync(tx: Tx, offerId: number) {
+  const defaults = tx
+    .select()
+    .from(schema.offerTexts)
+    .where(and(eq(schema.offerTexts.active, true), eq(schema.offerTexts.isDefault, true)))
+    .orderBy(asc(schema.offerTexts.position), asc(schema.offerTexts.name))
+    .all();
+  defaults.forEach((t, i) => {
+    tx.insert(schema.offerTextBlocks)
+      .values({ offerId, textId: t.id, title: t.title, body: t.body, position: i + 1 })
+      .run();
+  });
+}
+
 /** Numer kolejnej wersji: OF/2026/08/001 → OF/2026/08/001-w2. */
 function versionNumber(baseNumber: string, version: number): string {
   const base = baseNumber.split("-w")[0];
@@ -304,6 +329,9 @@ function canSeeCosts(c: Context): boolean {
 const COST_FIELDS = [
   "unitCost",
   "lineCost",
+  // Podgląd aktualizacji cen — koszt „przed" i „po" na pozycji.
+  "oldUnitCost",
+  "newUnitCost",
   "oneTimeCost",
   "oneTimeCostMaterial",
   "oneTimeCostLabour",
@@ -349,7 +377,12 @@ function respond<T>(c: Context, data: T, message?: string, status = 200) {
 // ---------------------------------------------------------------------------
 
 export interface OfferDetail {
-  offer: Offer & { status: OfferStatus; leaseMonthsEffective: number | null };
+  offer: Offer & {
+    status: OfferStatus;
+    leaseMonthsEffective: number | null;
+    /** Handlowiec prowadzący, a bez niego autor dokumentu — nazwa na wydruk. */
+    preparedBy: string | null;
+  };
   sections: OfferSection[];
   items: (OfferItem & {
     lineTotal: number;
@@ -366,6 +399,8 @@ export interface OfferDetail {
      */
     priceUpdatedAt: string | null;
   })[];
+  /** Opisy handlowe wklejone na ten dokument — patrz `offer_text_blocks`. */
+  texts: OfferTextBlock[];
   totals: OfferTotals;
 }
 
@@ -387,20 +422,47 @@ function loadOfferSync(dbx: DbOrTx, id: number): OfferDetail {
     .orderBy(asc(schema.offerItems.position), asc(schema.offerItems.id))
     .all();
 
+  const texts = dbx
+    .select()
+    .from(schema.offerTextBlocks)
+    .where(eq(schema.offerTextBlocks.offerId, id))
+    .orderBy(asc(schema.offerTextBlocks.position), asc(schema.offerTextBlocks.id))
+    .all();
+
   const { values } = getCompanyConfig();
   /*
    * Stawka prowizji jest w kartotece handlowca, nie na ofercie — bierzemy ją
    * przy odczycie, żeby zmiana stawki od razu przeliczała otwarte dokumenty
    * (tak samo jak narzut magazynowy przelicza ceny).
    */
-  const salesCommissionPct =
+  const salesperson =
     offer.salespersonId === null
       ? null
-      : (dbx
-          .select({ rate: schema.salespeople.commissionRate })
+      : dbx
+          .select()
           .from(schema.salespeople)
           .where(eq(schema.salespeople.id, offer.salespersonId))
-          .all()[0]?.rate ?? null);
+          .all()[0] ?? null;
+  const salesCommissionPct = salesperson?.commissionRate ?? null;
+
+  /*
+   * KTO WYKONAŁ OFERTĘ — nazwa, nie identyfikator, bo idzie na dokument (także
+   * ten dla klienta). Pierwszy jest handlowiec prowadzący; gdy oferta nie ma
+   * przypisanego handlowca, zostaje autor dokumentu. `created_by` trzyma LOGIN
+   * z sesji, więc rozwiązujemy go na nazwę użytkownika — a gdy konta już nie ma,
+   * zostawiamy login (lepszy ślad niż kreska), tak samo jak na liście ofert.
+   */
+  const authorLabel = offer.createdBy
+    ? (dbx
+        .select({ email: schema.users.email, displayName: schema.users.displayName })
+        .from(schema.users)
+        .all()
+        .find((u) => u.email.toLowerCase() === offer.createdBy!.toLowerCase())
+        ?.displayName || offer.createdBy)
+    : null;
+  const preparedBy = salesperson
+    ? `${salesperson.firstName} ${salesperson.lastName}`.trim()
+    : authorLabel;
   const totals = computeOffer(
     offer,
     sections,
@@ -432,6 +494,7 @@ function loadOfferSync(dbx: DbOrTx, id: number): OfferDetail {
       status: effectiveStatus(offer, todayISO()),
       leaseMonthsEffective:
         offer.leaseMode === "y1" ? 12 : offer.leaseMode === "y2" ? 24 : offer.leaseMonths,
+      preparedBy,
     },
     sections,
     items: items.map((it) => {
@@ -447,6 +510,7 @@ function loadOfferSync(dbx: DbOrTx, id: number): OfferDetail {
         priceUpdatedAt: source.priceUpdatedAt(it.source, refId),
       };
     }),
+    texts,
     totals,
   };
 }
@@ -801,6 +865,157 @@ app.delete("/packages/:id", async (c) =>
 );
 
 // ---------------------------------------------------------------------------
+// OPISY — biblioteka powtarzalnych tekstów handlowych (gwarancja, wsparcie,
+// warunki płatności). Montowane PRZED `/:id` z tego samego powodu co pakiety.
+// ---------------------------------------------------------------------------
+
+/**
+ * Głowa opisu. `current` to rekord sprzed zapisu: pole pominięte w body bierze
+ * wartość z niego, zamiast wracać do fabrycznej. Bez tego edytor — który nie ma
+ * przełącznika archiwum i `active` nie wysyła — po każdym zapisie po cichu
+ * przywracałby zarchiwizowany wzorzec do biblioteki.
+ */
+function parseTextHead(
+  body: Record<string, unknown>,
+  current?: OfferText
+): Partial<NewOfferText> {
+  const name = str(body.name);
+  if (!name) throw new ApiError(400, "Nazwa opisu jest wymagana");
+
+  return {
+    name,
+    category: oneOf(body.category, OFFER_SECTION_CATEGORIES, current?.category ?? "inne"),
+    title: str(body.title),
+    // Markdown zapisujemy jak przyszedł — składnię rozwija front przy wydruku,
+    // backendowi to zwykły tekst.
+    body: str(body.body),
+    isDefault:
+      body.isDefault === undefined ? current?.isDefault ?? false : Boolean(body.isDefault),
+    active: body.active === undefined ? current?.active ?? true : Boolean(body.active),
+    position: num(body.position, "Pozycja opisu", current?.position ?? 0) ?? 0,
+  };
+}
+
+app.get("/texts", async (c) =>
+  guard(c, () => {
+    const includeInactive = c.req.query("includeInactive") === "1";
+    const category = c.req.query("category");
+    const filters: SQL[] = [];
+    if (!includeInactive) filters.push(eq(schema.offerTexts.active, true));
+    if (category && (OFFER_SECTION_CATEGORIES as readonly string[]).includes(category)) {
+      filters.push(eq(schema.offerTexts.category, category as OfferSectionCategory));
+    }
+    const rows = db
+      .select()
+      .from(schema.offerTexts)
+      .where(filters.length ? and(...filters) : undefined)
+      .orderBy(asc(schema.offerTexts.position), asc(schema.offerTexts.name))
+      .all();
+    return c.json({ success: true, data: rows });
+  })
+);
+
+app.get("/texts/:id", async (c) =>
+  guard(c, () => {
+    const id = requireId(c.req.param("id"), "identyfikator opisu");
+    const row = db
+      .select()
+      .from(schema.offerTexts)
+      .where(eq(schema.offerTexts.id, id))
+      .all()[0];
+    if (!row) throw new ApiError(404, "Nie znaleziono opisu");
+    return c.json({ success: true, data: row });
+  })
+);
+
+app.post("/texts", async (c) => {
+  const body = await c.req.json<Record<string, unknown>>();
+  return guard(c, () => {
+    const head = parseTextHead(body);
+    const created = db.transaction((tx) => {
+      const row = tx
+        .insert(schema.offerTexts)
+        .values(head as NewOfferText)
+        .returning()
+        .get();
+      logActivity(tx, {
+        entityType: "offer_text",
+        entityId: row.id,
+        user: getUser(c),
+        action: "created",
+        summary: `Dodano opis ofertowy „${row.name}”`,
+      });
+      return row;
+    });
+    return c.json({ success: true, data: created, message: "Opis dodany" }, 201);
+  });
+});
+
+/** PUT podmienia głowę opisu; pole pominięte w body zostaje bez zmian. */
+app.put("/texts/:id", async (c) => {
+  const body = await c.req.json<Record<string, unknown>>();
+  return guard(c, () => {
+    const id = requireId(c.req.param("id"), "identyfikator opisu");
+    const updated = db.transaction((tx) => {
+      const before = tx
+        .select()
+        .from(schema.offerTexts)
+        .where(eq(schema.offerTexts.id, id))
+        .all()[0];
+      if (!before) throw new ApiError(404, "Nie znaleziono opisu");
+      const head = parseTextHead(body, before);
+      const row = tx
+        .update(schema.offerTexts)
+        .set({ ...head, updatedAt: new Date().toISOString() })
+        .where(eq(schema.offerTexts.id, id))
+        .returning()
+        .get();
+      logFieldDiffs(tx, {
+        entityType: "offer_text",
+        entityId: id,
+        user: getUser(c),
+        before,
+        after: row,
+        fields: ["name", "category", "title", "isDefault", "active"],
+      });
+      return row;
+    });
+    return c.json({ success: true, data: updated, message: "Opis zapisany" });
+  });
+});
+
+/**
+ * DELETE = archiwizacja. Bloki na wystawionych ofertach trzymają własną kopię
+ * treści, ale `offer_text_blocks.text_id` ma wskazywać, skąd tekst przyszedł —
+ * skasowanie wzorca zabrałoby ten ślad razem z całą biblioteką.
+ */
+app.delete("/texts/:id", async (c) =>
+  guard(c, () => {
+    const id = requireId(c.req.param("id"), "identyfikator opisu");
+    const row = db
+      .select()
+      .from(schema.offerTexts)
+      .where(eq(schema.offerTexts.id, id))
+      .all()[0];
+    if (!row) throw new ApiError(404, "Nie znaleziono opisu");
+    db.transaction((tx) => {
+      tx.update(schema.offerTexts)
+        .set({ active: false, updatedAt: new Date().toISOString() })
+        .where(eq(schema.offerTexts.id, id))
+        .run();
+      logActivity(tx, {
+        entityType: "offer_text",
+        entityId: id,
+        user: getUser(c),
+        action: "deleted",
+        summary: `Zarchiwizowano opis „${row.name}”`,
+      });
+    });
+    return c.json({ success: true, data: null, message: "Opis zarchiwizowany" });
+  })
+);
+
+// ---------------------------------------------------------------------------
 // OFERTY
 // ---------------------------------------------------------------------------
 
@@ -1052,6 +1267,7 @@ app.post("/", async (c) => {
         } as NewOffer)
         .returning()
         .get();
+      attachDefaultTextsSync(tx, offer.id);
       logActivity(tx, {
         entityType: "offer",
         entityId: offer.id,
@@ -1187,6 +1403,29 @@ app.post("/:id/version", async (c) =>
         .from(schema.offerItems)
         .where(eq(schema.offerItems.offerId, id))
         .all();
+
+      /*
+       * Opisy kopiujemy Z RODZICA, a nie z biblioteki: nowa wersja ma odtwarzać
+       * dokument 1:1, więc wjeżdżają dokładnie te teksty, które klient widział —
+       * nawet gdy wzorce w katalogu zdążyły się zmienić.
+       */
+      const textBlocks = tx
+        .select()
+        .from(schema.offerTextBlocks)
+        .where(eq(schema.offerTextBlocks.offerId, id))
+        .orderBy(asc(schema.offerTextBlocks.position), asc(schema.offerTextBlocks.id))
+        .all();
+      for (const b of textBlocks) {
+        tx.insert(schema.offerTextBlocks)
+          .values({
+            ...b,
+            id: undefined,
+            offerId: offer.id,
+            createdAt: undefined,
+            updatedAt: undefined,
+          })
+          .run();
+      }
 
       const sectionMap = new Map<number, number>();
       for (const s of sections) {
@@ -1734,6 +1973,157 @@ app.post("/:id/sections/:sid/save-as-package", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// OPISY NA OFERCIE — bloki tekstu; treść to KOPIA wzorca, nie odwołanie do niego
+// ---------------------------------------------------------------------------
+
+function nextTextBlockPositionSync(tx: Tx, offerId: number): number {
+  const rows = tx
+    .select({ position: schema.offerTextBlocks.position })
+    .from(schema.offerTextBlocks)
+    .where(eq(schema.offerTextBlocks.offerId, offerId))
+    .all();
+  return rows.reduce((max, r) => Math.max(max, r.position), 0) + 1;
+}
+
+function loadTextBlockSync(tx: Tx, offerId: number, tid: number) {
+  const block = tx
+    .select()
+    .from(schema.offerTextBlocks)
+    .where(
+      and(eq(schema.offerTextBlocks.id, tid), eq(schema.offerTextBlocks.offerId, offerId))
+    )
+    .all()[0];
+  if (!block) throw new ApiError(404, "Nie znaleziono opisu w tej ofercie");
+  return block;
+}
+
+/**
+ * Dołożenie opisu. Z `textId` treść przychodzi z biblioteki, bez niego powstaje
+ * pusty blok do napisania ręcznie.
+ */
+app.post("/:id/texts", async (c) => {
+  const body = await c.req.json<Record<string, unknown>>().catch(() => ({}));
+  return guard(c, () => {
+    const offerId = requireId(c.req.param("id"), "identyfikator oferty");
+    const b = body as Record<string, unknown>;
+    const textId = optId(b.textId, "identyfikator opisu");
+
+    db.transaction((tx) => {
+      loadEditableOfferSync(tx, offerId);
+
+      let tpl: OfferText | null = null;
+      if (textId !== null) {
+        tpl =
+          tx
+            .select()
+            .from(schema.offerTexts)
+            .where(eq(schema.offerTexts.id, textId))
+            .all()[0] ?? null;
+        if (!tpl) throw new ApiError(404, "Nie znaleziono opisu");
+      }
+
+      tx.insert(schema.offerTextBlocks)
+        .values({
+          offerId,
+          textId,
+          // Treść wzorca KOPIUJEMY; pola podane wprost w ciele mają
+          // pierwszeństwo, bo tekst często dostosowuje się do klienta.
+          title: b.title === undefined ? tpl?.title ?? "" : str(b.title),
+          body: b.body === undefined ? tpl?.body ?? "" : str(b.body),
+          position: nextTextBlockPositionSync(tx, offerId),
+        })
+        .run();
+    });
+
+    return respond(c, loadOfferSync(db, offerId), "Opis dodany", 201);
+  });
+});
+
+app.put("/:id/texts/:tid", async (c) => {
+  const body = await c.req.json<Record<string, unknown>>();
+  return guard(c, () => {
+    const offerId = requireId(c.req.param("id"), "identyfikator oferty");
+    const tid = requireId(c.req.param("tid"), "identyfikator opisu");
+    db.transaction((tx) => {
+      loadEditableOfferSync(tx, offerId);
+      const block = loadTextBlockSync(tx, offerId, tid);
+      // Patch CZĄSTKOWY: pominięte pole zostaje takie, jakie było — front
+      // zapisuje sam nagłówek albo samą treść, zależnie od pola w edytorze.
+      tx.update(schema.offerTextBlocks)
+        .set({
+          title: body.title === undefined ? block.title : str(body.title),
+          body: body.body === undefined ? block.body : str(body.body),
+          updatedAt: new Date().toISOString(),
+        })
+        .where(eq(schema.offerTextBlocks.id, tid))
+        .run();
+    });
+    return respond(c, loadOfferSync(db, offerId), "Opis zapisany");
+  });
+});
+
+app.delete("/:id/texts/:tid", async (c) =>
+  guard(c, () => {
+    const offerId = requireId(c.req.param("id"), "identyfikator oferty");
+    const tid = requireId(c.req.param("tid"), "identyfikator opisu");
+    db.transaction((tx) => {
+      loadEditableOfferSync(tx, offerId);
+      loadTextBlockSync(tx, offerId, tid);
+      tx.delete(schema.offerTextBlocks).where(eq(schema.offerTextBlocks.id, tid)).run();
+    });
+    return respond(c, loadOfferSync(db, offerId), "Opis usunięty");
+  })
+);
+
+/** Nowa kolejność opisów na dokumencie — `ids` w kolejności docelowej. */
+app.post("/:id/texts/reorder", async (c) => {
+  const body = await c.req.json<Record<string, unknown>>().catch(() => ({}));
+  return guard(c, () => {
+    const offerId = requireId(c.req.param("id"), "identyfikator oferty");
+    const raw = (body as Record<string, unknown>).ids;
+    if (!Array.isArray(raw))
+      throw new ApiError(400, "Podaj listę identyfikatorów opisów w nowej kolejności");
+    const ids = raw.map((v: unknown) => requireId(String(v), "identyfikator opisu"));
+    if (new Set(ids).size !== ids.length)
+      throw new ApiError(400, "Ten sam opis wystąpił w kolejności dwa razy");
+
+    db.transaction((tx) => {
+      loadEditableOfferSync(tx, offerId);
+      const current = tx
+        .select({ id: schema.offerTextBlocks.id })
+        .from(schema.offerTextBlocks)
+        .where(eq(schema.offerTextBlocks.offerId, offerId))
+        .all();
+      const known = new Set(current.map((b) => b.id));
+      const foreign = ids.filter((id) => !known.has(id));
+      if (foreign.length)
+        throw new ApiError(
+          400,
+          `Opis ${foreign.join(", ")} nie należy do tej oferty`
+        );
+      /*
+       * Lista musi być KOMPLETNA. Przy niepełnej przestawilibyśmy część bloków,
+       * a reszta zostałaby ze starymi numerami — kolejność na wydruku wyszłaby
+       * z przemieszania obu, czyli losowa.
+       */
+      if (ids.length !== current.length)
+        throw new ApiError(
+          400,
+          `Kolejność musi objąć wszystkie opisy oferty (${current.length}), a przysłano ${ids.length}`
+        );
+
+      ids.forEach((id, i) => {
+        tx.update(schema.offerTextBlocks)
+          .set({ position: i + 1, updatedAt: new Date().toISOString() })
+          .where(eq(schema.offerTextBlocks.id, id))
+          .run();
+      });
+    });
+    return respond(c, loadOfferSync(db, offerId), "Kolejność opisów zapisana");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // POZYCJE
 // ---------------------------------------------------------------------------
 
@@ -1871,59 +2261,136 @@ app.delete("/:id/items/:iid", async (c) =>
 );
 
 /**
- * Przeliczenie cen wg AKTUALNYCH kartotek.
+ * Aktualizacja cen wg AKTUALNYCH kartotek.
  *
  * Pozycje są migawkami (i tak ma zostać), ale szkic sprzed miesiąca potrafi
  * mieć nieaktualne ceny. To jawna, ręczna akcja — nigdy nie dzieje się sama,
  * żeby oferta nie zmieniła kwoty między obejrzeniem a wydrukiem.
  */
-app.post("/:id/reprice", async (c) =>
+
+/** Jedna pozycja, którą aktualizacja by ruszyła — z ceną „przed" i „po". */
+export interface RepriceChange {
+  itemId: number;
+  sectionTitle: string;
+  name: string;
+  unit: string;
+  qty: number;
+  oldUnitPrice: number;
+  newUnitPrice: number;
+  oldUnitCost: number | null;
+  newUnitCost: number | null;
+}
+
+/**
+ * Co aktualizacja by zmieniła — bez zapisu.
+ *
+ * Ta sama funkcja karmi podgląd w modalu i właściwy zapis, więc lista pokazana
+ * użytkownikowi nie może się rozjechać z tym, co naprawdę wejdzie do bazy.
+ */
+function repriceChangesSync(dbx: DbOrTx, offerId: number): RepriceChange[] {
+  const { values } = getCompanyConfig();
+  const src = priceSourceSync(dbx, values.warehouseMarkup);
+  const titles = new Map(
+    dbx
+      .select()
+      .from(schema.offerSections)
+      .where(eq(schema.offerSections.offerId, offerId))
+      .all()
+      .map((s) => [s.id, s.title] as const)
+  );
+  const items = dbx
+    .select()
+    .from(schema.offerItems)
+    .where(eq(schema.offerItems.offerId, offerId))
+    .orderBy(asc(schema.offerItems.position), asc(schema.offerItems.id))
+    .all();
+
+  const out: RepriceChange[] = [];
+  for (const it of items) {
+    if (it.source === "manual") continue; // ręcznej pozycji nie ma z czego przeliczyć
+    const refId = it.source === "warehouse" ? it.warehouseItemId : it.serviceId;
+    const price = src.price(it.source, refId);
+    const cost = src.cost(it.source, refId);
+    if (price === null) continue; // źródło zniknęło — zostawiamy migawkę
+    if (Math.abs(price - it.unitPrice) < 0.005 && cost === it.unitCost) continue;
+    out.push({
+      itemId: it.id,
+      sectionTitle: titles.get(it.sectionId) ?? "",
+      name: it.name,
+      unit: it.unit,
+      qty: it.qty,
+      oldUnitPrice: it.unitPrice,
+      newUnitPrice: price,
+      oldUnitCost: it.unitCost,
+      newUnitCost: cost,
+    });
+  }
+  return out;
+}
+
+/** Podgląd przed zapisem — lista pozycji „z czego na co". */
+app.get("/:id/reprice-preview", async (c) =>
   guard(c, () => {
     const offerId = requireId(c.req.param("id"), "identyfikator oferty");
-    const changed = db.transaction((tx) => {
-      const offer = loadEditableOfferSync(tx, offerId);
-      const { values } = getCompanyConfig();
-      const src = priceSourceSync(tx, values.warehouseMarkup);
-      const items = tx
-        .select()
-        .from(schema.offerItems)
-        .where(eq(schema.offerItems.offerId, offerId))
-        .all();
+    const offer = db.select().from(schema.offers).where(eq(schema.offers.id, offerId)).all()[0];
+    if (!offer) throw new ApiError(404, "Nie znaleziono oferty");
+    assertEditable(offer);
+    return respond(c, repriceChangesSync(db, offerId));
+  })
+);
 
-      let n = 0;
-      for (const it of items) {
-        if (it.source === "manual") continue; // ręcznej pozycji nie ma z czego przeliczyć
-        const refId = it.source === "warehouse" ? it.warehouseItemId : it.serviceId;
-        const price = src.price(it.source, refId);
-        const cost = src.cost(it.source, refId);
-        if (price === null) continue; // źródło zniknęło — zostawiamy migawkę
-        if (Math.abs(price - it.unitPrice) < 0.005 && cost === it.unitCost) continue;
+/**
+ * Zapis aktualizacji. Bez ciała bierze wszystkie pozycje; z `itemIds` — tylko
+ * wskazane, bo modal pozwala zaktualizować pojedynczy wiersz (jedna cena
+ * podskoczyła, a reszty handlowiec nie chce ruszać przed wysyłką).
+ */
+app.post("/:id/reprice", async (c) => {
+  const body = await c.req.json<Record<string, unknown>>().catch(() => ({}));
+  return guard(c, () => {
+    const offerId = requireId(c.req.param("id"), "identyfikator oferty");
+    const rawIds = (body as Record<string, unknown>).itemIds;
+    const only =
+      Array.isArray(rawIds) && rawIds.length > 0
+        ? new Set(rawIds.map((v: unknown) => requireId(String(v), "identyfikator pozycji")))
+        : null;
+
+    const changes = db.transaction((tx) => {
+      const offer = loadEditableOfferSync(tx, offerId);
+      const list = repriceChangesSync(tx, offerId).filter(
+        (ch) => only === null || only.has(ch.itemId)
+      );
+
+      for (const ch of list) {
         tx.update(schema.offerItems)
-          .set({ unitPrice: price, unitCost: cost })
-          .where(eq(schema.offerItems.id, it.id))
+          .set({ unitPrice: ch.newUnitPrice, unitCost: ch.newUnitCost })
+          .where(eq(schema.offerItems.id, ch.itemId))
           .run();
-        n += 1;
       }
 
-      if (n > 0) {
+      if (list.length > 0) {
         logActivity(tx, {
           entityType: "offer",
           entityId: offerId,
           objectId: offer.objectId,
           user: getUser(c),
           action: "updated",
-          summary: `Przeliczono ceny w ofercie ${offer.number} (${n} poz.)`,
+          summary:
+            list.length === 1
+              ? `Zaktualizowano cenę pozycji „${list[0].name}" w ofercie ${offer.number}`
+              : `Zaktualizowano ceny w ofercie ${offer.number} (${list.length} poz.)`,
         });
       }
-      return n;
+      return list;
     });
     return respond(
       c,
       loadOfferSync(db, offerId),
-      changed > 0 ? `Zaktualizowano ceny w ${changed} pozycjach` : "Ceny są aktualne"
+      changes.length > 0
+        ? `Zaktualizowano ceny w ${changes.length} ${changes.length === 1 ? "pozycji" : "pozycjach"}`
+        : "Ceny są aktualne"
     );
-  })
-);
+  });
+});
 
 // ---------------------------------------------------------------------------
 // AKCEPTACJA — zlecenie + szkic WZ w JEDNEJ transakcji
@@ -2282,6 +2749,7 @@ app.post("/from-monitoring/:projectId", async (c) => {
         } as NewOffer)
         .returning()
         .get();
+      attachDefaultTextsSync(tx, offer.id);
 
       if (packageId !== null && cameras > 0) {
         const pkg = tx
@@ -2344,6 +2812,263 @@ app.post("/from-monitoring/:projectId", async (c) => {
       201
     );
   });
+});
+
+// ---------------------------------------------------------------------------
+// LINK DLA KLIENTA
+//
+// POST/DELETE /:id/share (chronione) wystawiają i cofają token, a
+// `offersPublicRoutes` serwuje dokument spod `/api/public-offer/:token` BEZ
+// żadnej autoryzacji. Wzorzec 1:1 z feedem ICS kalendarza.
+// ---------------------------------------------------------------------------
+
+/*
+ * ADRES LINKU SKŁADA PRZEGLĄDARKA, NIE SERWER — zwracamy sam token.
+ *
+ * `new URL(c.req.url).origin` daje adres, pod którym API zostało WEWNĘTRZNIE
+ * wywołane, a nie ten, którego używa człowiek. W dev vite proxuje `/api` na
+ * `localhost:4001` z `changeOrigin: true` (nadpisuje nagłówek Host), więc
+ * serwer wystawiłby klientowi `http://localhost:4001/oferta/...` — link
+ * działający wyłącznie na maszynie dewelopera. Za reverse proxy (Dokploy,
+ * Tailscale) jest tak samo: origin żądania to adres wewnętrzny.
+ *
+ * Nagłówkom `X-Forwarded-*` nie ufamy, bo da się je podrobić, a to jest adres,
+ * który idzie do klienta. Jedyne miejsce, które ZNA prawdziwy adres, to karta
+ * przeglądarki handlowca — tam składamy `${window.location.origin}/oferta/<token>`.
+ */
+
+/**
+ * Wystawia (albo zwraca istniejący) token linku.
+ *
+ * ŚWIADOMIE BEZ `assertEditable`: sens linku polega na udostępnianiu oferty
+ * WYSŁANEJ, a ta jest zamrożona. Token nie jest treścią dokumentu — zamrożenie
+ * chroni kwoty i pozycje, nie sposób dostarczenia.
+ */
+app.post("/:id/share", (c) => {
+  const id = Number(c.req.param("id"));
+  const offer = db.select().from(schema.offers).where(eq(schema.offers.id, id)).get();
+  if (!offer) return c.json<ApiResponse<null>>({ success: false, error: "Nie znaleziono oferty" }, 404);
+
+  // Robocza oferta zmienia się pod ręką — klient ma dostać dokument wysłany.
+  if (offer.status === "draft") {
+    return c.json<ApiResponse<null>>(
+      { success: false, error: "Ofertę roboczą trzeba najpierw wysłać — dopiero wtedy da się ją udostępnić" },
+      409
+    );
+  }
+
+  const token = offer.shareToken ?? randomBytes(24).toString("hex");
+  if (!offer.shareToken) {
+    db.update(schema.offers).set({ shareToken: token }).where(eq(schema.offers.id, id)).run();
+    logActivity(db, {
+      entityType: "offer",
+      entityId: id,
+      user: getUser(c),
+      action: "updated",
+      summary: `Udostępniono ofertę ${offer.number} linkiem dla klienta`,
+    });
+  }
+  return c.json({ success: true, data: { token } });
+});
+
+/** Cofa dostęp — stary link natychmiast przestaje działać. */
+app.delete("/:id/share", (c) => {
+  const id = Number(c.req.param("id"));
+  const offer = db.select().from(schema.offers).where(eq(schema.offers.id, id)).get();
+  if (!offer) return c.json<ApiResponse<null>>({ success: false, error: "Nie znaleziono oferty" }, 404);
+
+  if (offer.shareToken) {
+    db.update(schema.offers).set({ shareToken: null }).where(eq(schema.offers.id, id)).run();
+    logActivity(db, {
+      entityType: "offer",
+      entityId: id,
+      user: getUser(c),
+      action: "updated",
+      summary: `Wyłączono link dla klienta do oferty ${offer.number}`,
+    });
+  }
+  return c.json({ success: true, data: null, message: "Link został wyłączony" });
+});
+
+/**
+ * Oferta widziana przez klienta — JAWNA BIAŁA LISTA pól.
+ *
+ * Nie da się tu użyć `redactCosts`: to CZARNA lista, która przepuszcza
+ * `contractMonths`, `horizonRevenue`, `stock`, `priceDrift`, `createdBy`,
+ * `salespersonId`, `orderId`, `notes` i całą resztę pól wewnętrznych. Na trasie
+ * bez autoryzacji jedyne bezpieczne podejście to wypisanie tego, co MA wyjść.
+ */
+export interface PublicOfferDetail {
+  offer: {
+    number: string;
+    version: number;
+    date: string;
+    validUntil: string | null;
+    kind: OfferKind;
+    clientName: string;
+    clientNip: string;
+    site: string;
+    address: string;
+    discountPct: number;
+    leaseMode: OfferLeaseMode;
+    leaseMonthsEffective: number | null;
+    /** Kto wykonał ofertę — handlowiec prowadzący, a bez niego autor dokumentu. */
+    preparedBy: string | null;
+  };
+  company: {
+    name: string;
+    fullName: string | null;
+    nip: string | null;
+    regon: string | null;
+    krs: string | null;
+    address: string | null;
+    postalCode: string | null;
+    city: string | null;
+  } | null;
+  sections: { id: number; title: string; position: number; isOptional: boolean }[];
+  items: {
+    sectionId: number;
+    position: number;
+    name: string;
+    unit: string;
+    qty: number;
+    unitPrice: number;
+    discountPct: number;
+    isOptional: boolean;
+    billing: OfferItemBilling;
+    lineTotal: number;
+  }[];
+  texts: { title: string; body: string }[];
+  totals: {
+    oneTimePayable: number;
+    equipmentValue: number;
+    leaseMonthly: number;
+    leaseMonthlyNet: number;
+    monthlyPrice: number;
+    monthlyPriceNet: number;
+    monthlyTotal: number;
+    optionsOneTime: number;
+    optionsMonthly: number;
+  };
+  isExpired: boolean;
+}
+
+export const offersPublicRoutes = new Hono();
+
+/*
+ * Limity jak przy formularzu ZDW: per IP i globalnie. `X-Forwarded-For` da się
+ * podrobić, więc sam limit per IP nie zatrzymałby zgadywania tokenów — dopiero
+ * sufit globalny to robi. Token ma 48 znaków hex, więc zgadywanie i tak jest
+ * beznadziejne, ale limit zdejmuje z bazy ruch prób.
+ */
+const publicOfferPerIp = createRateLimiter({ limit: 60, windowMs: 5 * 60_000 });
+const publicOfferGlobal = createRateLimiter({ limit: 600, windowMs: 5 * 60_000 });
+
+offersPublicRoutes.get("/public-offer/:token", (c) => {
+  const token = (c.req.param("token") || "").trim();
+
+  // Krótki token nie ma prawa istnieć — odrzucamy bez ruszania bazy.
+  if (token.length < 16) {
+    return c.json<ApiResponse<null>>({ success: false, error: "Nieprawidłowy link" }, 401);
+  }
+
+  if (!publicOfferPerIp.check(clientIp(c)) || !publicOfferGlobal.check("all")) {
+    return c.json<ApiResponse<null>>(
+      { success: false, error: "Za dużo zapytań — spróbuj ponownie za kilka minut" },
+      429
+    );
+  }
+
+  const row = db
+    .select({ id: schema.offers.id })
+    .from(schema.offers)
+    .where(eq(schema.offers.shareToken, token))
+    .get();
+  // 404, nie 401 — nie potwierdzamy, że taka oferta w ogóle istnieje.
+  if (!row) return c.json<ApiResponse<null>>({ success: false, error: "Nie znaleziono oferty" }, 404);
+
+  const detail = loadOfferSync(db, row.id);
+  const { offer, totals } = detail;
+  if (offer.status === "draft") {
+    return c.json<ApiResponse<null>>({ success: false, error: "Nie znaleziono oferty" }, 404);
+  }
+
+  const company = offer.companyId
+    ? db.select().from(schema.companies).where(eq(schema.companies.id, offer.companyId)).get()
+    : undefined;
+
+  /*
+   * Warianty rozstrzygamy PO STRONIE SERWERA. Gdyby filtrował tylko front,
+   * odrzucona alternatywa („Dahua zamiast Hikvision") leżałaby w JSON-ie
+   * w narzędziach przeglądarki — a to informacja handlowa, nie kosmetyka.
+   */
+  const sections = detail.sections.filter((s) => !s.variantGroup || s.variantSelected);
+  const visibleIds = new Set(sections.map((s) => s.id));
+
+  const data: PublicOfferDetail = {
+    offer: {
+      number: offer.number,
+      version: offer.version,
+      date: offer.date,
+      validUntil: offer.validUntil,
+      kind: offer.kind,
+      clientName: offer.clientName,
+      clientNip: offer.clientNip,
+      site: offer.site,
+      address: offer.address,
+      discountPct: offer.discountPct,
+      leaseMode: offer.leaseMode,
+      leaseMonthsEffective: offer.leaseMonthsEffective,
+      preparedBy: offer.preparedBy,
+    },
+    company: company
+      ? {
+          name: company.name,
+          fullName: company.fullName,
+          nip: company.nip,
+          regon: company.regon,
+          krs: company.krs,
+          address: company.address,
+          postalCode: company.postalCode,
+          city: company.city,
+        }
+      : null,
+    sections: sections.map((s) => ({
+      id: s.id,
+      title: s.title,
+      position: s.position,
+      isOptional: s.isOptional,
+    })),
+    items: detail.items
+      .filter((i) => visibleIds.has(i.sectionId))
+      .map((i) => ({
+        sectionId: i.sectionId,
+        position: i.position,
+        name: i.name,
+        unit: i.unit,
+        qty: i.qty,
+        unitPrice: i.unitPrice,
+        discountPct: i.discountPct,
+        isOptional: i.isOptional,
+        billing: i.billing,
+        lineTotal: i.lineTotal,
+      })),
+    texts: detail.texts.map((t) => ({ title: t.title, body: t.body })),
+    totals: {
+      oneTimePayable: totals.oneTimePayable,
+      equipmentValue: totals.equipmentValue,
+      leaseMonthly: totals.leaseMonthly,
+      leaseMonthlyNet: totals.leaseMonthlyNet,
+      monthlyPrice: totals.monthlyPrice,
+      monthlyPriceNet: totals.monthlyPriceNet,
+      monthlyTotal: totals.monthlyTotal,
+      optionsOneTime: totals.optionsOneTime,
+      optionsMonthly: totals.optionsMonthly,
+    },
+    isExpired: offer.status === "expired",
+  };
+
+  return c.json<ApiResponse<PublicOfferDetail>>({ success: true, data });
 });
 
 export default app;

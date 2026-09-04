@@ -15,7 +15,7 @@ function num(v: unknown, fallback: number): number {
   return Number.isFinite(n) ? n : fallback;
 }
 
-const CAMERA_TYPES = ["bullet", "dome", "ptz", "pano"] as const;
+const CAMERA_TYPES = ["bullet", "dome", "ptz", "pano", "lpr"] as const;
 type CameraType = (typeof CAMERA_TYPES)[number];
 
 function parseBody(body: Record<string, unknown>): {

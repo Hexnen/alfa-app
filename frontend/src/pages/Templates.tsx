@@ -21,6 +21,7 @@ const typeLabels: Record<CameraModelType, string> = {
   dome: "Kopułkowa",
   ptz: "PTZ",
   pano: "360°",
+  lpr: "LPR (tablice)",
 };
 
 export function Templates() {

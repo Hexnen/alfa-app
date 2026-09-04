@@ -5,7 +5,8 @@
  * Sprawdza: numerację OF/RRRR/MM/NNN i wersje „-w2", pakiety parametryczne
  * i sztywne, trzy strumienie pieniędzy z dzierżawą włącznie, zamrożenie
  * wysłanej oferty (409) i wyjście przez nową wersję, warianty i opcje,
- * przeliczanie cen, stany magazynowe na pozycjach, akceptację (zlecenie
+ * przeliczanie cen, stany magazynowe na pozycjach, bibliotekę OPISÓW (blok na
+ * ofercie jest KOPIĄ wzorca, nie odwołaniem do niego), akceptację (zlecenie
  * + szkic WZ w jednej transakcji, bez ruszania stanów) oraz — najważniejsze —
  * że użytkownik bez klucza `technical/oferty-koszty` NIE dostaje pól kosztowych
  * w odpowiedzi API, a nie tylko nie widzi ich w UI.
@@ -86,6 +87,9 @@ function cleanup() {
     .filter((o) => (o.notes ?? "").includes(PREFIX) || (o.site ?? "").includes(PREFIX));
   const offerIds = offerRows.map((o) => o.id);
   if (offerIds.length) {
+    db.delete(schema.offerTextBlocks)
+      .where(inArray(schema.offerTextBlocks.offerId, offerIds))
+      .run();
     db.delete(schema.offerItems).where(inArray(schema.offerItems.offerId, offerIds)).run();
     db.delete(schema.offerSections).where(inArray(schema.offerSections.offerId, offerIds)).run();
     db.delete(schema.offers).where(inArray(schema.offers.id, offerIds)).run();
@@ -102,6 +106,26 @@ function cleanup() {
       .where(inArray(schema.offerPackageItems.packageId, ids))
       .run();
     db.delete(schema.offerPackages).where(inArray(schema.offerPackages.id, ids)).run();
+  }
+
+  // Katalog opisów. Bloki na ofertach wskazują na wzorce przez `set null`,
+  // ale testowe oferty i tak poleciały wyżej — zostaje sam katalog.
+  const texts = db
+    .select()
+    .from(schema.offerTexts)
+    .where(like(schema.offerTexts.name, `${PREFIX}%`))
+    .all();
+  if (texts.length) {
+    const ids = texts.map((t) => t.id);
+    db.delete(schema.offerTexts).where(inArray(schema.offerTexts.id, ids)).run();
+    db.delete(schema.activityLog)
+      .where(
+        and(
+          eq(schema.activityLog.entityType, "offer_text"),
+          inArray(schema.activityLog.entityId, ids)
+        )
+      )
+      .run();
   }
 
   // Zlecenia i dokumenty magazynowe utworzone przez akceptację.
@@ -472,6 +496,24 @@ try {
     drifted.data.items.find((i: any) => i.warehouseItemId === camera.id)?.priceDrift === 550,
     drifted.data.items[0]
   );
+  // Druga kartoteka też drgnęła — dopiero wtedy widać, że aktualizacja
+  // pojedynczej pozycji NIE rusza sąsiadów.
+  db.update(schema.services).set({ price: 170 }).where(eq(schema.services.id, mount.id)).run();
+  const preview = await call("GET", `/offers/${offerId}/reprice-preview`);
+  const previewed = preview.data.find((ch: any) => ch.name === camera.name);
+  ok("podgląd wymienia pozycję z ceną przed i po", previewed?.oldUnitPrice === 500 && previewed?.newUnitPrice === 550, preview.data);
+  ok("podgląd widzi obie zmienione kartoteki", preview.data.length === 2, preview.data);
+  ok("podgląd nic nie zapisuje", (await call("GET", `/offers/${offerId}`)).data.items[0].unitPrice === 500, "cena zmieniona przed zatwierdzeniem");
+
+  // --- Aktualizacja POJEDYNCZEJ pozycji ------------------------------------
+  const one = await call("POST", `/offers/${offerId}/reprice`, { itemIds: [previewed.itemId] });
+  ok("pojedyncza aktualizacja rusza wskazaną pozycję", one.data.items.find((i: any) => i.id === previewed.itemId)?.unitPrice === 550, one.data.items);
+  ok(
+    "…i nie rusza pozostałych",
+    one.data.items.filter((i: any) => i.serviceId === mount.id).every((i: any) => i.unitPrice === 150),
+    one.data.items.filter((i: any) => i.serviceId === mount.id)
+  );
+  ok("…a komunikat mówi o jednej pozycji", one.message === "Zaktualizowano ceny w 1 pozycji", one.message);
   const repriced = await call("POST", `/offers/${offerId}/reprice`);
   ok("przeliczenie zaktualizowało cenę", repriced.data.items[0].unitPrice === 550, repriced.data.items[0]);
   ok("po przeliczeniu nie ma rozjazdu", repriced.data.items[0].priceDrift === null, repriced.data.items[0]);
@@ -882,6 +924,232 @@ try {
   const custom = await call("PUT", `/offers/${r3.data.id}`, { leaseAnnualRate: 60 });
   ok("własna stawka nadpisuje domyślną", custom.data.offer.leaseAnnualRate === 60, custom.data.offer);
   ok("…i rata idzie za nią (250)", custom.data.totals.leaseMonthly === 250, custom.data.totals);
+
+  // ===================================================================
+  // OPISY — biblioteka wzorców i bloki na ofercie
+  // ===================================================================
+
+  // --- CRUD wzorca ---
+  const GWARANCJA = "**24 miesiące** na sprzęt.";
+  const tpl = await call("POST", "/offers/texts", {
+    name: `${PREFIX} Gwarancja`,
+    category: "cctv",
+    title: "Gwarancja",
+    body: GWARANCJA,
+  });
+  ok("wzorzec opisu utworzony", tpl.status === 201, tpl);
+  const tplId: number = tpl.data.id;
+
+  const tplGet = await call("GET", `/offers/texts/${tplId}`);
+  ok("wzorzec czytany po id", tplGet.data?.body === GWARANCJA, tplGet);
+  const tplMissing = await call("GET", "/offers/texts/99999999");
+  ok("nieistniejący wzorzec → 404", tplMissing.status === 404, tplMissing);
+  const tplNoName = await call("POST", "/offers/texts", { body: "bez nazwy" });
+  ok("wzorzec bez nazwy → 400", tplNoName.status === 400, tplNoName);
+
+  const tplList = await call("GET", "/offers/texts?category=cctv");
+  ok(
+    "wzorzec na liście swojej kategorii",
+    (tplList.data as any[]).some((t) => t.id === tplId),
+    tplList.data
+  );
+
+  // --- Wzorzec „domyślny" wjeżdża na każdą nową ofertę ---
+  const tplDefault = await call("POST", "/offers/texts", {
+    name: `${PREFIX} Warunki płatności`,
+    title: "Warunki płatności",
+    body: "Przelew 14 dni.",
+    isDefault: true,
+  });
+  ok("wzorzec domyślny utworzony", tplDefault.status === 201, tplDefault);
+
+  const withTexts = await call("POST", "/offers", {
+    date: "2026-08-10",
+    site: PREFIX,
+    notes: PREFIX,
+  });
+  const wtId: number = withTexts.data.id;
+  const wtFresh = await call("GET", `/offers/${wtId}`);
+  ok(
+    "domyślny opis wjeżdża na świeżą ofertę",
+    wtFresh.data.texts.length === 1 && wtFresh.data.texts[0].textId === tplDefault.data.id,
+    wtFresh.data.texts
+  );
+
+  // --- Dołączenie wzorca KOPIUJE treść ---
+  const attached = await call("POST", `/offers/${wtId}/texts`, { textId: tplId });
+  ok("opis z wzorca dołączony", attached.status === 201, attached);
+  const block = (attached.data.texts as any[]).find((b) => b.textId === tplId);
+  ok("nagłówek skopiowany z wzorca", block.title === "Gwarancja", block);
+  ok("treść skopiowana z wzorca", block.body === GWARANCJA, block);
+  ok("nowy blok ląduje na końcu", block.position === 2, block);
+
+  // Sedno decyzji „kopia, nie referencja": poprawka wzorca nie przepisuje
+  // wstecz dokumentu, który już powstał.
+  const tplEdited = await call("PUT", `/offers/texts/${tplId}`, {
+    name: `${PREFIX} Gwarancja`,
+    category: "cctv",
+    title: "Gwarancja 36",
+    body: "**36 miesięcy** na sprzęt.",
+  });
+  ok("wzorzec zapisany", tplEdited.status === 200, tplEdited);
+  const afterEdit = ((await call("GET", `/offers/${wtId}`)).data.texts as any[]).find(
+    (b) => b.id === block.id
+  );
+  ok("blok na ofercie NIE poszedł za wzorcem", afterEdit.body === GWARANCJA, afterEdit);
+
+  // --- Archiwizacja wzorca zostawia blok nietknięty ---
+  const tplArchived = await call("DELETE", `/offers/texts/${tplId}`);
+  ok("wzorzec zarchiwizowany", tplArchived.status === 200, tplArchived);
+  const tplRow = db
+    .select()
+    .from(schema.offerTexts)
+    .where(eq(schema.offerTexts.id, tplId))
+    .all()[0];
+  ok("rekord wzorca zostaje w bazie", !!tplRow, tplRow);
+  ok("…z active = false", tplRow?.active === false, tplRow);
+  const listActive = await call("GET", "/offers/texts");
+  ok(
+    "zarchiwizowany wzorzec znika z listy",
+    !(listActive.data as any[]).some((t) => t.id === tplId),
+    listActive.data
+  );
+  const listAll = await call("GET", "/offers/texts?includeInactive=1");
+  ok(
+    "…ale wraca przy includeInactive=1",
+    (listAll.data as any[]).some((t) => t.id === tplId),
+    listAll.data
+  );
+  const afterArchive = ((await call("GET", `/offers/${wtId}`)).data.texts as any[]).find(
+    (b) => b.id === block.id
+  );
+  ok(
+    "blok na ofercie przeżywa archiwizację wzorca",
+    afterArchive?.body === GWARANCJA,
+    afterArchive
+  );
+
+  /*
+   * Edytor wzorca nie ma przełącznika archiwum, więc `active` w body nie
+   * przychodzi. Gdyby PUT wracał wtedy do wartości fabrycznej, zapis literówki
+   * w zarchiwizowanym opisie wskrzeszałby go po cichu w bibliotece.
+   */
+  const tplReedit = await call("PUT", `/offers/texts/${tplId}`, {
+    name: `${PREFIX} Gwarancja`,
+    title: "Warunki gwarancji",
+    body: `${GWARANCJA} Poprawka.`,
+  });
+  ok("zarchiwizowany wzorzec da się poprawić", tplReedit.status === 200, tplReedit);
+  ok(
+    "…i zostaje zarchiwizowany",
+    (tplReedit.data as any)?.active === false,
+    tplReedit.data
+  );
+
+  // --- Blok własny, bez wzorca ---
+  const ownRes = await call("POST", `/offers/${wtId}/texts`, {
+    title: "Uwagi",
+    body: "Tekst własny",
+  });
+  ok("własny blok dodany bez wzorca", ownRes.status === 201, ownRes);
+  const ownBlock = (ownRes.data.texts as any[]).find((b) => b.title === "Uwagi");
+  ok("własny blok nie ma śladu wzorca", ownBlock.textId === null, ownBlock);
+  const badTpl = await call("POST", `/offers/${wtId}/texts`, { textId: 99999999 });
+  ok("dołączenie nieistniejącego wzorca → 404", badTpl.status === 404, badTpl);
+
+  // --- PUT cząstkowy ---
+  const patched = await call("PUT", `/offers/${wtId}/texts/${ownBlock.id}`, {
+    body: "Tekst poprawiony",
+  });
+  const patchedBlock = (patched.data.texts as any[]).find((b) => b.id === ownBlock.id);
+  ok("PUT zmienia treść bloku", patchedBlock.body === "Tekst poprawiony", patchedBlock);
+  ok("…i NIE kasuje nagłówka", patchedBlock.title === "Uwagi", patchedBlock);
+
+  const foreignOffer = await call("POST", "/offers", {
+    date: "2026-08-10",
+    site: PREFIX,
+    notes: PREFIX,
+  });
+  const foreignPut = await call(
+    "PUT",
+    `/offers/${foreignOffer.data.id}/texts/${ownBlock.id}`,
+    { body: "x" }
+  );
+  ok("edycja bloku z obcej oferty → 404", foreignPut.status === 404, foreignPut);
+  const foreignDelete = await call(
+    "DELETE",
+    `/offers/${foreignOffer.data.id}/texts/${ownBlock.id}`
+  );
+  ok("usunięcie bloku z obcej oferty → 404", foreignDelete.status === 404, foreignDelete);
+
+  // --- Usuwanie bloku ---
+  const throwaway = await call("POST", `/offers/${wtId}/texts`, { title: "Do skasowania" });
+  const throwawayId = (throwaway.data.texts as any[]).find(
+    (b) => b.title === "Do skasowania"
+  ).id;
+  const removed = await call("DELETE", `/offers/${wtId}/texts/${throwawayId}`);
+  ok(
+    "blok usunięty z oferty",
+    removed.status === 200 && !(removed.data.texts as any[]).some((b) => b.id === throwawayId),
+    removed.data?.texts
+  );
+
+  // --- Kolejność ---
+  const beforeOrder = (await call("GET", `/offers/${wtId}`)).data.texts as any[];
+  const reversed = [...beforeOrder].map((b) => b.id).reverse();
+  const reorder = await call("POST", `/offers/${wtId}/texts/reorder`, { ids: reversed });
+  ok("reorder zapisany", reorder.status === 200, reorder);
+  ok(
+    "kolejność opisów odwrócona",
+    (reorder.data.texts as any[]).map((b) => b.id).join(",") === reversed.join(","),
+    reorder.data.texts
+  );
+  const reorderForeign = await call("POST", `/offers/${wtId}/texts/reorder`, {
+    ids: [...reversed, 99999999],
+  });
+  ok("reorder z obcym id → 400", reorderForeign.status === 400, reorderForeign);
+  const reorderShort = await call("POST", `/offers/${wtId}/texts/reorder`, {
+    ids: [reversed[0]],
+  });
+  ok("reorder z niepełną listą → 400", reorderShort.status === 400, reorderShort);
+
+  // --- Zamrożenie: po wysyłce bloki są nietykalne ---
+  const wtSection = await call("POST", `/offers/${wtId}/sections`, { title: "S" });
+  await call("POST", `/offers/${wtId}/items`, {
+    sectionId: wtSection.data.sections[0].id,
+    source: "manual",
+    name: "X",
+    qty: 1,
+    unitPrice: 100,
+  });
+  const parentTexts = (await call("GET", `/offers/${wtId}`)).data.texts as any[];
+  const wtSent = await call("POST", `/offers/${wtId}/send`);
+  ok("oferta z opisami wysłana", wtSent.status === 200, wtSent.error);
+
+  const addFrozen = await call("POST", `/offers/${wtId}/texts`, { title: "Za późno" });
+  ok("dodanie opisu do WYSŁANEJ oferty → 409", addFrozen.status === 409, addFrozen);
+  const editFrozen = await call("PUT", `/offers/${wtId}/texts/${ownBlock.id}`, { body: "x" });
+  ok("edycja opisu na WYSŁANEJ ofercie → 409", editFrozen.status === 409, editFrozen);
+  const delFrozen = await call("DELETE", `/offers/${wtId}/texts/${ownBlock.id}`);
+  ok("usunięcie opisu z WYSŁANEJ oferty → 409", delFrozen.status === 409, delFrozen);
+  const reorderFrozen = await call("POST", `/offers/${wtId}/texts/reorder`, { ids: reversed });
+  ok("reorder na WYSŁANEJ ofercie → 409", reorderFrozen.status === 409, reorderFrozen);
+
+  // --- Nowa wersja odtwarza opisy Z RODZICA, nie z katalogu ---
+  const wtVersion = await call("POST", `/offers/${wtId}/version`);
+  ok("wersja oferty z opisami utworzona", wtVersion.status === 201, wtVersion);
+  const versionTexts = (await call("GET", `/offers/${wtVersion.data.id}`)).data.texts as any[];
+  ok(
+    "wersja przenosi komplet opisów rodzica",
+    versionTexts.length === parentTexts.length &&
+      versionTexts.map((b) => b.body).join("|") === parentTexts.map((b) => b.body).join("|"),
+    versionTexts
+  );
+  ok(
+    "…jako nowe rekordy, nie te same wiersze",
+    versionTexts.every((b) => !parentTexts.some((pb) => pb.id === b.id)),
+    versionTexts.map((b) => b.id)
+  );
 } finally {
   cleanup();
 
@@ -915,6 +1183,12 @@ try {
     .where(like(schema.warehouseItems.name, `${PREFIX}%`))
     .all();
   ok("sprzątanie: brak testowych towarów", leftItems.length === 0, leftItems);
+  const leftTexts = db
+    .select()
+    .from(schema.offerTexts)
+    .where(like(schema.offerTexts.name, `${PREFIX}%`))
+    .all();
+  ok("sprzątanie: brak testowych opisów", leftTexts.length === 0, leftTexts);
 }
 
 console.log(failures === 0 ? "\nWszystkie testy OK" : `\n${failures} test(ów) nie przeszło`);

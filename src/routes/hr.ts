@@ -69,13 +69,50 @@ async function getNorms(year: number, month: number) {
 
 // ==================== PRACOWNICY ====================
 
+/**
+ * Nazwa działu po id — null, gdy takiego działu nie ma. Zapytanie po PK, więc
+ * wołamy je synchronicznie (jak `departmentNameTaken` niżej): raz przy walidacji
+ * zapisu, raz przy składaniu etykiety do odpowiedzi.
+ */
+function departmentNameById(id: number): string | null {
+  const row = db
+    .select({ name: schema.hrDepartments.name })
+    .from(schema.hrDepartments)
+    .where(eq(schema.hrDepartments.id, id))
+    .get();
+  return row?.name ?? null;
+}
+
+/**
+ * GOTOWA etykieta działu pracownika („ALFA GROUP:Handlowy”) albo pusty string.
+ * Front Kadr nie zna `company.name` (app_settings za `requireAdmin`), więc sklejać
+ * ją musi serwer — patrz `departmentLabel()` w src/lib/company-config.ts.
+ * Dla POJEDYNCZEGO wiersza (odpowiedź POST/PUT); listy składają etykietę same,
+ * z jednym `getCompanyConfig()` na całą odpowiedź.
+ */
+function employeeDepartmentLabel(departmentId: number | null | undefined): string {
+  if (departmentId == null) return "";
+  const name = departmentNameById(departmentId);
+  if (name == null) return "";
+  return departmentLabel(name, getCompanyConfig().values);
+}
+
 app.get("/employees", async (c) => {
   const onlyActive = c.req.query("active") === "true";
+  // LEFT JOIN, bo dział jest opcjonalny — osoba bez przypisania ma zostać na
+  // liście (INNER wyciąłby po cichu wszystkich nieprzypisanych).
   let rows = await db
-    .select()
+    .select({
+      employee: schema.hrEmployees,
+      departmentRawName: schema.hrDepartments.name,
+    })
     .from(schema.hrEmployees)
+    .leftJoin(
+      schema.hrDepartments,
+      eq(schema.hrEmployees.departmentId, schema.hrDepartments.id),
+    )
     .orderBy(asc(schema.hrEmployees.fullName));
-  if (onlyActive) rows = rows.filter((e) => e.active);
+  if (onlyActive) rows = rows.filter((r) => r.employee.active);
   // Kartoteka jest niezależna od miesiąca, a spółka pracownika biura siedzi
   // w miesięcznych wierszach rozliczenia — doklejamy więc komplet spółek z
   // całej historii, żeby lista pokazywała je bez wybierania miesiąca.
@@ -92,9 +129,15 @@ app.get("/employees", async (c) => {
     if (list) list.push(r.company);
     else byEmployee.set(r.employeeId, [r.company]);
   }
-  const data = rows.map((e) => ({
-    ...e,
-    officeCompanies: (byEmployee.get(e.id) ?? []).sort(),
+  // Nazwa firmy raz na odpowiedź, nie raz na wiersz — kartoteka to kilkaset osób
+  // (ten sam wzorzec, co w GET /hr/hours i w `loadDepartments`).
+  const { values } = getCompanyConfig();
+  const data = rows.map((r) => ({
+    ...r.employee,
+    officeCompanies: (byEmployee.get(r.employee.id) ?? []).sort(),
+    // Etykieta gotowa do wyświetlenia; pusty string = osoba bez działu.
+    departmentName:
+      r.departmentRawName != null ? departmentLabel(r.departmentRawName, values) : "",
   }));
   return c.json({ success: true, data });
 });
@@ -106,9 +149,29 @@ function parseEmployee(body: Record<string, unknown>): {
   const fullName =
     typeof body.fullName === "string" ? body.fullName.trim() : "";
   if (!fullName) return { error: "Nazwisko i imię są wymagane" };
+  /**
+   * Dział z KARTOTEKI = stałe miejsce pracy osoby. To NIE jest to samo, co
+   * `hr_hours.department_id`, który mówi, czego dotyczył pojedynczy wpis godzin:
+   * technik przypisany do działu technicznego może mieć godziny zapisane na
+   * obiekcie i nie ma w tym sprzeczności. Oba pola są niezależne i żadne nie
+   * wynika z drugiego.
+   *
+   * null = brak przypisania i to jest stan domyślny (np. ochrona na posterunkach).
+   */
+  const departmentId = toNum(body.departmentId);
+  if (departmentId != null && !Number.isInteger(departmentId)) {
+    return { error: "Dział: nieprawidłowy identyfikator" };
+  }
+  // Sprawdzamy istnienie działu, zamiast liczyć na FK: SQLite z wyłączonymi
+  // kluczami obcymi przyjąłby wskazanie na nieistniejący dział bez słowa, a wtedy
+  // kartoteka pokazywałaby pustą etykietę i nikt nie wiedziałby dlaczego.
+  if (departmentId != null && departmentNameById(departmentId) === null) {
+    return { error: "Wskazany dział nie istnieje — odśwież listę działów" };
+  }
   return {
     data: {
       fullName,
+      departmentId,
       code: typeof body.code === "string" ? body.code : "",
       // Rodzaj rozliczenia — decyduje, czy osoba trafia do tabeli ochrony
       // (umowy) czy do zestawienia biura w wynagrodzeniach.
@@ -129,7 +192,19 @@ app.post("/employees", async (c) => {
     .insert(schema.hrEmployees)
     .values(data as NewHrEmployee)
     .returning();
-  return c.json({ success: true, data: result[0], message: "Pracownik dodany" }, 201);
+  // Zwracamy wiersz w tym samym kształcie, co GET /employees (z etykietą działu),
+  // żeby front mógł podmienić pozycję w tabeli bez pobierania listy od nowa.
+  return c.json(
+    {
+      success: true,
+      data: {
+        ...result[0],
+        departmentName: employeeDepartmentLabel(result[0].departmentId),
+      },
+      message: "Pracownik dodany",
+    },
+    201,
+  );
 });
 
 app.put("/employees/:id", async (c) => {
@@ -173,7 +248,14 @@ app.put("/employees/:id", async (c) => {
       409,
     );
   }
-  return c.json({ success: true, data: result[0], message: "Pracownik zapisany" });
+  return c.json({
+    success: true,
+    data: {
+      ...result[0],
+      departmentName: employeeDepartmentLabel(result[0].departmentId),
+    },
+    message: "Pracownik zapisany",
+  });
 });
 
 app.delete("/employees/:id", async (c) => {
@@ -269,6 +351,11 @@ app.get("/object-catalog", async (c) => {
  * Kadrami: formularz handlowca i technika wiąże osobę z listą płac. Prefiks
  * `/hr/directory` ma w API_TAB_MAP własny, węższy wpis, żeby handlowiec-edytor
  * bez dostępu do Kadr mógł wybrać osobę, ale nie zobaczył jej wynagrodzenia.
+ *
+ * CELOWO BEZ DZIAŁU: lista służy wyłącznie do wskazania osoby po nazwisku
+ * (formularz handlowca i technika), a poszerzanie jej o strukturę organizacyjną
+ * wypuszczałoby dane kadrowe do ról, które Kadr nie widzą. Dział pracownika
+ * zwraca GET /hr/employees, chroniony uprawnieniem do Kadr.
  */
 app.get("/directory/employees", async (c) => {
   const onlyActive = c.req.query("active") === "true";
