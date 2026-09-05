@@ -17,6 +17,7 @@ import { Hono } from "hono";
 import { db, schema } from "../src/db/index.js";
 import { and, eq, like, inArray } from "drizzle-orm";
 import offers, { offersPublicRoutes } from "../src/routes/offers.js";
+import { createRateLimiter } from "../src/lib/rate-limit.js";
 import type { User } from "../src/db/schema.js";
 
 let failures = 0;
@@ -512,6 +513,13 @@ try {
   // --- itemIds obecne, ale nie lista → 400 i NIC nie ruszone ----------------
   const badIds = await call("POST", `/offers/${offerId}/reprice`, { itemIds: 123 });
   ok("itemIds nie-tablica → 400", badIds.status === 400, badIds);
+  // Pusta lista NIE znaczy „wszystkie" — brak klucza znaczy „wszystkie".
+  const emptyIds = await call("POST", `/offers/${offerId}/reprice`, { itemIds: [] });
+  ok(
+    "itemIds: [] → 400 z podpowiedzią, nie przeliczenie całości",
+    emptyIds.status === 400 && /pomiń pole/.test(emptyIds.error ?? ""),
+    emptyIds
+  );
   ok(
     "…i żadna pozycja nie zmieniona",
     (await call("GET", `/offers/${offerId}`)).data.items.find((i: any) => i.id === previewed.itemId)
@@ -1207,6 +1215,69 @@ try {
   });
   ok("reorder z niepełną listą → 400", reorderShort.status === 400, reorderShort);
 
+  // --- Ciało, które jest poprawnym JSON-em, ale nie obiektem → nigdy 500 ---
+  // `.catch` na parserze przepuszczał `null`, `[]` i `"abc"`; pierwszy dostęp
+  // do pola wywalał handler. Sprawdzamy WSZYSTKIE trasy z ciałem, o które
+  // poszło w bughuncie, na każdym z trzech kształtów.
+  const rawCall = (method: string, path: string, raw: string) =>
+    app
+      .request(path, { method, body: raw, headers: { "Content-Type": "application/json" } })
+      .then(async (r) => ({ status: r.status, ...((await r.json().catch(() => ({}))) as Res) }));
+  const weirdBodies = ["null", "[]", '"abc"'];
+  const bodyRoutes: Array<[string, string]> = [
+    ["POST", "/offers/texts"],
+    ["PUT", `/offers/texts/${tplId}`],
+    ["POST", `/offers/${wtId}/texts`],
+    ["PUT", `/offers/${wtId}/texts/${ownBlock.id}`],
+    ["POST", `/offers/${wtId}/reprice`],
+    ["POST", "/offers/packages"],
+    ["PUT", `/offers/${wtId}`],
+    ["POST", `/offers/${wtId}/items`],
+  ];
+  for (const [method, path] of bodyRoutes) {
+    for (const raw of weirdBodies) {
+      const r = await rawCall(method, path, raw);
+      ok(`${method} ${path.replace(/\d+/g, ":id")} z ciałem ${raw} → nie 500`, r.status < 500, r);
+    }
+  }
+  const blockAfterWeird = (await call("GET", `/offers/${wtId}`)).data.texts.find(
+    (b: any) => b.id === ownBlock.id
+  );
+  ok(
+    "PUT bloku z ciałem `null` = bez zmian (treść i nagłówek zostały)",
+    blockAfterWeird.body === "Tekst poprawiony" && blockAfterWeird.title === "Uwagi",
+    blockAfterWeird
+  );
+
+  // --- Nagłówek/treść opisu nie-string → 400, nie ciche wyczyszczenie ---
+  const tplBefore = (await call("GET", `/offers/texts/${tplId}`)).data;
+  const numTitle = await call("PUT", `/offers/texts/${tplId}`, { name: tplBefore.name, title: 123 });
+  ok(
+    "PUT wzorca z title: 123 → 400 „musi być tekstem”",
+    numTitle.status === 400 && /musi być tekstem/.test(numTitle.error ?? ""),
+    numTitle
+  );
+  const objBody = await call("PUT", `/offers/texts/${tplId}`, { name: tplBefore.name, body: {} });
+  ok("PUT wzorca z body: {} → 400", objBody.status === 400, objBody);
+  const tplIntact = await call("GET", `/offers/texts/${tplId}`);
+  ok(
+    "…a wzorzec ma nadal swój nagłówek i treść",
+    tplIntact.data.title === tplBefore.title && tplIntact.data.body === tplBefore.body,
+    tplIntact.data
+  );
+  const blockNumTitle = await call("PUT", `/offers/${wtId}/texts/${ownBlock.id}`, { title: 123 });
+  ok("PUT bloku z title: 123 → 400", blockNumTitle.status === 400, blockNumTitle);
+  const addNumTitle = await call("POST", `/offers/${wtId}/texts`, { title: 123 });
+  ok("POST bloku z title: 123 → 400", addNumTitle.status === 400, addNumTitle);
+  const nullTitle = await call("PUT", `/offers/${wtId}/texts/${ownBlock.id}`, { title: null });
+  ok(
+    "PUT bloku z title: null = wyczyść (jawna decyzja klienta)",
+    nullTitle.status === 200 &&
+      (nullTitle.data.texts as any[]).find((b) => b.id === ownBlock.id).title === "",
+    nullTitle
+  );
+  await call("PUT", `/offers/${wtId}/texts/${ownBlock.id}`, { title: "Uwagi" });
+
   // --- Zamrożenie: po wysyłce bloki są nietykalne ---
   const wtSection = await call("POST", `/offers/${wtId}/sections`, { title: "S" });
   await call("POST", `/offers/${wtId}/items`, {
@@ -1311,6 +1382,131 @@ try {
     versionTexts.every((b) => !parentTexts.some((pb) => pb.id === b.id)),
     versionTexts.map((b) => b.id)
   );
+
+  // ===================================================================
+  // REGRESJE Z BUGHUNTU — FALA 2 (2026-09-05)
+  // ===================================================================
+
+  // --- Odrzucenie gasi link dla klienta ---
+  const rj = await call("POST", "/offers", { date: "2026-08-10", site: PREFIX, notes: PREFIX });
+  const rjId = rj.data.id;
+  const rjSec = await call("POST", `/offers/${rjId}/sections`, { title: "S" });
+  await call("POST", `/offers/${rjId}/items`, {
+    sectionId: rjSec.data.sections[0].id, source: "manual", name: "X", qty: 1, unitPrice: 100,
+  });
+  await call("POST", `/offers/${rjId}/send`);
+  const rjShare = await call("POST", `/offers/${rjId}/share`);
+  const rjToken: string = rjShare.data.token;
+  ok("odrzucana oferta: link działa przed odrzuceniem", (await pub.request(`/public-offer/${rjToken}`)).status === 200);
+  const rjReject = await call("POST", `/offers/${rjId}/reject`);
+  ok("odrzucenie → 200", rjReject.status === 200, rjReject);
+  ok(
+    "po odrzuceniu stary link → 404",
+    (await pub.request(`/public-offer/${rjToken}`)).status === 404
+  );
+  ok(
+    "…a shareToken w bazie wyzerowany",
+    db.select().from(schema.offers).where(eq(schema.offers.id, rjId)).get()?.shareToken === null
+  );
+  // Obrona w głąb: token wraca „z innej ścieżki" (ręcznie w bazie) — publiczna
+  // trasa i tak nie serwuje odrzuconej.
+  db.update(schema.offers).set({ shareToken: rjToken }).where(eq(schema.offers.id, rjId)).run();
+  ok(
+    "odrzucona z przywróconym tokenem nadal → 404",
+    (await pub.request(`/public-offer/${rjToken}`)).status === 404
+  );
+
+  // --- share wymaga pozycji WLICZONEJ w kwotę ---
+  const zero = await call("POST", "/offers", { date: "2026-08-10", site: PREFIX, notes: PREFIX });
+  const zeroId = zero.data.id;
+  const zeroSec = await call("POST", `/offers/${zeroId}/sections`, { title: "Opcja", isOptional: true });
+  await call("POST", `/offers/${zeroId}/items`, {
+    sectionId: zeroSec.data.sections[0].id, source: "manual", name: "X", qty: 1, unitPrice: 100,
+  });
+  const zeroSent = await call("POST", `/offers/${zeroId}/send`);
+  ok("oferta z samą sekcją opcjonalną daje się wysłać (jak dotąd)", zeroSent.status === 200, zeroSent);
+  ok("…i ma 0,00 do zapłaty", zeroSent.data.totals.oneTimePayable === 0, zeroSent.data.totals);
+  const zeroShare = await call("POST", `/offers/${zeroId}/share`);
+  ok(
+    "share oferty bez pozycji wliczonych → 409",
+    zeroShare.status === 409 && /nie ma czego udostępnić/.test(zeroShare.error ?? ""),
+    zeroShare
+  );
+  // Ta sama oferta z niewybranym wariantem — też 409; z pozycją wliczoną — 200.
+  const zeroV = await call("POST", `/offers/${zeroId}/version`);
+  const zvId = zeroV.data.id;
+  // Wariant „A" (wybrany, pusty) i „B" (druga sekcja w grupie — automatycznie
+  // niewybrana) z jedyną pozycją: nic nie wchodzi do kwoty.
+  await call("POST", `/offers/${zvId}/sections`, { title: "A", variantGroup: "g" });
+  const zvSec = await call("POST", `/offers/${zvId}/sections`, { title: "B", variantGroup: "g" });
+  const zvSecB = zvSec.data.sections.find((s: any) => s.title === "B");
+  ok("druga sekcja w grupie wariantów jest niewybrana", zvSecB.variantSelected === false, zvSecB);
+  await call("POST", `/offers/${zvId}/items`, {
+    sectionId: zvSecB.id, source: "manual", name: "Y", qty: 1, unitPrice: 50,
+  });
+  const zvSent = await call("POST", `/offers/${zvId}/send`);
+  ok("oferta z opcją i niewybranym wariantem wysłana", zvSent.status === 200, zvSent);
+  const zvShare = await call("POST", `/offers/${zvId}/share`);
+  ok("share z niewybranym wariantem i opcją → 409", zvShare.status === 409, zvShare);
+  const zeroW = await call("POST", `/offers/${zvId}/version`);
+  const zwSec = await call("POST", `/offers/${zeroW.data.id}/sections`, { title: "C" });
+  await call("POST", `/offers/${zeroW.data.id}/items`, {
+    sectionId: zwSec.data.sections.find((s: any) => s.title === "C").id,
+    source: "manual", name: "Z", qty: 1, unitPrice: 10,
+  });
+  await call("POST", `/offers/${zeroW.data.id}/send`);
+  ok("share z choć jedną pozycją wliczoną → 200", (await call("POST", `/offers/${zeroW.data.id}/share`)).status === 200);
+
+  // --- Koszt 0 vs brak kosztu w kartotece: reprice nie kasuje kosztu ---
+  const noCostItem = db
+    .insert(schema.warehouseItems)
+    .values({ name: `${PREFIX} Uchwyt bez kosztu`, unit: "szt", purchasePrice: null, salePrice: 20 })
+    .returning()
+    .get();
+  const nc = await call("POST", "/offers", { date: "2026-08-10", site: PREFIX, notes: PREFIX });
+  const ncId = nc.data.id;
+  const ncSec = await call("POST", `/offers/${ncId}/sections`, { title: "S" });
+  const ncAdd = await call("POST", `/offers/${ncId}/items`, {
+    sectionId: ncSec.data.sections[0].id, source: "warehouse", warehouseItemId: noCostItem.id, qty: 1,
+  });
+  const ncItem = ncAdd.data.items.find((i: any) => i.warehouseItemId === noCostItem.id);
+  ok("pozycja z towaru bez ceny zakupu ma unitCost null", ncItem?.unitCost === null, ncItem);
+  db.update(schema.offerItems).set({ unitCost: 0 }).where(eq(schema.offerItems.id, ncItem.id)).run();
+  const ncPreview = await call("GET", `/offers/${ncId}/reprice-preview`);
+  ok("koszt 0 przy braku kosztu w kartotece NIE jest zmianą (podgląd pusty)", ncPreview.data.length === 0, ncPreview.data);
+  const ncReprice = await call("POST", `/offers/${ncId}/reprice`);
+  ok("reprice mówi „aktualne”", ncReprice.message === "Ceny są aktualne", ncReprice.message);
+  ok(
+    "…i koszt pozycji został 0, nie null",
+    ncReprice.data.items.find((i: any) => i.id === ncItem.id)?.unitCost === 0,
+    ncReprice.data.items
+  );
+  // Cena drgnęła, koszt w kartotece dalej nieznany → przepisujemy cenę, koszt zostaje.
+  db.update(schema.warehouseItems).set({ salePrice: 25 }).where(eq(schema.warehouseItems.id, noCostItem.id)).run();
+  const ncPreview2 = await call("GET", `/offers/${ncId}/reprice-preview`);
+  ok(
+    "zmiana ceny przy nieznanym koszcie: podgląd zachowuje stary koszt",
+    ncPreview2.data.length === 1 && ncPreview2.data[0].newUnitCost === 0 && ncPreview2.data[0].newUnitPrice === 25,
+    ncPreview2.data
+  );
+  const ncReprice2 = await call("POST", `/offers/${ncId}/reprice`);
+  const ncAfter = ncReprice2.data.items.find((i: any) => i.id === ncItem.id);
+  ok("…a zapis przepisuje cenę i zostawia koszt 0", ncAfter?.unitPrice === 25 && ncAfter?.unitCost === 0, ncAfter);
+
+  // --- Limiter: twardy sufit kluczy i O(1) amortyzowane ---
+  {
+    const lim = createRateLimiter({ limit: 5, windowMs: 60_000, maxKeys: 5000 });
+    for (let i = 0; i < 10_000; i++) lim.check(`k${i}`);
+    ok("limiter: 10k kluczy → rozmiar mapy ≤ maxKeys", lim.size() <= 5000, lim.size());
+    ok("limiter: najstarszy klucz wypadł, najświeższy został", lim.remaining("k0") === 5 && lim.remaining("k9999") === 4, {
+      k0: lim.remaining("k0"), k9999: lim.remaining("k9999"),
+    });
+    const t0 = performance.now();
+    for (let i = 0; i < 1000; i++) lim.check(`n${i}`);
+    const ms = performance.now() - t0;
+    ok(`limiter: 1000 check() przy pełnej mapie < 5 ms (${ms.toFixed(2)} ms)`, ms < 5, ms);
+    ok("limiter: po dołożeniu 1000 kluczy rozmiar nadal ≤ maxKeys", lim.size() <= 5000, lim.size());
+  }
 } finally {
   cleanup();
 

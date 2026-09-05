@@ -19,10 +19,17 @@ import {
   updateHrDepartment,
   type HrDepartment,
 } from "@/lib/api";
+import { pluralPl } from "@/lib/calendar-labels";
 import { hrs } from "./shared";
 import { Th } from "./parts";
 
-/** Kod HTTP z błędu `request()` — 409 przy usuwaniu znaczy „dział ma godziny". */
+/** „1 osoba / 2 osoby / 5 osób" — wspólny helper odmiany z etykiet kalendarza. */
+const persons = (n: number) => pluralPl(n, "osoba", "osoby", "osób");
+
+/**
+ * Kod HTTP z błędu `request()` — 409 przy usuwaniu znaczy „dział ma godziny lub
+ * ludzi" (do potwierdzenia) ALBO „dział jest pulą CMA" (bez obejścia).
+ */
 const errStatus = (e: unknown): number =>
   typeof e === "object" && e !== null && "status" in e
     ? Number((e as { status?: unknown }).status) || 0
@@ -133,41 +140,55 @@ export function DepartmentsTab({
     const parts: string[] = [];
     if (row.hoursTotal > 0 || row.hoursEmployeesCount > 0) {
       parts.push(
-        `${hrs(row.hoursTotal)} godz. od ${row.hoursEmployeesCount} osób — wpisy ` +
+        `${hrs(row.hoursTotal)} godz. od ${persons(row.hoursEmployeesCount)} — wpisy ` +
           "stracą przypisanie i trafią do kosztu ogólnego",
       );
     }
     if (row.employeesCount > 0) {
       parts.push(
-        `${row.employeesCount} osób w kartotece — zostaną bez macierzystego działu`,
+        `${persons(row.employeesCount)} w kartotece — zostaną bez macierzystego działu`,
       );
     }
     return parts.length ? `\n\nNa dziale „${row.name}" wisi:\n• ${parts.join("\n• ")}` : "";
   };
 
+  /** Czy wiersz zapowiada, że backend odpowie 409 bez `force`. */
+  const hasDependents = (row: HrDepartment) =>
+    row.hoursTotal > 0 || row.employeesCount > 0 || row.hoursEmployeesCount > 0;
+
   /**
-   * Usunięcie działu. Backend odmawia (409), gdy wiszą na nim godziny ALBO
-   * pracownicy z kartoteki — to NIE jest błąd do pokazania i zapomnienia, tylko
-   * pytanie: wiersze i ludzie przeżyją usunięcie (`ON DELETE SET NULL`), ale
-   * stracą przypisanie; dla biura, które godzin nie księguje, to przypisanie
-   * jest jedyne i nie ma skąd go odtworzyć. Dlatego dopiero po świadomym
-   * potwierdzeniu powtarzamy żądanie z `force`.
+   * Usunięcie działu. Wiersze i ludzie przeżyją usunięcie (`ON DELETE SET NULL`),
+   * ale stracą przypisanie; dla biura, które godzin nie księguje, to przypisanie
+   * jest jedyne i nie ma skąd go odtworzyć. Dlatego:
+   *  - dział-pula CMA nie ma tu kosza w ogóle (backend i tak odpowie 409 bez
+   *    obejścia) — flagę trzeba najpierw przenieść na inny dział;
+   *  - dział z licznikami > 0 pyta RAZ, ze skutkami z wiersza, i po potwierdzeniu
+   *    idzie od razu z `force` — wcześniej padały dwa dialogi o tym samym
+   *    (pierwszy ze skutkami, potem 409 i drugi z tymi samymi skutkami);
+   *  - 409 zostaje ścieżką awaryjną na „wiersz mówił 0, serwer inaczej" (ktoś
+   *    dopisał godziny od ostatniego odświeżenia) — wtedy drugie pytanie jest
+   *    uzasadnione, bo pierwsze nie mówiło o skutkach.
    */
   const handleDelete = async (row: HrDepartment) => {
-    if (!editable || busy) return;
-    if (!window.confirm(`Usunąć dział ${row.name}?${deleteImpact(row)}`)) return;
+    if (!editable || busy || row.isCmaPool) return;
+    const impact = deleteImpact(row);
+    const withForce = hasDependents(row);
+    if (
+      !window.confirm(
+        `Usunąć dział ${row.name}?${impact}${withForce ? "\n\nTej operacji nie da się cofnąć." : ""}`,
+      )
+    )
+      return;
     setBusy(true);
     try {
-      await deleteHrDepartment(row.id);
+      await deleteHrDepartment(row.id, withForce);
       await onChanged();
     } catch (err) {
-      if (errStatus(err) === 409) {
-        // Komunikat backendu w całości (liczy na świeżych danych, wiersz może
-        // być nieaktualny) + skutki z wiersza; drugie pytanie, bo pierwsze
-        // padło przed sprawdzeniem po stronie serwera.
+      if (errStatus(err) === 409 && !withForce) {
+        // Komunikat backendu w całości — liczy na świeżych danych, których
+        // wiersz nie miał.
         const forced = window.confirm(
-          `${errMessage(err, "Dział ma przypisane godziny lub pracowników.")}` +
-            `${deleteImpact(row)}\n\nUsunąć mimo to?`,
+          `${errMessage(err, "Dział ma przypisane godziny lub pracowników.")}\n\nUsunąć mimo to?`,
         );
         if (forced) {
           try {
@@ -178,6 +199,8 @@ export function DepartmentsTab({
           }
         }
       } else {
+        // W tym także 409 puli CMA (gdy wiersz był nieświeży i kosz się pokazał)
+        // — komunikat serwera mówi, co zrobić.
         alert(errMessage(err, "Błąd usuwania działu"));
       }
     } finally {
@@ -354,10 +377,19 @@ export function DepartmentsTab({
                           >
                             <Pencil className="h-4 w-4" />
                           </Button>
+                          {/* Pula CMA: kosz wyszarzony, jak reszta akcji przy
+                              `!editable` — powód w tooltipie, bo `disabled`
+                              nie przepuszcza kliknięcia, które mogłoby go
+                              wyświetlić. */}
                           <Button
                             variant="ghost"
                             size="icon"
-                            title="Usuń dział"
+                            title={
+                              r.isCmaPool
+                                ? "Działu-puli CMA nie da się usunąć — najpierw przenieś flagę puli na inny dział"
+                                : "Usuń dział"
+                            }
+                            disabled={r.isCmaPool}
                             onClick={() => void handleDelete(r)}
                           >
                             <Trash2 className="h-4 w-4" />

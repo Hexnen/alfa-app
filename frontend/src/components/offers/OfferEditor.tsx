@@ -456,7 +456,11 @@ export function OfferEditor({
       key: "share-link",
       label: offer.shareToken ? "Kopiuj link dla klienta" : "Utwórz link dla klienta",
       icon: Link2,
-      hint: frozen ? notReadyHint : "najpierw wyślij ofertę",
+      // Brak pozycji wliczonych w kwotę ma PIERWSZEŃSTWO przed „najpierw wyślij":
+      // wysyłka przechodzi z samymi opcjami (backend wymaga tylko niepustej listy),
+      // a po niej oferta jest zamrożona — użytkownik dowiadywałby się o brakującej
+      // pozycji dopiero wtedy, gdy nie może już jej dodać.
+      hint: notReadyHint ?? (frozen ? undefined : "najpierw wyślij ofertę"),
       // Robocza oferta zmienia się pod ręką — backend też odmówi (409).
       disabled: !frozen || !clientReady,
       onSelect: copyShareLink,

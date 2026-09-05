@@ -56,7 +56,7 @@ import { getUser } from "../middleware/auth.js";
 import { canView } from "../lib/auth/permissions.js";
 import { getCompanyConfig } from "../lib/company-config.js";
 import { effectiveSalePrice, round2 } from "../lib/margin.js";
-import { computeOffer, type OfferTotals } from "../lib/offer-calc.js";
+import { computeOffer, itemCounts, type OfferTotals } from "../lib/offer-calc.js";
 import {
   expandPackage,
   parseParamValues,
@@ -103,11 +103,38 @@ async function guard(
   }
 }
 
+/**
+ * Ciało żądania jako obiekt — ZAWSZE obiekt.
+ *
+ * `c.req.json().catch(...)` łapało tylko błąd parsera, a `null`, `[]` czy
+ * `"abc"` to poprawny JSON: przechodził dalej i pierwszy dostęp do pola
+ * (`body.name`) wywalał handler z 500. Tu każde ciało, które nie jest zwykłym
+ * obiektem, staje się `{}` — walidacja pól niżej zgłosi wtedy 400 („nazwa
+ * wymagana") albo trasa uzna „bez zmian", zależnie od kontraktu.
+ */
+async function readBody(c: Context): Promise<Record<string, unknown>> {
+  const raw: unknown = await c.req.json().catch(() => null);
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return {};
+  return raw as Record<string, unknown>;
+}
+
 // ---------------------------------------------------------------------------
 // Walidacja wejścia (ręczna — zod nie jest w tym repo używany w trasach CRUD)
 // ---------------------------------------------------------------------------
 
 const str = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
+
+/**
+ * Pole tekstowe opisu w patchu: `undefined` = bez zmian (`fallback`), `null`
+ * = wyczyść, string = nowa wartość. Cokolwiek innego (`123`, `{}`) to błąd
+ * klienta — `str()` robiło z tego po cichu `""` i kasowało treść wzorca.
+ */
+function patchText(v: unknown, label: string, fallback: string): string {
+  if (v === undefined) return fallback;
+  if (v === null) return "";
+  if (typeof v !== "string") throw new ApiError(400, `${label} musi być tekstem`);
+  return v.trim();
+}
 
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -787,7 +814,7 @@ app.get("/packages/:id", async (c) =>
 );
 
 app.post("/packages", async (c) => {
-  const body = await c.req.json<Record<string, unknown>>();
+  const body = await readBody(c);
   return guard(c, () => {
     const head = parsePackageHead(body);
     const items = parsePackageItems(body.items);
@@ -813,7 +840,7 @@ app.post("/packages", async (c) => {
 
 /** PUT podmienia pakiet W CAŁOŚCI razem z pozycjami (jak szkic dokumentu magazynu). */
 app.put("/packages/:id", async (c) => {
-  const body = await c.req.json<Record<string, unknown>>();
+  const body = await readBody(c);
   return guard(c, () => {
     const id = requireId(c.req.param("id"), "identyfikator pakietu");
     const head = parsePackageHead(body);
@@ -896,10 +923,10 @@ function parseTextHead(
     category: oneOf(body.category, OFFER_SECTION_CATEGORIES, current?.category ?? "inne"),
     // Treść też scalamy z `current`: PUT z samym `name` (zmiana nazwy w
     // bibliotece) nie może wyzerować tytułu i tekstu wzorca.
-    title: body.title === undefined ? current?.title ?? "" : str(body.title),
+    title: patchText(body.title, "Nagłówek opisu", current?.title ?? ""),
     // Markdown zapisujemy jak przyszedł — składnię rozwija front przy wydruku,
     // backendowi to zwykły tekst.
-    body: body.body === undefined ? current?.body ?? "" : str(body.body),
+    body: patchText(body.body, "Treść opisu", current?.body ?? ""),
     isDefault:
       body.isDefault === undefined ? current?.isDefault ?? false : Boolean(body.isDefault),
     active: body.active === undefined ? current?.active ?? true : Boolean(body.active),
@@ -940,7 +967,7 @@ app.get("/texts/:id", async (c) =>
 );
 
 app.post("/texts", async (c) => {
-  const body = await c.req.json<Record<string, unknown>>().catch(() => ({}));
+  const body = await readBody(c);
   return guard(c, () => {
     const head = parseTextHead(body);
     const created = db.transaction((tx) => {
@@ -964,7 +991,7 @@ app.post("/texts", async (c) => {
 
 /** PUT podmienia głowę opisu; pole pominięte w body zostaje bez zmian. */
 app.put("/texts/:id", async (c) => {
-  const body = await c.req.json<Record<string, unknown>>().catch(() => ({}));
+  const body = await readBody(c);
   return guard(c, () => {
     const id = requireId(c.req.param("id"), "identyfikator opisu");
     const updated = db.transaction((tx) => {
@@ -1277,7 +1304,7 @@ app.get("/:id", async (c) =>
 );
 
 app.post("/", async (c) => {
-  const body = await c.req.json<Record<string, unknown>>().catch(() => ({}));
+  const body = await readBody(c);
   return guard(c, () => {
     const head = parseOfferHead(body as Record<string, unknown>);
     const user = getUser(c);
@@ -1307,7 +1334,7 @@ app.post("/", async (c) => {
 });
 
 app.put("/:id", async (c) => {
-  const body = await c.req.json<Record<string, unknown>>();
+  const body = await readBody(c);
   return guard(c, () => {
     const id = requireId(c.req.param("id"), "identyfikator oferty");
     const updated = db.transaction((tx) => {
@@ -1546,8 +1573,12 @@ app.post("/:id/reject", async (c) =>
             ? "Szkic nie był u klienta — nie ma czego odrzucać"
             : `Oferta jest już zamknięta (${offer.status})`
         );
+      // Token linku kasujemy W TEJ SAMEJ transakcji: publiczny widok nie ma
+      // oznaczenia „odrzucona", więc klient wchodzący starym linkiem widziałby
+      // dokument wyglądający na aktualny. Link nie wraca — ponowny `share`
+      // odrzuconej oferty i tak kończy się 409.
       tx.update(schema.offers)
-        .set({ status: "rejected", updatedAt: new Date().toISOString() })
+        .set({ status: "rejected", shareToken: null, updatedAt: new Date().toISOString() })
         .where(eq(schema.offers.id, id))
         .run();
       logActivity(tx, {
@@ -1591,7 +1622,7 @@ function nextSectionPositionSync(tx: Tx, offerId: number): number {
  * rozwinięte pozycje; bez niego to pusta grupa do ręcznego wypełnienia.
  */
 app.post("/:id/sections", async (c) => {
-  const body = await c.req.json<Record<string, unknown>>().catch(() => ({}));
+  const body = await readBody(c);
   return guard(c, () => {
     const offerId = requireId(c.req.param("id"), "identyfikator oferty");
     const b = body as Record<string, unknown>;
@@ -1705,7 +1736,7 @@ app.post("/:id/sections", async (c) => {
 });
 
 app.put("/:id/sections/:sid", async (c) => {
-  const body = await c.req.json<Record<string, unknown>>();
+  const body = await readBody(c);
   return guard(c, () => {
     const offerId = requireId(c.req.param("id"), "identyfikator oferty");
     const sid = requireId(c.req.param("sid"), "identyfikator sekcji");
@@ -1843,7 +1874,7 @@ app.delete("/:id/sections/:sid", async (c) =>
  * pyta o to wprost przed wywołaniem.
  */
 app.post("/:id/sections/:sid/reexpand", async (c) => {
-  const body = await c.req.json<Record<string, unknown>>().catch(() => ({}));
+  const body = await readBody(c);
   return guard(c, () => {
     const offerId = requireId(c.req.param("id"), "identyfikator oferty");
     const sid = requireId(c.req.param("sid"), "identyfikator sekcji");
@@ -1927,7 +1958,7 @@ app.post("/:id/sections/:sid/reexpand", async (c) => {
 
 /** Zapis sekcji jako pakiet wielokrotnego użytku (tryb sztywny). */
 app.post("/:id/sections/:sid/save-as-package", async (c) => {
-  const body = await c.req.json<Record<string, unknown>>().catch(() => ({}));
+  const body = await readBody(c);
   return guard(c, () => {
     const offerId = requireId(c.req.param("id"), "identyfikator oferty");
     const sid = requireId(c.req.param("sid"), "identyfikator sekcji");
@@ -2032,7 +2063,7 @@ function loadTextBlockSync(tx: Tx, offerId: number, tid: number) {
  * pusty blok do napisania ręcznie.
  */
 app.post("/:id/texts", async (c) => {
-  const body = await c.req.json<Record<string, unknown>>().catch(() => ({}));
+  const body = await readBody(c);
   return guard(c, () => {
     const offerId = requireId(c.req.param("id"), "identyfikator oferty");
     const b = body as Record<string, unknown>;
@@ -2058,8 +2089,8 @@ app.post("/:id/texts", async (c) => {
           textId,
           // Treść wzorca KOPIUJEMY; pola podane wprost w ciele mają
           // pierwszeństwo, bo tekst często dostosowuje się do klienta.
-          title: b.title === undefined ? tpl?.title ?? "" : str(b.title),
-          body: b.body === undefined ? tpl?.body ?? "" : str(b.body),
+          title: patchText(b.title, "Nagłówek opisu", tpl?.title ?? ""),
+          body: patchText(b.body, "Treść opisu", tpl?.body ?? ""),
           position: nextTextBlockPositionSync(tx, offerId),
         })
         .run();
@@ -2070,9 +2101,7 @@ app.post("/:id/texts", async (c) => {
 });
 
 app.put("/:id/texts/:tid", async (c) => {
-  const body = await c.req
-    .json<Record<string, unknown>>()
-    .catch(() => ({}) as Record<string, unknown>);
+  const body = await readBody(c);
   return guard(c, () => {
     const offerId = requireId(c.req.param("id"), "identyfikator oferty");
     const tid = requireId(c.req.param("tid"), "identyfikator opisu");
@@ -2083,8 +2112,8 @@ app.put("/:id/texts/:tid", async (c) => {
       // zapisuje sam nagłówek albo samą treść, zależnie od pola w edytorze.
       tx.update(schema.offerTextBlocks)
         .set({
-          title: body.title === undefined ? block.title : str(body.title),
-          body: body.body === undefined ? block.body : str(body.body),
+          title: patchText(body.title, "Nagłówek opisu", block.title),
+          body: patchText(body.body, "Treść opisu", block.body),
           updatedAt: new Date().toISOString(),
         })
         .where(eq(schema.offerTextBlocks.id, tid))
@@ -2109,7 +2138,7 @@ app.delete("/:id/texts/:tid", async (c) =>
 
 /** Nowa kolejność opisów na dokumencie — `ids` w kolejności docelowej. */
 app.post("/:id/texts/reorder", async (c) => {
-  const body = await c.req.json<Record<string, unknown>>().catch(() => ({}));
+  const body = await readBody(c);
   return guard(c, () => {
     const offerId = requireId(c.req.param("id"), "identyfikator oferty");
     const raw = (body as Record<string, unknown>).ids;
@@ -2160,7 +2189,7 @@ app.post("/:id/texts/reorder", async (c) => {
 // ---------------------------------------------------------------------------
 
 app.post("/:id/items", async (c) => {
-  const body = await c.req.json<Record<string, unknown>>();
+  const body = await readBody(c);
   return guard(c, () => {
     const offerId = requireId(c.req.param("id"), "identyfikator oferty");
     const sectionId = optId(body.sectionId, "identyfikator sekcji");
@@ -2229,7 +2258,7 @@ app.post("/:id/items", async (c) => {
 });
 
 app.put("/:id/items/:iid", async (c) => {
-  const body = await c.req.json<Record<string, unknown>>();
+  const body = await readBody(c);
   return guard(c, () => {
     const offerId = requireId(c.req.param("id"), "identyfikator oferty");
     const iid = requireId(c.req.param("iid"), "identyfikator pozycji");
@@ -2346,11 +2375,15 @@ function repriceChangesSync(dbx: DbOrTx, offerId: number): RepriceChange[] {
     if (price === null) continue; // źródło zniknęło — zostawiamy migawkę
     // Koszt porównujemy z tą samą tolerancją co cenę — oba przechodzą przez
     // round2 i marżę, więc `===` na floatach zgłaszało „zmianę" o 1e-13.
-    // Null (brak kosztu w kartotece) to osobny stan, nie zero.
+    // `null` z kartoteki znaczy „brak informacji o koszcie", NIE „koszt
+    // zniknął": pozycja zachowuje swój koszt (także 0), a sam brak nie jest
+    // zmianą. Wcześniej porównanie `0 === null` zgłaszało zmianę i reprice
+    // przepisywał znany koszt na null, psując marżę oferty.
+    const nextCost = cost === null ? it.unitCost : cost;
     const costSame =
-      cost === null || it.unitCost === null
-        ? cost === it.unitCost
-        : Math.abs(cost - it.unitCost) < 0.005;
+      nextCost === null || it.unitCost === null
+        ? nextCost === it.unitCost
+        : Math.abs(nextCost - it.unitCost) < 0.005;
     if (Math.abs(price - it.unitPrice) < 0.005 && costSame) continue;
     out.push({
       itemId: it.id,
@@ -2361,7 +2394,7 @@ function repriceChangesSync(dbx: DbOrTx, offerId: number): RepriceChange[] {
       oldUnitPrice: it.unitPrice,
       newUnitPrice: price,
       oldUnitCost: it.unitCost,
-      newUnitCost: cost,
+      newUnitCost: nextCost,
     });
   }
   return out;
@@ -2384,7 +2417,7 @@ app.get("/:id/reprice-preview", async (c) =>
  * podskoczyła, a reszty handlowiec nie chce ruszać przed wysyłką).
  */
 app.post("/:id/reprice", async (c) => {
-  const body = await c.req.json<Record<string, unknown>>().catch(() => ({}));
+  const body = await readBody(c);
   return guard(c, () => {
     const offerId = requireId(c.req.param("id"), "identyfikator oferty");
     const rawIds = (body as Record<string, unknown>).itemIds;
@@ -2392,10 +2425,17 @@ app.post("/:id/reprice", async (c) => {
     // w kliencie nie może po cichu przepisać cen w całej ofercie.
     if (rawIds !== undefined && !Array.isArray(rawIds))
       throw new ApiError(400, "itemIds musi być listą identyfikatorów");
-    const only =
-      Array.isArray(rawIds) && rawIds.length > 0
-        ? new Set(rawIds.map((v: unknown) => requireId(String(v), "identyfikator pozycji")))
-        : null;
+    // Pusta lista to NIE „wszystkie": klient, który odfiltrował wszystko
+    // (np. odznaczył każdy wiersz w modalu), dostawał przeliczenie całej
+    // oferty. Kontrakt: brak klucza = całość, klucz = niepusta lista.
+    if (Array.isArray(rawIds) && rawIds.length === 0)
+      throw new ApiError(
+        400,
+        "itemIds: pusta lista — pomiń pole, żeby przeliczyć całą ofertę"
+      );
+    const only = Array.isArray(rawIds)
+      ? new Set(rawIds.map((v: unknown) => requireId(String(v), "identyfikator pozycji")))
+      : null;
 
     const changes = db.transaction((tx) => {
       const offer = loadEditableOfferSync(tx, offerId);
@@ -2505,7 +2545,7 @@ function resolveContact(
  * Szkic WZ NIE zdejmuje stanów — ruchy powstaną dopiero przy zatwierdzeniu.
  */
 app.post("/:id/accept", async (c) => {
-  const body = await c.req.json<Record<string, unknown>>().catch(() => ({}));
+  const body = await readBody(c);
   return guard(c, () => {
     const id = requireId(c.req.param("id"), "identyfikator oferty");
     const user = getUser(c);
@@ -2750,7 +2790,7 @@ app.post("/:id/accept", async (c) => {
  * dokument bez jednej złotówki.
  */
 app.post("/from-monitoring/:projectId", async (c) => {
-  const body = await c.req.json<Record<string, unknown>>().catch(() => ({}));
+  const body = await readBody(c);
   return guard(c, () => {
     const projectId = requireId(c.req.param("projectId"), "identyfikator projektu");
     const b = body as Record<string, unknown>;
@@ -2886,6 +2926,24 @@ app.post("/from-monitoring/:projectId", async (c) => {
  * przeglądarki handlowca — tam składamy `${window.location.origin}/oferta/<token>`.
  */
 
+/** Czy oferta ma choć jedną pozycję wliczaną do kwoty (kryterium z offer-calc). */
+function hasCountedItemSync(dbx: DbOrTx, offerId: number): boolean {
+  const sections = new Map(
+    dbx
+      .select()
+      .from(schema.offerSections)
+      .where(eq(schema.offerSections.offerId, offerId))
+      .all()
+      .map((s) => [s.id, s] as const)
+  );
+  const items = dbx
+    .select()
+    .from(schema.offerItems)
+    .where(eq(schema.offerItems.offerId, offerId))
+    .all();
+  return items.some((it) => itemCounts(sections.get(it.sectionId), it));
+}
+
 /**
  * Wystawia (albo zwraca istniejący) token linku.
  *
@@ -2911,6 +2969,17 @@ app.post("/:id/share", (c) => {
   if (offer.status === "rejected") {
     return c.json<ApiResponse<null>>(
       { success: false, error: "Nie można udostępnić odrzuconej oferty" },
+      409
+    );
+  }
+
+  // Link musi prowadzić do dokumentu z KWOTĄ. `send` sprawdza tylko, czy są
+  // jakiekolwiek pozycje, więc oferta z samą sekcją opcjonalną albo
+  // niewybranym wariantem przechodziła i klient dostawał stronę na 0,00 zł.
+  // Kryterium „wliczona" jest to samo, co w offer-calc — jedno źródło prawdy.
+  if (!hasCountedItemSync(db, id)) {
+    return c.json<ApiResponse<null>>(
+      { success: false, error: "Oferta nie ma pozycji wliczonych w kwotę — nie ma czego udostępnić" },
       409
     );
   }
@@ -3051,7 +3120,11 @@ offersPublicRoutes.get("/public-offer/:token", (c) => {
 
   const detail = loadOfferSync(db, row.id);
   const { offer, totals } = detail;
-  if (offer.status === "draft") {
+  // Szkic zmienia się pod ręką, a odrzucona nie ma w publicznym widoku żadnego
+  // oznaczenia — obie wyglądałyby na aktualny dokument. `reject` sam kasuje
+  // token, ale to obrona w głąb: gdyby token został z innej ścieżki (ręczna
+  // zmiana statusu, stara baza), klient i tak dostaje 404.
+  if (offer.status === "draft" || offer.status === "rejected") {
     return c.json<ApiResponse<null>>({ success: false, error: "Nie znaleziono oferty" }, 404);
   }
 

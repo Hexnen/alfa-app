@@ -2190,7 +2190,7 @@ function updateSelHandles(){ if(!selected)return; if(isClustered(selected)) clea
 // Podświetl płatek wybranej kamery na żywo (pełny kolor zamiast białego obrysu) — bez przebudowy ikon.
 /* Zaznaczenie wielu kamer na liście (Shift/Ctrl+klik). Deklaracja tutaj, bo markSel() poniżej
    podświetla piny także dla zaznaczenia hurtowego — obsługa jest w sekcji LISTA. */
-let camSel=new Set(), camAnchor=null;
+let camSel=new Set(), camAnchor=null, camRangeSet=new Set();   // camRangeSet = id-ki OSTATNIEGO zakresu Shift (do podmiany przy kolejnym Shift+klik)
 function markSel(){
   cameras.forEach(c=>{
     const pin=c.marker&&c.marker._icon&&c.marker._icon.querySelector('.cam-pin');
@@ -2422,23 +2422,32 @@ function moveCamsToGroup(list,gid){       // upuszczenie na nagłówek sekcji: n
    hurtowych: przeciągnięcia całej paczki do grupy, wspólnego koloru, usunięcia zaznaczonych.
    Piny zaznaczonych kamer świecą na mapie (markSel). */
 function camSelList(){return cameras.filter(c=>camSel.has(c.id));}
-function clearCamSel(){if(!camSel.size)return;camSel.clear();camAnchor=null;markSel();refreshList();}
-function toggleCamSel(c){camSel.has(c.id)?camSel.delete(c.id):camSel.add(c.id);camAnchor=c;markSel();refreshList();}
+function clearCamSel(){if(!camSel.size)return;camSel.clear();camRangeSet.clear();camAnchor=null;markSel();refreshList();}
+function toggleCamSel(c){                 // Ctrl/⌘+klik: dokładanie/odejmowanie pojedynczych; zeruje pamięć zakresu Shift
+  camRangeSet.clear();
+  if(camSel.has(c.id)){
+    camSel.delete(c.id);
+    if(camAnchor===c){const rest=camSelList();camAnchor=rest[rest.length-1]||null;}   // odznaczono kotwicę => ostatnia pozostała zaznaczona
+  }else{camSel.add(c.id);camAnchor=c;}     // kotwica = ostatnia ZAznaczona
+  markSel();refreshList();
+}
 function rangeCamSel(c){
   const rows=[...document.querySelectorAll('#camTable tr.trow:not(.hid-grp)')].map(r=>r.dataset.cam);  // zakres po WIDOCZNYCH wierszach (zwinięte grupy pomijamy)
   const b=rows.indexOf(c.id); if(b<0)return;
   let a=camAnchor?rows.indexOf(camAnchor.id):-1;
-  if(a<0){const vis=rows.find(id=>camSel.has(id));a=vis?rows.indexOf(vis):-1;}   // kotwica zwinięta/skasowana => pierwsza widoczna zaznaczona
-  camSel.clear();                                                                // Shift+klik = zakres zastępuje poprzedni (jak w menedżerach plików)
+  if(a<0){const vis=rows.find(id=>camSel.has(id)&&!camRangeSet.has(id));a=vis?rows.indexOf(vis):-1;}   // kotwica zwinięta/skasowana => pierwsza widoczna zaznaczona spoza zakresu
+  // Shift+klik jak w Finderze/Explorerze: rozszerza od kotwicy, ZACHOWUJĄC wcześniejsze Ctrl-owe wybory;
+  // zastępuje tylko poprzedni zakres Shift (camRangeSet), kotwica zostaje na miejscu.
+  camRangeSet.forEach(id=>camSel.delete(id)); camRangeSet.clear();
   if(a<0){camSel.add(c.id);camAnchor=c;}
-  else{const lo=Math.min(a,b),hi=Math.max(a,b);for(let i=lo;i<=hi;i++)camSel.add(rows[i]);}
+  else{const lo=Math.min(a,b),hi=Math.max(a,b);for(let i=lo;i<=hi;i++){camSel.add(rows[i]);camRangeSet.add(rows[i]);}}
   markSel(); refreshList();
 }
 function selectSectionCams(gid){          // klik w licznik sekcji: zaznacz / odznacz całą sekcję
   const list=groupCams(gid);
   const all=list.length&&list.every(c=>camSel.has(c.id));
-  list.forEach(c=>all?camSel.delete(c.id):camSel.add(c.id));
-  camAnchor=list[list.length-1]||null; markSel(); refreshList();
+  list.forEach(c=>all?camSel.delete(c.id):camSel.add(c.id)); camRangeSet.clear();
+  camAnchor=all?(camSelList().slice(-1)[0]||null):(list[list.length-1]||null); markSel(); refreshList();   // kotwica na ostatniej ZAznaczonej
 }
 const plKamer=n=>{const d=n%10,s=n%100;return n===1?'zaznaczona kamera':(d>=2&&d<=4&&!(s>=12&&s<=14))?'zaznaczone kamery':'zaznaczonych kamer';};
 function updateCamSelBar(){
@@ -2456,7 +2465,7 @@ function delSelectedCams(){
     list.forEach(c=>{map.removeLayer(c.marker);if(c.cover)map.removeLayer(c.cover);if(c.coverVis)map.removeLayer(c.coverVis);});
     cameras=cameras.filter(c=>!list.includes(c));
     if(selected&&list.includes(selected)){selected=null;clearHandles();el('camEmpty').style.display='block';el('camEdit').style.display='none';}
-    camSel.clear(); camAnchor=null;
+    camSel.clear(); camRangeSet.clear(); camAnchor=null;
     if(autoRenumber)renumberCameras(); else {refreshList();save();}
     restackCameras();
   });
@@ -2705,7 +2714,7 @@ function refreshList(){
       if(e.target.closest('.del-x')||e.target.closest('.cdrag'))return;
       if(e.shiftKey){rangeCamSel(c);return;}                 // zakres — bez skoku na kamerę
       if(e.ctrlKey||e.metaKey){toggleCamSel(c);return;}      // dokładanie pojedynczych
-      const had=camSel.size; camSel.clear(); camAnchor=c;
+      const had=camSel.size; camSel.clear(); camRangeSet.clear(); camAnchor=c;
       selectCam(c); map.panTo([c.lat,c.lng]);
       if(had)refreshList();
     };
@@ -4217,7 +4226,7 @@ function histSnap(){
   const o=serialize(); delete o.overlays;
   // klucz porównawczy bez widoku mapy — pan/zoom/podkład to nie zmiany projektu (interval 4 s nie może śmiecić)
   const key=JSON.stringify({...o,center:0,zoom:0,base:0});
-  return {json:JSON.stringify(o),key,counts:{cam:cameras.length,pt:points.length,zone:zones.length,cab:cables.length,grp:camGroups.length},grpKey:JSON.stringify(o.camGroups||[])};
+  return {json:JSON.stringify(o),key,counts:{cam:cameras.length,pt:points.length,zone:zones.length,cab:cables.length,grp:camGroups.length},grpKey:JSON.stringify(o.camGroups||[])+'|'+cameras.map(c=>c.id+':'+(c.group||'')).join(',')};   // grupy + przynależność kamer (setCamGroup/przeciągnięcie)
 }
 const HIST_CNT_LABEL={cam:'kamery',pt:'punkty',zone:'obszary',cab:'kable',grp:'grupy'};
 function histLabel(prev,s){
@@ -5038,12 +5047,22 @@ document.addEventListener('click',e=>{
   if(m.classList.contains('open')&&!m.contains(e.target)&&!e.target.closest('#btnOptions'))closeOptMenu();
 });
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeOptMenu();});
-function clearAllCameras(silent){        // usuwa wszystkie kamery z mapy i listy
+function resetCamSelState(){             // zerowanie stanu zaznaczenia/menu/przeciągania po hurtowym usunięciu kamer
+  camSel.clear(); camRangeSet.clear(); camAnchor=null; ctxCams=[]; dragCams=[];
+}
+function clearAllCameras(silent){        // usuwa wszystkie kamery z mapy i listy; grupy ZOSTAJĄ (struktura projektu, nie kamery)
   if(!cameras.length)return;
   cameras.forEach(c=>{map.removeLayer(c.marker);if(c.cover)map.removeLayer(c.cover);if(c.coverVis)map.removeLayer(c.coverVis);});
-  cameras=[]; selected=null; clearHandles();   // grupy zostają — to struktura projektu, nie kamery
+  cameras=[]; selected=null; clearHandles(); resetCamSelState();
   document.getElementById('camEmpty').style.display='block'; document.getElementById('camEdit').style.display='none';
   refreshList(); restackCameras();
+  if(!silent)save();
+}
+function clearAllCamGroups(silent){      // „Usuń wszystko” = cały projekt, więc lecą też puste grupy
+  if(!camGroups.length&&!camNoneCollapsed)return;
+  camGroups=[]; camGroupSeq=0; camNoneCollapsed=false; dragGrp=null;
+  cameras.forEach(c=>delete c.group);    // gdyby kamery jeszcze istniały — żadnych martwych odwołań
+  refreshList();
   if(!silent)save();
 }
 function clearAllZones(silent){          // usuwa wszystkie obszary (główne i poboczne)
@@ -5079,11 +5098,13 @@ el('btnClearZones').onclick=()=>{
 };
 el('btnClearAll').onclick=()=>{
   closeOptMenu();
-  const n=cameras.length+points.length+cables.length+zones.length;
+  const n=cameras.length+points.length+cables.length+zones.length+camGroups.length;   // grupy też się liczą — inaczej „pusty” projekt z wiszącymi nagłówkami
   if(!n){uiAlert('Projekt jest już pusty.');return;}
-  uiConfirm('Usunąć WSZYSTKO z projektu (kamery, punkty, okablowanie, obszary)? Tej operacji nie można cofnąć.',{danger:true}).then(ok=>{
+  const plGrup=k=>k===1?'grupa':(k%10>=2&&k%10<=4&&!(k%100>=12&&k%100<=14))?'grupy':'grup';
+  const what='kamery, punkty, okablowanie, obszary'+(camGroups.length?', '+camGroups.length+' '+plGrup(camGroups.length)+' kamer':'');
+  uiConfirm('Usunąć WSZYSTKO z projektu ('+what+')? Tej operacji nie można cofnąć.',{danger:true}).then(ok=>{
     if(!ok)return;
-    clearAllCameras(true); clearAllPoints(true); clearAllCables(true); clearAllZones(true);
+    clearAllCameras(true); clearAllPoints(true); clearAllCables(true); clearAllZones(true); clearAllCamGroups(true);
     save();
   });
 };

@@ -204,7 +204,11 @@ function groupsFor(
     const rows = itemsOf(section);
     if (rows.length === 0) continue;
     if (section.isOptional) {
-      optional.push({ section, rows });
+      // Ta sama zasada co w „— pozycje dodatkowe" poniżej: w bloku „Propozycje
+      // dodatkowe" żaden wiersz nie nosi plakietki „opcja" — inaczej pozycja
+      // opcjonalna w sekcji opcjonalnej była wyróżniona, a ta sama pozycja
+      // wyjęta z sekcji głównej już nie.
+      optional.push({ section, rows: rows.map((i) => ({ ...i, isOptional: false })) });
       continue;
     }
     const counted = rows.filter((i) => isCountedItem(i, section));
@@ -334,6 +338,7 @@ const STYLE = `
   .optgroup { margin-top: 18px; padding-top: 10px; border-top: 2px solid #d5dce4; }
   .optgroup-head { font-size: 12.5px; color: ${NAVY_DARK};
                    page-break-after: avoid; break-after: avoid; }
+  .optgroup-note.bridge { margin: 6px 0 0; }
   .optgroup-note { font-size: 10px; color: #6b7480; margin: 2px 0 8px;
                    page-break-after: avoid; break-after: avoid; }
 
@@ -437,22 +442,26 @@ const sectionBadge = (s: DocSection, isClient: boolean) => {
 /**
  * Wiersz pozycji.
  *
- * CENA JEDNOSTKOWA JEST EFEKTYWNA (po rabacie pozycji), wyliczona z `lineTotal`,
- * a nie przeliczana od nowa — dzięki temu na papierze `Ilość × Cena = Wartość`
- * zgadza się co do grosza. Przy rabacie pokazujemy przekreśloną cenę katalogową,
- * żeby ustępstwo było widoczne.
+ * CENA JEDNOSTKOWA JEST EFEKTYWNA (po rabacie pozycji): `unitPrice × (1 − rabat)`,
+ * bez zaokrąglania przed dzieleniem. Wcześniej szła z `lineTotal / qty`, ale
+ * `lineTotal` jest zaokrąglony do grosza, więc dwa IDENTYCZNE wiersze różniące
+ * się tylko ilością (0,335 zł × 1 vs × 3) dostawały inną cenę i inną marżę
+ * (70,6% vs 70,3%). Bez rabatu wychodzi dokładnie `unitPrice`. Przy rabacie
+ * pokazujemy przekreśloną cenę katalogową, żeby ustępstwo było widoczne.
  *
  * MARŻA TEŻ Z CENY EFEKTYWNEJ. Wcześniej liczyła się z katalogowego `unitPrice`,
  * więc przy rabacie pozycji dwie sąsiednie kolumny opisywały różne ceny, a
  * marża wiersza nie zgadzała się z marżą sumaryczną w podsumowaniu (ta idzie
  * z `lineTotal`, czyli po rabacie). Backend nie przysyła marży na pozycji,
  * więc liczymy ją tu tak, jak `marginOf` w src/lib/margin.ts: koszt albo cena
- * ≤ 0 to „brak danych" (kreska), nie 100% ani 0%.
+ * ≤ 0 to „brak danych" (kreska), nie 100% ani 0%. Dotyczy to TAKŻE wiersza
+ * z ilością 0 albo wartością 0,00 zł (rabat 100%) — wcześniej ilość 0 spadała
+ * na cenę katalogową i drukowała 77,8% przy wartości 0,00 zł.
  */
 function itemRow(i: DocItem, n: number, withCosts: boolean): string {
-  const effUnit = i.qty > 0 ? i.lineTotal / i.qty : i.unitPrice;
+  const effUnit = i.unitPrice * (1 - (i.discountPct || 0) / 100);
   const margin =
-    withCosts && i.unitCost != null && i.unitCost > 0 && effUnit > 0
+    withCosts && i.unitCost != null && i.unitCost > 0 && effUnit > 0 && i.qty > 0 && i.lineTotal > 0
       ? ((effUnit - i.unitCost) / effUnit) * 100
       : null;
   const priceCell =
@@ -683,8 +692,11 @@ function summaryRowsHtml(
       )}</b></div>`
     );
     if (totals.margin) {
+      // Marże wierszy są PRZED rabatem dokumentu, ta — po nim; bez dopisku dwie
+      // liczby na jednej kartce wyglądają na sprzeczne.
+      const afterDoc = offer.discountPct > 0 ? " (po rabacie dokumentu)" : "";
       rows.push(
-        `<div class="row cost"><span>Koszt łączny / marża za ${totals.marginHorizonMonths} mies.</span><b>${fmtPln(
+        `<div class="row cost"><span>Koszt łączny / marża za ${totals.marginHorizonMonths} mies.${afterDoc}</span><b>${fmtPln(
           totals.horizonCost ?? 0
         )} · ${fmtPct(totals.margin.marginPct)}</b></div>`
       );
@@ -739,12 +751,36 @@ export function buildOfferHtml(detail: OfferDocInput, opts: OfferDocOptions = {}
   </div>`
     : "";
 
+  /*
+   * „Razem w sekcji" to kwoty PRZED rabatem dokumentu i z pełną wartością
+   * sprzętu, a „Do zapłaty" — po rabacie i bez sprzętu objętego dzierżawą.
+   * Bez jednego zdania między nimi klient widział Σ sekcji 3902 zł i „Do
+   * zapłaty" 360 zł, a jedynym mostem był wiersz „Uwzględniony rabat".
+   * Zdanie drukuje się tylko wtedy, gdy któraś z tych różnic faktycznie zachodzi.
+   */
+  const leaseActive = offer.leaseMode !== "none" && detail.totals.leaseMonthly > 0;
+  const bridgeParts = [
+    offer.discountPct > 0 ? "przed rabatem dokumentu" : "",
+    leaseActive ? "z pełną wartością sprzętu" : "",
+  ].filter(Boolean);
+  const bridgeHtml =
+    isClient && main.length > 0 && bridgeParts.length > 0
+      ? `<p class="optgroup-note bridge">Kwoty w sekcjach podano ${bridgeParts.join(
+          " i "
+        )}; podsumowanie poniżej ${[
+          offer.discountPct > 0 ? "uwzględnia rabat" : "",
+          leaseActive ? "wyłącza sprzęt objęty dzierżawą" : "",
+        ]
+          .filter(Boolean)
+          .join(" i ")}.</p>`
+      : "";
+
   const emptyMsg = isClient
     ? "Zakres oferty zostanie uzupełniony."
     : "Oferta nie ma jeszcze żadnych pozycji.";
   const bodySections =
     mainHtml || optionalHtml
-      ? `${mainHtml}${optionalHtml}`
+      ? `${mainHtml}${optionalHtml}${bridgeHtml}`
       : `<p class="notes">${emptyMsg}</p>`;
 
   // Skos przypięty do ODBIORCY, nie do kosztów — każdy wydruk wewnętrzny ma być

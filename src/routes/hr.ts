@@ -30,16 +30,60 @@ const round2 = (n: number) => Math.round(n * 100) / 100;
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 type DbOrTx = typeof db | Tx;
 
-// Liczba lub null — akceptuje number i string z przecinkiem. `Number()`, nie
-// `parseFloat()`: ten drugi czyta prefiks i przepuszczał "3abc" jako 3, więc
-// literówka w polu liczbowym zapisywała się po cichu jako inna wartość.
+// Liczba lub null — akceptuje number i string w zapisie DZIESIĘTNYM z kropką
+// albo przecinkiem ("7,5", "-12", "100"). Wcześniej `Number()`: nie czyta prefiksu
+// jak `parseFloat()` ("3abc" → 3), ale przepuszczał "0x10" jako 16 i "1e1" jako
+// 10 — wartości, których nikt nie wpisuje w godziny ani kwoty świadomie. Regex
+// zamyka obie strony: to, co nie wygląda jak liczba, jest null i o dalszym losie
+// (400 czy „brak wartości") decyduje wywołujący przez `isBlank()`.
+const DECIMAL_RE = /^-?\d+(\.\d+)?$/;
 function toNum(v: unknown): number | null {
   if (typeof v === "number" && Number.isFinite(v)) return v;
-  if (typeof v === "string" && v.trim() !== "") {
-    const n = Number(v.trim().replace(",", "."));
-    if (Number.isFinite(n)) return n;
+  if (typeof v === "string") {
+    const t = v.trim().replace(",", ".");
+    if (DECIMAL_RE.test(t)) return Number(t);
   }
   return null;
+}
+
+/** Pole „nie podane": brak klucza, null albo pusty string — to NIE jest błąd. */
+const isBlank = (v: unknown): boolean =>
+  v === undefined || v === null || (typeof v === "string" && v.trim() === "");
+
+/**
+ * Pole liczbowe opcjonalne: puste → null (jak dotąd), liczba → liczba, a string,
+ * który liczbą nie jest ("12h", "abc") → błąd z NAZWĄ pola. Wcześniej `toNum`
+ * samo zerowało nieparsowalne wartości i zapis kończył się 201 z `null` w
+ * kolumnie — operator nie miał jak zauważyć, że jego „12h" zniknęło.
+ */
+function optionalNum(
+  body: Record<string, unknown>,
+  key: string,
+  label: string,
+): { value: number | null; error?: string } {
+  const raw = body[key];
+  if (isBlank(raw)) return { value: null };
+  const n = toNum(raw);
+  if (n == null) return { value: null, error: `${label}: nieprawidłowa liczba` };
+  return { value: n };
+}
+
+/**
+ * Zestaw pól liczbowych opcjonalnych naraz: `{ workedHours: "Godziny" }` →
+ * `{ data: { workedHours: 7.5 } }` albo `{ error: "Godziny: nieprawidłowa liczba" }`
+ * (pierwszy błąd przerywa — jeden komunikat na raz, jak w pozostałych parserach).
+ */
+function parseNumericFields<K extends string>(
+  body: Record<string, unknown>,
+  labels: Record<K, string>,
+): { data?: Record<K, number | null>; error?: string } {
+  const data = {} as Record<K, number | null>;
+  for (const key of Object.keys(labels) as K[]) {
+    const { value, error } = optionalNum(body, key, labels[key]);
+    if (error) return { error };
+    data[key] = value;
+  }
+  return { data };
 }
 
 function yearMonth(c: {
@@ -195,6 +239,15 @@ function parseEmployee(
   if (departmentId != null && departmentNameById(departmentId) === null) {
     return { error: "Wskazany dział nie istnieje — odśwież listę działów" };
   }
+  // Pola NIENULLOWALNE (`kind`, `active`): `undefined` = zostaw, co jest, ale
+  // jawny `null` to błąd klienta, nie wartość. Wcześniej `kind: null` po cichu
+  // resetował rodzaj rozliczenia do „ochrona", a `active: null` dezaktywował
+  // osobę — PUT z wyzerowanym formularzem przepinał człowieka między tabelami.
+  if (body.kind === null) return { error: "kind nie może być puste" };
+  if (body.kind !== undefined && body.kind !== "biuro" && body.kind !== "ochrona") {
+    return { error: "kind: dozwolone wartości to „ochrona” albo „biuro”" };
+  }
+  if (body.active === null) return { error: "active nie może być puste" };
   return {
     data: {
       fullName,
@@ -202,12 +255,7 @@ function parseEmployee(
       code: typeof body.code === "string" ? body.code : current?.code ?? "",
       // Rodzaj rozliczenia — decyduje, czy osoba trafia do tabeli ochrony
       // (umowy) czy do zestawienia biura w wynagrodzeniach.
-      kind:
-        body.kind === undefined
-          ? current?.kind ?? "ochrona"
-          : body.kind === "biuro"
-            ? "biuro"
-            : "ochrona",
+      kind: body.kind === undefined ? current?.kind ?? "ochrona" : body.kind,
       notes: typeof body.notes === "string" ? body.notes : current?.notes ?? "",
       active:
         body.active === undefined ? current?.active ?? true : Boolean(body.active),
@@ -763,16 +811,38 @@ app.put("/departments/:id", async (c) => {
  * tylko po cichu ODPINA ich od przypisania.
  *
  * DECYZJA: dział z godzinami LUB z pracownikami w kartotece wymaga świadomego
- * potwierdzenia (`?force=1`), inaczej 409 z liczbami. Sam dział CMA niesie
- * 31 tys. godzin całej historii; jedno przypadkowe kliknięcie zabrałoby alokacji
- * kosztów jej podstawę, nie zgłaszając żadnego błędu. Guard liczący TYLKO godziny
+ * potwierdzenia (`?force=1`), inaczej 409 z liczbami. Guard liczący TYLKO godziny
  * nie chronił działów biura: biuro nie ma wierszy w `hr_hours`, więc Handlowy czy
  * Księgowość kasowały się bez pytania, a przypisań 11 osób z migracji 0073 nie
  * da się odtworzyć z żadnych innych danych.
+ *
+ * DZIAŁ-PULA (`is_cma_pool = 1`) NIE DA SIĘ usunąć wcale — 409 bez obejścia przez
+ * `force`. To nie jest „dużo godzin" (31 tys. z całej historii), które użytkownik
+ * może świadomie odpiąć: razem z wierszem znika flaga, alokacja kosztów centrum
+ * po cichu przestaje działać (`cma.pool = 0` w `object-personnel-cost.ts`), a
+ * odtworzenia nie ma — FK SET NULL zostawia wpisy bez działu i z UI nie da się
+ * ich zbiorczo przypiąć z powrotem. Ścieżka legalna: najpierw przenieś flagę
+ * puli na inny dział (PUT `isCmaPool: true` na nim), dopiero potem kasuj.
  */
+const CMA_POOL_UNDELETABLE =
+  "Ten dział jest pulą centrum monitorowania — najpierw przenieś flagę puli na inny dział";
+
 app.delete("/departments/:id", async (c) => {
   const id = parseInt(c.req.param("id"));
   const force = c.req.query("force") === "1";
+  const [target] = await db
+    .select({ isCmaPool: schema.hrDepartments.isCmaPool })
+    .from(schema.hrDepartments)
+    .where(eq(schema.hrDepartments.id, id));
+  if (!target) {
+    return c.json<ApiResponse<null>>(
+      { success: false, error: "Nie znaleziono działu" },
+      404,
+    );
+  }
+  if (target.isCmaPool) {
+    return c.json<ApiResponse<null>>({ success: false, error: CMA_POOL_UNDELETABLE }, 409);
+  }
   if (!force) {
     const [used] = await db
       .select({ count: sql<number>`count(*)` })
@@ -888,6 +958,19 @@ function parseHours(body: Record<string, unknown>): {
   if (objectId != null && departmentId != null) {
     return { error: "Wpis może wskazywać obiekt albo dział, nie oba naraz" };
   }
+  // Pola liczbowe opcjonalne: puste → null, „12h" → 400 z nazwą pola — ta sama
+  // zasada, co dla `departmentId` i `sortOrder`; wcześniej te pola zerowały się
+  // po cichu i zapis wracał 201.
+  const nums = parseNumericFields(body, {
+    nightHours: "Godziny nocne",
+    workedHours: "Godziny",
+    uwHours: "Urlop (godz.)",
+    l4Hours: "L4 (godz.)",
+    maxHours: "Godziny maks.",
+    deductions: "Potrącenia",
+    bonuses: "Dodatki",
+  });
+  if (nums.error || !nums.data) return { error: nums.error };
   return {
     data: {
       employeeId,
@@ -895,13 +978,7 @@ function parseHours(body: Record<string, unknown>): {
       departmentId,
       year,
       month,
-      nightHours: toNum(body.nightHours),
-      workedHours: toNum(body.workedHours),
-      uwHours: toNum(body.uwHours),
-      l4Hours: toNum(body.l4Hours),
-      maxHours: toNum(body.maxHours),
-      deductions: toNum(body.deductions),
-      bonuses: toNum(body.bonuses),
+      ...nums.data,
       notes: typeof body.notes === "string" ? body.notes : "",
       // Flaga „przypisanie do potwierdzenia" (carry-over) — jedna dla obiektu
       // i dla działu. Formularz jej nie wysyła, więc każdy zapis wpisu przez
@@ -1361,14 +1438,21 @@ app.put("/payroll", async (c) => {
       404,
     );
   }
+  // Nieparsowalna kwota → 400 z nazwą pola (patrz `optionalNum`), nie ciche null.
+  const nums = parseNumericFields(body, {
+    mainAmount: "Kwota główna",
+    bonusRate: "Stawka dodatku",
+    rateAdjustment: "Korekta stawki",
+    maxHoursOverride: "Godziny maks. (nadpisanie)",
+    actualHoursOverride: "Godziny faktyczne (nadpisanie)",
+    bonusAmountOverride: "Kwota dodatku (nadpisanie)",
+  });
+  if (nums.error || !nums.data) {
+    return c.json<ApiResponse<null>>({ success: false, error: nums.error }, 400);
+  }
   const values = {
-    mainAmount: toNum(body.mainAmount),
-    bonusRate: toNum(body.bonusRate),
+    ...nums.data,
     bonusRatePending: Boolean(body.bonusRatePending),
-    rateAdjustment: toNum(body.rateAdjustment),
-    maxHoursOverride: toNum(body.maxHoursOverride),
-    actualHoursOverride: toNum(body.actualHoursOverride),
-    bonusAmountOverride: toNum(body.bonusAmountOverride),
     notes: typeof body.notes === "string" ? body.notes : "",
   };
   // Upsert w jednej synchronicznej transakcji — select i insert/update są
@@ -1415,21 +1499,25 @@ function parseOffice(body: Record<string, unknown>): {
   if (!year || !month || month < 1 || month > 12) {
     return { error: "Nieprawidłowy rok/miesiąc" };
   }
+  const nums = parseNumericFields(body, {
+    etatHours: "Godziny etatu",
+    uwL4: "UW/L4",
+    deductions: "Potrącenia",
+    bonuses: "Dodatki",
+    hoursForAccounting: "Godziny do księgowej",
+    rate: "Stawka",
+    amount: "Kwota",
+    rorBase: "Podstawa ROR",
+    cashOverride: "Gotówka (nadpisanie)",
+  });
+  if (nums.error || !nums.data) return { error: nums.error };
   return {
     data: {
       employeeId,
       year,
       month,
       company: typeof body.company === "string" ? body.company.trim() : "",
-      etatHours: toNum(body.etatHours),
-      uwL4: toNum(body.uwL4),
-      deductions: toNum(body.deductions),
-      bonuses: toNum(body.bonuses),
-      hoursForAccounting: toNum(body.hoursForAccounting),
-      rate: toNum(body.rate),
-      amount: toNum(body.amount),
-      rorBase: toNum(body.rorBase),
-      cashOverride: toNum(body.cashOverride),
+      ...nums.data,
       notes: typeof body.notes === "string" ? body.notes : "",
     },
   };

@@ -24,8 +24,16 @@
  *     więc guard liczący tylko godziny kasował je bez pytania.
  *  8. PUT pracownika bez klucza `departmentId` NIE kasuje działu (pominięte = zostaw);
  *     jawny `null` kasuje.
+ *  9. Działu-puli CMA nie da się usunąć — 409 bez obejścia przez `?force=1`; flaga
+ *     i wpisy godzin zostają nietknięte.
+ * 10. Walidacja liczb: `toNum` czyta tylko zapis dziesiętny ("0x10", "1e1" → 400),
+ *     nieparsowalne pole godzin ("12h") → 400 z nazwą pola zamiast cichego null,
+ *     `kind: null` / `active: null` → 400 (pola nienullowalne).
  *
- * Sprząta po sobie HARD, także przy błędzie.
+ * Sprząta po sobie HARD, także przy błędzie — łącznie z flagą puli: test zakłada
+ * własne działy-pule, a niezmiennik „pula jest jedna" zdejmuje wtedy flagę z
+ * PRAWDZIWEGO działu CMA. `cleanup()` przywraca ją na zapamiętany id, inaczej
+ * kopia bazy kończyłaby test z `cma.pool = 0` i wyłączoną alokacją kosztów centrum.
  *
  * Nie ma tu frameworka testowego — to konwencja z pozostałych scripts/test-*.ts.
  */
@@ -69,6 +77,21 @@ const NAME_KEY = COMPANY_FIELDS.companyName.dbKey;
 /** Stan sprzed testu: wartość albo null („wpisu nie było") — to dwa różne stany. */
 let savedCompanyName: string | null = null;
 let companyNameStashed = false;
+
+/** Id produkcyjnego działu z flagą puli sprzed testu (null = puli nie było). */
+let savedPoolId: number | null = null;
+
+/**
+ * Flaga puli wraca na zapamiętany dział. Działy testowe (PREFIX) są już wtedy
+ * skasowane, więc nie ma z kim kolidować i niezmiennik „jedna pula" trzyma.
+ */
+function restorePoolFlag() {
+  if (savedPoolId == null) return;
+  db.update(schema.hrDepartments)
+    .set({ isCmaPool: true })
+    .where(eq(schema.hrDepartments.id, savedPoolId))
+    .run();
+}
 
 function restoreCompanyName() {
   if (!companyNameStashed) return;
@@ -119,6 +142,7 @@ function cleanup() {
     db.delete(schema.hrEmployees).where(eq(schema.hrEmployees.id, id)).run();
   }
   db.delete(schema.hrDepartments).where(like(schema.hrDepartments.name, `${PREFIX}%`)).run();
+  restorePoolFlag();
   db.delete(schema.hrObjects).where(like(schema.hrObjects.name, `${PREFIX}%`)).run();
   db.delete(schema.objects).where(like(schema.objects.name, `${PREFIX}%`)).run();
   db.delete(schema.contractors).where(like(schema.contractors.name, `${PREFIX}%`)).run();
@@ -170,6 +194,15 @@ async function main() {
   ok("PUT nieistniejącego działu → 404", missing.status === 404, missing);
 
   console.log("\n— niezmiennik puli —");
+
+  // Zapamiętane PRZED założeniem własnych pul — od tej chwili flaga produkcyjnego
+  // CMA jest zdjęta aż do `cleanup()`.
+  savedPoolId =
+    db
+      .select({ id: schema.hrDepartments.id })
+      .from(schema.hrDepartments)
+      .where(eq(schema.hrDepartments.isCmaPool, true))
+      .get()?.id ?? null;
 
   const poolA = await call("/departments", {
     method: "POST",
@@ -507,6 +540,63 @@ async function main() {
   });
   ok("sortOrder \"3abc\" → 400 (toNum nie czyta prefiksu jak parseFloat)", badSort.status === 400, badSort);
 
+  console.log("\n— walidacja liczb —");
+
+  // Druga strona `toNum`: `Number()` przepuszczał zapis szesnastkowy i wykładniczy.
+  const hexSort = await call(`/departments/${depHandlowy.id}`, {
+    method: "PUT",
+    body: { sortOrder: "0x10" },
+  });
+  ok("sortOrder \"0x10\" → 400 (nie 16)", hexSort.status === 400, hexSort);
+  const expSort = await call(`/departments/${depHandlowy.id}`, {
+    method: "PUT",
+    body: { sortOrder: "1e1" },
+  });
+  ok("sortOrder \"1e1\" → 400 (nie 10)", expSort.status === 400, expSort);
+
+  const hoursBody = { employeeId: empSwitch.id, departmentId: depHandlowy.id, year: m1.year, month: m1.month };
+  const badHours = await call("/hours", { method: "POST", body: { ...hoursBody, workedHours: "12h" } });
+  ok(
+    "workedHours \"12h\" → 400 z nazwą pola, nie 201 z cichym null",
+    badHours.status === 400 && /Godziny: nieprawidłowa liczba/.test(String(badHours.body?.error)),
+    badHours
+  );
+  const numHours = await call("/hours", { method: "POST", body: { ...hoursBody, workedHours: 7.5 } });
+  ok("workedHours 7.5 (liczba) przechodzi", numHours.status === 201 && numHours.body?.data?.workedHours === 7.5, numHours);
+  const commaHours = await call("/hours", { method: "POST", body: { ...hoursBody, workedHours: "7,5", bonuses: "" } });
+  ok(
+    "workedHours \"7,5\" (string z przecinkiem) przechodzi, a \"\" → null",
+    commaHours.status === 201 && commaHours.body?.data?.workedHours === 7.5 && commaHours.body?.data?.bonuses === null,
+    commaHours
+  );
+  // Dwa wpisy dodane wyżej zdublowałyby licznik „Z godzin"? Nie — ten sam
+  // pracownik (distinct), ale przesuwają hoursTotal; sprzątamy, żeby asercje
+  // liczników niżej nie zależały od tej sekcji.
+  for (const r of [numHours, commaHours]) {
+    if (r.body?.data?.id) db.delete(schema.hrHours).where(eq(schema.hrHours.id, r.body.data.id)).run();
+  }
+
+  const nullKind = await call(`/employees/${empDept.body?.data?.id}`, {
+    method: "PUT",
+    body: { fullName: `${PREFIX}Kartotekowy`, kind: null },
+  });
+  ok(
+    "PUT kind: null → 400 (nie cichy reset do „ochrona”)",
+    nullKind.status === 400 && /kind nie może być puste/.test(String(nullKind.body?.error)),
+    nullKind
+  );
+  const nullActive = await call(`/employees/${empDept.body?.data?.id}`, {
+    method: "PUT",
+    body: { fullName: `${PREFIX}Kartotekowy`, active: null },
+  });
+  ok("PUT active: null → 400 (nie ciche `false`)", nullActive.status === 400, nullActive);
+  const untouched = db
+    .select({ kind: schema.hrEmployees.kind, active: schema.hrEmployees.active })
+    .from(schema.hrEmployees)
+    .where(eq(schema.hrEmployees.id, empDept.body?.data?.id))
+    .get();
+  ok("po obu 400 kind = biuro i active = true bez zmian", untouched?.kind === "biuro" && untouched?.active === true, untouched);
+
   const withCounts = (await call("/departments")).body?.data?.find(
     (d: any) => d.id === depHandlowy.id
   );
@@ -515,6 +605,41 @@ async function main() {
     withCounts?.employeesCount === 1 && withCounts?.hoursEmployeesCount === 2,
     withCounts
   );
+
+  console.log("\n— usuwanie działu-puli CMA —");
+
+  // Pula to w tej chwili `poolB` (test niezmiennika). Wieszamy na niej wpis
+  // godzin, żeby sprawdzić, że 409 nie zostawia po sobie NULL-i (FK SET NULL).
+  const poolId = poolB.body?.data?.id as number;
+  const [poolHours] = db
+    .insert(schema.hrHours)
+    .values({ employeeId: empSolo.id, departmentId: poolId, year: m1.year, month: m1.month, workedHours: 10 })
+    .returning()
+    .all();
+  const delPool = await call(`/departments/${poolId}`, { method: "DELETE" });
+  ok(
+    "DELETE działu-puli bez force → 409 z komunikatem o puli",
+    delPool.status === 409 && /pulą centrum monitorowania/.test(String(delPool.body?.error)),
+    delPool
+  );
+  const delPoolForced = await call(`/departments/${poolId}?force=1`, { method: "DELETE" });
+  ok("DELETE działu-puli z ?force=1 → nadal 409 (bez obejścia)", delPoolForced.status === 409, delPoolForced);
+  const poolAfter = db
+    .select({ isCmaPool: schema.hrDepartments.isCmaPool })
+    .from(schema.hrDepartments)
+    .where(eq(schema.hrDepartments.id, poolId))
+    .get();
+  const poolHoursAfter = db
+    .select({ departmentId: schema.hrHours.departmentId })
+    .from(schema.hrHours)
+    .where(eq(schema.hrHours.id, poolHours.id))
+    .get();
+  ok(
+    "po obu 409 dział istnieje, flaga puli i przypisanie wpisu nietknięte",
+    poolAfter?.isCmaPool === true && poolHoursAfter?.departmentId === poolId,
+    { poolAfter, poolHoursAfter }
+  );
+  db.delete(schema.hrHours).where(eq(schema.hrHours.id, poolHours.id)).run();
 
   console.log("\n— usuwanie działu —");
 
@@ -605,6 +730,17 @@ try {
   await main();
 } finally {
   cleanup();
+}
+
+// Sprzątanie sprawdzamy tak samo, jak resztę: flaga puli ma wrócić na dział,
+// który ją miał przed testem — inaczej nagłówek „sprząta po sobie" byłby fałszem.
+if (savedPoolId != null) {
+  const restored = db
+    .select({ isCmaPool: schema.hrDepartments.isCmaPool })
+    .from(schema.hrDepartments)
+    .where(eq(schema.hrDepartments.id, savedPoolId))
+    .get();
+  ok("cleanup przywrócił flagę puli na produkcyjny dział CMA", restored?.isCmaPool === true, restored);
 }
 
 console.log(failures === 0 ? "\nWszystko OK" : `\n${failures} niepowodzeń`);

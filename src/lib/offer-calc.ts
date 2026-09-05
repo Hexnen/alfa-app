@@ -187,6 +187,19 @@ function sectionCounts(section: SectionCalcInput | undefined): boolean {
   return true;
 }
 
+/**
+ * Czy pozycja WCHODZI DO KWOTY oferty: sekcja się liczy i pozycja nie jest
+ * opcją. Eksportowane, bo to samo kryterium rozstrzyga w trasach, czy oferta
+ * w ogóle ma co pokazać klientowi (`share`) — druga definicja rozjechałaby
+ * się z sumami na dokumencie.
+ */
+export function itemCounts(
+  section: SectionCalcInput | undefined,
+  item: Pick<ItemCalcInput, "isOptional">
+): boolean {
+  return sectionCounts(section) && !item.isOptional;
+}
+
 export function computeOffer(
   offer: OfferCalcInput,
   sections: SectionCalcInput[],
@@ -208,7 +221,7 @@ export function computeOffer(
     // Pozycja z wariantu, którego klient nie wybrał, nie jest nawet „opcją" —
     // to alternatywa dla czegoś innego w ofercie i nigdzie się nie sumuje.
     if (section.variantGroup && !section.variantSelected) continue;
-    if (it.isOptional || !sectionCounts(section)) {
+    if (!itemCounts(section, it)) {
       optional.push(it);
       continue;
     }

@@ -55,13 +55,19 @@ export function PublicOffer() {
          * Nie rozróżniamy „nie ma takiej oferty" od „link wyłączony" ani od
          * „token za krótki" — backend odpowiada 404 na każdy zły token, żeby
          * nie potwierdzać istnienia dokumentu. Po stronie klienta rozróżniamy
-         * TYLKO brak odpowiedzi (sieć, 5xx — `status` pusty albo ≥ 500) od
-         * odpowiedzi odmownej. W żadnym wariancie nie pokazujemy `e.message`
-         * z backendu: to strona bez logowania, a komunikat walidacji zdradzałby
-         * kształt tokenu i wewnętrzne nazwy pól.
+         * TYLKO brak odpowiedzi (sieć, 5xx — `status` pusty albo ≥ 500) i limit
+         * odsłon (429) od odpowiedzi odmownej. W żadnym wariancie nie pokazujemy
+         * `e.message` z backendu: to strona bez logowania, a komunikat walidacji
+         * zdradzałby kształt tokenu i wewnętrzne nazwy pól.
+         *
+         * 429 MUSI mieć własny komunikat: limiter liczy odsłony per IP, więc kilka
+         * osób za jednym firmowym NAT-em wyczerpuje go wspólnie. Bez tej gałęzi
+         * wpadały do „link nieprawidłowy lub wyłączony", co klient czytał jako
+         * cofnięcie oferty.
          */
         const status = (e as { status?: number })?.status;
         const serverDown = status === undefined || status >= 500;
+        const rateLimited = status === 429;
         setState({
           token,
           detail: null,
@@ -70,10 +76,15 @@ export function PublicOffer() {
                 title: "Nie udało się wczytać oferty",
                 text: "Spróbuj odświeżyć stronę za chwilę.",
               }
-            : {
-                title: "Nie znaleziono oferty",
-                text: "Ten link jest nieprawidłowy lub został wyłączony. Prosimy o kontakt z osobą, która przesłała ofertę.",
-              },
+            : rateLimited
+              ? {
+                  title: "Zbyt wiele odsłon w krótkim czasie",
+                  text: "Odczekaj kilka minut i odśwież stronę. Oferta pozostaje aktualna.",
+                }
+              : {
+                  title: "Nie znaleziono oferty",
+                  text: "Ten link jest nieprawidłowy lub został wyłączony. Prosimy o kontakt z osobą, która przesłała ofertę.",
+                },
         });
       });
     return () => {

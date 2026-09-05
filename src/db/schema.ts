@@ -1196,7 +1196,11 @@ export const hrEmployees = sqliteTable("hr_employees", {
   updatedAt: text("updated_at")
     .default(sql`(datetime('now'))`)
     .notNull(),
-});
+},
+(t) => ({
+  // Licznik „W kartotece" w GET /departments i filtr kartoteki po dziale.
+  departmentIdIdx: index("hr_employees_department_id_idx").on(t.departmentId),
+}));
 
 export type HrEmployee = typeof hrEmployees.$inferSelect;
 export type NewHrEmployee = typeof hrEmployees.$inferInsert;
@@ -1320,7 +1324,17 @@ export const hrHours = sqliteTable("hr_hours", {
   updatedAt: text("updated_at")
     .default(sql`(datetime('now'))`)
     .notNull(),
-});
+},
+(t) => ({
+  // Tabela rośnie z każdym miesiącem (2 tys. wierszy po roku) i BEZ indeksów
+  // każde pytanie o nią było pełnym skanem — w GET /departments trzy skorelowane
+  // podzapytania per dział, w GET /objects dwa per pozycję, w GET /hours i
+  // payrollu filtr po (rok, miesiąc). FK w SQLite nie zakłada indeksu samo.
+  employeeIdIdx: index("hr_hours_employee_id_idx").on(t.employeeId),
+  objectIdIdx: index("hr_hours_object_id_idx").on(t.objectId),
+  departmentIdIdx: index("hr_hours_department_id_idx").on(t.departmentId),
+  yearMonthIdx: index("hr_hours_year_month_idx").on(t.year, t.month),
+}));
 
 export type HrHours = typeof hrHours.$inferSelect;
 export type NewHrHours = typeof hrHours.$inferInsert;
