@@ -382,6 +382,8 @@ export interface OfferDetail {
     leaseMonthsEffective: number | null;
     /** Handlowiec prowadzący, a bez niego autor dokumentu — nazwa na wydruk. */
     preparedBy: string | null;
+    /** To samo dla klienta: null zamiast loginu, gdy nie ma nazwy do pokazania. */
+    preparedByPublic: string | null;
   };
   sections: OfferSection[];
   items: (OfferItem & {
@@ -452,17 +454,23 @@ function loadOfferSync(dbx: DbOrTx, id: number): OfferDetail {
    * z sesji, więc rozwiązujemy go na nazwę użytkownika — a gdy konta już nie ma,
    * zostawiamy login (lepszy ślad niż kreska), tak samo jak na liście ofert.
    */
-  const authorLabel = offer.createdBy
-    ? (dbx
+  const authorName = offer.createdBy
+    ? dbx
         .select({ email: schema.users.email, displayName: schema.users.displayName })
         .from(schema.users)
         .all()
         .find((u) => u.email.toLowerCase() === offer.createdBy!.toLowerCase())
-        ?.displayName || offer.createdBy)
+        ?.displayName || null
     : null;
-  const preparedBy = salesperson
+  const authorLabel = authorName || offer.createdBy || null;
+  const salespersonName = salesperson
     ? `${salesperson.firstName} ${salesperson.lastName}`.trim()
-    : authorLabel;
+    : null;
+  const preparedBy = salespersonName ?? authorLabel;
+  // Wariant na dokument dla KLIENTA: bez zapasowego loginu. Gdy konto autora
+  // zniknęło, a handlowca nie ma, lepiej pominąć linię niż pokazać e-mail
+  // z sesji — na zewnątrz to nie jest „ślad", tylko wyciek.
+  const preparedByPublic = salespersonName ?? authorName;
   const totals = computeOffer(
     offer,
     sections,
@@ -495,6 +503,7 @@ function loadOfferSync(dbx: DbOrTx, id: number): OfferDetail {
       leaseMonthsEffective:
         offer.leaseMode === "y1" ? 12 : offer.leaseMode === "y2" ? 24 : offer.leaseMonths,
       preparedBy,
+      preparedByPublic,
     },
     sections,
     items: items.map((it) => {
@@ -885,10 +894,12 @@ function parseTextHead(
   return {
     name,
     category: oneOf(body.category, OFFER_SECTION_CATEGORIES, current?.category ?? "inne"),
-    title: str(body.title),
+    // Treść też scalamy z `current`: PUT z samym `name` (zmiana nazwy w
+    // bibliotece) nie może wyzerować tytułu i tekstu wzorca.
+    title: body.title === undefined ? current?.title ?? "" : str(body.title),
     // Markdown zapisujemy jak przyszedł — składnię rozwija front przy wydruku,
     // backendowi to zwykły tekst.
-    body: str(body.body),
+    body: body.body === undefined ? current?.body ?? "" : str(body.body),
     isDefault:
       body.isDefault === undefined ? current?.isDefault ?? false : Boolean(body.isDefault),
     active: body.active === undefined ? current?.active ?? true : Boolean(body.active),
@@ -929,7 +940,7 @@ app.get("/texts/:id", async (c) =>
 );
 
 app.post("/texts", async (c) => {
-  const body = await c.req.json<Record<string, unknown>>();
+  const body = await c.req.json<Record<string, unknown>>().catch(() => ({}));
   return guard(c, () => {
     const head = parseTextHead(body);
     const created = db.transaction((tx) => {
@@ -953,7 +964,7 @@ app.post("/texts", async (c) => {
 
 /** PUT podmienia głowę opisu; pole pominięte w body zostaje bez zmian. */
 app.put("/texts/:id", async (c) => {
-  const body = await c.req.json<Record<string, unknown>>();
+  const body = await c.req.json<Record<string, unknown>>().catch(() => ({}));
   return guard(c, () => {
     const id = requireId(c.req.param("id"), "identyfikator opisu");
     const updated = db.transaction((tx) => {
@@ -976,7 +987,20 @@ app.put("/texts/:id", async (c) => {
         user: getUser(c),
         before,
         after: row,
-        fields: ["name", "category", "title", "isDefault", "active"],
+        fields: [
+          "name",
+          "category",
+          "title",
+          // Treść skracamy w podsumowaniu jak opis wydarzenia w kalendarzu —
+          // pełne wartości i tak lądują w old_value/new_value.
+          {
+            key: "body",
+            label: "treść",
+            format: (v) => (v ? String(v).slice(0, 60) + (String(v).length > 60 ? "…" : "") : "—"),
+          },
+          "isDefault",
+          "active",
+        ],
       });
       return row;
     });
@@ -1386,6 +1410,12 @@ app.post("/:id/version", async (c) =>
           sentAt: null,
           orderId: null,
           warehouseDocId: null,
+          // Nowa wersja to nieuzgodniony szkic — link klienta NIE MOŻE na nią
+          // przeskoczyć, więc tokenu nie kopiujemy. Bez tego spread przenosił
+          // `shareToken` i UNIQUE na `offers.share_token` wywalał wersjonowanie
+          // każdej udostępnionej oferty — indeks był jedyną rzeczą, która
+          // trzymała link przy dokumencie, który klient faktycznie widział.
+          shareToken: null,
           createdBy: user?.email ?? null,
           createdAt: undefined,
           updatedAt: undefined,
@@ -2040,7 +2070,9 @@ app.post("/:id/texts", async (c) => {
 });
 
 app.put("/:id/texts/:tid", async (c) => {
-  const body = await c.req.json<Record<string, unknown>>();
+  const body = await c.req
+    .json<Record<string, unknown>>()
+    .catch(() => ({}) as Record<string, unknown>);
   return guard(c, () => {
     const offerId = requireId(c.req.param("id"), "identyfikator oferty");
     const tid = requireId(c.req.param("tid"), "identyfikator opisu");
@@ -2312,7 +2344,14 @@ function repriceChangesSync(dbx: DbOrTx, offerId: number): RepriceChange[] {
     const price = src.price(it.source, refId);
     const cost = src.cost(it.source, refId);
     if (price === null) continue; // źródło zniknęło — zostawiamy migawkę
-    if (Math.abs(price - it.unitPrice) < 0.005 && cost === it.unitCost) continue;
+    // Koszt porównujemy z tą samą tolerancją co cenę — oba przechodzą przez
+    // round2 i marżę, więc `===` na floatach zgłaszało „zmianę" o 1e-13.
+    // Null (brak kosztu w kartotece) to osobny stan, nie zero.
+    const costSame =
+      cost === null || it.unitCost === null
+        ? cost === it.unitCost
+        : Math.abs(cost - it.unitCost) < 0.005;
+    if (Math.abs(price - it.unitPrice) < 0.005 && costSame) continue;
     out.push({
       itemId: it.id,
       sectionTitle: titles.get(it.sectionId) ?? "",
@@ -2349,6 +2388,10 @@ app.post("/:id/reprice", async (c) => {
   return guard(c, () => {
     const offerId = requireId(c.req.param("id"), "identyfikator oferty");
     const rawIds = (body as Record<string, unknown>).itemIds;
+    // Klucz obecny, ale nie lista → błąd, nie „wszystkie pozycje". Literówka
+    // w kliencie nie może po cichu przepisać cen w całej ofercie.
+    if (rawIds !== undefined && !Array.isArray(rawIds))
+      throw new ApiError(400, "itemIds musi być listą identyfikatorów");
     const only =
       Array.isArray(rawIds) && rawIds.length > 0
         ? new Set(rawIds.map((v: unknown) => requireId(String(v), "identyfikator pozycji")))
@@ -2368,6 +2411,12 @@ app.post("/:id/reprice", async (c) => {
       }
 
       if (list.length > 0) {
+        // Zmiana ceny to zmiana dokumentu — znacznik jak przy PUT /:id, żeby
+        // lista „ostatnio edytowane" i wiek ceny nie kłamały.
+        tx.update(schema.offers)
+          .set({ updatedAt: new Date().toISOString() })
+          .where(eq(schema.offers.id, offerId))
+          .run();
         logActivity(tx, {
           entityType: "offer",
           entityId: offerId,
@@ -2856,6 +2905,15 @@ app.post("/:id/share", (c) => {
       409
     );
   }
+  // Odrzuconej też nie: publiczny widok nie ma dla niej żadnego oznaczenia
+  // (baner ma tylko wygasła), więc klient dostałby dokument wyglądający na
+  // aktualny. `sent`, `accepted` i wygasła (status `sent` po terminie) przechodzą.
+  if (offer.status === "rejected") {
+    return c.json<ApiResponse<null>>(
+      { success: false, error: "Nie można udostępnić odrzuconej oferty" },
+      409
+    );
+  }
 
   const token = offer.shareToken ?? randomBytes(24).toString("hex");
   if (!offer.shareToken) {
@@ -2956,23 +3014,27 @@ export interface PublicOfferDetail {
 export const offersPublicRoutes = new Hono();
 
 /*
- * Limity jak przy formularzu ZDW: per IP i globalnie. `X-Forwarded-For` da się
- * podrobić, więc sam limit per IP nie zatrzymałby zgadywania tokenów — dopiero
- * sufit globalny to robi. Token ma 48 znaków hex, więc zgadywanie i tak jest
- * beznadziejne, ale limit zdejmuje z bazy ruch prób.
+ * Limit TYLKO per IP — bez sufitu globalnego, inaczej niż przy formularzu ZDW.
+ * Tam globalny limit chroni zewnętrzne API (wykaz VAT) przed lawiną; tu nie ma
+ * czego chronić: token ma 192 bity, więc zgadywanie jest beznadziejne, a
+ * odczyt z SQLite jest tani. Sufit globalny był za to dźwignią DoS — jedna
+ * maszyna wysyłająca 600 żądań zamykała dokument WSZYSTKIM klientom na 5 minut.
+ * Adres bierze `clientIp()` z ostatniego członu XFF (dokładanego przez nasze
+ * proxy), więc rotowanie fałszywych członów z przodu nie rozmnaża kluczy.
  */
 const publicOfferPerIp = createRateLimiter({ limit: 60, windowMs: 5 * 60_000 });
-const publicOfferGlobal = createRateLimiter({ limit: 600, windowMs: 5 * 60_000 });
 
 offersPublicRoutes.get("/public-offer/:token", (c) => {
   const token = (c.req.param("token") || "").trim();
 
-  // Krótki token nie ma prawa istnieć — odrzucamy bez ruszania bazy.
+  // Krótki token nie ma prawa istnieć — odrzucamy bez ruszania bazy. Ten sam
+  // 404 co przy nietrafionym tokenie: front obsługuje neutralnie tylko 404,
+  // a rozróżnianie „za krótki" od „zły" nic nikomu nie daje.
   if (token.length < 16) {
-    return c.json<ApiResponse<null>>({ success: false, error: "Nieprawidłowy link" }, 401);
+    return c.json<ApiResponse<null>>({ success: false, error: "Nie znaleziono oferty" }, 404);
   }
 
-  if (!publicOfferPerIp.check(clientIp(c)) || !publicOfferGlobal.check("all")) {
+  if (!publicOfferPerIp.check(clientIp(c))) {
     return c.json<ApiResponse<null>>(
       { success: false, error: "Za dużo zapytań — spróbuj ponownie za kilka minut" },
       429
@@ -3019,7 +3081,7 @@ offersPublicRoutes.get("/public-offer/:token", (c) => {
       discountPct: offer.discountPct,
       leaseMode: offer.leaseMode,
       leaseMonthsEffective: offer.leaseMonthsEffective,
-      preparedBy: offer.preparedBy,
+      preparedBy: offer.preparedByPublic,
     },
     company: company
       ? {

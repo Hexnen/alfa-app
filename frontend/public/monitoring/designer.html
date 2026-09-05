@@ -1636,7 +1636,14 @@ const ICON={
  lockOpen:'<svg viewBox="0 0 24 24"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>'
 };
 function ico(k,cls){return '<span class="ico '+(cls||'')+'">'+(ICON[k]||'')+'</span>';}
+// Ucieczka HTML dla danych projektu (nazwy kamer/grup/obszarów, etykiety) — trafiają do innerHTML i dymków Leaflet,
+// a projekt jedzie z serwera, więc każdy, kto go otworzy, wykonałby wstrzyknięty skrypt. Wszędzie, gdzie tekst
+// użytkownika ląduje w stringu HTML, ma przejść przez esc().
+const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+// Kolor z zapisu może być czymkolwiek (JSON z pliku/serwera) — do atrybutu style wpuszczamy tylko hex (#rgb/#rrggbb/#rrggbbaa).
+const safeColor=(c,dflt)=>/^#([0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(c||'')?c:(dflt||PALETTE[0]);
 const TYPE_META={bullet:{label:'Tubowa',icon:'bullet'},dome:{label:'Kopułka',icon:'dome'},ptz:{label:'PTZ',icon:'ptz'},pano:{label:'360°',icon:'pano'},lpr:{label:'LPR',icon:'lpr'}};
+const typeMeta=c=>TYPE_META[c&&c.type]||TYPE_META.bullet;   // nieznany typ ze starego zapisu => jak tubowa (bez wyjątku na .icon)
 /* Owija input[type=number] w kompaktowy stepper (−/+), sufiks jednostki, kółko myszy, Enter=zatwierdź/Esc=przywróć.
    Zachowuje input#id; przyciski dispatchują 'input'+'change' (1:1 z listenerami). Respektuje disabled/readOnly. */
 function enhanceNumber(input,opts){
@@ -2386,8 +2393,8 @@ function delCamGroup(g){
 }
 // kamera dołączająca do grupy przejmuje jej kolor — kolor grupy to kolor jej kamer
 function setCamGroup(cam,gid){
-  if(gid)cam.group=gid; else delete cam.group;
-  const g=camGroupById(cam.group);
+  const g=gid?camGroupById(gid):null;
+  if(g)cam.group=g.id; else delete cam.group;   // nieznane id => „Bez grupy” (żadnych martwych odwołań w zapisie)
   if(g&&g.color&&cam.color!==g.color){cam.color=g.color;drawCam(cam);}
 }
 function moveCamsBefore(list,dst){        // upuszczenie na wiersz kamery: ta sama sekcja, wstaw PRZED nią
@@ -2420,7 +2427,9 @@ function toggleCamSel(c){camSel.has(c.id)?camSel.delete(c.id):camSel.add(c.id);c
 function rangeCamSel(c){
   const rows=[...document.querySelectorAll('#camTable tr.trow:not(.hid-grp)')].map(r=>r.dataset.cam);  // zakres po WIDOCZNYCH wierszach (zwinięte grupy pomijamy)
   const b=rows.indexOf(c.id); if(b<0)return;
-  const a=camAnchor?rows.indexOf(camAnchor.id):-1;
+  let a=camAnchor?rows.indexOf(camAnchor.id):-1;
+  if(a<0){const vis=rows.find(id=>camSel.has(id));a=vis?rows.indexOf(vis):-1;}   // kotwica zwinięta/skasowana => pierwsza widoczna zaznaczona
+  camSel.clear();                                                                // Shift+klik = zakres zastępuje poprzedni (jak w menedżerach plików)
   if(a<0){camSel.add(c.id);camAnchor=c;}
   else{const lo=Math.min(a,b),hi=Math.max(a,b);for(let i=lo;i<=hi;i++)camSel.add(rows[i]);}
   markSel(); refreshList();
@@ -2511,8 +2520,10 @@ function openCamCtxGroups(anchor){
   const s=el('camCtxSub'), targets=ctxCams.slice(); s.innerHTML='';
   const row=(label,color,fn)=>{
     const b=document.createElement('button');
-    const dot='<span class="grp-dot" style="'+(color?('background:'+color):'background:transparent;border:1px dashed var(--muted)')+'"></span>';
-    b.innerHTML=dot+'<span>'+label+'</span>';
+    const dot=document.createElement('span'); dot.className='grp-dot';   // nazwa grupy = tekst użytkownika: nigdy przez innerHTML
+    if(color)dot.style.background=safeColor(color); else dot.style.cssText='background:transparent;border:1px dashed var(--muted)';
+    const lab=document.createElement('span'); lab.textContent=label;
+    b.appendChild(dot); b.appendChild(lab);
     b.onclick=ev=>{ev.stopPropagation();closeCamCtx();fn();};
     s.appendChild(b);
   };
@@ -2679,8 +2690,8 @@ function refreshList(){
     const tr=document.createElement('tr'); tr.className='trow'+(hidden?' hid-grp':'')+(camSel.has(c.id)?' msel':''); tr.dataset.cam=c.id;
     const vr=visRange(c);   // zasięg widoczności (kalkulowany) — „—" gdy brak danych optyki
     const night=(vr!=null&&+c.ir>0)?Math.min(vr,Math.round(+c.ir)):null;   // noc = min(kryterium, IR)
-    tr.innerHTML=`<td style="white-space:nowrap"><span class="cdrag" data-grip title="Przeciągnij: do grupy lub na inne miejsce listy">${ico('grip')}</span><span class="swatch" style="background:${c.color}"></span>${c.num}</td>`+
-      `<td class="cam-name" title="${c.name}">${c.name}</td><td class="type-cell" title="${typeName[c.type]}">${ico(TYPE_META[c.type].icon,'type-ico')}</td>`+
+    tr.innerHTML=`<td style="white-space:nowrap"><span class="cdrag" data-grip title="Przeciągnij: do grupy lub na inne miejsce listy">${ico('grip')}</span><span class="swatch" style="background:${esc(c.color)}"></span>${c.num}</td>`+
+      `<td class="cam-name" title="${esc(c.name)}">${esc(c.name)}</td><td class="type-cell" title="${typeMeta(c).label}">${ico(typeMeta(c).icon,'type-ico')}</td>`+
       `<td class="num">${c.type==='pano'?'360°':c.fov+'°'}</td>`+
       `<td class="num" title="Zasięg analityki (projektowany) / widoczność (kalkulowana) · księżyc = zasięg nocny (IR)">${c.range} m<div style="font-size:10px;color:var(--muted);font-weight:400">${vr==null?'—':vr+' m'+(night!=null&&night<vr?' <span style="color:var(--accent2)">'+ico('moon')+night+'</span>':'')}</div></td>`+
       `<td style="text-align:right;white-space:nowrap"><span class="del-x" title="Usuń kamerę" data-del>${ico('close')}</span></td>`;
@@ -2730,7 +2741,7 @@ function delPoint(p){map.removeLayer(p.marker);points=points.filter(x=>x!==p);re
 function drawPoint(p){
   const t=POINT_TYPES[p.type]||POINT_TYPES.nvr;
   const m=L.marker([p.lat,p.lng],{icon:L.divIcon({className:'',iconSize:[26,26],iconAnchor:[13,13],html:`<div class="pt-pin" style="background:${t.bg}">${ico(t.icon)}</div>`}),draggable:true,autoPan:false}).addTo(map);
-  m.bindTooltip(p.name,{permanent:true,direction:'top',offset:[0,-14],className:'cam-label'});
+  m.bindTooltip(esc(p.name),{permanent:true,direction:'top',offset:[0,-14],className:'cam-label'});
   m.on('dragend',e=>{const q=e.target.getLatLng();p.lat=q.lat;p.lng=q.lng;save();});
   m.on('contextmenu',ev=>{L.DomEvent.stop(ev);uiConfirm('Usunąć: '+p.name+'?',{danger:true}).then(ok=>{if(ok)delPoint(p);});});
   p.marker=m;
@@ -2756,7 +2767,7 @@ function refreshPoints(){
     td1.style.cursor='pointer'; td1.onclick=()=>map.panTo([p.lat,p.lng]);
     const td2=document.createElement('td');
     const inp=document.createElement('input'); inp.className='mini'; inp.value=p.name;
-    inp.oninput=()=>{p.name=inp.value;p.marker.setTooltipContent(p.name);}; inp.onchange=save;
+    inp.oninput=()=>{p.name=inp.value;p.marker.setTooltipContent(esc(p.name));}; inp.onchange=save;
     inp.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();inp.blur();}else if(e.key==='Escape'){e.preventDefault();inp.value=p.name;inp.blur();}});
     td2.appendChild(inp);
     const td3=document.createElement('td'); const x=document.createElement('span'); x.className='del-x'; x.innerHTML=ico('close'); x.title='Usuń punkt';
@@ -2791,7 +2802,7 @@ function finishMeasure(){
     if(label!==null){
       const line=L.polyline(measurePts,{color:'#f59e0b',weight:3}).addTo(map);
       const cab={id:'k'+Date.now(),label:label||('Odcinek '+(cables.length+1)),len:len,pts:measurePts.slice(),line};
-      line.bindTooltip(cab.label+' — '+len+' m',{className:'cam-label'});
+      line.bindTooltip(esc(cab.label)+' — '+len+' m',{className:'cam-label'});
       line.on('contextmenu',ev=>{L.DomEvent.stop(ev);uiConfirm('Usunąć odcinek: '+cab.label+'?',{danger:true}).then(ok=>{if(ok){map.removeLayer(line);cables=cables.filter(x=>x!==cab);refreshCable();save();}});});
       cables.push(cab); refreshCable(); save();
     }
@@ -2807,7 +2818,7 @@ function refreshCable(){
   cables.forEach(c=>{
     const withS=Math.round(c.len*(1+slack)); tot+=c.len; totS+=withS;
     const tr=document.createElement('tr'); tr.className='trow';
-    tr.innerHTML=`<td>${c.label}</td><td class="num">${c.len} m</td><td class="num">${withS} m</td><td><span class="del-x" title="Usuń odcinek">${ico('close')}</span></td>`;
+    tr.innerHTML=`<td>${esc(c.label)}</td><td class="num">${c.len} m</td><td class="num">${withS} m</td><td><span class="del-x" title="Usuń odcinek">${ico('close')}</span></td>`;
     tr.onclick=e=>{if(e.target.closest('.del-x'))return; map.fitBounds(c.line.getBounds().pad(.3));};
     tr.querySelector('.del-x').onclick=(e)=>{e.stopPropagation();map.removeLayer(c.line);cables=cables.filter(x=>x!==c);refreshCable();save();};
     tb.appendChild(tr);
@@ -2851,7 +2862,7 @@ function zonePerimeter(pts){
   return s;
 }
 // podpis obszaru na mapie: nazwa w 1. linii, „obwód N m" w 2. — bez m²/ha
-const zoneTooltip=z=>z.name+'<br>obwód '+fmtLen(zonePerimeter(z.pts));
+const zoneTooltip=z=>esc(z.name)+'<br>obwód '+fmtLen(zonePerimeter(z.pts));   // dymek Leaflet = innerHTML
 function startArea(){areaPts=[];if(areaPoly){map.removeLayer(areaPoly);areaPoly=null;}if(areaLabel){map.removeLayer(areaLabel);areaLabel=null;}}
 function areaClick(latlng){
   areaPts.push([latlng.lat,latlng.lng]);
@@ -4149,23 +4160,28 @@ function loadState(d){
   cables.forEach(c=>map.removeLayer(c.line));
   zones.forEach(z=>{if(z.poly)map.removeLayer(z.poly);});
   overlays.forEach(o=>{if(o.layer)map.removeLayer(o.layer);});
-  cameras=[];points=[];cables=[];zones=[];overlays=[];camGroups=[];dragCam=null;dragGrp=null;clearHandles();clearPlanHandles();clearZoneHandles();selected=null;selectedOverlay=null;selectedZone=null;startArea();
+  cameras=[];points=[];cables=[];zones=[];overlays=[];camGroups=[];dragCams=[];dragGrp=null;clearHandles();clearPlanHandles();clearZoneHandles();selected=null;selectedOverlay=null;selectedZone=null;startArea();
   if(d.base&&(bases[d.base]||d.base===BASE_NONE))setBase(d.base);
   if(d.center)map.setView(d.center,d.zoom||DEFAULT_ZOOM);
   camSeq=d.seq?.cam||0; ptSeq=d.seq?.pt||{}; zoneSeq=d.seq?.zone||0;
-  camGroups=(d.camGroups||[]).map(g=>({id:g.id,name:g.name||'Grupa',color:g.color||PALETTE[0],collapsed:!!g.collapsed}));
+  camGroups=(d.camGroups||[]).filter(g=>g&&g.id).map(g=>({id:String(g.id),name:String(g.name||'Grupa'),color:safeColor(g.color),collapsed:!!g.collapsed}));
   camGroupSeq=d.seq?.grp||camGroups.length; camNoneCollapsed=!!d.camNoneCollapsed;
   el('objInfo').value=d.info||DEFAULT_INFO;
   setObjPin(d.objPin||null,false);
   el('pricePerM').value=d.pricePerM||''; el('cableSlack').value=d.slack||10;   // '' (a nie 0) — inaczej odtworzony stan różni się od zapisanego i pierwszy save() po cofnięciu dorabia lewy wpis historii, ucinając redo
   layerToggles={analytics:true,visibility:true,blind:true,...(d.layerToggles||{})};   // przed rysowaniem kamer — respektują stan przełączników (stare projekty → domyślne)
   autoRenumber=d.autoRenumber!==false; el('fAutoRenumber').checked=autoRenumber;
-  (d.cameras||[]).forEach(c=>{const cam={...CAM_DEFAULTS,...c};clampFov(cam);cameras.push(cam);drawCam(cam);});   // CAM_DEFAULTS = optyka dla starych projektów; fov przycięty do kąta optyki
+  (d.cameras||[]).forEach(c=>{
+    const cam={...CAM_DEFAULTS,...c}; clampFov(cam);
+    cam.color=safeColor(cam.color,CAM_COLOR);                         // kolor idzie do atrybutu style ikony
+    if(cam.group&&!camGroupById(cam.group))delete cam.group;           // samonaprawa: martwe id grupy ze starego zapisu
+    cameras.push(cam); drawCam(cam);
+  });   // CAM_DEFAULTS = optyka dla starych projektów; fov przycięty do kąta optyki
   (d.points||[]).forEach(p=>{const pt={...p};points.push(pt);drawPoint(pt);});
   (d.nvrs||[]).forEach(n=>{const pt={...n,type:'nvr'};points.push(pt);drawPoint(pt);}); // wsteczna zgodność
   (d.cables||[]).forEach(c=>{
     const cab={...c,line:L.polyline(c.pts,{color:'#f59e0b',weight:3}).addTo(map)};
-    cab.line.bindTooltip(cab.label+' — '+cab.len+' m',{className:'cam-label'});
+    cab.line.bindTooltip(esc(cab.label)+' — '+cab.len+' m',{className:'cam-label'});
     cab.line.on('contextmenu',ev=>{L.DomEvent.stop(ev);uiConfirm('Usunąć odcinek: '+cab.label+'?',{danger:true}).then(ok=>{if(ok){map.removeLayer(cab.line);cables=cables.filter(x=>x!==cab);refreshCable();save();}});});
     cables.push(cab);
   });
@@ -4201,13 +4217,14 @@ function histSnap(){
   const o=serialize(); delete o.overlays;
   // klucz porównawczy bez widoku mapy — pan/zoom/podkład to nie zmiany projektu (interval 4 s nie może śmiecić)
   const key=JSON.stringify({...o,center:0,zoom:0,base:0});
-  return {json:JSON.stringify(o),key,counts:{cam:cameras.length,pt:points.length,zone:zones.length,cab:cables.length}};
+  return {json:JSON.stringify(o),key,counts:{cam:cameras.length,pt:points.length,zone:zones.length,cab:cables.length,grp:camGroups.length},grpKey:JSON.stringify(o.camGroups||[])};
 }
-const HIST_CNT_LABEL={cam:'kamery',pt:'punkty',zone:'obszary',cab:'kable'};
+const HIST_CNT_LABEL={cam:'kamery',pt:'punkty',zone:'obszary',cab:'kable',grp:'grupy'};
 function histLabel(prev,s){
   if(!prev)return 'Stan początkowy';
-  const parts=Object.keys(HIST_CNT_LABEL).filter(k=>prev.counts[k]!==s.counts[k])
-    .map(k=>HIST_CNT_LABEL[k]+': '+prev.counts[k]+'→'+s.counts[k]);
+  const parts=Object.keys(HIST_CNT_LABEL).filter(k=>(prev.counts[k]||0)!==(s.counts[k]||0))
+    .map(k=>HIST_CNT_LABEL[k]+': '+(prev.counts[k]||0)+'→'+(s.counts[k]||0));
+  if(!parts.length&&prev.grpKey!==s.grpKey)return 'Grupy kamer';   // nazwa/kolor/kolejność/przynależność bez zmiany liczników
   return parts.length?parts.join(', '):'Zmiana parametrów';
 }
 function histRecord(){
@@ -4867,7 +4884,7 @@ async function exportPdf(mode,action){
     const TYPE_PL=Object.fromEntries(Object.entries(TYPE_META).map(([k,v])=>[k,v.label]));
     function camTable(y,items,right){
       let half=Math.ceil(items.length/2);
-      if(items[half-1]&&items[half-1].t==='g')half--;
+      if(items[half-1]&&items[half-1].t==='g')half=half>1?half-1:half+1;   // nie łam po nagłówku grupy: cofnij podział, a gdy to opróżniłoby lewą kolumnę — przesuń go w prawo
       const L=items.slice(0,half), R=items.slice(half);
       if(camGroups.length&&R.length&&R[0].t==='c'&&R[0].g!==undefined)R.unshift({t:'g',g:R[0].g,cd:true});
       const gap=6, hw=(CW-gap)/2, xs=[PDF.M,PDF.M+hw+gap];
@@ -5024,7 +5041,7 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape')closeOptMenu();});
 function clearAllCameras(silent){        // usuwa wszystkie kamery z mapy i listy
   if(!cameras.length)return;
   cameras.forEach(c=>{map.removeLayer(c.marker);if(c.cover)map.removeLayer(c.cover);if(c.coverVis)map.removeLayer(c.coverVis);});
-  cameras=[]; camGroups=[]; camNoneCollapsed=false; selected=null; clearHandles();
+  cameras=[]; selected=null; clearHandles();   // grupy zostają — to struktura projektu, nie kamery
   document.getElementById('camEmpty').style.display='block'; document.getElementById('camEdit').style.display='none';
   refreshList(); restackCameras();
   if(!silent)save();
@@ -5102,7 +5119,7 @@ function drawObjPin(){
     icon:L.divIcon({className:'',html:'<div style="font-size:30px;line-height:1;filter:drop-shadow(0 1px 3px rgba(0,0,0,.7))">📍</div>',iconSize:[30,30],iconAnchor:[15,28]}),
     interactive:true,zIndexOffset:900
   });
-  if(objPin.address)objPinMarker.bindTooltip('📍 '+objPin.address,{className:'cam-label',direction:'top',offset:[0,-24]});
+  if(objPin.address)objPinMarker.bindTooltip('📍 '+esc(objPin.address),{className:'cam-label',direction:'top',offset:[0,-24]});
   updateObjPinVisibility();
 }
 // pinezka obiektu widoczna tylko na zakładce „Obiekt" albo gdy kursor jest w wyszukiwarce adresów
@@ -5149,7 +5166,7 @@ el('btnDelObjPin').onclick=()=>{ if(!objPin)return; uiConfirm('Usunąć zapisan�
       const rest=parts.slice(2).join(',').trim();
       const row=document.createElement('div');
       row.className='row'+(i===active?' active':'');
-      row.innerHTML='<div>'+head+'</div>'+(rest?'<small>'+rest+'</small>':'');
+      row.innerHTML='<div>'+esc(head)+'</div>'+(rest?'<small>'+esc(rest)+'</small>':'');   // odpowiedź zewnętrznego API
       row.onmousedown=e=>{e.preventDefault();pick(it);};
       box.appendChild(row);
     });
@@ -5282,7 +5299,7 @@ el('btnDelObjPin').onclick=()=>{ if(!objPin)return; uiConfirm('Usunąć zapisan�
       const tr=document.createElement('tr'); tr.className='trow';
       tr.innerHTML=`<td><span class="swatch" style="background:${esc(t.color)}"></span></td>
         <td>${esc(t.name)}${t.manufacturer?'<br><span class="tpl-sub">'+esc(t.manufacturer)+'</span>':''}</td>
-        <td class="type-cell" title="${TYPE_LABEL[t.type]||esc(t.type)}">${ico((TYPE_META[t.type]||{icon:'bullet'}).icon,'type-ico')}</td>
+        <td class="type-cell" title="${TYPE_LABEL[t.type]||esc(t.type)}">${ico(typeMeta(t).icon,'type-ico')}</td>
         <td class="num">${t.type==='pano'?'360°':t.fov+'°'}</td>
         <td class="num">${t.range} m</td>
         <td style="white-space:nowrap;text-align:right">
@@ -5853,8 +5870,8 @@ el('btnDelObjPin').onclick=()=>{ if(!objPin)return; uiConfirm('Usunąć zapisan�
     const typeName=Object.fromEntries(Object.entries(TYPE_META).map(([k,v])=>[k,v.label]));
     cams.forEach(c=>{
       const tr=document.createElement('tr'); tr.className='trow'+(selected===c?' sel':'');
-      tr.innerHTML=`<td style="width:1%;white-space:nowrap"><span class="swatch" style="background:${c.color}"></span>${c.num}</td>`+
-        `<td>${esc(c.name)}</td><td class="type-cell" title="${typeName[c.type]||c.type}">${ico((TYPE_META[c.type]||{icon:'bullet'}).icon,'type-ico')}</td>`;
+      tr.innerHTML=`<td style="width:1%;white-space:nowrap"><span class="swatch" style="background:${esc(c.color)}"></span>${c.num}</td>`+
+        `<td>${esc(c.name)}</td><td class="type-cell" title="${typeMeta(c).label}">${ico(typeMeta(c).icon,'type-ico')}</td>`;
       tr.onclick=()=>{selectCam(c);map.panTo([c.lat,c.lng]);};
       tb.appendChild(tr);
     });

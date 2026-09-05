@@ -125,26 +125,49 @@ export function DepartmentsTab({
   };
 
   /**
-   * Usunięcie działu. Backend odmawia (409), gdy wiszą na nim godziny — to
-   * NIE jest błąd do pokazania i zapomnienia, tylko pytanie: wiersze przeżyją
-   * usunięcie działu (`ON DELETE SET NULL`), ale stracą przypisanie i wpadną
-   * do kosztu nieprzypisanego. Dlatego dopiero po świadomym potwierdzeniu
-   * powtarzamy żądanie z `force`.
+   * Co zostanie odpięte przy usunięciu działu — z liczników wiersza, żeby już
+   * PIERWSZE pytanie mówiło o skutkach, a nie dopiero odpowiedź 409. Pusty
+   * string = dział bez godzin i bez ludzi, zwykłe „Usunąć?" wystarczy.
+   */
+  const deleteImpact = (row: HrDepartment): string => {
+    const parts: string[] = [];
+    if (row.hoursTotal > 0 || row.hoursEmployeesCount > 0) {
+      parts.push(
+        `${hrs(row.hoursTotal)} godz. od ${row.hoursEmployeesCount} osób — wpisy ` +
+          "stracą przypisanie i trafią do kosztu ogólnego",
+      );
+    }
+    if (row.employeesCount > 0) {
+      parts.push(
+        `${row.employeesCount} osób w kartotece — zostaną bez macierzystego działu`,
+      );
+    }
+    return parts.length ? `\n\nNa dziale „${row.name}" wisi:\n• ${parts.join("\n• ")}` : "";
+  };
+
+  /**
+   * Usunięcie działu. Backend odmawia (409), gdy wiszą na nim godziny ALBO
+   * pracownicy z kartoteki — to NIE jest błąd do pokazania i zapomnienia, tylko
+   * pytanie: wiersze i ludzie przeżyją usunięcie (`ON DELETE SET NULL`), ale
+   * stracą przypisanie; dla biura, które godzin nie księguje, to przypisanie
+   * jest jedyne i nie ma skąd go odtworzyć. Dlatego dopiero po świadomym
+   * potwierdzeniu powtarzamy żądanie z `force`.
    */
   const handleDelete = async (row: HrDepartment) => {
     if (!editable || busy) return;
-    if (!window.confirm(`Usunąć dział ${row.name}?`)) return;
+    if (!window.confirm(`Usunąć dział ${row.name}?${deleteImpact(row)}`)) return;
     setBusy(true);
     try {
       await deleteHrDepartment(row.id);
       await onChanged();
     } catch (err) {
       if (errStatus(err) === 409) {
+        // Komunikat backendu w całości (liczy na świeżych danych, wiersz może
+        // być nieaktualny) + skutki z wiersza; drugie pytanie, bo pierwsze
+        // padło przed sprawdzeniem po stronie serwera.
         const forced = window.confirm(
-          `${errMessage(err, "Dział ma przypisane godziny.")}\n\n` +
-            `Na dziale „${row.name}" wisi ${hrs(row.hoursTotal)} godz. ` +
-            `(${row.employeesCount} prac.). Usunięcie zostawi te wpisy bez ` +
-            "przypisania — trafią do kosztu ogólnego. Usunąć mimo to?",
+          `${errMessage(err, "Dział ma przypisane godziny lub pracowników.")}` +
+            `${deleteImpact(row)}\n\nUsunąć mimo to?`,
         );
         if (forced) {
           try {
@@ -221,11 +244,21 @@ export function DepartmentsTab({
                 >
                   Godziny
                 </Th>
+                {/* Dwa liczniki, bo to dwa niezależne przypisania: kartoteka
+                    (macierzysty dział osoby — jedyna więź dla biura, które nie
+                    księguje godzin) i wpisy godzin (CMA, Techniczny). Jeden
+                    licznik z godzin pokazywał Księgowość z 6 osobami jako „—". */}
+                <Th
+                  tip="Osoby z macierzystym działem w kartotece pracowników. Dla działów biura (Handlowy, Księgowość, Zarząd) to jedyne przypisanie — biuro nie wpisuje godzin."
+                  className="text-right"
+                >
+                  W kartotece
+                </Th>
                 <Th
                   tip="Ilu różnych pracowników kiedykolwiek księgowało godziny na tym dziale"
                   className="text-right"
                 >
-                  Pracownicy
+                  Z godzin
                 </Th>
                 <Th className="w-32" />
               </tr>
@@ -234,7 +267,7 @@ export function DepartmentsTab({
               {sorted.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={7}
+                    colSpan={8}
                     className="px-3 py-8 text-center text-muted-foreground"
                   >
                     {loading ? "Ładowanie…" : "Brak działów w słowniku"}
@@ -306,6 +339,9 @@ export function DepartmentsTab({
                     </td>
                     <td className="px-3 py-2 text-right tabular-nums">
                       {r.employeesCount || "—"}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums">
+                      {r.hoursEmployeesCount || "—"}
                     </td>
                     <td className="px-3 py-2">
                       {editable && (

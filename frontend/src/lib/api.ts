@@ -2645,11 +2645,17 @@ export interface OfferText {
   updatedAt: string;
 }
 
+/**
+ * Wzorzec opisu — payload POST i PUT (pełny zapis, nie patch). `title` i `body`
+ * są WYMAGANE: pominięcie któregoś kasowało treść wzorca po stronie serwera, a
+ * TS to przepuszczał. Edytor zawsze wysyła komplet (pusty `title` to legalne
+ * „bez nagłówka", pusty `body` odrzuca walidacja formularza).
+ */
 export interface OfferTextInput {
   name: string;
   category?: OfferSectionCategory;
-  title?: string;
-  body?: string;
+  title: string;
+  body: string;
   isDefault?: boolean;
   active?: boolean;
   position?: number;
@@ -3447,7 +3453,10 @@ export interface HrEmployeeInput {
   fullName: string;
   code?: string;
   kind?: HrEmployeeKind;
-  /** Dział pracownika; `null` kasuje przypisanie. */
+  /**
+   * Dział pracownika; `null` kasuje przypisanie, POMINIĘCIE klucza zostawia
+   * bieżący (PUT nie jest już pełnym nadpisaniem — backend dopełnia z wiersza).
+   */
   departmentId?: number | null;
   active?: boolean;
   notes?: string;
@@ -3500,8 +3509,13 @@ export interface HrDepartment {
   active: boolean;
   /** Suma godzin z CAŁEJ historii — waga działu w zestawieniu. */
   hoursTotal: number;
-  /** Ilu różnych pracowników kiedykolwiek księgowało godziny na tym dziale. */
+  /**
+   * Osoby przypisane do działu w KARTOTECE (`hr_employees.department_id`).
+   * Dla działów biura to jedyna więź — biuro nie księguje godzin.
+   */
   employeesCount: number;
+  /** Ilu różnych pracowników kiedykolwiek księgowało godziny na tym dziale. */
+  hoursEmployeesCount: number;
   createdAt: string;
   updatedAt: string;
 }

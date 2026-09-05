@@ -16,7 +16,7 @@
 import { Hono } from "hono";
 import { db, schema } from "../src/db/index.js";
 import { and, eq, like, inArray } from "drizzle-orm";
-import offers from "../src/routes/offers.js";
+import offers, { offersPublicRoutes } from "../src/routes/offers.js";
 import type { User } from "../src/db/schema.js";
 
 let failures = 0;
@@ -62,6 +62,10 @@ function appAs(user: User) {
 
 const app = appAs(FULL);
 const appNoCosts = appAs(NO_COSTS);
+
+/** Publiczna trasa /public-offer — bez użytkownika, jak przed requireAuth. */
+const pub = new Hono();
+pub.route("/", offersPublicRoutes);
 
 type Res = { status: number; success?: boolean; data?: any; error?: string; message?: string };
 async function callOn(a: Hono, method: string, path: string, body?: unknown): Promise<Res> {
@@ -505,8 +509,25 @@ try {
   ok("podgląd widzi obie zmienione kartoteki", preview.data.length === 2, preview.data);
   ok("podgląd nic nie zapisuje", (await call("GET", `/offers/${offerId}`)).data.items[0].unitPrice === 500, "cena zmieniona przed zatwierdzeniem");
 
+  // --- itemIds obecne, ale nie lista → 400 i NIC nie ruszone ----------------
+  const badIds = await call("POST", `/offers/${offerId}/reprice`, { itemIds: 123 });
+  ok("itemIds nie-tablica → 400", badIds.status === 400, badIds);
+  ok(
+    "…i żadna pozycja nie zmieniona",
+    (await call("GET", `/offers/${offerId}`)).data.items.find((i: any) => i.id === previewed.itemId)
+      ?.unitPrice === 500,
+    "cena przepisana mimo błędnego itemIds"
+  );
+
   // --- Aktualizacja POJEDYNCZEJ pozycji ------------------------------------
+  const updatedBefore: string = (await call("GET", `/offers/${offerId}`)).data.offer.updatedAt;
+  await new Promise((r) => setTimeout(r, 5)); // stempel ma rozdzielczość ms
   const one = await call("POST", `/offers/${offerId}/reprice`, { itemIds: [previewed.itemId] });
+  ok(
+    "przeliczenie podbija updated_at oferty",
+    typeof one.data.offer.updatedAt === "string" && one.data.offer.updatedAt > updatedBefore,
+    { before: updatedBefore, after: one.data.offer.updatedAt }
+  );
   ok("pojedyncza aktualizacja rusza wskazaną pozycję", one.data.items.find((i: any) => i.id === previewed.itemId)?.unitPrice === 550, one.data.items);
   ok(
     "…i nie rusza pozostałych",
@@ -519,6 +540,29 @@ try {
   ok("po przeliczeniu nie ma rozjazdu", repriced.data.items[0].priceDrift === null, repriced.data.items[0]);
   const repricedAgain = await call("POST", `/offers/${offerId}/reprice`);
   ok("drugie przeliczenie nic nie zmienia", repricedAgain.message === "Ceny są aktualne", repricedAgain.message);
+  ok(
+    "…i nie rusza updated_at",
+    repricedAgain.data.offer.updatedAt === repriced.data.offer.updatedAt,
+    { first: repriced.data.offer.updatedAt, again: repricedAgain.data.offer.updatedAt }
+  );
+
+  // --- Tolerancja kosztu: szum float w unit_cost nie jest „zmianą" -----------
+  const camItem = repricedAgain.data.items.find((i: any) => i.warehouseItemId === camera.id);
+  ok("pozycja towarowa ma koszt z kartoteki", typeof camItem?.unitCost === "number", camItem);
+  db.update(schema.offerItems)
+    .set({ unitCost: camItem.unitCost + 0.001 })
+    .where(eq(schema.offerItems.id, camItem.id))
+    .run();
+  const noisyPreview = await call("GET", `/offers/${offerId}/reprice-preview`);
+  ok(
+    "koszt różny o 0.001 nie trafia do podglądu przeliczenia",
+    !(noisyPreview.data as any[]).some((ch) => ch.itemId === camItem.id),
+    noisyPreview.data
+  );
+  db.update(schema.offerItems)
+    .set({ unitCost: camItem.unitCost })
+    .where(eq(schema.offerItems.id, camItem.id))
+    .run();
 
   // --- Zapis sekcji jako pakiet --------------------------------------------
   const savedPkg = await call(
@@ -820,11 +864,21 @@ try {
   ok("akceptacja ODRZUCONEJ oferty → 409", acceptRejected.status === 409, acceptRejected);
   const rejectTwice = await call("POST", `/offers/${r1id}/reject`);
   ok("powtórne odrzucenie → 409", rejectTwice.status === 409, rejectTwice);
+  // Klient nie może dostać linku do dokumentu, który sam odrzucił — publiczny
+  // widok nie ma dla „rejected" żadnego oznaczenia.
+  const shareRejected = await call("POST", `/offers/${r1id}/share`);
+  ok(
+    "udostępnienie ODRZUCONEJ oferty → 409",
+    shareRejected.status === 409 && shareRejected.error === "Nie można udostępnić odrzuconej oferty",
+    shareRejected
+  );
 
   // --- reject nie działa na szkicu ---
   const r2 = await call("POST", "/offers", { date: "2026-08-10", site: PREFIX, notes: PREFIX });
   const rejectDraft = await call("POST", `/offers/${r2.data.id}/reject`);
   ok("odrzucenie SZKICU → 409", rejectDraft.status === 409, rejectDraft);
+  const shareDraft = await call("POST", `/offers/${r2.data.id}/share`);
+  ok("udostępnienie SZKICU → 409", shareDraft.status === 409, shareDraft);
 
   // --- PUT częściowy nie kasuje reszty nagłówka ---
   const full = await call("PUT", `/offers/${r2.data.id}`, {
@@ -970,9 +1024,17 @@ try {
   });
   const wtId: number = withTexts.data.id;
   const wtFresh = await call("GET", `/offers/${wtId}`);
+  // Baza może mieć już własne domyślne wzorce (seed-offer-texts.ts), więc
+  // liczymy je z bazy zamiast zakładać, że testowy jest jedyny.
+  const defaultCount = db
+    .select({ id: schema.offerTexts.id })
+    .from(schema.offerTexts)
+    .where(and(eq(schema.offerTexts.active, true), eq(schema.offerTexts.isDefault, true)))
+    .all().length;
   ok(
     "domyślny opis wjeżdża na świeżą ofertę",
-    wtFresh.data.texts.length === 1 && wtFresh.data.texts[0].textId === tplDefault.data.id,
+    wtFresh.data.texts.length === defaultCount &&
+      (wtFresh.data.texts as any[]).some((b) => b.textId === tplDefault.data.id),
     wtFresh.data.texts
   );
 
@@ -982,7 +1044,7 @@ try {
   const block = (attached.data.texts as any[]).find((b) => b.textId === tplId);
   ok("nagłówek skopiowany z wzorca", block.title === "Gwarancja", block);
   ok("treść skopiowana z wzorca", block.body === GWARANCJA, block);
-  ok("nowy blok ląduje na końcu", block.position === 2, block);
+  ok("nowy blok ląduje na końcu", block.position === defaultCount + 1, block);
 
   // Sedno decyzji „kopia, nie referencja": poprawka wzorca nie przepisuje
   // wstecz dokumentu, który już powstał.
@@ -997,6 +1059,36 @@ try {
     (b) => b.id === block.id
   );
   ok("blok na ofercie NIE poszedł za wzorcem", afterEdit.body === GWARANCJA, afterEdit);
+
+  // --- PUT z samym `name` nie kasuje treści wzorca ---
+  const tplRenamed = await call("PUT", `/offers/texts/${tplId}`, { name: `${PREFIX} Gwarancja 36` });
+  ok("zmiana samej nazwy wzorca → 200", tplRenamed.status === 200, tplRenamed);
+  ok("…title bez zmian", tplRenamed.data?.title === "Gwarancja 36", tplRenamed.data);
+  ok("…body bez zmian", tplRenamed.data?.body === "**36 miesięcy** na sprzęt.", tplRenamed.data);
+
+  // --- Przepisanie treści wzorca zostawia ślad w dzienniku ---
+  const bodyLog = db
+    .select()
+    .from(schema.activityLog)
+    .where(
+      and(
+        eq(schema.activityLog.entityType, "offer_text"),
+        eq(schema.activityLog.entityId, tplId),
+        eq(schema.activityLog.field, "body")
+      )
+    )
+    .all();
+  ok(
+    "zmiana treści wzorca ma wpis w dzienniku (pole body, stara wartość)",
+    bodyLog.length === 1 && bodyLog[0].oldValue === GWARANCJA,
+    bodyLog
+  );
+
+  // --- Puste ciało → 400 (nazwa wymagana), nie 500 ---
+  const emptyPost = await call("POST", "/offers/texts");
+  ok("POST /texts bez ciała → 400", emptyPost.status === 400, emptyPost);
+  const emptyPut = await call("PUT", `/offers/texts/${tplId}`);
+  ok("PUT /texts/:id bez ciała → 400", emptyPut.status === 400, emptyPut);
 
   // --- Archiwizacja wzorca zostawia blok nietknięty ---
   const tplArchived = await call("DELETE", `/offers/texts/${tplId}`);
@@ -1064,6 +1156,8 @@ try {
   const patchedBlock = (patched.data.texts as any[]).find((b) => b.id === ownBlock.id);
   ok("PUT zmienia treść bloku", patchedBlock.body === "Tekst poprawiony", patchedBlock);
   ok("…i NIE kasuje nagłówka", patchedBlock.title === "Uwagi", patchedBlock);
+  const emptyPatch = await call("PUT", `/offers/${wtId}/texts/${ownBlock.id}`);
+  ok("PUT bloku bez ciała nie jest 500", emptyPatch.status < 500, emptyPatch);
 
   const foreignOffer = await call("POST", "/offers", {
     date: "2026-08-10",
@@ -1126,6 +1220,69 @@ try {
   const wtSent = await call("POST", `/offers/${wtId}/send`);
   ok("oferta z opisami wysłana", wtSent.status === 200, wtSent.error);
 
+  // ===================================================================
+  // LINK DLA KLIENTA — share, publiczna trasa, limiter
+  // ===================================================================
+  const shared = await call("POST", `/offers/${wtId}/share`);
+  ok(
+    "udostępnienie wysłanej oferty → 200 z 48-znakowym tokenem",
+    shared.status === 200 && typeof shared.data?.token === "string" && shared.data.token.length === 48,
+    shared
+  );
+  const wtToken: string = shared.data.token;
+
+  const pubOk = await pub.request(`/public-offer/${wtToken}`);
+  ok("publiczna oferta po tokenie → 200", pubOk.status === 200, pubOk.status);
+  const pubJson = (await pubOk.json()) as Res;
+  // Autor to login z sesji testowej. Wewnętrznie login zostaje jako ślad, ale
+  // na dokument dla klienta idzie wyłącznie nazwa — albo nic.
+  const authorAccount = db
+    .select({ email: schema.users.email, displayName: schema.users.displayName })
+    .from(schema.users)
+    .all()
+    .find((u) => u.email.toLowerCase() === "test@example.com");
+  ok(
+    "publiczny preparedBy: brak konta autora → null, nie login",
+    pubJson.data?.offer?.preparedBy === (authorAccount?.displayName ?? null),
+    pubJson.data?.offer
+  );
+  ok(
+    "wewnętrzny preparedBy zostaje loginem",
+    (await call("GET", `/offers/${wtId}`)).data.offer.preparedBy ===
+      (authorAccount?.displayName || "test@example.com"),
+    (await call("GET", `/offers/${wtId}`)).data.offer.preparedBy
+  );
+  ok(
+    "publiczna projekcja nie ma pól kosztowych",
+    pubJson.data?.items?.every((i: any) => i.unitCost === undefined && i.lineCost === undefined),
+    pubJson.data?.items
+  );
+
+  const pubShort = await pub.request("/public-offer/abc");
+  ok("krótki token → 404 (jak zły)", pubShort.status === 404, pubShort.status);
+  const pubWrong = await pub.request(`/public-offer/${"0".repeat(48)}`);
+  ok("zły token → 404", pubWrong.status === 404, pubWrong.status);
+
+  // Limiter liczy OSTATNI człon XFF (dokłada go proxy). Rotacja pierwszego
+  // członu — jedyne, co kontroluje klient — nie rozmnaża kluczy.
+  let limited = 0;
+  for (let i = 0; i < 61; i++) {
+    const r = await pub.request(`/public-offer/${"0".repeat(48)}`, {
+      headers: { "x-forwarded-for": `10.0.${i}.1, 203.0.113.7` },
+    });
+    if (r.status === 429) limited++;
+  }
+  ok("61 żądań z rotowanym pierwszym członem XFF → dokładnie ostatnie zbite (429)", limited === 1, limited);
+  const otherLast = await pub.request(`/public-offer/${"0".repeat(48)}`, {
+    headers: { "x-forwarded-for": "10.0.0.1, 198.51.100.9" },
+  });
+  ok("inny ostatni człon XFF → osobna pula (404, nie 429)", otherLast.status === 404, otherLast.status);
+  // Bez sufitu globalnego zbicie jednego IP nie zamyka dokumentu innym.
+  const stillOpen = await pub.request(`/public-offer/${wtToken}`, {
+    headers: { "x-forwarded-for": "198.51.100.10" },
+  });
+  ok("zbity jeden adres nie zamyka oferty pozostałym", stillOpen.status === 200, stillOpen.status);
+
   const addFrozen = await call("POST", `/offers/${wtId}/texts`, { title: "Za późno" });
   ok("dodanie opisu do WYSŁANEJ oferty → 409", addFrozen.status === 409, addFrozen);
   const editFrozen = await call("PUT", `/offers/${wtId}/texts/${ownBlock.id}`, { body: "x" });
@@ -1137,7 +1294,11 @@ try {
 
   // --- Nowa wersja odtwarza opisy Z RODZICA, nie z katalogu ---
   const wtVersion = await call("POST", `/offers/${wtId}/version`);
-  ok("wersja oferty z opisami utworzona", wtVersion.status === 201, wtVersion);
+  ok("wersja UDOSTĘPNIONEJ oferty utworzona (201, nie 500 z UNIQUE)", wtVersion.status === 201, wtVersion);
+  const wtVersionRow = db.select().from(schema.offers).where(eq(schema.offers.id, wtVersion.data.id)).get();
+  ok("nowa wersja NIE dziedziczy tokenu linku", wtVersionRow?.shareToken === null, wtVersionRow?.shareToken);
+  const wtParentRow = db.select().from(schema.offers).where(eq(schema.offers.id, wtId)).get();
+  ok("rodzic zachowuje swój token", wtParentRow?.shareToken === wtToken, wtParentRow?.shareToken);
   const versionTexts = (await call("GET", `/offers/${wtVersion.data.id}`)).data.texts as any[];
   ok(
     "wersja przenosi komplet opisów rodzica",

@@ -51,22 +51,29 @@ export function PublicOffer() {
       })
       .catch((e: unknown) => {
         if (!alive) return;
-        // Nie rozróżniamy „nie ma takiej oferty" od „link wyłączony" — obie
-        // odpowiedzi to 404, żeby nie potwierdzać istnienia dokumentu.
+        /*
+         * Nie rozróżniamy „nie ma takiej oferty" od „link wyłączony" ani od
+         * „token za krótki" — backend odpowiada 404 na każdy zły token, żeby
+         * nie potwierdzać istnienia dokumentu. Po stronie klienta rozróżniamy
+         * TYLKO brak odpowiedzi (sieć, 5xx — `status` pusty albo ≥ 500) od
+         * odpowiedzi odmownej. W żadnym wariancie nie pokazujemy `e.message`
+         * z backendu: to strona bez logowania, a komunikat walidacji zdradzałby
+         * kształt tokenu i wewnętrzne nazwy pól.
+         */
         const status = (e as { status?: number })?.status;
+        const serverDown = status === undefined || status >= 500;
         setState({
           token,
           detail: null,
-          error:
-            status === 404
-              ? {
-                  title: "Nie znaleziono oferty",
-                  text: "Link mógł zostać wyłączony albo jest nieprawidłowy. Prosimy o kontakt z osobą, która przesłała ofertę.",
-                }
-              : {
-                  title: "Nie udało się wczytać oferty",
-                  text: (e as Error)?.message || "Spróbuj odświeżyć stronę za chwilę.",
-                },
+          error: serverDown
+            ? {
+                title: "Nie udało się wczytać oferty",
+                text: "Spróbuj odświeżyć stronę za chwilę.",
+              }
+            : {
+                title: "Nie znaleziono oferty",
+                text: "Ten link jest nieprawidłowy lub został wyłączony. Prosimy o kontakt z osobą, która przesłała ofertę.",
+              },
         });
       });
     return () => {

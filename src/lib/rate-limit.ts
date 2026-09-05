@@ -5,6 +5,11 @@
  * Stan trzymamy w pamięci procesu: aplikacja chodzi jako jeden serwis (Dokploy),
  * a limit ma chronić zewnętrzne API przed lawiną, nie być zabezpieczeniem
  * kryptograficznym. Restart procesu kasuje liczniki — i tak ma być.
+ *
+ * Limit GLOBALNY (jeden klucz dla całej trasy) ma sens tylko tam, gdzie za
+ * trasą stoi cudze API z własnym limitem — u nas wykaz VAT MF w /public.
+ * Na trasie, która czyta wyłącznie z własnej bazy, jest odwrotnie: to gotowa
+ * dźwignia DoS, bo jedna maszyna wyczerpuje pulę wszystkim naraz.
  */
 import type { Context } from "hono";
 
@@ -70,17 +75,26 @@ export function createRateLimiter({
 }
 
 /**
- * Adres IP klienta. Aplikacja stoi za proxy (Dokploy/Traefik), więc bierzemy
- * pierwszy wpis z `X-Forwarded-For`; bez proxy zostaje adres z gniazda.
+ * Adres IP klienta — klucz limitów per IP na trasach publicznych.
  *
- * UWAGA: nagłówki da się podrobić, więc limit per IP sam z siebie nie zatrzyma
- * uporu — publiczne trasy dokładają do tego limit globalny.
+ * MODEL ZAUFANIA. Aplikacja stoi za jednym reverse proxy (Dokploy/Traefik),
+ * które DOKŁADA adres nadawcy NA KONIEC `X-Forwarded-For`. Klient może wysłać
+ * własny nagłówek z dowolną liczbą zmyślonych członów z przodu, ale tego
+ * ostatniego, dopisanego przez proxy, nie ma jak usunąć ani podmienić — więc
+ * to on jest adresem, któremu ufamy. Pierwszy człon (dawny wybór) był w pełni
+ * pod kontrolą klienta: rotując go co żądanie, jedna maszyna mnożyła klucze
+ * limitera bez końca, a sufit globalny, który miał to łatać, sam stawał się
+ * dźwignią DoS na wszystkich.
+ *
+ * Bez proxy (dev, testy przez `app.request()`) nagłówka nie ma i zostaje
+ * `X-Real-IP` albo adres z gniazda.
  */
 export function clientIp(c: Context): string {
   const forwarded = c.req.header("x-forwarded-for");
   if (forwarded) {
-    const first = forwarded.split(",")[0]?.trim();
-    if (first) return first;
+    const parts = forwarded.split(",").map((s) => s.trim()).filter(Boolean);
+    const last = parts[parts.length - 1];
+    if (last) return last;
   }
   const real = c.req.header("x-real-ip")?.trim();
   if (real) return real;

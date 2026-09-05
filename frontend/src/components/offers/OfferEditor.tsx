@@ -377,6 +377,9 @@ export function OfferEditor({
    * papieru dla klienta. Teraz odbiorcę wybiera się jawnie.
    */
   const clientReady = hasClientContent(detail);
+  // Blokada bez wyjaśnienia wygląda jak błąd — podpowiedź mówi, czego brakuje:
+  // pozycji WLICZONEJ w kwotę (same opcje i niewybrane warianty to nie oferta).
+  const notReadyHint = clientReady ? undefined : "oferta nie ma pozycji wliczonych w kwotę";
   const printClient = () => printOffer(detail, { audience: "client", company });
 
   const openShare = (e: React.MouseEvent<HTMLButtonElement>) => {
@@ -426,7 +429,7 @@ export function OfferEditor({
       key: "preview",
       label: "Podgląd dla klienta",
       icon: Eye,
-      hint: "wersja zewnętrzna",
+      hint: notReadyHint ?? "wersja zewnętrzna",
       disabled: !clientReady,
       onSelect: () => setPreviewOpen(true),
     },
@@ -434,7 +437,7 @@ export function OfferEditor({
       key: "print-client",
       label: "Drukuj zewnętrznie",
       icon: Printer,
-      hint: "bez kosztów",
+      hint: notReadyHint ?? "bez kosztów",
       disabled: !clientReady,
       onSelect: printClient,
     },
@@ -453,7 +456,7 @@ export function OfferEditor({
       key: "share-link",
       label: offer.shareToken ? "Kopiuj link dla klienta" : "Utwórz link dla klienta",
       icon: Link2,
-      hint: frozen ? undefined : "najpierw wyślij ofertę",
+      hint: frozen ? notReadyHint : "najpierw wyślij ofertę",
       // Robocza oferta zmienia się pod ręką — backend też odmówi (409).
       disabled: !frozen || !clientReady,
       onSelect: copyShareLink,
@@ -1344,6 +1347,13 @@ onChange={(e) => {
  * gdyby pola czytały wprost z propsa, tekst pisany w tle znikałby w połowie zdania.
  * Zapis idzie na blur i TYLKO gdy wartość różni się od serwerowej, a nieudany
  * zapis cofa pole do tego, co naprawdę stoi w bazie.
+ *
+ * RESYNCHRONIZACJA PO ZAPISIE. Backend trimuje `body`, więc po treści zakończonej
+ * enterem lokalny stan („abc\n") na zawsze różnił się od serwerowego („abc") i
+ * KAŻDY kolejny blur wysyłał PUT — na ofercie wysłanej z innej karty kończyło
+ * się to alertem 409 „za nic". Dlatego gdy prop się zmieni, a pole NIE ma
+ * fokusu, przejmujemy wartość z serwera; pole z fokusem zostaje w spokoju, bo
+ * tam ktoś właśnie pisze.
  */
 function TextBlockRow({
   block,
@@ -1364,6 +1374,15 @@ function TextBlockRow({
 }) {
   const [title, setTitle] = useState(block.title);
   const [body, setBody] = useState(block.body);
+  const titleRef = useRef<HTMLInputElement>(null);
+  const bodyRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    if (document.activeElement !== titleRef.current) setTitle(block.title);
+  }, [block.title]);
+  useEffect(() => {
+    if (document.activeElement !== bodyRef.current) setBody(block.body);
+  }, [block.body]);
 
   const flush = async (patch: { title?: string; body?: string }) => {
     try {
@@ -1382,6 +1401,7 @@ function TextBlockRow({
           className="h-8 text-sm font-medium"
           placeholder="Nagłówek na wydruku (opcjonalny)"
           aria-label="Nagłówek opisu"
+          ref={titleRef}
           value={title}
           disabled={!canEdit}
           onChange={(e) => setTitle(e.target.value)}
@@ -1426,6 +1446,7 @@ function TextBlockRow({
         className="font-mono text-sm"
         aria-label="Treść opisu"
         placeholder="Treść w prostym markdownie: ## nagłówek, - lista, **pogrubienie**"
+        ref={bodyRef}
         value={body}
         disabled={!canEdit}
         onChange={(e) => setBody(e.target.value)}

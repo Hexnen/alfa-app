@@ -18,6 +18,12 @@
  *     działowy pomijać PRZED inkrementacją sumy, obiekty wchłonęłyby koszt Handlowego
  *     i Księgowości — cicho, bez błędu, z zawyżonym kosztem obiektu.
  *  6. Usunięcie działu z godzinami wymaga potwierdzenia (409 → `?force=1`).
+ *  7. Usunięcie działu BEZ godzin, ale z pracownikami w kartotece, też wymaga
+ *     potwierdzenia — to jedyna konfiguracja realnie występująca dla działów biura
+ *     (Handlowy, Księgowość, Zarząd, Operacyjny): biuro nie ma wierszy w `hr_hours`,
+ *     więc guard liczący tylko godziny kasował je bez pytania.
+ *  8. PUT pracownika bez klucza `departmentId` NIE kasuje działu (pominięte = zostaw);
+ *     jawny `null` kasuje.
  *
  * Sprząta po sobie HARD, także przy błędzie.
  *
@@ -475,6 +481,41 @@ async function main() {
     body: { fullName: `${PREFIX}Kartotekowy`, kind: "biuro", departmentId: depHandlowy.id },
   });
 
+  // Pominięty klucz ≠ null. Wcześniej PUT był pełnym nadpisaniem i każdy klient
+  // wysyłający sam `fullName` zerował dział po cichu.
+  const keepDept = await call(`/employees/${empDept.body?.data?.id}`, {
+    method: "PUT",
+    body: { fullName: `${PREFIX}Kartotekowy`, notes: "bez klucza departmentId" },
+  });
+  ok(
+    "PUT bez klucza departmentId zostawia dział (i kind) bez zmian",
+    keepDept.status === 200 &&
+      keepDept.body?.data?.departmentId === depHandlowy.id &&
+      keepDept.body?.data?.kind === "biuro" &&
+      keepDept.body?.data?.notes === "bez klucza departmentId",
+    keepDept.body?.data
+  );
+  const garbageDept = await call(`/employees/${empDept.body?.data?.id}`, {
+    method: "PUT",
+    body: { fullName: `${PREFIX}Kartotekowy`, departmentId: "abc" },
+  });
+  ok("PUT z departmentId nieparsowalnym → 400, nie ciche wyczyszczenie", garbageDept.status === 400, garbageDept);
+
+  const badSort = await call(`/departments/${depHandlowy.id}`, {
+    method: "PUT",
+    body: { sortOrder: "3abc" },
+  });
+  ok("sortOrder \"3abc\" → 400 (toNum nie czyta prefiksu jak parseFloat)", badSort.status === 400, badSort);
+
+  const withCounts = (await call("/departments")).body?.data?.find(
+    (d: any) => d.id === depHandlowy.id
+  );
+  ok(
+    "GET /departments niesie oba liczniki: 1 z kartoteki, 2 z godzin",
+    withCounts?.employeesCount === 1 && withCounts?.hoursEmployeesCount === 2,
+    withCounts
+  );
+
   console.log("\n— usuwanie działu —");
 
   const delBlocked = await call(`/departments/${depHandlowy.id}`, { method: "DELETE" });
@@ -503,6 +544,60 @@ async function main() {
     "usunięcie działu zeruje department_id pracownika, nie kasując osoby",
     afterDelete != null && afterDelete.departmentId === null,
     afterDelete
+  );
+
+  console.log("\n— usuwanie działu biurowego (kartoteka, zero godzin) —");
+
+  // Konfiguracja Handlowego/Księgowości/Zarządu na produkcji: ludzie w kartotece,
+  // ANI JEDNEGO wpisu w hr_hours. Dawny guard widział tu 0 i kasował bez 409.
+  const officeDept = (await call("/departments", { method: "POST", body: { name: `${PREFIX}Biurowy` } }))
+    .body?.data;
+  await call("/employees", {
+    method: "POST",
+    body: { fullName: `${PREFIX}Biuro1`, kind: "biuro", departmentId: officeDept.id },
+  });
+  await call("/employees", {
+    method: "POST",
+    body: { fullName: `${PREFIX}Biuro2`, kind: "biuro", departmentId: officeDept.id },
+  });
+  const officeRow = (await call("/departments")).body?.data?.find((d: any) => d.id === officeDept.id);
+  ok(
+    "dział biurowy: employeesCount = 2, hoursEmployeesCount = 0, hoursTotal = 0",
+    officeRow?.employeesCount === 2 && officeRow?.hoursEmployeesCount === 0 && officeRow?.hoursTotal === 0,
+    officeRow
+  );
+
+  const officeBlocked = await call(`/departments/${officeDept.id}`, { method: "DELETE" });
+  ok(
+    "usunięcie działu z pracownikami w kartotece i bez godzin → 409",
+    officeBlocked.status === 409,
+    officeBlocked
+  );
+  ok(
+    "komunikat 409 mówi o kartotece (2) i NIE wspomina godzin",
+    /kartotece \(2\)/.test(String(officeBlocked.body?.error)) &&
+      !/godzin/.test(String(officeBlocked.body?.error)),
+    officeBlocked.body?.error
+  );
+  const stillThere = db
+    .select({ id: schema.hrDepartments.id })
+    .from(schema.hrDepartments)
+    .where(eq(schema.hrDepartments.id, officeDept.id))
+    .get();
+  ok("po 409 dział nadal istnieje", stillThere != null, stillThere);
+
+  const officeForced = await call(`/departments/${officeDept.id}?force=1`, { method: "DELETE" });
+  const officeStaff = db
+    .select({ departmentId: schema.hrEmployees.departmentId })
+    .from(schema.hrEmployees)
+    .where(like(schema.hrEmployees.fullName, `${PREFIX}Biuro%`))
+    .all();
+  ok(
+    "?force=1 usuwa dział biurowy; obie osoby zostają z department_id = null",
+    officeForced.status === 200 &&
+      officeStaff.length === 2 &&
+      officeStaff.every((e) => e.departmentId === null),
+    { status: officeForced.status, officeStaff }
   );
 }
 

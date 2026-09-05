@@ -140,35 +140,98 @@ export interface OfferDocOptions {
 type DocSection = OfferDocInput["sections"][number];
 type DocItem = OfferDocInput["items"][number];
 
+/** Zaokrąglenie do groszy — ta sama konwencja co `round2` w src/lib/margin.ts. */
+const round2 = (n: number) => Math.round(n * 100) / 100;
+
 /** Czy sekcja liczy się do kwoty — to samo kryterium co w offer-calc.ts. */
 const isCounted = (s: DocSection) =>
   !s.isOptional && (!s.variantGroup || s.variantSelected);
 
 /**
- * Sekcje w kolejności, w jakiej mają iść na papier.
- *
- * Dla klienta: niewybrane warianty WYPADAJĄ (nie pokazujemy odrzuconej
- * alternatywy), a sekcje opcjonalne lądują w osobnej grupie „Propozycje
- * dodatkowe" — inaczej ich suma czyta się jak część ceny.
+ * Czy pozycja wchodzi do kwoty oferty — lustro pętli w `computeOffer`:
+ * sekcja musi się liczyć I pozycja nie może być opcjonalna.
  */
-function sectionsFor(audience: OfferAudience, sections: DocSection[]) {
-  if (audience === "internal") return { main: sections, optional: [] as DocSection[] };
-  const visible = sections.filter((s) => !s.variantGroup || s.variantSelected);
-  return {
-    main: visible.filter((s) => !s.isOptional),
-    optional: visible.filter((s) => s.isOptional),
-  };
+const isCountedItem = (i: DocItem, s: DocSection) => isCounted(s) && !i.isOptional;
+
+/**
+ * Sekcja wraz z wierszami, które faktycznie idą do jej tabeli. Sekcje i wiersze
+ * rozdzielamy W JEDNYM miejscu, żeby „Razem w sekcji" sumowało dokładnie to,
+ * co stoi w tabeli nad nim — a nie to, co zdarzyło się mieć ten `sectionId`.
+ */
+interface DocGroup {
+  section: DocSection;
+  rows: DocItem[];
 }
 
 /**
- * Czy wersja dla klienta ma cokolwiek do pokazania. Musi używać TEGO SAMEGO
- * filtra co builder, dlatego mieszka tutaj, a nie w komponencie.
+ * Sekcje w kolejności, w jakiej mają iść na papier, już z wierszami.
+ *
+ * Wewnętrznie: wszystko jak w edytorze — każda sekcja ze wszystkimi pozycjami,
+ * pozycje opcjonalne oznaczone plakietką w wierszu.
+ *
+ * Dla klienta: niewybrane warianty WYPADAJĄ (nie pokazujemy odrzuconej
+ * alternatywy), a wszystko, co nie wchodzi do kwoty, ląduje w osobnej grupie
+ * „Propozycje dodatkowe" — inaczej suma sekcji czyta się jak część ceny.
+ * Dotyczy to TAKŻE pojedynczych pozycji `isOptional` z sekcji głównych:
+ * wcześniej zostawały w tabeli sekcji i wchodziły do „Razem w sekcji", a
+ * podsumowanie liczyło je osobno — dokument klienta nie sumował się. Teraz
+ * wypadają z sekcji macierzystej i tworzą w bloku dodatkowym własną sekcję
+ * „<tytuł> — pozycje dodatkowe", żeby klient nadal wiedział, do czego
+ * dokładka się odnosi (rabat na kamerę do „Monitoringu", nie do „Abonamentu").
+ * Puste sekcje (bez wierszy) wypadają tutaj, a nie przy numerowaniu.
+ */
+function groupsFor(
+  audience: OfferAudience,
+  sections: DocSection[],
+  items: DocItem[]
+): { main: DocGroup[]; optional: DocGroup[] } {
+  const itemsOf = (s: DocSection) =>
+    items.filter((i) => i.sectionId === s.id).sort((a, b) => a.position - b.position);
+
+  if (audience === "internal") {
+    return {
+      main: sections
+        .map((section) => ({ section, rows: itemsOf(section) }))
+        .filter((g) => g.rows.length > 0),
+      optional: [],
+    };
+  }
+
+  const main: DocGroup[] = [];
+  const optional: DocGroup[] = [];
+  for (const section of sections) {
+    if (section.variantGroup && !section.variantSelected) continue;
+    const rows = itemsOf(section);
+    if (rows.length === 0) continue;
+    if (section.isOptional) {
+      optional.push({ section, rows });
+      continue;
+    }
+    const counted = rows.filter((i) => isCountedItem(i, section));
+    const extras = rows.filter((i) => !isCountedItem(i, section));
+    if (counted.length) main.push({ section, rows: counted });
+    if (extras.length) {
+      optional.push({
+        section: { ...section, title: `${section.title} — pozycje dodatkowe`, isOptional: true },
+        // Plakietka „opcja" w wierszu jest tu zbędna: cały blok ma nagłówek
+        // „Propozycje dodatkowe" i plakietkę na sekcji; kursywa w KAŻDYM
+        // wierszu tylko utrudniałaby czytanie cen.
+        rows: extras.map((i) => ({ ...i, isOptional: false })),
+      });
+    }
+  }
+  return { main, optional };
+}
+
+/**
+ * Czy wersja dla klienta ma cokolwiek do pokazania: choć JEDNĄ pozycję
+ * wliczoną w kwotę (to samo kryterium co `computeOffer`). Same sekcje i pozycje
+ * opcjonalne to nie oferta — link u klienta pokazywałby „0,00 zł do zapłaty".
+ * Musi używać TEGO SAMEGO filtra co builder, dlatego mieszka tutaj, a nie
+ * w komponencie.
  */
 export function hasClientContent(detail: OfferDocInput): boolean {
-  const { main, optional } = sectionsFor("client", detail.sections);
-  return [...main, ...optional].some((s) =>
-    detail.items.some((i) => i.sectionId === s.id)
-  );
+  return groupsFor("client", detail.sections, detail.items).main.length > 0;
 }
 
 /** Nazwa pliku przy „Zapisz jako PDF" — ukośniki z numeru psują nazwę. */
@@ -377,14 +440,21 @@ const sectionBadge = (s: DocSection, isClient: boolean) => {
  * CENA JEDNOSTKOWA JEST EFEKTYWNA (po rabacie pozycji), wyliczona z `lineTotal`,
  * a nie przeliczana od nowa — dzięki temu na papierze `Ilość × Cena = Wartość`
  * zgadza się co do grosza. Przy rabacie pokazujemy przekreśloną cenę katalogową,
- * żeby ustępstwo było widoczne. Marża liczy się dalej z SUROWEGO `unitPrice`.
+ * żeby ustępstwo było widoczne.
+ *
+ * MARŻA TEŻ Z CENY EFEKTYWNEJ. Wcześniej liczyła się z katalogowego `unitPrice`,
+ * więc przy rabacie pozycji dwie sąsiednie kolumny opisywały różne ceny, a
+ * marża wiersza nie zgadzała się z marżą sumaryczną w podsumowaniu (ta idzie
+ * z `lineTotal`, czyli po rabacie). Backend nie przysyła marży na pozycji,
+ * więc liczymy ją tu tak, jak `marginOf` w src/lib/margin.ts: koszt albo cena
+ * ≤ 0 to „brak danych" (kreska), nie 100% ani 0%.
  */
 function itemRow(i: DocItem, n: number, withCosts: boolean): string {
-  const margin =
-    withCosts && i.unitCost != null && i.unitPrice > 0
-      ? ((i.unitPrice - i.unitCost) / i.unitPrice) * 100
-      : null;
   const effUnit = i.qty > 0 ? i.lineTotal / i.qty : i.unitPrice;
+  const margin =
+    withCosts && i.unitCost != null && i.unitCost > 0 && effUnit > 0
+      ? ((effUnit - i.unitCost) / effUnit) * 100
+      : null;
   const priceCell =
     i.discountPct > 0
       ? `<s class="was">${fmtPln(i.unitPrice)}</s>${fmtPln(effUnit)}`
@@ -410,6 +480,11 @@ function itemRow(i: DocItem, n: number, withCosts: boolean): string {
  * Tabela jednej sekcji. Suma jest ROZBITA na jednorazową i miesięczną — wcześniej
  * jeden wiersz sumował oba strumienie, więc sekcja „Abonament" drukowała kwotę
  * miesięczną tak, jakby była wartością do zapłaty.
+ *
+ * WIERSZ SUMY DRUKUJE SIĘ ZAWSZE, gdy sekcja ma pozycje danego strumienia —
+ * także przy 0,00 zł. Zero to informacja („w cenie", 100% rabatu), a bez
+ * wiersza sekcja wyglądała, jakby jej zapomniano podsumować. Sumy zaokrąglamy
+ * do grosza jak `round2` w offer-calc, żeby zgadzały się z podsumowaniem.
  */
 function sectionTable(
   s: DocSection,
@@ -418,12 +493,10 @@ function sectionTable(
 ): string {
   const { withCosts, isClient, no } = opts;
   const colCount = withCosts ? 8 : 6;
-  const oneTimeSum = rows
-    .filter((i) => i.billing !== "monthly")
-    .reduce((a, i) => a + i.lineTotal, 0);
-  const monthlySum = rows
-    .filter((i) => i.billing === "monthly")
-    .reduce((a, i) => a + i.lineTotal, 0);
+  const oneTimeRows = rows.filter((i) => i.billing !== "monthly");
+  const monthlyRows = rows.filter((i) => i.billing === "monthly");
+  const oneTimeSum = round2(oneTimeRows.reduce((a, i) => a + i.lineTotal, 0));
+  const monthlySum = round2(monthlyRows.reduce((a, i) => a + i.lineTotal, 0));
 
   const sumRow = (label: string, value: string) =>
     `<tr class="sum-row">
@@ -432,13 +505,13 @@ function sectionTable(
         </tr>`;
 
   const sums = [
-    oneTimeSum > 0
+    oneTimeRows.length > 0
       ? sumRow(
-          monthlySum > 0 ? "Razem w sekcji (jednorazowo)" : "Razem w sekcji",
+          monthlyRows.length > 0 ? "Razem w sekcji (jednorazowo)" : "Razem w sekcji",
           fmtPln(oneTimeSum)
         )
       : "",
-    monthlySum > 0
+    monthlyRows.length > 0
       ? sumRow("Razem w sekcji (miesięcznie)", `${fmtPln(monthlySum)} / mies.`)
       : "",
   ].join("");
@@ -639,37 +712,31 @@ export function buildOfferHtml(detail: OfferDocInput, opts: OfferDocOptions = {}
   const { offer, sections, items } = detail;
   const logoUrl = `${window.location.origin}/alfa-logo.png`;
 
-  const itemsOf = (s: DocSection) =>
-    items.filter((i) => i.sectionId === s.id).sort((a, b) => a.position - b.position);
+  // `groupsFor` oddaje już tylko sekcje z wierszami, więc numer to po prostu
+  // indeks na liście. Wcześniej numerowaliśmy PRZED odrzuceniem pustych sekcji
+  // i dokument klienta zaczynał się od „2.", gdy pierwsza sekcja była pusta.
+  const { main, optional } = groupsFor(audience, sections, items);
 
-  const { main, optional } = sectionsFor(audience, sections);
-
-  const renderGroup = (list: DocSection[], numbered: boolean) =>
+  const renderGroup = (list: DocGroup[], numbered: boolean) =>
     list
-      .map((s, idx) => {
-        const rows = itemsOf(s);
-        if (rows.length === 0) return "";
-        return sectionTable(s, rows, {
+      .map((g, idx) =>
+        sectionTable(g.section, g.rows, {
           withCosts,
           isClient,
           no: numbered ? idx + 1 : undefined,
-        });
-      })
+        })
+      )
       .join("");
 
   const mainHtml = renderGroup(main, isClient);
   const optionalHtml = optional.length
-    ? (() => {
-        const body = renderGroup(optional, false);
-        if (!body) return "";
-        return `
+    ? `
   <div class="optgroup">
     <h2 class="optgroup-head">Propozycje dodatkowe</h2>
     <p class="optgroup-note">Poniższe pozycje nie są wliczone w kwotę oferty —
        można je zamówić razem z ofertą albo później.</p>
-    ${body}
-  </div>`;
-      })()
+    ${renderGroup(optional, false)}
+  </div>`
     : "";
 
   const emptyMsg = isClient
@@ -757,8 +824,10 @@ export function buildOfferHtml(detail: OfferDocInput, opts: OfferDocOptions = {}
       <span class="no">${esc(offer.number)}</span>
       ${offer.version > 1 ? `<span class="ver">wersja ${offer.version}</span>` : ""}
       ${
-        offer.preparedBy
-          ? `<span class="by">Wykonanie oferty: <b>${esc(offer.preparedBy)}</b></span>`
+        // Brak handlowca i autora (null albo pusty ciąg) = brak wiersza, a nie
+        // „Wykonanie oferty:" z pustką za dwukropkiem.
+        offer.preparedBy?.trim()
+          ? `<span class="by">Wykonanie oferty: <b>${esc(offer.preparedBy.trim())}</b></span>`
           : ""
       }
     </div>

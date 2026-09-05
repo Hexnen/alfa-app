@@ -30,11 +30,13 @@ const round2 = (n: number) => Math.round(n * 100) / 100;
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 type DbOrTx = typeof db | Tx;
 
-// Liczba lub null — akceptuje number i string z przecinkiem
+// Liczba lub null — akceptuje number i string z przecinkiem. `Number()`, nie
+// `parseFloat()`: ten drugi czyta prefiks i przepuszczał "3abc" jako 3, więc
+// literówka w polu liczbowym zapisywała się po cichu jako inna wartość.
 function toNum(v: unknown): number | null {
   if (typeof v === "number" && Number.isFinite(v)) return v;
   if (typeof v === "string" && v.trim() !== "") {
-    const n = parseFloat(v.replace(",", "."));
+    const n = Number(v.trim().replace(",", "."));
     if (Number.isFinite(n)) return n;
   }
   return null;
@@ -142,7 +144,18 @@ app.get("/employees", async (c) => {
   return c.json({ success: true, data });
 });
 
-function parseEmployee(body: Record<string, unknown>): {
+/**
+ * Walidacja ciała POST/PUT pracownika. `current` (tylko PUT) to wiersz sprzed
+ * zapisu: pole POMINIĘTE w body zostaje bez zmian, pole podane (także `null`)
+ * nadpisuje. Bez tego rozróżnienia PUT był pełnym nadpisaniem — brak klucza
+ * `departmentId` znaczył `toNum(undefined)` = null, czyli kasował przypisanie
+ * do działu, którego dla osób biura nie da się odtworzyć z żadnych danych
+ * (patrz migracja 0073). Ten sam wzór co `parseTextHead` w routes/offers.ts.
+ */
+function parseEmployee(
+  body: Record<string, unknown>,
+  current?: NewHrEmployee,
+): {
   data?: Partial<NewHrEmployee>;
   error?: string;
 } {
@@ -157,9 +170,23 @@ function parseEmployee(body: Record<string, unknown>): {
    * wynika z drugiego.
    *
    * null = brak przypisania i to jest stan domyślny (np. ochrona na posterunkach).
+   * undefined (klucza nie ma w body) = zostaw, co jest.
    */
-  const departmentId = toNum(body.departmentId);
+  const departmentId =
+    body.departmentId === undefined
+      ? current?.departmentId ?? null
+      : toNum(body.departmentId);
   if (departmentId != null && !Number.isInteger(departmentId)) {
+    return { error: "Dział: nieprawidłowy identyfikator" };
+  }
+  // Wartość podana, ale nieparsowalna ("abc") — to błąd klienta, nie prośba
+  // o wyczyszczenie; ciche zerowanie ukryłoby wadę pod poprawnym zapisem.
+  if (
+    departmentId == null &&
+    body.departmentId !== undefined &&
+    body.departmentId !== null &&
+    body.departmentId !== ""
+  ) {
     return { error: "Dział: nieprawidłowy identyfikator" };
   }
   // Sprawdzamy istnienie działu, zamiast liczyć na FK: SQLite z wyłączonymi
@@ -172,12 +199,18 @@ function parseEmployee(body: Record<string, unknown>): {
     data: {
       fullName,
       departmentId,
-      code: typeof body.code === "string" ? body.code : "",
+      code: typeof body.code === "string" ? body.code : current?.code ?? "",
       // Rodzaj rozliczenia — decyduje, czy osoba trafia do tabeli ochrony
       // (umowy) czy do zestawienia biura w wynagrodzeniach.
-      kind: body.kind === "biuro" ? "biuro" : "ochrona",
-      notes: typeof body.notes === "string" ? body.notes : "",
-      active: body.active === undefined ? true : Boolean(body.active),
+      kind:
+        body.kind === undefined
+          ? current?.kind ?? "ochrona"
+          : body.kind === "biuro"
+            ? "biuro"
+            : "ochrona",
+      notes: typeof body.notes === "string" ? body.notes : current?.notes ?? "",
+      active:
+        body.active === undefined ? current?.active ?? true : Boolean(body.active),
     },
   };
 }
@@ -220,7 +253,7 @@ app.put("/employees/:id", async (c) => {
     );
   }
   const body = await c.req.json<Record<string, unknown>>();
-  const { data, error } = parseEmployee(body);
+  const { data, error } = parseEmployee(body, existing);
   if (error || !data) {
     return c.json<ApiResponse<null>>({ success: false, error }, 400);
   }
@@ -510,9 +543,19 @@ export interface HrDepartmentDto {
   isCmaPool: boolean;
   sortOrder: number;
   active: boolean;
-  /** Waga działu: suma godzin i liczba osób z CAŁEJ historii `hr_hours`. */
+  /** Waga działu: suma godzin z CAŁEJ historii `hr_hours`. */
   hoursTotal: number;
+  /**
+   * DWA liczniki osób, bo to dwa niezależne przypisania (patrz `parseEmployee`):
+   * `employeesCount` — osoby z KARTOTEKI (`hr_employees.department_id`); dla
+   *   działów biura (Handlowy, Księgowość, Zarząd) to JEDYNA więź, bo biuro nie
+   *   ma wierszy w `hr_hours`. Jeden licznik z godzin pokazywał tu „—" i admin
+   *   widział dział jako pusty, choć wisiało na nim sześć osób.
+   * `hoursEmployeesCount` — distinct osoby z wpisów godzin; potrzebny dla CMA
+   *   i Technicznego, gdzie kartoteka przypisań nie ma, a godziny są.
+   */
   employeesCount: number;
+  hoursEmployeesCount: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -534,6 +577,10 @@ async function loadDepartments(where?: SQL): Promise<HrDepartmentDto[]> {
         from hr_hours where hr_hours.department_id = hr_departments.id
       )`,
       employeesCount: sql<number>`(
+        select count(*)
+        from hr_employees where hr_employees.department_id = hr_departments.id
+      )`,
+      hoursEmployeesCount: sql<number>`(
         select count(distinct hr_hours.employee_id)
         from hr_hours where hr_hours.department_id = hr_departments.id
       )`,
@@ -549,6 +596,7 @@ async function loadDepartments(where?: SQL): Promise<HrDepartmentDto[]> {
     label: departmentLabel(r.row.name, values),
     hoursTotal: r.hoursTotal ?? 0,
     employeesCount: r.employeesCount ?? 0,
+    hoursEmployeesCount: r.hoursEmployeesCount ?? 0,
   }));
 }
 
@@ -710,14 +758,17 @@ app.put("/departments/:id", async (c) => {
 });
 
 /**
- * Usunięcie działu. FK `hr_hours.department_id` jest ON DELETE SET NULL, więc
- * kasowanie NIE usuwa godzin — po cichu ODPINA je od przypisania.
+ * Usunięcie działu. Dwa FK są ON DELETE SET NULL — `hr_hours.department_id`
+ * i `hr_employees.department_id` — więc kasowanie NIE usuwa godzin ani ludzi,
+ * tylko po cichu ODPINA ich od przypisania.
  *
- * DECYZJA: dział z godzinami wymaga świadomego potwierdzenia (`?force=1`), inaczej
- * 409 z liczbą wierszy. Sam dział CMA niesie 31 tys. godzin całej historii; jedno
- * przypadkowe kliknięcie zabrałoby alokacji kosztów jej podstawę, nie zgłaszając
- * żadnego błędu — wiersze zostają, tylko przestają być czyjekolwiek. Odtworzyć
- * tego z aplikacji się nie da.
+ * DECYZJA: dział z godzinami LUB z pracownikami w kartotece wymaga świadomego
+ * potwierdzenia (`?force=1`), inaczej 409 z liczbami. Sam dział CMA niesie
+ * 31 tys. godzin całej historii; jedno przypadkowe kliknięcie zabrałoby alokacji
+ * kosztów jej podstawę, nie zgłaszając żadnego błędu. Guard liczący TYLKO godziny
+ * nie chronił działów biura: biuro nie ma wierszy w `hr_hours`, więc Handlowy czy
+ * Księgowość kasowały się bez pytania, a przypisań 11 osób z migracji 0073 nie
+ * da się odtworzyć z żadnych innych danych.
  */
 app.delete("/departments/:id", async (c) => {
   const id = parseInt(c.req.param("id"));
@@ -727,12 +778,22 @@ app.delete("/departments/:id", async (c) => {
       .select({ count: sql<number>`count(*)` })
       .from(schema.hrHours)
       .where(eq(schema.hrHours.departmentId, id));
+    const [staff] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(schema.hrEmployees)
+      .where(eq(schema.hrEmployees.departmentId, id));
     const rowsUsing = Number(used?.count ?? 0);
-    if (rowsUsing > 0) {
+    const staffUsing = Number(staff?.count ?? 0);
+    if (rowsUsing > 0 || staffUsing > 0) {
+      // Komunikat wymienia tylko niezerowe liczniki — „0 pracowników" to szum,
+      // który odciąga uwagę od tego, co naprawdę zostanie odpięte.
+      const parts: string[] = [];
+      if (rowsUsing > 0) parts.push(`przypisane godziny (wpisów: ${rowsUsing})`);
+      if (staffUsing > 0) parts.push(`pracowników w kartotece (${staffUsing})`);
       return c.json<ApiResponse<null>>(
         {
           success: false,
-          error: `Dział ma przypisane godziny (wpisów: ${rowsUsing}). Usunięcie odepnie je od działu — potwierdź operację.`,
+          error: `Dział ma ${parts.join(" i ")}. Usunięcie odepnie ich od działu — potwierdź operację.`,
         },
         409,
       );
