@@ -51,22 +51,15 @@ export function Dashboard() {
   };
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <h1 className="text-3xl font-bold">Dashboard</h1>
-        <p className="text-muted-foreground">
-          Podsumowanie i statystyki systemu
-        </p>
-      </div>
-
+    <div className="space-y-3">
       {/* Stats cards */}
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
         <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Kontrahenci</CardTitle>
-            <Users className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
+          <CardContent className="p-4">
+            <div className="flex flex-row items-center justify-between gap-2 pb-2">
+              <CardTitle className="text-sm font-medium">Kontrahenci</CardTitle>
+              <Users className="h-4 w-4 text-muted-foreground" />
+            </div>
             <div className="text-2xl font-bold">{stats?.contractors || 0}</div>
             <Link
               to="/contractors"
@@ -78,11 +71,11 @@ export function Dashboard() {
         </Card>
 
         <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Obiekty</CardTitle>
-            <Building2 className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
+          <CardContent className="p-4">
+            <div className="flex flex-row items-center justify-between gap-2 pb-2">
+              <CardTitle className="text-sm font-medium">Obiekty</CardTitle>
+              <Building2 className="h-4 w-4 text-muted-foreground" />
+            </div>
             <div className="text-2xl font-bold">{stats?.objects || 0}</div>
             <Link
               to="/objects"
@@ -94,11 +87,11 @@ export function Dashboard() {
         </Card>
 
         <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Umowy</CardTitle>
-            <FileText className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
+          <CardContent className="p-4">
+            <div className="flex flex-row items-center justify-between gap-2 pb-2">
+              <CardTitle className="text-sm font-medium">Umowy</CardTitle>
+              <FileText className="h-4 w-4 text-muted-foreground" />
+            </div>
             <div className="text-2xl font-bold">{stats?.contracts || 0}</div>
             <Link
               to="/contracts"
@@ -110,13 +103,13 @@ export function Dashboard() {
         </Card>
 
         <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">
-              Przychod miesieczny
-            </CardTitle>
-            <TrendingUp className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
+          <CardContent className="p-4">
+            <div className="flex flex-row items-center justify-between gap-2 pb-2">
+              <CardTitle className="text-sm font-medium">
+                Przychod miesieczny
+              </CardTitle>
+              <TrendingUp className="h-4 w-4 text-muted-foreground" />
+            </div>
             <div className="text-2xl font-bold">
               {formatCurrency(stats?.monthlyRevenue || 0)}
             </div>

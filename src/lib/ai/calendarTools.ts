@@ -478,7 +478,10 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
       execute: async ({ query }) => {
         const q = likePattern(query);
         if (q === "%%") return { error: "Pusty fragment nazwy" };
-        const sel = () => db.select({ id: schema.objects.id, name: schema.objects.name, address: schema.objects.address, city: schema.objects.city }).from(schema.objects);
+        // identity-ok (cały `find_object`): to SZUKAJKA dla człowieka — zwraca listę
+        // kandydatów wraz z `duplicateIds`, żeby użytkownik WYBRAŁ id. Nic tu nie wiąże
+        // dokumentu z obiektem po nazwie (to robi wyłącznie src/lib/object-identity.ts).
+        const sel = () => db.select({ id: schema.objects.id, name: schema.objects.name, address: schema.objects.address, city: schema.objects.city }).from(schema.objects); // identity-ok
         let rows = sel()
           .where(or(likeEsc(schema.objects.name, q), likeEsc(schema.objects.address, q), likeEsc(schema.objects.city, q)))
           .orderBy(asc(schema.objects.name), asc(schema.objects.id))
@@ -487,8 +490,8 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
         // Fallback dla odmiany („u Testowego 42” vs „Obiekt Testowy 42”): każdy token po rdzeniu (bez końcówki ≤3 znaki) w nazwie+adresie+mieście.
         if (rows.length === 0) {
           const stems = query.trim().split(/\s+/).filter(Boolean).map((t) => (t.length >= 5 ? t.slice(0, Math.max(4, t.length - 3)) : t));
-          const hay = sql`coalesce(${schema.objects.name}, '') || ' ' || coalesce(${schema.objects.address}, '') || ' ' || coalesce(${schema.objects.city}, '')`;
-          if (stems.length) rows = sel().where(and(...stems.map((t) => likeEsc(hay, likePattern(t))))).orderBy(asc(schema.objects.name), asc(schema.objects.id)).limit(60).all();
+          const hay = sql`coalesce(${schema.objects.name}, '') || ' ' || coalesce(${schema.objects.address}, '') || ' ' || coalesce(${schema.objects.city}, '')`; // identity-ok: szukajka
+          if (stems.length) rows = sel().where(and(...stems.map((t) => likeEsc(hay, likePattern(t))))).orderBy(asc(schema.objects.name), asc(schema.objects.id)).limit(60).all(); // identity-ok: szukajka
         }
         // Dedup po (name, address, city): duplikaty w bazie to jeden wybór; id = najstarszy, reszta w duplicateIds.
         const norm = (s: string | null) => (s ?? "").trim().toLowerCase();
@@ -625,7 +628,9 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
         ];
         // Odległość od dziś (dni) — najbliższe wydarzenia pierwsze; remis: wcześniejsze startAt.
         const distance = sql`abs(julianday(substr(${schema.calendarEvents.startAt}, 1, 10)) - julianday(${today}))`;
-        const hay = sql`coalesce(${schema.calendarEvents.title}, '') || ' ' || coalesce(${schema.objects.name}, '') || ' ' || coalesce(${schema.calendarEvents.location}, '')`;
+        // identity-ok: pełnotekstowe szukanie WYDARZEŃ; nazwa obiektu jest tu tylko
+        // dodatkowym polem tekstowym, a samo złączenie z obiektem idzie po `object_id`.
+        const hay = sql`coalesce(${schema.calendarEvents.title}, '') || ' ' || coalesce(${schema.objects.name}, '') || ' ' || coalesce(${schema.calendarEvents.location}, '')`; // identity-ok
         const run = (textConds: unknown[], strict: boolean) =>
           db
             .select({ id: schema.calendarEvents.id })

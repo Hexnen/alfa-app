@@ -1,0 +1,1 @@
+ALTER TABLE `objects` ADD `monthly_rental` real;

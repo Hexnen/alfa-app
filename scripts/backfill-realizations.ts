@@ -41,7 +41,7 @@ console.log(`Kandydaci: ${result.candidates.length}`);
 for (const cand of result.candidates) {
   const skipped = result.skipped.find((s) => s.eventId === cand.eventId);
   const created = result.created?.find((x) => x.eventId === cand.eventId);
-  const mark = skipped ? `⏭  ${skipped.reason}` : created ? `✅ realizacja #${created.realizationId}${created.protocolNumber ? `, protokół ${created.protocolNumber}` : ""}` : "→ do utworzenia";
+  const mark = skipped ? `⏭  ${skipped.reason}` : created ? `✅ realizacja #${created.realizationId}${created.protocolNumber ? `, protokół ${created.protocolNumber}` : ""}${created.quoteNumber ? `, wycena ${created.quoteNumber}` : ""}` : "→ do utworzenia";
   console.log(`  #${cand.eventId} ${cand.startAt} [${cand.type}] ${cand.title} — ${cand.site}  ${mark}`);
 }
 console.log(`\nUtworzono: ${result.created?.length ?? 0}, pominięto: ${result.skipped.length}`);

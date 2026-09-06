@@ -10,6 +10,21 @@ import {
 } from "drizzle-orm/sqlite-core";
 import { sql } from "drizzle-orm";
 
+/**
+ * KWOTY: NETTO CZY BRUTTO
+ *
+ * Wszystkie kwoty handlowe w tej bazie są NETTO, w sensie „bez VAT": abonamenty,
+ * umowy, wyceny, cennik, realizacje, magazyn. Wynika to ze źródła — formularz
+ * zlecenia przyjmuje „Abonament (zł netto)", a konwersja zlecenia na obiekt
+ * przepisuje tę kwotę wprost do `objects.monthly_value` (src/services/orders.ts).
+ *
+ * UWAGA NA PUŁAPKĘ: w module kadr „netto" znaczy coś INNEGO — kwotę na rękę,
+ * po podatku i składkach pracownika. Kwoty z `hr_payroll` / `hr_office_payroll`
+ * to wypłaty netto w tym drugim sensie i NIE zawierają składek pracodawcy, więc
+ * nie są pełnym kosztem zatrudnienia. Zestawiając je z przychodem (Analityka,
+ * koszt osobowy obiektu) trzeba o tym pamiętać: to nie są te same „netto".
+ */
+
 // Contractors table
 export const contractors = sqliteTable("contractors", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -22,6 +37,23 @@ export const contractors = sqliteTable("contractors", {
   email: text("email"),
   contactPerson: text("contact_person"),
   notes: text("notes"),
+  // Dane z wykazu VAT MF (biała lista) — uzupełniane przez wyszukiwarkę firm.
+  regon: text("regon"),
+  krs: text("krs"),
+  // "Czynny" / "Zwolniony" / "Niezarejestrowany"; NULL = nigdy nie weryfikowano.
+  vatStatus: text("vat_status"),
+  // Data ostatniego sprawdzenia w wykazie ("YYYY-MM-DD").
+  vatCheckedAt: text("vat_checked_at"),
+  /**
+   * Kontrahent bieżący (true) albo archiwalny (false) — ta sama konwencja, co przy
+   * technikach: nic nie kasujemy, tylko chowamy z zakładki „Aktualni”. Historia
+   * (obiekty, zlecenia, protokoły) zostaje nienaruszona.
+   */
+  active: integer("active", { mode: "boolean" }).default(true).notNull(),
+  /** Opiekun handlowy klienta (NULL = nieprzypisany). */
+  salespersonId: integer("salesperson_id").references(() => salespeople.id, {
+    onDelete: "set null",
+  }),
   createdAt: text("created_at")
     .default(sql`(datetime('now'))`)
     .notNull(),
@@ -39,9 +71,35 @@ export const objects = sqliteTable("objects", {
   name: text("name").notNull(),
   address: text("address"),
   city: text("city"),
+  /**
+   * @deprecated Zastąpione rozdzielnymi usługami (hasSswin / hasCameras +
+   * cameraCount / hasOfi / hasVideoreception). Jeden wybór nie opisywał obiektu,
+   * na którym jest i alarm, i kamery, i warta — a od tego zależy, którym kluczem
+   * liczy się koszt. Kolumna znika w osobnej migracji, gdy nic jej już nie czyta.
+   */
   type: text("type", {
     enum: ["monitoring", "physical", "alarm", "mixed"],
   }).notNull(),
+  /**
+   * USŁUGI ŚWIADCZONE NA OBIEKCIE — niezależne od siebie, dowolny mix.
+   * Decydują o tym, którym kluczem liczy się koszt osobowy:
+   *  - ochrona fizyczna (OFI) → koszt wprost z godzin pracowników TEGO obiektu,
+   *  - SSWiN / kamery / wideorecepcja → udział w koszcie centrum monitorowania,
+   *    dzielonym po wszystkich dozorowanych jednostkach w firmie.
+   */
+  hasSswin: integer("has_sswin", { mode: "boolean" }).default(false).notNull(),
+  hasCameras: integer("has_cameras", { mode: "boolean" }).default(false).notNull(),
+  /**
+   * Liczba kamer. NULL przy `hasCameras` = usługa jest, ale nikt nie policzył ilu —
+   * i to NIE to samo, co zero. Taki obiekt nie ma jak wejść do podziału kosztu CMA
+   * (nie znamy jego wagi), więc jest zgłaszany jako brak danych, dokładnie tak samo
+   * jak nieuzupełniony koszt.
+   */
+  cameraCount: integer("camera_count"),
+  hasOfi: integer("has_ofi", { mode: "boolean" }).default(false).notNull(),
+  hasVideoreception: integer("has_videoreception", { mode: "boolean" })
+    .default(false)
+    .notNull(),
   installationType: text("installation_type", {
     enum: ["new", "takeover"],
   }).notNull(),
@@ -55,13 +113,53 @@ export const objects = sqliteTable("objects", {
   })
     .default("sales")
     .notNull(),
+  /** Abonament miesięczny w zł NETTO (bez VAT) — przepisywany z kwoty ze zlecenia. */
   monthlyValue: real("monthly_value"),
+  /**
+   * Dzierżawa sprzętu w zł NETTO/mies. — druga część tego, co klient płaci co
+   * miesiąc, przepisywana ze zlecenia (`orders.rental_amount`).
+   *
+   * OSOBNA KOLUMNA, a nie doliczenie do `monthly_value`, żeby dało się odróżnić
+   * abonament za usługę od najmu sprzętu; Analityka sumuje obie pozycje
+   * (`revenue = monthly_value + monthly_rental`). Do wersji z sierpnia 2026
+   * kwota dzierżawy w ogóle nie docierała do obiektu i przychód takich obiektów
+   * był zaniżony — dlatego dla danych sprzed migracji ta kolumna jest NULL,
+   * a nie 0: nie ma z czego jej odtworzyć.
+   */
+  monthlyRental: real("monthly_rental"),
+  /**
+   * Miesięczny koszt POZOSTAŁY obiektu (zł NETTO/mies., bez VAT) — wszystko poza wynagrodzeniami:
+   * monitoring, abonamenty, sprzęt, dojazdy. NIE jest to koszt całkowity.
+   *
+   * Koszt osobowy liczy się osobno z wypłat (src/lib/object-personnel-cost.ts),
+   * przez mapowanie hr_objects.object_id, i DODAJE SIĘ do tego pola. Wpisanie tu
+   * sumy wszystkiego policzyłoby wynagrodzenia drugi raz.
+   *
+   * NULL = nieuzupełniony, i to NIE to samo, co 0 zł — Analityka liczy pokrycie
+   * danymi kosztowymi po tej różnicy, a marża obiektu bez żadnego znanego kosztu
+   * jest nieznana, nie stuprocentowa.
+   */
+  monthlyCost: real("monthly_cost"),
+  /** Jednorazowy koszt instalacji / wdrożenia w zł NETTO (bez VAT). NULL = nieuzupełniony. */
+  setupCost: real("setup_cost"),
   notes: text("notes"),
   // Współrzędne obiektu (WGS84). NULL = jeszcze nieustalone; uzupełniane leniwie
   // geokoderem przy pierwszej kalkulacji dystansu (src/lib/geo.ts) albo ręcznie
   // z formularza obiektu — z nich liczy się dystans biuro → obiekt.
   latitude: real("latitude"),
   longitude: real("longitude"),
+  /** Spółka grupy, która obsługuje/fakturuje obiekt (NULL = nieprzypisana). */
+  companyId: integer("company_id").references(() => companies.id, {
+    onDelete: "set null",
+  }),
+  /**
+   * Handlowiec prowadzący ten obiekt. NULL = obowiązuje opiekun kontrahenta
+   * (`contractors.salesperson_id`); obiekt nadpisuje przypisanie tylko wtedy,
+   * gdy ktoś świadomie wskaże kogoś innego.
+   */
+  salespersonId: integer("salesperson_id").references(() => salespeople.id, {
+    onDelete: "set null",
+  }),
   createdAt: text("created_at")
     .default(sql`(datetime('now'))`)
     .notNull(),
@@ -79,6 +177,7 @@ export const contracts = sqliteTable("contracts", {
   contractNumber: text("contract_number").notNull(),
   startDate: text("start_date").notNull(),
   endDate: text("end_date"),
+  /** Wartość umowy w zł NETTO (bez VAT). */
   value: real("value"),
   filePath: text("file_path"),
   status: text("status", {
@@ -148,8 +247,10 @@ export const orders = sqliteTable("orders", {
   videoReception: integer("video_reception", { mode: "boolean" }).default(false),
   
   // Dane finansowe
+  /** Abonament w zł NETTO (bez VAT) — tak podpisane w formularzu przyjęcia zlecenia. */
   monthlyAmount: real("monthly_amount"),
   contractLengthMonths: integer("contract_length_months"),
+  /** Dzierżawa w zł NETTO (bez VAT). */
   rentalAmount: real("rental_amount"),
   rentalLengthMonths: integer("rental_length_months"),
   invoiceIssuer: text("invoice_issuer"),
@@ -294,6 +395,17 @@ export const objectImports = sqliteTable("object_imports", {
 // identyfikacja po externalId ("ID Obiektu" z raportu)
 export const monitoredObjects = sqliteTable("monitored_objects", {
   id: integer("id").primaryKey({ autoIncrement: true }),
+  /**
+   * Obiekt z kartoteki, któremu odpowiada ta pozycja z systemu monitoringu.
+   * NULL = niezmapowana, i tak jest dziś dla wszystkich 416 pozycji: rejestr
+   * powstał niezależnie od kartoteki i nie pokrywa się z nią ani po nazwie,
+   * ani po adresie (0 dopasowań). To trzeci — po `hr_objects` — rejestr, który
+   * musiał dostać jawne powiązanie zamiast dopasowywania po tekście.
+   * Mapowanie ustawia się ręcznie w module CMA.
+   */
+  objectId: integer("object_id").references(() => objects.id, {
+    onDelete: "set null",
+  }),
   externalId: integer("external_id").notNull().unique(),
   account: text("account"),
   category: text("category"),
@@ -481,7 +593,22 @@ export type RealizationBilling = (typeof REALIZATION_BILLINGS)[number];
 export const realizations = sqliteTable("realizations", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   date: text("date").notNull(), // YYYY-MM-DD
-  site: text("site").notNull(), // Obiekt
+  /**
+   * Obiekt z kartoteki — JEDYNE ŹRÓDŁO TOŻSAMOŚCI tej realizacji.
+   * Dopasowywanie po `site` dawało 29 błędnych trafień na 289 realizacji (10%),
+   * bo dwanaście obiektów ma zduplikowane nazwy („Stacja paliw Bochnia" ×2)
+   * i nazwa wskazywała inny obiekt niż kalendarz. NULL tylko dla realizacji
+   * wpisanej ręcznie, zanim obiekt powstał.
+   */
+  objectId: integer("object_id").references(() => objects.id, {
+    onDelete: "set null",
+  }),
+  /**
+   * Nazwa obiektu w chwili wykonania prac — MIGAWKA na dokument, nie klucz.
+   * Zostaje niezmieniona, gdy ktoś przemianuje obiekt, bo protokół ma mówić to,
+   * co uzgodniono wtedy. Do łączenia służy wyłącznie `objectId`.
+   */
+  site: text("site").notNull(),
   // Rodzaj prac (CO) — źródło prawdy dla protokołów i statystyk.
   workType: text("work_type", { enum: REALIZATION_WORK_TYPES })
     .default("serwis")
@@ -514,7 +641,8 @@ export const realizations = sqliteTable("realizations", {
   contractor2: text("contractor_2"), // Wykonawca 2
   actualHours: real("actual_hours").default(0).notNull(), // Faktyczne godziny pracownicze
   actualKm: real("actual_km").default(0).notNull(), // Faktyczne KM
-  hourlyCost: real("hourly_cost").default(0).notNull(), // Koszt godzinowy
+  // Koszt godzinowy technika w zł NETTO (bez VAT) — wewnętrzny koszt roboczogodziny.
+  hourlyCost: real("hourly_cost").default(0).notNull(),
   // Ślad automatu (src/lib/realization-autofill.ts): JSON { [pole]: { source, detail, at } }
   // dla pól uzupełnionych automatycznie. NULL = nic nie uzupełniano. Wpis pola znika,
   // gdy ktoś zmieni tę wartość ręcznie (PUT /realizations/:id) — badge „auto" nie kłamie.
@@ -545,6 +673,14 @@ export const technicians = sqliteTable("technicians", {
     .notNull(),
   notes: text("notes"),
   active: integer("active", { mode: "boolean" }).default(true).notNull(),
+  /**
+   * Ta sama osoba w kartotece kadrowej (NULL = technik spoza listy płac).
+   * Dotąd technik i pracownik kadr byli osobnymi rekordami bez żadnego związku,
+   * choć część osób figuruje w obu (Jaworski, Sajdak).
+   */
+  employeeId: integer("employee_id").references(() => hrEmployees.id, {
+    onDelete: "set null",
+  }),
   // Cennik przypisany technikowi (NULL = korzysta z cennika głównego).
   priceListId: integer("price_list_id").references(() => priceLists.id, {
     onDelete: "set null",
@@ -559,6 +695,113 @@ export const technicians = sqliteTable("technicians", {
 
 export type Technician = typeof technicians.$inferSelect;
 export type NewTechnician = typeof technicians.$inferInsert;
+
+/**
+ * Handlowcy — słownik opiekunów handlowych, prowadzony jak technicy (miękkie
+ * archiwum przez `active`, bez kasowania historii). Do handlowca przypisuje się
+ * kontrahenta (opiekun klienta) i pojedynczy obiekt (`objects.salesperson_id`),
+ * bo bywa, że konkretną lokalizację prowadzi kto inny niż całą firmę.
+ */
+export const salespeople = sqliteTable("salespeople", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  firstName: text("first_name").default("").notNull(),
+  lastName: text("last_name").default("").notNull(),
+  phone: text("phone"),
+  email: text("email"),
+  /** Region / obszar działania — czysty opis, bez słownika. */
+  region: text("region"),
+  /**
+   * Ile handlowiec kosztuje firmę miesięcznie: wynagrodzenie, auto, telefon.
+   * Kwota wpisywana ręcznie — podawaj ją w tej samej skali, co wypłaty z kadr,
+   * czyli NETTO na rękę (aplikacja nie zna składek pracodawcy). Gdy handlowiec
+   * jest powiązany z pracownikiem (`employeeId`), to pole jest ignorowane, a koszt
+   * bierze się wprost z wypłat. NULL = nieuzupełniony.
+   */
+  monthlyCost: real("monthly_cost"),
+  /** Prowizja w % od przychodu prowadzonego portfela (0–100). NULL = brak prowizji. */
+  commissionRate: real("commission_rate"),
+  /**
+   * Ta sama osoba w kartotece kadrowej. NULL = handlowiec spoza listy płac
+   * (np. na własnej działalności) i wtedy liczy się `monthlyCost` wpisany ręcznie.
+   * Gdy powiązanie ISTNIEJE, koszt własny bierze się z wypłat, a pole ręczne jest
+   * ignorowane — inaczej ten sam człowiek kosztowałby firmę dwa razy: raz
+   * w Kadrach, raz w Analityce.
+   */
+  employeeId: integer("employee_id").references(() => hrEmployees.id, {
+    onDelete: "set null",
+  }),
+  notes: text("notes"),
+  active: integer("active", { mode: "boolean" }).default(true).notNull(),
+  createdAt: text("created_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+  updatedAt: text("updated_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+});
+
+export type Salesperson = typeof salespeople.$inferSelect;
+export type NewSalesperson = typeof salespeople.$inferInsert;
+
+/**
+ * Spółki grupy (ALFA, ALFA S, CONTROL, GUARD n, TRUST n…) — słownik wspólny dla kadr
+ * i obiektów. `name` jest KLUCZEM zgodności z modułem wynagrodzeń, gdzie spółka jest
+ * trzymana jako tekst (`hr_contracts.company`, `hr_office_payroll.company`); zmiana
+ * nazwy w słowniku przepisuje te wiersze, żeby jedno nie odjechało od drugiego.
+ */
+export const companies = sqliteTable("companies", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  /** Skrót używany w kadrach, np. „ALFA S”, „GUARD 21”. Unikalny. */
+  name: text("name").notNull().unique(),
+  /** Pełna nazwa prawna (z wykazu VAT MF albo wpisana ręcznie). */
+  fullName: text("full_name"),
+  nip: text("nip"),
+  // Dane z wykazu VAT MF — uzupełniane tą samą wyszukiwarką, co przy kontrahentach
+  // (src/lib/mf-whitelist.ts). NULL = nigdy nie sprawdzano.
+  regon: text("regon"),
+  krs: text("krs"),
+  address: text("address"),
+  postalCode: text("postal_code"),
+  city: text("city"),
+  /** "Czynny" / "Zwolniony" / "Niezarejestrowany". */
+  vatStatus: text("vat_status"),
+  /** Dzień sprawdzenia w wykazie ("YYYY-MM-DD"). */
+  vatCheckedAt: text("vat_checked_at"),
+  notes: text("notes"),
+  /*
+   * NARZUT SKŁADEK PRACODAWCY — nadpisania per spółka (NULL = użyj wartości globalnej
+   * z app_settings, klucze `company.employer_markup_*`; opis: src/lib/company-config.ts).
+   *
+   * Współczynnik, przez który mnożymy wypłatę NETTO („na rękę"), żeby dostać szacunkowy
+   * KOSZT PRACODAWCY. Aplikacja nie zna kwot brutto — księgowość podaje wyłącznie netto —
+   * więc jest to jawne przybliżenie, a nie wyliczenie z podstawy wymiaru składek.
+   *
+   * Nadpisania są per spółka, bo składka WYPADKOWA zależy od branży (PKD) i od wielkości
+   * płatnika: spółka ochroniarska z kilkuset osobami ma inną stopę niż mała spółka biurowa
+   * z tej samej grupy, a stopa jest ustalana indywidualnie na rok składkowy. Reszta składek
+   * (emerytalna, rentowa, FP, FGŚP) jest wspólna, ale różnice w wypadkowej i w zwolnieniach
+   * z FP/FGŚP potrafią przesunąć narzut o kilka punktów procentowych.
+   *
+   * Dopasowanie do umów idzie po NAZWIE (`hr_contracts.company` = `companies.name`) —
+   * w kadrach spółka jest tekstem, nie kluczem obcym (patrz komentarz nad tabelą).
+   */
+  /** Umowa o pracę (zawsze ZUA) — pełne składki po stronie pracodawcy. */
+  employerMarkupUop: real("employer_markup_uop"),
+  /** Zlecenie zgłoszone na ZUA — te same składki pracodawcy, ale bez chorobowego pracownika. */
+  employerMarkupZlecenieZua: real("employer_markup_zlecenie_zua"),
+  /** Zlecenie zgłoszone tylko na ZZA — samo zdrowotne, pracodawca do ZUS nie dopłaca nic. */
+  employerMarkupZlecenieZza: real("employer_markup_zlecenie_zza"),
+  active: integer("active", { mode: "boolean" }).default(true).notNull(),
+  createdAt: text("created_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+  updatedAt: text("updated_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+});
+
+export type Company = typeof companies.$inferSelect;
+export type NewCompany = typeof companies.$inferInsert;
 
 // Cenniki (grupy pozycji). Zawsze dokładnie jeden ma isDefault=1 — to „cennik
 // główny", z którego startują wyceny bez kontekstu technika i który przejmuje
@@ -627,7 +870,7 @@ export const cameraModels = sqliteTable("camera_models", {
   name: text("name").notNull(), // Nazwa / model kamery
   manufacturer: text("manufacturer").default("").notNull(), // Producent
   // Typ geometryczny (spójny z designerem): tubowa / kopułkowa / PTZ / 360°
-  type: text("camera_type", { enum: ["bullet", "dome", "ptz", "pano"] })
+  type: text("camera_type", { enum: ["bullet", "dome", "ptz", "pano", "lpr"] })
     .default("bullet")
     .notNull(),
   resolution: text("resolution").default("").notNull(), // Rozdzielczość (np. 4MP, 8MP)
@@ -704,13 +947,112 @@ export type NewProtocol = typeof protocols.$inferInsert;
 // Wyceny usług serwisowych — wg wzoru "20260610 wycena" (tabela pozycji
 // z cennika + sprzęt; suma = ilość × cena, liczona w API/froncie).
 // items to JSON [{name, qty, unit, price}].
-export const quotes = sqliteTable("quotes", {
+// Dla PŁATNYCH prac z kalendarza wycena powstaje automatycznie razem z realizacją
+// i protokołem (src/lib/calendar-realizations.ts) — stąd `realization_id`.
+export const quotes = sqliteTable(
+  "quotes",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    number: text("number").notNull().unique(), // np. W/2026/07/001
+    date: text("date").notNull(), // YYYY-MM-DD
+    /** Obiekt z kartoteki — źródło tożsamości. NULL = wycena bez obiektu. */
+    objectId: integer("object_id").references(() => objects.id, {
+      onDelete: "set null",
+    }),
+    /** Nazwa obiektu w chwili wyceny — MIGAWKA na dokument, nie klucz. */
+    site: text("site").default("").notNull(),
+    address: text("address").default("").notNull(), // Adres
+    items: text("items").default("[]").notNull(),
+    /**
+     * Realizacja, do której należy wycena (1:1, jak protokół). NULL = wycena
+     * wolnostojąca: utworzona ręcznie w module Wyceny albo sprzed powiązania
+     * wycen z kalendarzem.
+     */
+    realizationId: integer("realization_id").references(() => realizations.id, {
+      onDelete: "cascade",
+    }),
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+    updatedAt: text("updated_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+  },
+  (t) => ({
+    // Realizacja ↔ wycena 1:1 (indeks częściowy — wiele wycen bez realizacji jest OK).
+    realizationIdIdx: uniqueIndex("quotes_realization_id_uidx")
+      .on(t.realizationId)
+      .where(sql`realization_id IS NOT NULL`),
+  })
+);
+
+export type Quote = typeof quotes.$inferSelect;
+export type NewQuote = typeof quotes.$inferInsert;
+
+// ============================================================================
+// USŁUGI (dział techniczny) — katalog rzeczy, które NIE są towarem, a wchodzą
+// do oferty: montaż kamery, uruchomienie rejestratora, konfiguracja, dojazd.
+// ============================================================================
+
+/**
+ * DLACZEGO OSOBNO OD `price_list`
+ *
+ * Cennik (`price_list`) to cennik usług SERWISOWYCH: stawki RBH i km przypisane
+ * technikom, z których automat przepisuje protokół na wycenę powykonawczą.
+ * Zna wyłącznie cenę sprzedaży — nie ma pojęcia o koszcie własnym, więc marży
+ * z niego nie policzysz. Dołożenie tam kosztu zmieniłoby zachowanie działającego
+ * automatu protokół → wycena, dlatego ofertowanie dostaje własny katalog.
+ */
+export const SERVICE_CATEGORIES = [
+  "montaz",
+  "uruchomienie",
+  "konfiguracja",
+  "serwis",
+  "projekt",
+  "abonament",
+  "inne",
+] as const;
+export type ServiceCategory = (typeof SERVICE_CATEGORIES)[number];
+
+/** System, którego usługa dotyczy — filtr przy składaniu pakietów oferty. */
+export const SERVICE_SYSTEMS = [
+  "cctv",
+  "sswin",
+  "kd",
+  "ppoz",
+  "sieci",
+  "inne",
+] as const;
+export type ServiceSystem = (typeof SERVICE_SYSTEMS)[number];
+
+export const services = sqliteTable("services", {
   id: integer("id").primaryKey({ autoIncrement: true }),
-  number: text("number").notNull().unique(), // np. W/2026/07/001
-  date: text("date").notNull(), // YYYY-MM-DD
-  site: text("site").default("").notNull(), // Obiekt
-  address: text("address").default("").notNull(), // Adres
-  items: text("items").default("[]").notNull(),
+  name: text("name").notNull(), // np. „Montaż kamery IP"
+  category: text("category", { enum: SERVICE_CATEGORIES })
+    .default("montaz")
+    .notNull(),
+  /** NULL = usługa uniwersalna, niezwiązana z konkretnym systemem. */
+  system: text("system", { enum: SERVICE_SYSTEMS }),
+  unit: text("unit").default("szt").notNull(), // szt / RBH / mb / kpl
+  /** Koszt własny netto (robocizna). 0 = zadeklarowane zero, nie „nie wiem". */
+  cost: real("cost").default(0).notNull(),
+  /** Cena sprzedaży netto. */
+  price: real("price").default(0).notNull(),
+  description: text("description"),
+  active: integer("active", { mode: "boolean" }).default(true).notNull(),
+  position: integer("position").default(0).notNull(),
+  /** Kto założył pozycję katalogu — login (email), jak `offers.created_by`. */
+  createdBy: text("created_by"),
+  /** Kto ostatni zapisał pozycję — login (email). */
+  updatedBy: text("updated_by"),
+  /**
+   * Kiedy OSTATNIO zmieniła się cena — czyli `cost` ALBO `price`, bo w usłudze
+   * stawka to para (koszt robocizny i cena sprzedaży) i przeterminowanie
+   * jednej psuje marżę tak samo jak drugiej. Nie zmienia się przy poprawce
+   * nazwy czy opisu — od tego jest `updated_at`, po którym nie da się poznać,
+   * czy stawka jest jeszcze aktualna. NULL = nie wiadomo kiedy.
+   */
+  priceUpdatedAt: text("price_updated_at"),
   createdAt: text("created_at")
     .default(sql`(datetime('now'))`)
     .notNull(),
@@ -719,8 +1061,8 @@ export const quotes = sqliteTable("quotes", {
     .notNull(),
 });
 
-export type Quote = typeof quotes.$inferSelect;
-export type NewQuote = typeof quotes.$inferInsert;
+export type Service = typeof services.$inferSelect;
+export type NewService = typeof services.$inferInsert;
 
 // Projekty monitoringu (CCTV) — projektowanie kamer na mapie satelitarnej
 // (moduł "Monitoring", designer w frontend/public/monitoring/designer.html).
@@ -744,7 +1086,7 @@ export const monitoringProjects = sqliteTable("monitoring_projects", {
 export type MonitoringProject = typeof monitoringProjects.$inferSelect;
 export type NewMonitoringProject = typeof monitoringProjects.$inferInsert;
 
-// Zdjęcia z wizji lokalnej do oferty monitoringu — przeskalowane w przeglądarce
+// Zdjęcia z wizji do oferty monitoringu — przeskalowane w przeglądarce
 // (max 1500 px, JPEG ~80%) i zapisane jako data-URL, osadzane potem w HTML oferty.
 export const monitoringPhotos = sqliteTable("monitoring_photos", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -827,6 +1169,25 @@ export const hrEmployees = sqliteTable("hr_employees", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   fullName: text("full_name").notNull().unique(), // "Nazwisko Imię" — jak w arkuszu
   code: text("code").default("").notNull(), // KOD z listy pracowników: Emeryt / Rencista / Student <26 lat
+  // Rodzaj rozliczenia: "ochrona" = osoba z umowami kadrowymi (arkusz
+  // WYNAGRODZENIA), "biuro" = osoba z zestawienia "WYNAGRODZENIA - Biuro".
+  // Dawniej wynikał tylko z tego, w której tabeli ktoś miał wiersze — teraz
+  // jest cechą pracownika, bo kartoteka jest wspólna i niezależna od miesiąca.
+  kind: text("kind", { enum: ["ochrona", "biuro"] })
+    .default("ochrona")
+    .notNull(),
+  /**
+   * Dział firmy, do którego należy osoba. NIEZALEŻNY od przypisania pojedynczego
+   * wpisu godzin (`hrHours.departmentId`): tam dział mówi, CZEGO dotyczyła praca
+   * w danym miesiącu, tutaj — gdzie człowiek pracuje na stałe.
+   *
+   * Bez tego pola biura nie dało się przypisać do działu w ogóle: pracownicy
+   * `kind = "biuro"` rozliczają się przez `hrOfficePayroll`, więc nie mają ani
+   * jednego wiersza w `hrHours`, na którym dział mógłby zawisnąć.
+   */
+  departmentId: integer("department_id").references(() => hrDepartments.id, {
+    onDelete: "set null",
+  }),
   active: integer("active", { mode: "boolean" }).default(true).notNull(),
   notes: text("notes").default("").notNull(),
   createdAt: text("created_at")
@@ -835,7 +1196,11 @@ export const hrEmployees = sqliteTable("hr_employees", {
   updatedAt: text("updated_at")
     .default(sql`(datetime('now'))`)
     .notNull(),
-});
+},
+(t) => ({
+  // Licznik „W kartotece" w GET /departments i filtr kartoteki po dziale.
+  departmentIdIdx: index("hr_employees_department_id_idx").on(t.departmentId),
+}));
 
 export type HrEmployee = typeof hrEmployees.$inferSelect;
 export type NewHrEmployee = typeof hrEmployees.$inferInsert;
@@ -844,6 +1209,20 @@ export type NewHrEmployee = typeof hrEmployees.$inferInsert;
 export const hrObjects = sqliteTable("hr_objects", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   name: text("name").notNull().unique(),
+  /**
+   * Obiekt z kartoteki, którego dotyczą godziny zapisane na tej pozycji.
+   * NULL = niezmapowany, i to jest stan domyślny: słownik kadrowy powstał
+   * niezależnie od kartoteki i nazwy nie pokrywają się ani w jednym przypadku
+   * („PUŁAWSKA 233" vs „Magazyn Centralny Kraków-Płaszów"). Bez tego ogniwa
+   * nie da się przypisać wynagrodzeń do obiektu — mapowanie robi się ręcznie
+   * w Kadry → Obiekty. Pozycje techniczne (#BIURO, #zlecenie) zostają
+   * niezmapowane celowo: to koszt ogólny, nie koszt konkretnego obiektu.
+   * Praca działowa (CMA, handlowy, …) nie mieszka już tutaj — ma własny
+   * słownik `hrDepartments` i własną kolumnę w `hrHours`.
+   */
+  objectId: integer("object_id").references(() => objects.id, {
+    onDelete: "set null",
+  }),
   active: integer("active", { mode: "boolean" }).default(true).notNull(),
   createdAt: text("created_at")
     .default(sql`(datetime('now'))`)
@@ -855,6 +1234,37 @@ export const hrObjects = sqliteTable("hr_objects", {
 
 export type HrObject = typeof hrObjects.$inferSelect;
 export type NewHrObject = typeof hrObjects.$inferInsert;
+
+// Działy firmy — słownik z Kadry → Działy
+//
+// Rodzeństwo `hrObjects`, nie kartoteki: godziny wskazują ALBO obiekt (posterunek),
+// ALBO dział (praca, która nie należy do żadnego obiektu — handlowy, księgowość,
+// zarząd). Dlatego dział nie ma `objectId` i nie da się go zmapować do kartoteki.
+// Wcześniej rolę działów pełniły pozycje słownika obiektów rozpoznawane po nazwie
+// (prefiks "#", literalne "CMA") — nazwa przestała być kluczem.
+export const hrDepartments = sqliteTable("hr_departments", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull().unique(),
+  /**
+   * Dział jest PULĄ CENTRUM MONITOROWANIA. Jego koszt nie należy do żadnego
+   * pojedynczego obiektu — rozdziela się po wszystkich dozorowanych jednostkach
+   * (SSWiN, wideorecepcja i każda kamera liczą się po jednym). W praktyce flagę
+   * nosi jeden dział („CMA"). Flaga, a nie nazwa: CRUD pozwala dział przemianować,
+   * a rozpoznawanie po nazwie zepsułoby wtedy po cichu alokację kosztów.
+   */
+  isCmaPool: integer("is_cma_pool", { mode: "boolean" }).default(false).notNull(),
+  sortOrder: integer("sort_order").default(0).notNull(), // kolejność na liście wyboru
+  active: integer("active", { mode: "boolean" }).default(true).notNull(),
+  createdAt: text("created_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+  updatedAt: text("updated_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+});
+
+export type HrDepartment = typeof hrDepartments.$inferSelect;
+export type NewHrDepartment = typeof hrDepartments.$inferInsert;
 
 // Normy godzin na miesiąc (arkusz "Rok": kolumny Praca / Zlecenie)
 export const hrMonthNorms = sqliteTable("hr_month_norms", {
@@ -874,17 +1284,26 @@ export const hrMonthNorms = sqliteTable("hr_month_norms", {
 export type HrMonthNorm = typeof hrMonthNorms.$inferSelect;
 export type NewHrMonthNorm = typeof hrMonthNorms.$inferInsert;
 
-// Wypracowane godziny — wpis miesięczny pracownik×obiekt
+// Wypracowane godziny — wpis miesięczny pracownik×(obiekt albo dział)
 // (arkusz "Wypracowane godziny"; może być kilka wpisów na osobę w miesiącu)
 export const hrHours = sqliteTable("hr_hours", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   employeeId: integer("employee_id")
     .notNull()
     .references(() => hrEmployees.id, { onDelete: "cascade" }),
+  /**
+   * Przypisanie wpisu. `objectId` i `departmentId` WYKLUCZAJĄ SIĘ: wiersz wskazuje
+   * obiekt albo dział, albo nic (praca nieprzypisana). Rozłączności pilnuje
+   * `parseHours` w src/routes/hr.ts (400 przy obu naraz) i asercja w
+   * scripts/test-object-identity.ts — SQLite CHECK wymagałby przebudowy tabeli.
+   */
   objectId: integer("object_id").references(() => hrObjects.id, {
     onDelete: "set null",
   }),
-  // Wpis przeniesiony z poprzedniego miesiąca — obiekt do potwierdzenia
+  departmentId: integer("department_id").references(() => hrDepartments.id, {
+    onDelete: "set null",
+  }),
+  // Wpis przeniesiony z poprzedniego miesiąca — przypisanie do potwierdzenia
   // (zapis wpisu przez użytkownika zdejmuje flagę)
   objectUncertain: integer("object_uncertain", { mode: "boolean" })
     .default(false)
@@ -905,7 +1324,17 @@ export const hrHours = sqliteTable("hr_hours", {
   updatedAt: text("updated_at")
     .default(sql`(datetime('now'))`)
     .notNull(),
-});
+},
+(t) => ({
+  // Tabela rośnie z każdym miesiącem (2 tys. wierszy po roku) i BEZ indeksów
+  // każde pytanie o nią było pełnym skanem — w GET /departments trzy skorelowane
+  // podzapytania per dział, w GET /objects dwa per pozycję, w GET /hours i
+  // payrollu filtr po (rok, miesiąc). FK w SQLite nie zakłada indeksu samo.
+  employeeIdIdx: index("hr_hours_employee_id_idx").on(t.employeeId),
+  objectIdIdx: index("hr_hours_object_id_idx").on(t.objectId),
+  departmentIdIdx: index("hr_hours_department_id_idx").on(t.departmentId),
+  yearMonthIdx: index("hr_hours_year_month_idx").on(t.year, t.month),
+}));
 
 export type HrHours = typeof hrHours.$inferSelect;
 export type NewHrHours = typeof hrHours.$inferInsert;
@@ -1024,8 +1453,18 @@ export const warehouseItems = sqliteTable("warehouse_items", {
   sku: text("sku").unique(),
   name: text("name").notNull(),
   category: text("category"),
+  /** Producent (Dahua, Hikvision, Satel...) — wolny tekst, jak `category`. */
+  manufacturer: text("manufacturer"),
   unit: text("unit").default("szt").notNull(),
   description: text("description"),
+  /** Cena zakupu netto = koszt własny towaru. NULL = nikt jej nie podał. */
+  purchasePrice: real("purchase_price"),
+  /**
+   * Cena sprzedaży netto. NULL NIE znaczy „za darmo" — znaczy „licz automatem":
+   * cena zakupu + globalny narzut `company.warehouse_markup`. Wpisana wartość to
+   * świadome nadpisanie automatu dla tego towaru (src/lib/margin.ts).
+   */
+  salePrice: real("sale_price"),
   photoData: text("photo_data"), // base64 data-URL (wzorzec jak monitoringPhotos)
   minStock: real("min_stock"), // próg alertu niskiego stanu
   isAsset: integer("is_asset", { mode: "boolean" }).default(false).notNull(),
@@ -1033,6 +1472,19 @@ export const warehouseItems = sqliteTable("warehouse_items", {
   isArchived: integer("is_archived", { mode: "boolean" })
     .default(false)
     .notNull(),
+  /** Kto założył kartotekę — login (email), jak `offers.created_by`. */
+  createdBy: text("created_by"),
+  /** Kto ostatni zapisał kartotekę — login (email). */
+  updatedBy: text("updated_by"),
+  /**
+   * Kiedy OSTATNIO zmieniła się cena (zakupu albo sprzedaży) — nie kiedy
+   * ktokolwiek dotknął rekordu. `updated_at` przestawia się przy poprawce
+   * literówki w nazwie czy zmianie kategorii i przez to nie mówi nic
+   * o aktualności cennika; bez osobnego stempla nie da się odróżnić towaru
+   * z ceną potwierdzoną wczoraj od takiego z ceną sprzed dwóch lat.
+   * NULL = ceny nigdy nie ustawiono (albo nie wiadomo kiedy).
+   */
+  priceUpdatedAt: text("price_updated_at"),
   createdAt: text("created_at")
     .default(sql`(datetime('now'))`)
     .notNull(),
@@ -1109,6 +1561,7 @@ export const warehouseDocumentItems = sqliteTable(
       .notNull()
       .references(() => warehouseItems.id),
     quantity: real("quantity").notNull(),
+    /** Cena jednostkowa w zł NETTO (bez VAT). */
     unitPrice: real("unit_price"),
     positionNo: integer("position_no").notNull(),
   },
@@ -1195,6 +1648,480 @@ export const warehouseDocSequences = sqliteTable(
 
 export type WarehouseDocSequence = typeof warehouseDocSequences.$inferSelect;
 export type NewWarehouseDocSequence = typeof warehouseDocSequences.$inferInsert;
+
+// ============================================================================
+// OFERTY (dział techniczny) — dokument handlowy dla klienta, składany z pakietów
+// ============================================================================
+
+/*
+ * CZYM OFERTA NIE JEST
+ *
+ * `quotes` („Wyceny") to dokument POWYKONAWCZY, sztywno związany z realizacją,
+ * z pozycjami w płaskim JSON-ie bez identyfikatorów. Oferta idzie do klienta
+ * PRZED pracą, zna kontrahenta, koszt własny i marżę, ma pozycje cykliczne
+ * (abonament) i dzierżawę — dlatego jest osobnym bytem, a nie rozbudową wyceny.
+ *
+ * TRZY STRUMIENIE PIENIĘDZY, które oferta musi rozróżniać:
+ *   jednorazowo — sprzęt i robocizna płatne przy wdrożeniu,
+ *   miesięcznie — abonament (analityka, internet, grupa interwencyjna),
+ *   dzierżawa   — najem sprzętu, liczony z wartości sprzętu w ofercie.
+ *
+ * Wszystkie kwoty NETTO (patrz nagłówek pliku).
+ */
+
+export const OFFER_KINDS = ["rozbudowa", "montaz", "serwis"] as const;
+export type OfferKind = (typeof OFFER_KINDS)[number];
+
+export const OFFER_STATUSES = [
+  "draft",
+  "sent",
+  "accepted",
+  "rejected",
+  "expired",
+] as const;
+export type OfferStatus = (typeof OFFER_STATUSES)[number];
+
+/** Tryb dzierżawy; `custom` = dowolna liczba miesięcy wpisana ręcznie. */
+export const OFFER_LEASE_MODES = ["none", "y1", "y2", "custom"] as const;
+export type OfferLeaseMode = (typeof OFFER_LEASE_MODES)[number];
+
+export const offers = sqliteTable(
+  "offers",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    /** OF/RRRR/MM/NNN, wersje z sufiksem „-w2" (patrz `parentId`). */
+    number: text("number").notNull().unique(),
+    /**
+     * Oferta pierwotna, z której powstała ta wersja. NULL = wersja pierwsza.
+     * Wysłanej oferty nie wolno edytować — negocjacje tworzą nową wersję, żeby
+     * to, co klient dostał na papierze, dało się odtworzyć co do złotówki.
+     */
+    parentId: integer("parent_id").references((): AnySQLiteColumn => offers.id, {
+      onDelete: "set null",
+    }),
+    version: integer("version").default(1).notNull(),
+
+    date: text("date").notNull(), // YYYY-MM-DD
+    /** Termin ważności; status „expired" WYLICZAMY z niego przy odczycie. */
+    validUntil: text("valid_until"),
+    sentAt: text("sent_at"),
+
+    kind: text("kind", { enum: OFFER_KINDS }).default("montaz").notNull(),
+    status: text("status", { enum: OFFER_STATUSES }).default("draft").notNull(),
+
+    // Klient: wskazanie na kartotekę + MIGAWKI na dokument. Migawka jest po to,
+    // żeby zmiana nazwy kontrahenta nie przepisała wstecz wystawionej oferty.
+    contractorId: integer("contractor_id").references(() => contractors.id, {
+      onDelete: "set null",
+    }),
+    clientName: text("client_name").default("").notNull(),
+    clientNip: text("client_nip").default("").notNull(),
+
+    objectId: integer("object_id").references(() => objects.id, {
+      onDelete: "set null",
+    }),
+    site: text("site").default("").notNull(),
+    address: text("address").default("").notNull(),
+
+    /** Handlowiec prowadzący — pod konwersję ofert i prowizje w Analityce. */
+    salespersonId: integer("salesperson_id").references(() => salespeople.id, {
+      onDelete: "set null",
+    }),
+    /** Spółka wystawiająca — z niej wydruk bierze NIP/KRS/REGON do stopki. */
+    companyId: integer("company_id").references(() => companies.id, {
+      onDelete: "set null",
+    }),
+
+    /** Rabat na CAŁY dokument (%), obok rabatów na pojedynczych pozycjach. */
+    discountPct: real("discount_pct").default(0).notNull(),
+
+    /**
+     * PRZEWIDYWANY CZAS KONTRAKTU w miesiącach — jak długo klient ma zostać.
+     *
+     * To założenie handlowca, nie zobowiązanie klienta (od tego jest dzierżawa),
+     * ale właśnie ono decyduje, ile warta jest oferta z abonamentem: te same
+     * 460 zł miesięcznie przez rok i przez trzy lata to dwie różne transakcje.
+     * Ustawia OKRES, na którym liczy się marża, zysk i prowizja; NULL = zostaje
+     * dotychczasowa reguła (długość dzierżawy, a bez niej 12 miesięcy).
+     */
+    contractMonths: integer("contract_months"),
+
+    // --- Dzierżawa: jeden zestaw parametrów na całą ofertę ---
+    leaseMode: text("lease_mode", { enum: OFFER_LEASE_MODES })
+      .default("none")
+      .notNull(),
+    leaseMonths: integer("lease_months"),
+    /** Procent ROCZNY; rata miesięczna = podstawa × procent / 100 / 12. */
+    leaseAnnualRate: real("lease_annual_rate"),
+    /** Czy robocizna wchodzi do podstawy raty (raz tak, raz nie). */
+    leaseIncludeLabour: integer("lease_include_labour", { mode: "boolean" })
+      .default(false)
+      .notNull(),
+
+    // --- Ślady po akceptacji ---
+    orderId: integer("order_id").references(() => orders.id, {
+      onDelete: "set null",
+    }),
+    warehouseDocId: integer("warehouse_doc_id").references(
+      () => warehouseDocuments.id,
+      { onDelete: "set null" }
+    ),
+
+    notes: text("notes"),
+
+    /**
+     * Token linku dla klienta (`/oferta/<token>`). NULL = oferta nieudostępniona.
+     *
+     * To JEDYNE, co chroni dokument — pod tym adresem nie ma żadnej innej
+     * autoryzacji, więc token musi być losowy i długi (24 bajty z `randomBytes`).
+     * Wyzerowanie kolumny natychmiast odbiera klientowi dostęp.
+     */
+    shareToken: text("share_token"),
+
+    createdBy: text("created_by"), // login (email) użytkownika
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+    updatedAt: text("updated_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+  },
+  (t) => ({
+    contractorIdIdx: index("offers_contractor_id_idx").on(t.contractorId),
+    objectIdIdx: index("offers_object_id_idx").on(t.objectId),
+    statusIdx: index("offers_status_idx").on(t.status),
+    parentIdIdx: index("offers_parent_id_idx").on(t.parentId),
+    // Unikalny, ale kolumna jest nullowalna — w SQLite wiele NULL-i nie koliduje,
+    // więc oferty nieudostępnione nie blokują się nawzajem.
+    shareTokenIdx: uniqueIndex("offers_share_token_uidx").on(t.shareToken),
+  })
+);
+
+export type Offer = typeof offers.$inferSelect;
+export type NewOffer = typeof offers.$inferInsert;
+
+/** Kategoria sekcji — pokrywa się z usługami obiektu (src/lib/object-services.ts). */
+export const OFFER_SECTION_CATEGORIES = [
+  "cctv",
+  "sswin",
+  "kd",
+  "wideoweryfikacja",
+  "abonament",
+  "inne",
+] as const;
+export type OfferSectionCategory = (typeof OFFER_SECTION_CATEGORIES)[number];
+
+/**
+ * Sekcja oferty = jeden pakiet (np. „CCTV Dahua, 8 kamer") albo ręczna grupa pozycji.
+ *
+ * WARIANTY: sekcje z tym samym `variantGroup` są dla klienta alternatywami
+ * („Dahua albo Hikvision”) — do sum wchodzi wyłącznie ta z `variantSelected`.
+ * OPCJE: sekcja `isOptional` jest na dokumencie widoczna, ale poza kwotą
+ * „do zapłaty” — to propozycja dodatkowa, nie część zamówienia.
+ */
+export const offerSections = sqliteTable(
+  "offer_sections",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    offerId: integer("offer_id")
+      .notNull()
+      .references(() => offers.id, { onDelete: "cascade" }),
+    position: integer("position").default(0).notNull(),
+    category: text("category", { enum: OFFER_SECTION_CATEGORIES })
+      .default("inne")
+      .notNull(),
+    title: text("title").default("").notNull(),
+    /** Pakiet, z którego sekcja powstała (NULL = złożona ręcznie). */
+    packageId: integer("package_id").references(
+      (): AnySQLiteColumn => offerPackages.id,
+      { onDelete: "set null" }
+    ),
+    /** Parametry użyte przy rozwijaniu pakietu, JSON: {"cameras": 8}. */
+    params: text("params").default("{}").notNull(),
+    isOptional: integer("is_optional", { mode: "boolean" })
+      .default(false)
+      .notNull(),
+    variantGroup: text("variant_group"),
+    variantSelected: integer("variant_selected", { mode: "boolean" })
+      .default(true)
+      .notNull(),
+    notes: text("notes"),
+  },
+  (t) => ({
+    offerIdIdx: index("offer_sections_offer_id_idx").on(t.offerId),
+  })
+);
+
+export type OfferSection = typeof offerSections.$inferSelect;
+export type NewOfferSection = typeof offerSections.$inferInsert;
+
+/** Skąd wzięła się pozycja — decyduje, którą kartotekę odświeża „Przelicz ceny". */
+export const OFFER_ITEM_SOURCES = ["warehouse", "service", "manual"] as const;
+export type OfferItemSource = (typeof OFFER_ITEM_SOURCES)[number];
+
+/**
+ * Rodzaj pozycji. Rozstrzyga, co wchodzi do PODSTAWY DZIERŻAWY: zawsze
+ * `material` (sprzęt), a `labour` tylko przy `leaseIncludeLabour`.
+ */
+export const OFFER_ITEM_KINDS = [
+  "material",
+  "labour",
+  "subscription",
+  "other",
+] as const;
+export type OfferItemKind = (typeof OFFER_ITEM_KINDS)[number];
+
+/** Jednorazowo czy co miesiąc — dwa osobne strumienie w podsumowaniu oferty. */
+export const OFFER_ITEM_BILLINGS = ["one_time", "monthly"] as const;
+export type OfferItemBilling = (typeof OFFER_ITEM_BILLINGS)[number];
+
+export const offerItems = sqliteTable(
+  "offer_items",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    /**
+     * Denormalizacja: pozycja zna swoją ofertę wprost, żeby suma dokumentu nie
+     * wymagała joinu przez sekcje. Kaskada leci obiema drogami.
+     */
+    offerId: integer("offer_id")
+      .notNull()
+      .references(() => offers.id, { onDelete: "cascade" }),
+    sectionId: integer("section_id")
+      .notNull()
+      .references(() => offerSections.id, { onDelete: "cascade" }),
+    position: integer("position").default(0).notNull(),
+
+    source: text("source", { enum: OFFER_ITEM_SOURCES })
+      .default("manual")
+      .notNull(),
+    warehouseItemId: integer("warehouse_item_id").references(
+      () => warehouseItems.id,
+      { onDelete: "set null" }
+    ),
+    serviceId: integer("service_id").references(() => services.id, {
+      onDelete: "set null",
+    }),
+
+    /** MIGAWKI: nazwa i jednostka na dokumencie nie zmieniają się po edycji kartoteki. */
+    name: text("name").notNull(),
+    unit: text("unit").default("szt").notNull(),
+    qty: real("qty").default(1).notNull(),
+
+    kind: text("kind", { enum: OFFER_ITEM_KINDS }).default("material").notNull(),
+    billing: text("billing", { enum: OFFER_ITEM_BILLINGS })
+      .default("one_time")
+      .notNull(),
+
+    /** Koszt własny netto za jednostkę. NULL = nieznany, i to NIE jest zero. */
+    unitCost: real("unit_cost"),
+    /** Cena sprzedaży netto za jednostkę. */
+    unitPrice: real("unit_price").default(0).notNull(),
+    discountPct: real("discount_pct").default(0).notNull(),
+    /** Pozycja pokazana klientowi, ale poza kwotą „do zapłaty". */
+    isOptional: integer("is_optional", { mode: "boolean" })
+      .default(false)
+      .notNull(),
+  },
+  (t) => ({
+    offerIdIdx: index("offer_items_offer_id_idx").on(t.offerId),
+    sectionIdIdx: index("offer_items_section_id_idx").on(t.sectionId),
+  })
+);
+
+export type OfferItem = typeof offerItems.$inferSelect;
+export type NewOfferItem = typeof offerItems.$inferInsert;
+
+/**
+ * Biblioteka pakietów — zapisane zestawy, z których składa się ofertę jednym
+ * kliknięciem („+ CCTV → Dahua → 8 kamer").
+ *
+ * `parametric` skaluje pozycje od parametru (8 kamer → 8 kamer, 1 rejestrator
+ * na każde 8, 8 montaży), `fixed` to sztywny zestaw ignorujący parametry.
+ */
+export const OFFER_PACKAGE_MODES = ["parametric", "fixed"] as const;
+export type OfferPackageMode = (typeof OFFER_PACKAGE_MODES)[number];
+
+export const offerPackages = sqliteTable("offer_packages", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(),
+  category: text("category", { enum: OFFER_SECTION_CATEGORIES })
+    .default("inne")
+    .notNull(),
+  /** Marka zestawu (Dahua, Hikvision, Satel) — wolny tekst, jak w magazynie. */
+  manufacturer: text("manufacturer"),
+  description: text("description"),
+  mode: text("mode", { enum: OFFER_PACKAGE_MODES })
+    .default("parametric")
+    .notNull(),
+  /**
+   * Definicja parametrów, JSON:
+   * [{ "key": "cameras", "label": "Liczba kamer", "default": 4, "min": 1, "max": 64 }]
+   * Przy `mode = "fixed"` pusta tablica.
+   */
+  params: text("params").default("[]").notNull(),
+  active: integer("active", { mode: "boolean" }).default(true).notNull(),
+  position: integer("position").default(0).notNull(),
+  createdAt: text("created_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+  updatedAt: text("updated_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+});
+
+export type OfferPackage = typeof offerPackages.$inferSelect;
+export type NewOfferPackage = typeof offerPackages.$inferInsert;
+
+/** Zaokrąglenie ilości po przeskalowaniu — „1 rejestrator na każde 8 kamer". */
+export const OFFER_QTY_ROUNDINGS = ["none", "up"] as const;
+export type OfferQtyRounding = (typeof OFFER_QTY_ROUNDINGS)[number];
+
+export const offerPackageItems = sqliteTable(
+  "offer_package_items",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    packageId: integer("package_id")
+      .notNull()
+      .references(() => offerPackages.id, { onDelete: "cascade" }),
+    position: integer("position").default(0).notNull(),
+
+    source: text("source", { enum: OFFER_ITEM_SOURCES })
+      .default("warehouse")
+      .notNull(),
+    warehouseItemId: integer("warehouse_item_id").references(
+      () => warehouseItems.id,
+      { onDelete: "cascade" }
+    ),
+    serviceId: integer("service_id").references(() => services.id, {
+      onDelete: "cascade",
+    }),
+    /** Nazwa dla pozycji ręcznej; przy magazynie/usłudze — zapas, gdy zniknie źródło. */
+    name: text("name").default("").notNull(),
+    unit: text("unit").default("szt").notNull(),
+
+    kind: text("kind", { enum: OFFER_ITEM_KINDS }).default("material").notNull(),
+    billing: text("billing", { enum: OFFER_ITEM_BILLINGS })
+      .default("one_time")
+      .notNull(),
+
+    /** Ilość stała, niezależna od parametru (np. 1 rejestrator „zawsze"). */
+    qtyBase: real("qty_base").default(0).notNull(),
+    /** Mnożnik parametru: 1 = jedna sztuka na kamerę, 0.125 = jedna na osiem. */
+    qtyPerParam: real("qty_per_param").default(0).notNull(),
+    /** Klucz parametru z `offerPackages.params`, np. „cameras". */
+    paramKey: text("param_key"),
+    qtyRound: text("qty_round", { enum: OFFER_QTY_ROUNDINGS })
+      .default("none")
+      .notNull(),
+
+    /**
+     * SLOT — jedno miejsce w zestawie („Rejestrator"), w którym pakiet WYBIERA
+     * wariant zamiast dodawać wszystkie. Wiersze o tej samej etykiecie tworzą
+     * grupę; NULL = zwykła pozycja, wchodzi zawsze.
+     *
+     * Tym różni się od mnożnika: przy 9–16 kamerach nie zmienia się ILOŚĆ
+     * rejestratorów, tylko KTÓRY rejestrator wchodzi na ofertę. Bez slotów
+     * trzeba było trzymać trzy niemal identyczne pakiety w bibliotece.
+     */
+    slot: text("slot"),
+    /**
+     * Zakres wartości parametru z `paramKey`, przy którym ten wariant wygrywa
+     * slot — granice WŁĄCZNIE, NULL = strona otwarta. Ma sens tylko razem ze
+     * `slot` (route pilnuje) i zakresy w jednym slocie nie mogą na siebie
+     * nachodzić, bo wybór stałby się zależny od kolejności wierszy.
+     */
+    paramMin: real("param_min"),
+    paramMax: real("param_max"),
+
+    /** Cena narzucona przez pakiet; NULL = weź aktualną ze źródła. */
+    unitPriceOverride: real("unit_price_override"),
+  },
+  (t) => ({
+    packageIdIdx: index("offer_package_items_package_id_idx").on(t.packageId),
+  })
+);
+
+export type OfferPackageItem = typeof offerPackageItems.$inferSelect;
+export type NewOfferPackageItem = typeof offerPackageItems.$inferInsert;
+
+/**
+ * Biblioteka OPISÓW — powtarzalne teksty handlowe (warunki gwarancji, zakres
+ * wsparcia, warunki płatności), wklejane na ofertę jednym kliknięciem.
+ *
+ * Analogia pakietu: to WZORZEC, a nie treść dokumentu. Dołączenie opisu na
+ * ofertę KOPIUJE tekst do `offerTextBlocks`, bo moduł stoi na zamrożeniu —
+ * poprawiona dziś gwarancja nie może przepisać wstecz oferty, którą klient
+ * dostał w zeszłym miesiącu.
+ */
+export const offerTexts = sqliteTable("offer_texts", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  /** Nazwa W BIBLIOTECE („Gwarancja 24 mies."), nie nagłówek na wydruku. */
+  name: text("name").notNull(),
+  category: text("category", { enum: OFFER_SECTION_CATEGORIES })
+    .default("inne")
+    .notNull(),
+  /** Nagłówek drukowany nad treścią; pusty = blok bez nagłówka. */
+  title: text("title").default("").notNull(),
+  /**
+   * Treść w prostym markdownie. Backend trzyma ją jako zwykły tekst i niczego
+   * w niej nie interpretuje — składnię rozwija dopiero front przy wydruku.
+   */
+  body: text("body").default("").notNull(),
+  /** Wchodzi na KAŻDĄ nową ofertę (warunki płatności, klauzula RODO). */
+  isDefault: integer("is_default", { mode: "boolean" }).default(false).notNull(),
+  active: integer("active", { mode: "boolean" }).default(true).notNull(),
+  position: integer("position").default(0).notNull(),
+  createdAt: text("created_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+  updatedAt: text("updated_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+});
+
+export type OfferText = typeof offerTexts.$inferSelect;
+export type NewOfferText = typeof offerTexts.$inferInsert;
+
+/**
+ * Opis NA KONKRETNEJ OFERCIE — pełna kopia treści, nie referencja do katalogu.
+ *
+ * Dzięki temu wydruk jest samowystarczalny: da się go odtworzyć co do
+ * przecinka nawet po tym, jak wzorzec w bibliotece zmieniono albo schowano.
+ */
+export const offerTextBlocks = sqliteTable(
+  "offer_text_blocks",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    offerId: integer("offer_id")
+      .notNull()
+      .references(() => offers.id, { onDelete: "cascade" }),
+    /**
+     * ŚLAD POCHODZENIA — z którego wzorca wzięto treść (NULL = blok napisany
+     * ręcznie na tej ofercie). `set null`, bo archiwizacja wzorca nie ma prawa
+     * ruszyć wystawionej oferty; treść i tak leży w kolumnach obok.
+     */
+    textId: integer("text_id").references(
+      (): AnySQLiteColumn => offerTexts.id,
+      { onDelete: "set null" }
+    ),
+    title: text("title").default("").notNull(),
+    /** Markdown, jak w katalogu — migawka z chwili dołączenia opisu. */
+    body: text("body").default("").notNull(),
+    position: integer("position").default(0).notNull(),
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+    updatedAt: text("updated_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+  },
+  (t) => ({
+    offerIdIdx: index("offer_text_blocks_offer_id_idx").on(t.offerId),
+  })
+);
+
+export type OfferTextBlock = typeof offerTextBlocks.$inferSelect;
+export type NewOfferTextBlock = typeof offerTextBlocks.$inferInsert;
 
 // ============================================================================
 // KALENDARZ (dział techniczny) — wydarzenia, serie cykliczne, przypisani technicy
@@ -1298,6 +2225,10 @@ export const calendarEvents = sqliteTable(
     billing: text("billing", { enum: CALENDAR_BILLINGS }),
     // Jawnie przypięty protokół; gdy NULL — protokół realizacji (realization_id → protocols.realization_id).
     protocolId: integer("protocol_id").references(() => protocols.id, {
+      onDelete: "set null",
+    }),
+    // Jawnie przypięta wycena; gdy NULL — wycena realizacji (realization_id → quotes.realization_id).
+    quoteId: integer("quote_id").references(() => quotes.id, {
       onDelete: "set null",
     }),
     createdBy: integer("created_by").references(() => users.id, {

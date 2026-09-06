@@ -9,21 +9,27 @@ import { Layout } from "./components/Layout";
 import { Dashboard } from "./pages/Dashboard";
 import { Contractors } from "./pages/Contractors";
 import { Objects } from "./pages/Objects";
+import { Salespeople } from "./pages/Salespeople";
+import { Spolki } from "./pages/Spolki";
 import { ObjectDetails } from "./pages/ObjectDetails";
 import { Contracts } from "./pages/Contracts";
 import { ContractDetails } from "./pages/ContractDetails";
 import { Orders } from "./pages/Orders";
 import { Technical } from "./pages/Technical";
 import { Kadry } from "./pages/Kadry";
+import { Analityka, AnalitykaRedirect } from "./pages/Analityka";
 import { Monitoring } from "./pages/Monitoring";
 import { Templates } from "./pages/Templates";
 import { Warehouse } from "./pages/Warehouse";
+import { Uslugi } from "./pages/Uslugi";
+import { Oferty } from "./pages/Oferty";
 import { Calendar } from "./pages/Calendar";
 import { OrderDetails } from "./pages/OrderDetails";
 import { CmaReports } from "./pages/CmaReports";
 import { CmaReportDetails } from "./pages/CmaReportDetails";
 import { CmaTrends } from "./pages/CmaTrends";
 import { CmaCameraOutages } from "./pages/CmaCameraOutages";
+import { CmaObjects } from "./pages/CmaObjects";
 import { CmaSettings } from "./pages/CmaSettings";
 import { Ofi } from "./pages/Ofi";
 import { AdminUsers } from "./pages/AdminUsers";
@@ -31,6 +37,7 @@ import { AdminAssistant } from "./pages/AdminAssistant";
 import { AdminCalendar } from "./pages/AdminCalendar";
 import { AdminCompany } from "./pages/AdminCompany";
 import { PublicOrderForm } from "./pages/PublicOrderForm";
+import { PublicOffer } from "./pages/PublicOffer";
 import { useAuth } from "./auth/AuthProvider";
 import { usePerms, tabKeyForPath } from "./auth/permissions";
 import AuthScreen from "./auth/AuthScreen";
@@ -41,6 +48,8 @@ function App() {
       <Routes>
         {/* Public, unauthenticated intake form (external Alfa branding) */}
         <Route path="/formularz/zlecenie" element={<PublicOrderForm />} />
+        {/* Public, unauthenticated client-facing offer (link + print/PDF) */}
+        <Route path="/oferta/:token" element={<PublicOffer />} />
         {/* Everything else goes through the authenticated app shell */}
         <Route path="/*" element={<AuthedApp />} />
       </Routes>
@@ -68,6 +77,8 @@ function AuthedApp() {
         <Route path="/contractors" element={<Contractors />} />
         <Route path="/objects" element={<Objects />} />
         <Route path="/objects/:id" element={<ObjectDetails />} />
+        <Route path="/handlowcy" element={<Salespeople />} />
+        <Route path="/spolki" element={<Spolki />} />
         <Route path="/contracts" element={<Contracts />} />
         <Route path="/contracts/:id" element={<ContractDetails />} />
         <Route path="/orders" element={<Orders />} />
@@ -81,6 +92,10 @@ function AuthedApp() {
           <Route path="/technical/szablony" element={<Templates />} />
           <Route path="/technical/kalendarz" element={<Calendar />} />
           <Route path="/technical/magazyn" element={<Warehouse />} />
+          <Route path="/technical/uslugi" element={<Uslugi />} />
+          <Route path="/technical/oferty" element={<Oferty />} />
+          {/* Oferta ma własny adres z numeru: /technical/oferty/of202608014 */}
+          <Route path="/technical/oferty/:slug" element={<Oferty />} />
           <Route path="/technical/:tab" element={<Technical />} />
           {/* Legacy paths → new locations under Techniczny */}
           <Route
@@ -96,12 +111,17 @@ function AuthedApp() {
             element={<Navigate to="/kadry/wynagrodzenia" replace />}
           />
           <Route path="/kadry/:tab" element={<Kadry />} />
+          {/* Analityka: goły adres trafia na pierwszą podzakładkę, którą
+              użytkownik naprawdę widzi (patrz AnalitykaRedirect). */}
+          <Route path="/analityka" element={<AnalitykaRedirect />} />
+          <Route path="/analityka/:tab" element={<Analityka />} />
           <Route path="/ofi" element={<Ofi />} />
           <Route path="/cma" element={<Navigate to="/cma/raporty" replace />} />
           <Route path="/cma/raporty" element={<CmaReports />} />
           <Route path="/cma/raporty/:id" element={<CmaReportDetails />} />
           <Route path="/cma/trendy" element={<CmaTrends />} />
           <Route path="/cma/braki-kamer" element={<CmaCameraOutages />} />
+          <Route path="/cma/obiekty" element={<CmaObjects />} />
           <Route path="/cma/ustawienia" element={<CmaSettings />} />
           <Route path="/admin/users" element={<AdminUsers />} />
           <Route path="/admin/asystent" element={<AdminAssistant />} />

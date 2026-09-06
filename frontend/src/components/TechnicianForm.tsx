@@ -3,6 +3,7 @@ import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 import { Textarea } from "./ui/textarea";
+import { NIPField } from "./NIPField";
 import {
   Dialog,
   DialogContent,
@@ -11,6 +12,7 @@ import {
   DialogFooter,
 } from "./ui/dialog";
 import type {
+  HrEmployeeRef,
   PriceListGroup,
   Technician,
   TechnicianInput,
@@ -24,6 +26,8 @@ interface TechnicianFormProps {
   technician?: Technician | null;
   /** Cenniki do wyboru; pusta lista = pole „Cennik" pokazuje tylko główny. */
   priceLists?: PriceListGroup[];
+  /** Pracownicy z kadr do powiązania; pusta lista = pole pokazuje tylko „bez powiązania". */
+  employees?: HrEmployeeRef[];
 }
 
 export function TechnicianForm({
@@ -32,6 +36,7 @@ export function TechnicianForm({
   onSubmit,
   technician,
   priceLists = [],
+  employees = [],
 }: TechnicianFormProps) {
   const [loading, setLoading] = useState(false);
   const [formData, setFormData] = useState<TechnicianInput>({
@@ -45,6 +50,7 @@ export function TechnicianForm({
     notes: technician?.notes || "",
     active: technician?.active ?? true,
     priceListId: technician?.priceListId ?? null,
+    employeeId: technician?.employeeId ?? null,
   });
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -139,29 +145,31 @@ export function TechnicianForm({
             />
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label htmlFor="tech-company">Firma</Label>
-              <Input
-                id="tech-company"
-                value={formData.company || ""}
-                onChange={(e) =>
-                  setFormData((p) => ({ ...p, company: e.target.value }))
-                }
-                placeholder="np. Serwis-Tech sp. z o.o."
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="tech-nip">NIP</Label>
-              <Input
-                id="tech-nip"
-                value={formData.nip || ""}
-                onChange={(e) =>
-                  setFormData((p) => ({ ...p, nip: e.target.value }))
-                }
-                placeholder="np. 1234567890"
-              />
-            </div>
+          {/* NIP technika (zwykle podwykonawca na własnej działalności) — po wpisaniu
+              wyszukiwarka podpowiada nazwę firmy z wykazu VAT MF. Bazy kontrahentów
+              nie sprawdzamy: technik to nie klient, a dostępu do tego modułu może nie być. */}
+          <NIPField
+            value={formData.nip || ""}
+            onChange={(nip) => setFormData((p) => ({ ...p, nip }))}
+            onCompanyFound={(company) =>
+              setFormData((p) => ({ ...p, company: company.name || p.company }))
+            }
+            label="NIP"
+            required={false}
+            checkExisting={false}
+            id="tech-nip"
+          />
+
+          <div className="space-y-2">
+            <Label htmlFor="tech-company">Firma</Label>
+            <Input
+              id="tech-company"
+              value={formData.company || ""}
+              onChange={(e) =>
+                setFormData((p) => ({ ...p, company: e.target.value }))
+              }
+              placeholder="np. Serwis-Tech sp. z o.o."
+            />
           </div>
 
           <div className="space-y-2">
@@ -191,6 +199,38 @@ export function TechnicianForm({
             </select>
             <p className="text-xs text-muted-foreground">
               Cennik podpowiadany przy wycenach dla tego technika.
+            </p>
+          </div>
+
+          {/* Powiązanie z kartoteką kadrową — technik i pracownik kadr to dotąd
+              były dwa osobne rekordy, choć część osób figuruje w obu. */}
+          <div className="space-y-2">
+            <Label htmlFor="tech-employee">Pracownik w kadrach</Label>
+            <select
+              id="tech-employee"
+              data-testid="tech-employee"
+              value={formData.employeeId ?? ""}
+              onChange={(e) =>
+                setFormData((p) => ({
+                  ...p,
+                  employeeId: e.target.value ? Number(e.target.value) : null,
+                }))
+              }
+              className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+            >
+              <option value="">— bez powiązania (spoza listy płac) —</option>
+              {employees
+                .filter((e) => e.active || e.id === technician?.employeeId)
+                .map((e) => (
+                  <option key={e.id} value={e.id}>
+                    {e.fullName}
+                    {e.active ? "" : " (nieaktywny)"}
+                  </option>
+                ))}
+            </select>
+            <p className="text-xs text-muted-foreground">
+              Powiąż, jeśli technik jest na liście płac. Podwykonawcę na własnej
+              działalności zostaw bez powiązania.
             </p>
           </div>
 

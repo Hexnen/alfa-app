@@ -12,6 +12,7 @@ import {
   AlertTriangle,
   ArrowRight,
   Building2,
+  Calculator,
   Check,
   ChevronDown,
   ChevronLeft,
@@ -28,6 +29,7 @@ import {
   Receipt,
   Repeat,
   RotateCcw,
+  Route,
   Search,
   StickyNote,
   Trash2,
@@ -62,6 +64,7 @@ import {
   calendarApi,
   getObjects,
   getProtocols,
+  getQuotes,
   getRealizations,
   getTechnicians,
   type ActivityEntry,
@@ -70,6 +73,7 @@ import {
   type CalendarEvent,
   type CalendarEventInput,
   type CalendarEventProtocol,
+  type CalendarEventQuote,
   type CalendarEventRealization,
   type CalendarEventStatus,
   type CalendarEventType,
@@ -78,6 +82,7 @@ import {
   type CalendarSeriesScope,
   type ObjectWithContractor,
   type Protocol,
+  type Quote,
   type Realization,
   type Technician,
   type TechnicianAvailability,
@@ -90,6 +95,7 @@ import {
   EVENT_TYPE_UI,
   activityIcon,
   fmtDuration,
+  fmtMinutes,
   fmtRelative,
   initials,
   statusBadgeClass,
@@ -97,6 +103,7 @@ import {
   EVENT_TYPE_META,
   EVENT_TYPE_ORDER,
   PROTOCOL_BADGE_META,
+  QUOTE_BADGE_META,
   SERIES_FREQ_META,
   billingApplies,
   billingBadgeClass,
@@ -113,6 +120,9 @@ import {
   protocolBadgeClass,
   protocolBadgeKind,
   protocolHref,
+  quoteBadgeClass,
+  quoteBadgeKind,
+  quoteHref,
   REALIZATION_BADGE_META,
   REALIZATION_KIND_LABEL,
   realizationApplies,
@@ -124,6 +134,7 @@ import {
   toDateStr,
   toDateTimeStr,
 } from "@/lib/calendar-labels";
+import { travelLine, travelSourceLabel, useTravel } from "@/lib/travel";
 import { cn } from "@/lib/utils";
 import { CalendarEventNotes } from "@/components/CalendarEventNotes";
 import { tip } from "@/components/ui/tooltip";
@@ -168,6 +179,12 @@ interface CalendarEventDialogProps {
    * Rodzic przełącza dialog w tryb `edit` (ten sam event).
    */
   onEdit?: () => void;
+  /**
+   * Powłoka formularza. `modal` (domyślnie) to okno na środku, `drawer` — panel dokowany
+   * w siatce strony, który zwęża kalendarz zamiast go zasłaniać. Rodzic decyduje, kiedy
+   * szuflada ma sens (dość szeroki ekran) i osadza komponent we właściwej kolumnie.
+   */
+  variant?: "modal" | "drawer";
 }
 
 const plural = (n: number, one: string, few: string, many: string) => {
@@ -198,6 +215,8 @@ interface FormState {
   billing: CalendarBilling | null;
   /** Jawnie przypięty protokół (null = brak / protokół realizacji wyliczany przez backend). */
   protocolId: number | null;
+  /** Jawnie przypięta wycena (null = brak / wycena realizacji wyliczana przez backend). */
+  quoteId: number | null;
   /** Powiązana realizacja (null = brak / do utworzenia automatem). */
   realizationId: number | null;
   /** `true` = realizacja ręcznie odpięta — automat jej nie odtworzy. */
@@ -213,13 +232,16 @@ interface FormState {
 type FieldKey = "title" | "start" | "end" | "technicians" | "recUntil" | "recCount";
 type FieldErrors = Partial<Record<FieldKey, string>>;
 
-/** Domyślny zakres: najbliższa pełna godzina, 2h. */
+/** Domyślny czas trwania nowego wydarzenia (minuty). */
+const DEFAULT_DURATION_MIN = 180;
+
+/** Domyślny zakres: najbliższa pełna godzina, 3h (typowy wyjazd na obiekt). */
 function defaultRange(): { start: string; end: string } {
   const s = new Date();
   s.setMinutes(0, 0, 0);
   s.setHours(s.getHours() + 1);
   const e = new Date(s);
-  e.setHours(e.getHours() + 2);
+  e.setHours(e.getHours() + DEFAULT_DURATION_MIN / 60);
   return { start: toDateTimeStr(s), end: toDateTimeStr(e) };
 }
 
@@ -254,6 +276,7 @@ function buildInitial(
       technicianIds: event.technicians.map((t) => t.id),
       billing: event.billing ?? null,
       protocolId: event.protocolId ?? null,
+      quoteId: event.quoteId ?? null,
       realizationId: event.realizationId ?? null,
       realizationOptout: event.realizationOptout ?? false,
       recFreq: "",
@@ -273,7 +296,7 @@ function buildInitial(
     end = prefill?.endAt ? addDays(end.slice(0, 10), -1) : start;
   } else {
     if (start.length === 10) start = `${start}T08:00`;
-    if (end.length === 10) end = `${end}T10:00`;
+    if (end.length === 10) end = `${end}T11:00`;
   }
   const isKons = prefillType === "konserwacja";
   return {
@@ -289,6 +312,7 @@ function buildInitial(
     technicianIds: prefill?.technicianIds ? [...prefill.technicianIds] : [],
     billing: null,
     protocolId: null,
+    quoteId: null,
     realizationId: null,
     realizationOptout: false,
     recFreq: isKons ? "quarterly" : "",
@@ -317,6 +341,7 @@ function toInput(f: FormState): CalendarEventInput {
     technicianIds: f.technicianIds,
     billing: billingApplies(f.type) ? f.billing : null,
     protocolId: billingApplies(f.type) ? f.protocolId : null,
+    quoteId: billingApplies(f.type) ? f.quoteId : null,
     realizationId: realizationApplies(f.type) ? f.realizationId : null,
     realizationOptout: realizationApplies(f.type) ? f.realizationOptout : false,
   };
@@ -903,6 +928,162 @@ function RealizationPicker({
   );
 }
 
+/** Pełny rekord wyceny (`/quotes`) → skrót używany w dialogu. */
+function toEventQuote(q: Quote): CalendarEventQuote {
+  const filledItems = q.items.filter((i) => {
+    const n = parseFloat(String(i.qty).replace(",", "."));
+    return Number.isFinite(n) && n > 0;
+  }).length;
+  return { id: q.id, number: q.number, date: q.date, total: q.total, filledItems };
+}
+
+/** Wybór wyceny z listy (szukajka z debounce ~250 ms; bez filtra — ostatnie 50). */
+function QuotePicker({ onPick, disabled }: { onPick: (q: Quote) => void; disabled?: boolean }) {
+  const [openList, setOpenList] = useState(false);
+  const [q, setQ] = useState("");
+  const [items, setItems] = useState<Quote[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [active, setActive] = useState(0);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!openList) return;
+    let cancelled = false;
+    setLoading(true);
+    const t = window.setTimeout(() => {
+      getQuotes(undefined, undefined, { q: q.trim() || undefined, limit: 50 })
+        .then((res) => {
+          if (cancelled) return;
+          setItems(res.data || []);
+          setActive(0);
+        })
+        .catch(() => {
+          if (!cancelled) setItems([]);
+        })
+        .finally(() => {
+          if (!cancelled) setLoading(false);
+        });
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(t);
+    };
+  }, [openList, q]);
+
+  useEffect(() => {
+    if (!openList) return;
+    const onDoc = (e: MouseEvent) => {
+      if (!wrapRef.current?.contains(e.target as Node)) setOpenList(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    window.setTimeout(() => inputRef.current?.focus(), 0);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [openList]);
+
+  const pick = (item: Quote) => {
+    onPick(item);
+    setOpenList(false);
+    setQ("");
+  };
+
+  return (
+    <div ref={wrapRef} className="relative">
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        disabled={disabled}
+        aria-expanded={openList}
+        aria-controls="cal-quote-list"
+        data-testid="quote-pick"
+        onClick={() => setOpenList((v) => !v)}
+      >
+        <Calculator className="mr-1 h-4 w-4" /> Wybierz wycenę…
+      </Button>
+      {openList && (
+        <div className="absolute left-0 z-20 mt-1 w-full min-w-[20rem] max-w-[28rem] rounded-md border bg-popover p-1.5 text-sm shadow-md sm:w-[26rem]">
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              ref={inputRef}
+              role="combobox"
+              aria-expanded={openList}
+              aria-controls="cal-quote-list"
+              aria-autocomplete="list"
+              aria-label="Szukaj wyceny"
+              data-testid="quote-search"
+              value={q}
+              placeholder="Numer, obiekt, adres…"
+              className="h-9 pl-8"
+              onChange={(e) => setQ(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "ArrowDown") {
+                  e.preventDefault();
+                  setActive((a) => Math.min(a + 1, items.length - 1));
+                } else if (e.key === "ArrowUp") {
+                  e.preventDefault();
+                  setActive((a) => Math.max(a - 1, 0));
+                } else if (e.key === "Enter" && items[active]) {
+                  e.preventDefault();
+                  pick(items[active]);
+                } else if (e.key === "Escape") {
+                  e.stopPropagation();
+                  setOpenList(false);
+                }
+              }}
+            />
+          </div>
+          <ul id="cal-quote-list" role="listbox" className="mt-1 max-h-64 overflow-y-auto">
+            {loading && items.length === 0 ? (
+              <li className="flex items-center gap-2 px-2 py-1.5 text-xs text-muted-foreground">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" /> Szukam…
+              </li>
+            ) : items.length === 0 ? (
+              <li className="px-2 py-1.5 text-xs text-muted-foreground">Brak wycen.</li>
+            ) : (
+              items.map((item, i) => {
+                const ref = toEventQuote(item);
+                const kind = ref.filledItems > 0 ? "filled" : "draft";
+                return (
+                  <li
+                    key={item.id}
+                    role="option"
+                    aria-selected={i === active}
+                    data-testid={`quote-option-${item.id}`}
+                    onMouseEnter={() => setActive(i)}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      pick(item);
+                    }}
+                    className={cn(
+                      "flex cursor-pointer items-center gap-2 rounded px-2 py-1.5",
+                      i === active && "bg-accent text-accent-foreground"
+                    )}
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="truncate font-medium tabular-nums">{item.number}</span>
+                        <span className="text-xs text-muted-foreground">{fmtLong(item.date, true)}</span>
+                      </div>
+                      <div className="truncate text-xs text-muted-foreground">
+                        {[item.site, item.address].filter(Boolean).join(" · ") || "—"}
+                      </div>
+                    </div>
+                    <span className={cn(quoteBadgeClass(kind), "shrink-0 tabular-nums")}>
+                      {realizationMoney(item.total)}
+                    </span>
+                  </li>
+                );
+              })
+            )}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Historia (oś czasu)
 // — agregacja wpisów z jednej operacji, grupowanie po dniu
@@ -1080,19 +1261,6 @@ function diffDays(a: string, b: string): number {
 
 const pad2 = (n: number) => String(n).padStart(2, "0");
 
-/** „90” → „1 godz. 30 min”, „30” → „30 min”, „1500” → „1 dzień 1 godz.” */
-function fmtMinutes(m: number): string {
-  if (m <= 0) return "";
-  const days = Math.floor(m / 1440);
-  const h = Math.floor((m % 1440) / 60);
-  const r = m % 60;
-  const parts: string[] = [];
-  if (days) parts.push(days === 1 ? "1 dzień" : `${days} dni`);
-  if (h) parts.push(`${h} godz.`);
-  if (r) parts.push(`${r} min`);
-  return parts.join(" ");
-}
-
 /** Wszystkie kwadranse doby: "00:00" … "23:45". */
 const TIME_OPTIONS: string[] = Array.from({ length: 96 }, (_, i) =>
   `${pad2(Math.floor(i / 4))}:${pad2((i % 4) * 15)}`
@@ -1122,12 +1290,13 @@ function parseTimeInput(raw: string): string | null {
 
 const timeToMin = (t: string) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5));
 
+/**
+ * Chipy czasu trwania: same liczby, wspólne „godz." raz za grupą (patrz `suffix`
+ * w DurationChips) — inaczej jednostka powtarza się dziewięć razy i zjada wiersz.
+ */
 const HOURS_DURATIONS = [
   { label: "30 min", minutes: 30 },
-  { label: "1 godz.", minutes: 60 },
-  { label: "2 godz.", minutes: 120 },
-  { label: "4 godz.", minutes: 240 },
-  { label: "8 godz.", minutes: 480 },
+  ...[1, 2, 3, 4, 5, 6, 7, 8].map((h) => ({ label: String(h), minutes: h * 60 })),
 ];
 const DAY_DURATIONS = [
   { label: "1 dzień", days: 1 },
@@ -1354,11 +1523,14 @@ function DurationChips<T extends { label: string }>({
   isActive,
   onPick,
   ariaLabel,
+  suffix,
 }: {
   items: T[];
   isActive: (item: T) => boolean;
   onPick: (item: T) => void;
   ariaLabel: string;
+  /** Wspólna jednostka pokazana raz, za chipami (np. „godz."). */
+  suffix?: string;
 }) {
   return (
     <div role="group" aria-label={ariaLabel} className="flex flex-wrap items-center gap-1">
@@ -1381,6 +1553,7 @@ function DurationChips<T extends { label: string }>({
           </button>
         );
       })}
+      {suffix && <span className="text-xs text-muted-foreground">{suffix}</span>}
     </div>
   );
 }
@@ -1420,7 +1593,9 @@ export function CalendarEventDialog({
   onOpenEvent,
   onEdit,
   onNotesChanged,
+  variant = "modal",
 }: CalendarEventDialogProps) {
+  const docked = variant === "drawer";
   const readOnly = mode === "view";
   const isEdit = mode === "edit" && !!event;
   const navigate = useNavigate();
@@ -1451,6 +1626,8 @@ export function CalendarEventDialog({
   const [pickedProtocol, setPickedProtocol] = useState<CalendarEventProtocol | null>(null);
   /** Realizacja wybrana z listy w tej sesji edycji (podgląd przed zapisem). */
   const [pickedRealization, setPickedRealization] = useState<CalendarEventRealization | null>(null);
+  /** Wycena wybrana z listy w tej sesji edycji (podgląd przed zapisem). */
+  const [pickedQuote, setPickedQuote] = useState<CalendarEventQuote | null>(null);
   const [technicians, setTechnicians] = useState<Technician[]>([]);
   const [objects, setObjects] = useState<ObjectWithContractor[]>([]);
   const [history, setHistory] = useState<ActivityEntry[]>([]);
@@ -1464,10 +1641,13 @@ export function CalendarEventDialog({
   // Sekcje „Więcej opcji”: przy tworzeniu zwinięte, przy edycji otwarte gdy mają wartość.
   const init = initialRef.current;
   const [openSec, setOpenSec] = useState({
-    where: mode !== "create" || !!init.objectId || !!init.location,
+    // Sekcja stoi tuż pod tytułem i statusem, więc trzymanie jej zwiniętej przy
+    // tworzeniu chowałoby pierwszą decyzję planującego (który obiekt).
+    where: true,
     repeat: mode === "create" && !!init.recFreq,
     notes: mode !== "create" || !!init.description,
     protocol: mode !== "create" && !!(init.protocolId || event?.protocol),
+    quote: mode !== "create" && !!(init.quoteId || event?.quote),
     realization: mode !== "create" && !!(init.realizationId || event?.realization || init.realizationOptout),
     journal: true,
     firstNote: false,
@@ -1590,6 +1770,9 @@ export function CalendarEventDialog({
 
   const isUrlop = form.type === "urlop";
   const showBilling = billingApplies(form.type);
+
+  /** Dojazd — pole informacyjne, poza FormState: nie zapisuje się z wydarzeniem. */
+  const { travel, loading: travelLoading } = useTravel(form.objectId, open && !isUrlop);
   /** Protokół widoczny w formularzu: wybrany z listy / przypięty / z realizacji (gdy nic nie przypięto). */
   const formProtocol: CalendarEventProtocol | null =
     form.protocolId != null
@@ -1604,6 +1787,21 @@ export function CalendarEventDialog({
   const protocolFromRealization = !!formProtocol && form.protocolId == null;
   /** Odpięto protokół przypięty jawnie — po zapisie backend wróci do protokołu realizacji lub braku. */
   const protocolUnpinned = !!event && event.protocolId != null && form.protocolId == null;
+
+  /** Wycena widoczna w formularzu: wybrana z listy / przypięta / z realizacji (gdy nic nie przypięto). */
+  const formQuote: CalendarEventQuote | null =
+    form.quoteId != null
+      ? pickedQuote?.id === form.quoteId
+        ? pickedQuote
+        : event?.quote?.id === form.quoteId
+          ? event.quote
+          : null
+      : event && event.quoteId == null
+        ? (event.quote ?? null)
+        : null;
+  const quoteFromRealization = !!formQuote && form.quoteId == null;
+  /** Odpięto wycenę przypiętą jawnie — po zapisie backend wróci do wyceny realizacji lub braku. */
+  const quoteUnpinned = !!event && event.quoteId != null && form.quoteId == null;
 
   const showRealization = realizationApplies(form.type);
   /** Realizacja widoczna w formularzu: wybrana z listy albo przypięta do wydarzenia. */
@@ -1685,6 +1883,7 @@ export function CalendarEventDialog({
       if (!billingApplies(type)) {
         next.billing = null;
         next.protocolId = null;
+        next.quoteId = null;
       }
       if (!realizationApplies(type)) next.realizationId = null;
       if (type === "urlop") {
@@ -1744,7 +1943,7 @@ export function CalendarEventDialog({
   const setStartKeepDuration = (nextStart: string) => {
     clearWhenErrors();
     setForm((f) => {
-      const dur = f.start && f.end && diffMinutes(f.start, f.end) > 0 ? diffMinutes(f.start, f.end) : 120;
+      const dur = f.start && f.end && diffMinutes(f.start, f.end) > 0 ? diffMinutes(f.start, f.end) : DEFAULT_DURATION_MIN;
       return { ...f, start: nextStart, end: addMinutes(nextStart, dur) };
     });
   };
@@ -1929,7 +2128,7 @@ export function CalendarEventDialog({
     else onClose();
   }, [dirty, saving, onClose]);
 
-  const onKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+  const onKeyDown = (e: ReactKeyboardEvent<HTMLElement>) => {
     if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
       e.preventDefault();
       handleSubmit();
@@ -1949,6 +2148,9 @@ export function CalendarEventDialog({
   const objectAddress = selectedObject
     ? [selectedObject.address, selectedObject.city].filter(Boolean).join(", ")
     : "";
+  // Dojazd: błąd geokodera pokazujemy zamiast liczb — pole nigdy nie blokuje zapisu.
+  const travelText = travelLine(travel, travelLoading, { startAt: form.start, allDay: form.allDay });
+  const travelSource = travelSourceLabel(travel, travelLoading);
   const rangeText = (() => {
     if (!form.start || !form.end) return "";
     const i = toInput(form);
@@ -2014,6 +2216,8 @@ export function CalendarEventDialog({
 
   // ---------------------------------------------------------------------------
 
+  const Title = docked ? "h2" : DialogTitle;
+  const Description = docked ? "p" : DialogDescription;
   const header = (
     <div className="relative shrink-0 border-b px-5 pb-3 pt-4 pr-12">
       <div className={cn("absolute inset-x-0 top-0 h-1", typeUi?.bar)} aria-hidden />
@@ -2028,7 +2232,7 @@ export function CalendarEventDialog({
           <TypeIcon className="h-5 w-5" />
         </span>
         <div className="min-w-0 flex-1">
-          <DialogTitle className="flex flex-wrap items-center gap-x-2 gap-y-1 text-base leading-tight">
+          <Title className="flex flex-wrap items-center gap-x-2 gap-y-1 text-base font-semibold leading-tight">
             <span className="truncate">{titleText}</span>
             {event && (
               <span className={statusBadgeClass(event.status)}>
@@ -2046,8 +2250,8 @@ export function CalendarEventDialog({
                 Usunięte
               </span>
             )}
-          </DialogTitle>
-          <DialogDescription className="mt-0.5 text-xs">
+          </Title>
+          <Description className="mt-0.5 text-xs text-muted-foreground">
             {readOnly && event
               ? `${typeMeta?.label ?? form.type} · ${fmtRange(event.startAt, event.endAt, event.allDay)}`
               : event
@@ -2055,9 +2259,21 @@ export function CalendarEventDialog({
                 : isUrlop
                   ? "Wskaż technika i termin urlopu. Tytuł jest opcjonalny."
                   : "Typ, tytuł, termin i technicy. Reszta pod rozwijanymi sekcjami."}
-          </DialogDescription>
+          </Description>
         </div>
       </div>
+      {docked && (
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="absolute right-2 top-3 h-7 w-7"
+          onClick={requestClose}
+          aria-label="Zamknij edycję"
+        >
+          <X className="h-4 w-4" />
+        </Button>
+      )}
     </div>
   );
 
@@ -2187,6 +2403,37 @@ export function CalendarEventDialog({
                 );
               })()}
             </dd>
+            <dt className="flex items-center gap-1.5 text-muted-foreground">
+              <Calculator className="h-3.5 w-3.5" /> Wycena
+            </dt>
+            <dd>
+              {(() => {
+                const kind = quoteBadgeKind(event);
+                if (!kind) return <span className="text-muted-foreground">nie dotyczy</span>;
+                const meta = QUOTE_BADGE_META[kind];
+                const I = meta.icon;
+                const badge = (
+                  <span className={quoteBadgeClass(kind)}>
+                    <I className="h-3.5 w-3.5" />
+                    {meta.label(event.quote?.number)}
+                  </span>
+                );
+                return event.quote ? (
+                  <span className="inline-flex flex-wrap items-center gap-2">
+                    <Link to={quoteHref(event.quote.id)} className="hover:underline">
+                      {badge}
+                    </Link>
+                    <span className="text-xs text-muted-foreground">
+                      <span className="tabular-nums">{realizationMoney(event.quote.total)}</span>
+                      {event.quote.filledItems === 0 ? " · szkic z cennika" : ""}
+                      {event.quoteId == null ? " · z realizacji" : ""}
+                    </span>
+                  </span>
+                ) : (
+                  badge
+                );
+              })()}
+            </dd>
           </>
         )}
 
@@ -2258,7 +2505,11 @@ export function CalendarEventDialog({
   const formBody = (
     <div className="space-y-4 px-5 py-4">
       {/* Typ */}
-      <div role="radiogroup" aria-label="Typ wydarzenia" className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+      <div
+        role="radiogroup"
+        aria-label="Typ wydarzenia"
+        className={cn("grid gap-1.5", docked ? "grid-cols-2" : "grid-cols-2 sm:grid-cols-4")}
+      >
         {EVENT_TYPE_ORDER.map((t) => {
           const m = EVENT_TYPE_META[t];
           const I = m.icon;
@@ -2282,38 +2533,129 @@ export function CalendarEventDialog({
         })}
       </div>
 
-      {/* Tytuł + status */}
-      <div className="grid gap-3 sm:grid-cols-[1fr_170px]">
-        <div className="space-y-1">
-          <Label htmlFor="cal-title">{isUrlop ? "Tytuł" : "Tytuł *"}</Label>
-          <Input
-            id="cal-title"
-            value={form.title}
-            onChange={(e) => set("title", e.target.value)}
-            placeholder={isUrlop ? "domyślnie: Urlop — Imię Nazwisko" : "np. Serwis kamer — magazyn A"}
-            autoFocus={mode === "create"}
-            aria-invalid={!!fieldErrors.title}
-            aria-describedby={fieldErrors.title ? "cal-title-err" : undefined}
-            className={cn(fieldErrors.title && "border-destructive focus-visible:ring-destructive")}
-          />
-          <FieldError id="cal-title-err" msg={fieldErrors.title} />
-        </div>
-        <div className="space-y-1">
-          <Label htmlFor="cal-status">Status</Label>
-          <select
-            id="cal-status"
-            value={form.status}
-            onChange={(e) => set("status", e.target.value as CalendarEventStatus)}
-            className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            {EVENT_STATUS_ORDER.map((s) => (
-              <option key={s} value={s}>
-                {EVENT_STATUS_META[s].label}
-              </option>
-            ))}
-          </select>
+      {/* Tytuł */}
+      <div className="space-y-1">
+        <Label htmlFor="cal-title">{isUrlop ? "Tytuł" : "Tytuł *"}</Label>
+        <Input
+          id="cal-title"
+          value={form.title}
+          onChange={(e) => set("title", e.target.value)}
+          placeholder={isUrlop ? "domyślnie: Urlop — Imię Nazwisko" : "np. Serwis kamer — magazyn A"}
+          autoFocus={mode === "create"}
+          aria-invalid={!!fieldErrors.title}
+          aria-describedby={fieldErrors.title ? "cal-title-err" : undefined}
+          className={cn(fieldErrors.title && "border-destructive focus-visible:ring-destructive")}
+        />
+        <FieldError id="cal-title-err" msg={fieldErrors.title} />
+      </div>
+
+      {/* Status — cztery wartości, więc segmenty zamiast rozwijanej listy */}
+      <div className="space-y-1">
+        <Label>Status</Label>
+        <div
+          role="radiogroup"
+          aria-label="Status"
+          className={cn("grid gap-1.5", docked ? "grid-cols-2" : "grid-cols-2 sm:grid-cols-4")}
+        >
+          {EVENT_STATUS_ORDER.map((st) => {
+            const m = EVENT_STATUS_META[st];
+            const I = m.icon;
+            const active = form.status === st;
+            return (
+              <button
+                key={st}
+                type="button"
+                role="radio"
+                aria-checked={active}
+                {...tip(m.hint)}
+                data-testid={`status-chip-${st}`}
+                onClick={() => set("status", st)}
+                className={cn(
+                  "flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none",
+                  active ? m.chipActive : cn(m.chip, "bg-background hover:bg-muted")
+                )}
+              >
+                <I className="h-4 w-4 shrink-0" />
+                <span className="truncate">{m.label}</span>
+              </button>
+            );
+          })}
         </div>
       </div>
+
+      {/* Gdzie (nie dla urlopu) */}
+      {!isUrlop && (
+        <Section
+          id="sec-where"
+          icon={Building2}
+          title="Gdzie"
+          open={openSec.where}
+          onToggle={() => toggleSec("where")}
+          summary={
+            selectedObject?.name ??
+            (form.objectId ? event?.objectName : null) ??
+            form.location ??
+            "obiekt, lokalizacja"
+          }
+        >
+          <div className="space-y-1">
+            <div className="flex items-center justify-between gap-2">
+              <Label htmlFor="cal-object">Obiekt</Label>
+              {form.objectId && (
+                <button
+                  type="button"
+                  onClick={() => goToObject(Number(form.objectId))}
+                  className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                >
+                  <ExternalLink className="h-3.5 w-3.5" /> Karta obiektu
+                </button>
+              )}
+            </div>
+            <ObjectPicker
+              inputId="cal-object"
+              objects={objects}
+              value={form.objectId}
+              onChange={(id) => {
+                set("objectId", id);
+                // Podpowiedź adresu do lokalizacji, gdy pusta
+                const o = objects.find((x) => String(x.id) === id);
+                const addr = o ? [o.address, o.city].filter(Boolean).join(", ") : "";
+                if (id && addr && !form.location.trim()) set("location", addr);
+              }}
+              fallbackName={event?.objectName}
+            />
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="cal-location" className="flex items-center gap-1">
+              <MapPin className="h-3.5 w-3.5" /> Lokalizacja
+            </Label>
+            <Input
+              id="cal-location"
+              value={form.location}
+              onChange={(e) => set("location", e.target.value)}
+              placeholder="Adres / miejsce"
+            />
+            {objectAddress && objectAddress !== form.location.trim() && (
+              <button
+                type="button"
+                onClick={() => set("location", objectAddress)}
+                className="text-xs text-primary hover:underline"
+              >
+                Użyj adresu obiektu: {objectAddress}
+              </button>
+            )}
+          </div>
+          {form.objectId && (
+            <div className="space-y-0.5" aria-live="polite">
+              <span className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
+                <Route className="h-3.5 w-3.5" /> Dojazd (szacowany)
+              </span>
+              <p className="text-sm">{travelText}</p>
+              {travelSource && <p className="text-[11px] text-muted-foreground">{travelSource}</p>}
+            </div>
+          )}
+        </Section>
+      )}
 
       {/* Rozliczenie — gwarancyjny / darmowy / płatny (nie dla urlop/biuro/przygotowanie) */}
       {showBilling && (
@@ -2448,6 +2790,7 @@ export function CalendarEventDialog({
             <DurationChips
               ariaLabel="Czas trwania"
               items={HOURS_DURATIONS}
+              suffix="godz."
               isActive={(d) => durationMin === d.minutes}
               onPick={(d) => setDurationMinutes(d.minutes)}
             />
@@ -2608,71 +2951,6 @@ export function CalendarEventDialog({
         )}
       </Section>
 
-      {/* Gdzie (nie dla urlopu) */}
-      {!isUrlop && (
-        <Section
-          id="sec-where"
-          icon={Building2}
-          title="Gdzie"
-          open={openSec.where}
-          onToggle={() => toggleSec("where")}
-          summary={
-            selectedObject?.name ??
-            (form.objectId ? event?.objectName : null) ??
-            form.location ??
-            "obiekt, lokalizacja"
-          }
-        >
-          <div className="space-y-1">
-            <div className="flex items-center justify-between gap-2">
-              <Label htmlFor="cal-object">Obiekt</Label>
-              {form.objectId && (
-                <button
-                  type="button"
-                  onClick={() => goToObject(Number(form.objectId))}
-                  className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
-                >
-                  <ExternalLink className="h-3.5 w-3.5" /> Karta obiektu
-                </button>
-              )}
-            </div>
-            <ObjectPicker
-              inputId="cal-object"
-              objects={objects}
-              value={form.objectId}
-              onChange={(id) => {
-                set("objectId", id);
-                // Podpowiedź adresu do lokalizacji, gdy pusta
-                const o = objects.find((x) => String(x.id) === id);
-                const addr = o ? [o.address, o.city].filter(Boolean).join(", ") : "";
-                if (id && addr && !form.location.trim()) set("location", addr);
-              }}
-              fallbackName={event?.objectName}
-            />
-          </div>
-          <div className="space-y-1">
-            <Label htmlFor="cal-location" className="flex items-center gap-1">
-              <MapPin className="h-3.5 w-3.5" /> Lokalizacja
-            </Label>
-            <Input
-              id="cal-location"
-              value={form.location}
-              onChange={(e) => set("location", e.target.value)}
-              placeholder="Adres / miejsce"
-            />
-            {objectAddress && objectAddress !== form.location.trim() && (
-              <button
-                type="button"
-                onClick={() => set("location", objectAddress)}
-                className="text-xs text-primary hover:underline"
-              >
-                Użyj adresu obiektu: {objectAddress}
-              </button>
-            )}
-          </div>
-        </Section>
-      )}
-
       {/* Protokół — przypięty jawnie albo wyliczony z realizacji */}
       {showBilling && (
         <Section
@@ -2751,6 +3029,106 @@ export function CalendarEventDialog({
                   onPick={(p) => {
                     setPickedProtocol(toEventProtocol(p));
                     set("protocolId", p.id);
+                  }}
+                />
+              </div>
+            );
+          })()}
+        </Section>
+      )}
+
+      {/* Wycena — dokument „za ile”; powstaje automatycznie dla prac płatnych */}
+      {showBilling && (
+        <Section
+          id="sec-quote"
+          icon={Calculator}
+          title="Wycena"
+          open={openSec.quote}
+          onToggle={() => toggleSec("quote")}
+          summary={
+            formQuote
+              ? `${formQuote.number}${quoteFromRealization ? " (z realizacji)" : ""}`
+              : quoteUnpinned
+                ? "odpięto"
+                : form.billing === "paid"
+                  ? mode === "create"
+                    ? "powstanie automatycznie"
+                    : "brak"
+                  : "nie dotyczy"
+          }
+        >
+          {(() => {
+            const kind = quoteBadgeKind({ type: form.type, status: form.status, billing: form.billing, quote: formQuote });
+            const meta = kind ? QUOTE_BADGE_META[kind] : null;
+            const KindIcon = meta?.icon ?? Calculator;
+            return (
+              <div className="space-y-2">
+                {formQuote ? (
+                  <div
+                    data-testid="quote-linked"
+                    className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/40 px-2.5 py-1.5 text-sm"
+                  >
+                    <span className={quoteBadgeClass(kind ?? "draft")}>
+                      <KindIcon className="h-3.5 w-3.5" />
+                      {formQuote.number}
+                    </span>
+                    <span className="text-xs text-muted-foreground">
+                      {fmtLong(formQuote.date, true)} ·{" "}
+                      <span className="tabular-nums">{realizationMoney(formQuote.total)}</span>
+                      {formQuote.filledItems === 0 ? " · szkic z cennika" : ""}
+                      {quoteFromRealization ? " · z realizacji" : ""}
+                    </span>
+                    <span className="ml-auto flex items-center gap-2">
+                      <Link
+                        to={quoteHref(formQuote.id)}
+                        className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                      >
+                        <ExternalLink className="h-3.5 w-3.5" /> Otwórz wycenę
+                      </Link>
+                      {!quoteFromRealization && (
+                        <button
+                          type="button"
+                          data-testid="quote-unpin"
+                          onClick={() => {
+                            set("quoteId", null);
+                            setPickedQuote(null);
+                          }}
+                          className="inline-flex items-center gap-1 rounded px-1 py-0.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        >
+                          <Unlink className="h-3.5 w-3.5" /> Odepnij
+                        </button>
+                      )}
+                    </span>
+                  </div>
+                ) : kind === "missing" ? (
+                  <div className="flex flex-wrap items-center gap-2 text-xs">
+                    <span className={quoteBadgeClass("missing")}>
+                      <KindIcon className="h-3.5 w-3.5" />
+                      {meta?.label()}
+                    </span>
+                    <span className="text-muted-foreground">
+                      {quoteUnpinned
+                        ? "Odpięto — po zapisie wróci wycena realizacji (jeśli istnieje) albo pozostanie brak."
+                        : mode === "create"
+                          ? "Praca płatna — wycena powstanie razem z realizacją, z pozycjami z cennika technika."
+                          : "Praca płatna bez wyceny — wybierz z listy albo włącz automat w Administracja → Kalendarz."}
+                    </span>
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    {form.billing !== "paid"
+                      ? "Wycena dotyczy tylko prac płatnych — dla gwarancji i prac darmowych nie powstaje."
+                      : quoteUnpinned
+                        ? "Odpięto. Po zapisie wydarzenie dostanie wycenę realizacji (jeśli istnieje) albo zostanie bez wyceny."
+                        : mode === "create"
+                          ? "Praca płatna — wycena powstanie razem z realizacją, z pozycjami z cennika technika."
+                          : "Brak przypiętej wyceny. Jeśli wydarzenie ma realizację, jej wycena pojawi się tu automatycznie."}
+                  </p>
+                )}
+                <QuotePicker
+                  onPick={(q) => {
+                    setPickedQuote(toEventQuote(q));
+                    set("quoteId", q.id);
                   }}
                 />
               </div>
@@ -3083,35 +3461,25 @@ export function CalendarEventDialog({
     </span>
   );
 
-  return (
-    <>
-      <Dialog open={open} onOpenChange={(o) => !o && requestClose()}>
-        <DialogContent
-          onKeyDown={onKeyDown}
-          aria-describedby={undefined}
-          className={cn(
-            "flex h-[100dvh] max-h-[100dvh] w-full flex-col gap-0 overflow-hidden p-0",
-            "sm:h-auto sm:max-h-[92vh] sm:max-w-2xl sm:rounded-lg",
-            "motion-reduce:animate-none motion-reduce:transition-none"
-          )}
+  const scrollBody = (
+    <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+      {readOnly ? viewBody : formBody}
+      {historySection}
+      {error && (
+        <div
+          role="alert"
+          className="mx-5 mb-4 flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
         >
-          {header}
-          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
-            {readOnly ? viewBody : formBody}
-            {historySection}
-            {error && (
-              <div
-                role="alert"
-                className="mx-5 mb-4 flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
-              >
-                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-                {error}
-              </div>
-            )}
-          </div>
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          {error}
+        </div>
+      )}
+    </div>
+  );
 
-          {/* Stopka: sticky (na mobile pełny ekran, na desktopie dół dialogu) */}
-          <div className="shrink-0 border-t bg-background px-5 py-3">
+  /* Stopka: sticky (na mobile pełny ekran, na desktopie dół dialogu / szuflady) */
+  const footer = (
+    <div className="shrink-0 border-t bg-background px-5 py-3">
             <div className="flex items-center justify-between gap-3">
               <div className="flex min-w-0 items-center gap-2">
                 {isEdit && !event?.deletedAt && (
@@ -3152,10 +3520,53 @@ export function CalendarEventDialog({
                 )}
               </div>
             </div>
-            {metaLine && <div className="mt-1 sm:hidden">{metaLine}</div>}
-          </div>
-        </DialogContent>
-      </Dialog>
+      {metaLine && <div className="mt-1 sm:hidden">{metaLine}</div>}
+    </div>
+  );
+
+  // Modal zostawiamy zamontowany, żeby Radix dokończył animację zamykania;
+  // szuflada nie ma animacji wyjścia, więc znika od razu.
+  if (docked && !open) return null;
+
+  return (
+    <>
+      {docked ? (
+        // Szuflada: zwykły panel w siatce strony (kalendarz zwęża się obok), więc bez
+        // overlaya i pułapki fokusu. Esc zamyka tak samo jak w oknie modalnym.
+        <aside
+          role="region"
+          aria-label={isEdit ? "Edycja wydarzenia" : "Wydarzenie"}
+          data-testid="event-drawer"
+          onKeyDown={(e) => {
+            onKeyDown(e);
+            if (e.key === "Escape") {
+              e.stopPropagation();
+              requestClose();
+            }
+          }}
+          className="flex h-fit min-w-0 flex-col overflow-hidden rounded-lg border bg-background shadow-sm lg:h-full lg:min-h-0"
+        >
+          {header}
+          {scrollBody}
+          {footer}
+        </aside>
+      ) : (
+        <Dialog open={open} onOpenChange={(o) => !o && requestClose()}>
+          <DialogContent
+            onKeyDown={onKeyDown}
+            aria-describedby={undefined}
+            className={cn(
+              "flex h-[100dvh] max-h-[100dvh] w-full flex-col gap-0 overflow-hidden p-0",
+              "sm:h-auto sm:max-h-[92vh] sm:max-w-2xl sm:rounded-lg",
+              "motion-reduce:animate-none motion-reduce:transition-none"
+            )}
+          >
+            {header}
+            {scrollBody}
+            {footer}
+          </DialogContent>
+        </Dialog>
+      )}
 
       {/* Niezapisane zmiany */}
       <AlertDialog open={confirmClose} onOpenChange={setConfirmClose}>

@@ -379,16 +379,8 @@ export function CmaCameraOutages() {
   const summary = data?.summary;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-3">
       {!editable && <ReadOnlyBanner className="mb-4" />}
-
-      {/* Header */}
-      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <h1 className="text-3xl font-bold text-slate-900">CMA</h1>
-        <p className="text-slate-500">
-          Centrum monitorowania alarmów - aktualne braki obrazu z kamer
-        </p>
-      </div>
 
       {loading ? (
         <div className="text-center py-8">Ładowanie...</div>
@@ -464,39 +456,33 @@ export function CmaCameraOutages() {
           {summary && (
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
               <Card>
-                <CardHeader className="pb-2">
-                  <CardTitle className="flex items-center gap-2 text-sm font-medium text-slate-500">
+                <CardContent className="p-4">
+                  <CardTitle className="flex items-center gap-2 text-sm font-medium text-slate-500 mb-2">
                     <Building2 className="w-4 h-4" />
                     Obiekty z brakami
                   </CardTitle>
-                </CardHeader>
-                <CardContent>
                   <div className="text-2xl font-bold text-slate-900">
                     {nf(summary.objectsWithOutages)}
                   </div>
                 </CardContent>
               </Card>
               <Card>
-                <CardHeader className="pb-2">
-                  <CardTitle className="flex items-center gap-2 text-sm font-medium text-slate-500">
+                <CardContent className="p-4">
+                  <CardTitle className="flex items-center gap-2 text-sm font-medium text-slate-500 mb-2">
                     <CameraOff className="w-4 h-4" />
                     Kamery bez obrazu
                   </CardTitle>
-                </CardHeader>
-                <CardContent>
                   <div className="text-2xl font-bold text-slate-900">
                     {nf(summary.camerasOut)}
                   </div>
                 </CardContent>
               </Card>
               <Card>
-                <CardHeader className="pb-2">
-                  <CardTitle className="flex items-center gap-2 text-sm font-medium text-slate-500">
+                <CardContent className="p-4">
+                  <CardTitle className="flex items-center gap-2 text-sm font-medium text-slate-500 mb-2">
                     <Plus className="w-4 h-4" />
                     Przybyło
                   </CardTitle>
-                </CardHeader>
-                <CardContent>
                   <div className="text-2xl font-bold text-red-600">
                     {summary.newCameras > 0 ? "+" : ""}
                     {nf(summary.newCameras)}
@@ -512,13 +498,11 @@ export function CmaCameraOutages() {
                 </CardContent>
               </Card>
               <Card>
-                <CardHeader className="pb-2">
-                  <CardTitle className="flex items-center gap-2 text-sm font-medium text-slate-500">
+                <CardContent className="p-4">
+                  <CardTitle className="flex items-center gap-2 text-sm font-medium text-slate-500 mb-2">
                     <Minus className="w-4 h-4" />
                     Ustąpiło
                   </CardTitle>
-                </CardHeader>
-                <CardContent>
                   <div className="text-2xl font-bold text-green-600">
                     {summary.resolvedCameras > 0 ? "−" : ""}
                     {nf(summary.resolvedCameras)}
@@ -534,13 +518,11 @@ export function CmaCameraOutages() {
                 </CardContent>
               </Card>
               <Card>
-                <CardHeader className="pb-2">
-                  <CardTitle className="flex items-center gap-2 text-sm font-medium text-slate-500">
+                <CardContent className="p-4">
+                  <CardTitle className="flex items-center gap-2 text-sm font-medium text-slate-500 mb-2">
                     <AlertTriangle className="w-4 h-4" />
                     Obiekty całkiem bez obrazu
                   </CardTitle>
-                </CardHeader>
-                <CardContent>
                   <div
                     className={cn(
                       "text-2xl font-bold",

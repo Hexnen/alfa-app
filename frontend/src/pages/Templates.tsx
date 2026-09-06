@@ -21,6 +21,7 @@ const typeLabels: Record<CameraModelType, string> = {
   dome: "Kopułkowa",
   ptz: "PTZ",
   pano: "360°",
+  lpr: "LPR (tablice)",
 };
 
 export function Templates() {
@@ -96,37 +97,25 @@ export function Templates() {
     : models;
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-          <h1 className="text-3xl font-bold">Szablony</h1>
-          <p className="text-muted-foreground">
-            Modele kamer i szablony wyposażenia
-          </p>
+    <div className="space-y-3">
+      {!editable && <ReadOnlyBanner className="mb-4" />}
+
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="relative max-w-sm flex-1">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+          <Input
+            placeholder="Szukaj modelu…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="pl-10"
+          />
         </div>
         {editable && (
-          <Button onClick={() => setFormOpen(true)}>
+          <Button className="ml-auto" onClick={() => setFormOpen(true)}>
             <Plus className="h-4 w-4 mr-2" />
             Nowy model
           </Button>
         )}
-      </div>
-
-      {!editable && <ReadOnlyBanner className="mb-4" />}
-
-      <p className="text-sm text-muted-foreground">
-        Biblioteka standardowych modeli kamer i ich parametrów — używana przy
-        tworzeniu wycen oraz w Monitoring Designerze.
-      </p>
-
-      <div className="relative max-w-sm">
-        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-        <Input
-          placeholder="Szukaj modelu…"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          className="pl-10"
-        />
       </div>
 
       <Card>

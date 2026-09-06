@@ -18,6 +18,7 @@ import { eq, inArray, like, sql } from "drizzle-orm";
 import { db, schema } from "../src/db/index.js";
 import {
   distanceForObject,
+  estimateMinutes,
   geoCacheGet,
   geoCacheKey,
   geoCacheSet,
@@ -28,9 +29,11 @@ import {
   pruneGeoCache,
   routeCacheKey,
   routeDistanceKm,
+  routeMatrix,
   setGeoFetch,
   straightLineKm,
   GEO_CACHE_TTL_DAYS,
+  MAX_MATRIX_POINTS,
 } from "../src/lib/geo.js";
 import { COMPANY_FIELDS, COMPANY_FIELD_NAMES } from "../src/lib/company-config.js";
 import { deleteSetting, getSetting, setSetting } from "../src/lib/settings.js";
@@ -228,25 +231,62 @@ async function main() {
     fallback.method === "straight" && Math.abs(fallback.km - straightLineKm(OFFICE, target)) < 0.001,
     fallback
   );
+  ok(
+    "fallback ma czas z estymacji (minutesEstimated)",
+    fallback.minutes === estimateMinutes(fallback.km) && fallback.minutesEstimated === true,
+    fallback
+  );
+
+  // Estymacja czasu: minimum 1 min, monotoniczna, próg prędkości miejska/drogowa na 15 km
+  ok("estimateMinutes(0,3 km) ≥ 1 min", estimateMinutes(0.3) >= 1, estimateMinutes(0.3));
+  ok("estimateMinutes rośnie z dystansem", estimateMinutes(100) > estimateMinutes(10), [estimateMinutes(10), estimateMinutes(100)]);
+  ok(
+    "próg 15 km przełącza prędkość (35 → 60 km/h)",
+    estimateMinutes(14) === Math.round((14 / 35) * 60) && estimateMinutes(16) === Math.round((16 / 60) * 60),
+    [estimateMinutes(14), estimateMinutes(16)]
+  );
 
   const rk = routeCacheKey(OFFICE, target);
   cacheSet(rk, { km: 310.5, method: "route" });
   netCalls = 0;
   const cachedRoute = await routeDistanceKm(OFFICE, target);
   ok("trasa z cache: 310,5 km, method=route, bez sieci", cachedRoute.km === 310.5 && cachedRoute.method === "route" && cachedRoute.cached === true && netCalls === 0, { cachedRoute, netCalls });
+  // Wpis sprzed dodania czasu przejazdu ma samo { km, method } — km musi zostać nietknięte
+  // (liczą się z niego kwoty w realizacjach), a czas dochodzi z estymacji.
+  ok(
+    "stary wpis cache bez minut → km bez zmian + czas estymowany",
+    cachedRoute.minutes === estimateMinutes(310.5) && cachedRoute.minutesEstimated === true && netCalls === 0,
+    { cachedRoute, netCalls }
+  );
 
   const forcedStraight = await routeDistanceKm(OFFICE, target, { useRouting: false });
   ok("useRouting:false pomija cache trasy i liczy linią prostą", forcedStraight.method === "straight", forcedStraight);
 
   // OSRM z odpowiedzią → zapis do cache
   const other = { lat: 51.1079, lng: 17.0385 }; // Wrocław
-  setGeoFetch(jsonFetch({ code: "Ok", routes: [{ distance: 183_400 }] }));
+  setGeoFetch(jsonFetch({ code: "Ok", routes: [{ distance: 183_400, duration: 7_320 }] }));
   touchedKeys.add(routeCacheKey(OFFICE, other));
   const osrm = await routeDistanceKm(OFFICE, other);
   ok("OSRM 183 400 m → 183,4 km (method=route)", osrm.km === 183.4 && osrm.method === "route", osrm);
+  ok("OSRM 7 320 s → 122 min (czas nie jest estymowany)", osrm.minutes === 122 && osrm.minutesEstimated === false, osrm);
   setGeoFetch(offlineFetch);
   const osrmCached = await routeDistanceKm(OFFICE, other);
   ok("trasa OSRM odtworzona z cache po utracie sieci", osrmCached.km === 183.4 && osrmCached.cached === true, osrmCached);
+  ok("czas z OSRM przetrwał w cache", osrmCached.minutes === 122 && osrmCached.minutesEstimated === false, osrmCached);
+
+  // OSRM bez pola duration — czas estymujemy i NIE zapisujemy do cache'u
+  const third = { lat: 54.352, lng: 18.6466 }; // Gdańsk
+  const tk = routeCacheKey(OFFICE, third);
+  touchedKeys.add(tk);
+  setGeoFetch(jsonFetch({ code: "Ok", routes: [{ distance: 50_000 }] }));
+  const noDur = await routeDistanceKm(OFFICE, third);
+  setGeoFetch(offlineFetch);
+  ok("OSRM bez duration → czas estymowany z km", noDur.km === 50 && noDur.minutes === estimateMinutes(50) && noDur.minutesEstimated === true, noDur);
+  ok(
+    "estymacji nie zapisujemy do cache'u (zostaje samo km)",
+    (geoCacheGet<{ minutes?: number }>(tk) ?? {}).minutes === undefined,
+    geoCacheGet(tk)
+  );
 
   // -------------------------------------------------------------------------
   // 5. distanceForObject (biuro z ustawień)
@@ -269,6 +309,7 @@ async function main() {
   setSetting("company.km_source", "straight", null);
   const straight = await distanceForObject(object.id);
   ok("źródło „straight” liczy linią prostą (bez cache trasy)", !isGeoError(straight) && straight.method === "straight", straight);
+  ok("źródło „straight” zawsze estymuje czas", !isGeoError(straight) && straight.minutesEstimated === true && straight.minutes >= 1, straight);
 
   setSetting("company.km_source", "manual", null);
   const manual = await distanceForObject(object.id);
@@ -306,6 +347,128 @@ async function main() {
   db.update(schema.objects).set({ latitude: 50, longitude: 20 }).where(eq(schema.objects.id, lazy.id)).run();
   const manualPoint = await objectPoint(lazy.id);
   ok("ręcznie wpisane współrzędne mają pierwszeństwo", !isGeoError(manualPoint) && manualPoint.lat === 50, manualPoint);
+
+
+  // --- routeMatrix: macierz jednym zapytaniem /table -----------------------
+  // Punkty testowe: Szczecin, Lublin, Nowy Sącz — celowo INNE niż w testach wyżej,
+  // żeby blok był niezależny od par, które tamte testy zdążyły wrzucić do cache'u.
+  const P1 = { lat: 53.4285, lng: 14.5528 };
+  const P2 = { lat: 51.2465, lng: 22.5684 };
+  const P3 = { lat: 49.6218, lng: 20.6971 };
+  const trio = [P1, P2, P3];
+  for (const a of trio) for (const b of trio) if (a !== b) touchedKeys.add(routeCacheKey(a, b));
+
+  setGeoFetch(offlineFetch);
+  netCalls = 0;
+  const mCacheOnly = await routeMatrix(trio, { cacheOnly: true });
+  ok(
+    "routeMatrix cacheOnly bez wpisów: linia prosta, zero sieci",
+    netCalls === 0 && mCacheOnly.missing === 6 && mCacheOnly.method[0][1] === "straight" && mCacheOnly.km[0][0] === 0,
+    { netCalls, missing: mCacheOnly.missing }
+  );
+
+  // Odpowiedź OSRM: asymetryczna, z jedną parą nieosiągalną (null) — P2→P3.
+  const tableBody = {
+    code: "Ok",
+    distances: [
+      [0, 312570.8, 183000.0],
+      [311900.7, 0, null],
+      [184200.5, 295008.4, 0],
+    ],
+    durations: [
+      [0, 11329.8, 7200.0],
+      [11252.8, 0, null],
+      [7320.0, 11930.4, 0],
+    ],
+  };
+  setGeoFetch(jsonFetch(tableBody));
+  netCalls = 0;
+  const mFetched = await routeMatrix(trio);
+  ok("routeMatrix: JEDNO zapytanie na całą macierz", netCalls === 1, { netCalls });
+  ok(
+    "routeMatrix: km i minuty z OSRM (metry→km, sekundy→minuty)",
+    mFetched.km[0][1] === 312.6 && mFetched.minutes[0][1] === 189 && mFetched.method[0][1] === "route",
+    { km: mFetched.km[0][1], min: mFetched.minutes[0][1] }
+  );
+  ok(
+    "routeMatrix: para nieosiągalna (null) zostaje linią prostą",
+    mFetched.method[1][2] === "straight" && mFetched.missing === 1,
+    { method: mFetched.method[1][2], missing: mFetched.missing }
+  );
+  ok(
+    "routeMatrix: macierz jest asymetryczna",
+    mFetched.km[0][1] !== mFetched.km[1][0],
+    { ab: mFetched.km[0][1], ba: mFetched.km[1][0] }
+  );
+  ok("routeMatrix: przekątna zerowa", mFetched.km[1][1] === 0 && mFetched.minutes[2][2] === 0);
+
+  // Para nieosiągalna nie może trafić do cache'u (inaczej zatrulibyśmy ją na 90 dni).
+  ok(
+    "routeMatrix: para bez wyniku NIE trafia do cache'u",
+    geoCacheGet(routeCacheKey(P2, P3)) === null,
+    geoCacheGet(routeCacheKey(P2, P3))
+  );
+
+  // REGRESJA KLUCZOWA: klucze cache'u są wspólne z routeDistanceKm w obie strony.
+  netCalls = 0;
+  const shared = await routeDistanceKm(P1, P2, { cacheOnly: true });
+  ok(
+    "routeMatrix i routeDistanceKm dzielą cache par (zero sieci, method=route)",
+    netCalls === 0 && shared.method === "route" && shared.km === 312.6 && shared.cached === true,
+    { netCalls, shared }
+  );
+
+  // Drugie wywołanie idzie wyłącznie z cache'u.
+  netCalls = 0;
+  const mAgain = await routeMatrix(trio, { cacheOnly: true });
+  ok(
+    "routeMatrix: powtórka bez sieci, wartości z cache'u",
+    netCalls === 0 && mAgain.km[0][1] === 312.6 && mAgain.method[2][0] === "route",
+    { netCalls, km: mAgain.km[0][1] }
+  );
+
+  // Komplet w cache → cached: true (para P2→P3 wciąż jest luką, więc bierzemy samą parę P1/P2).
+  netCalls = 0;
+  const mPair = await routeMatrix([P1, P2], { cacheOnly: true });
+  ok(
+    "routeMatrix: komplet z cache'u → cached, missing 0",
+    netCalls === 0 && mPair.cached === true && mPair.missing === 0,
+    { netCalls, cached: mPair.cached, missing: mPair.missing }
+  );
+
+  // Błąd sieci → cała macierz linią prostą i NIC nie ląduje w cache'u.
+  const E1 = { lat: 54.352, lng: 18.6466 };
+  const E2 = { lat: 50.2649, lng: 19.0238 };
+  touchedKeys.add(routeCacheKey(E1, E2));
+  touchedKeys.add(routeCacheKey(E2, E1));
+  setGeoFetch(offlineFetch);
+  netCalls = 0;
+  const mErr = await routeMatrix([E1, E2]);
+  ok(
+    "routeMatrix: błąd sieci → linia prosta, nic w cache'u",
+    mErr.missing === 2 && mErr.method[0][1] === "straight" && geoCacheGet(routeCacheKey(E1, E2)) === null,
+    { missing: mErr.missing, cached: geoCacheGet(routeCacheKey(E1, E2)) }
+  );
+
+  // useRouting:false → tryb „linia prosta” z ustawień firmy, zero sieci.
+  setGeoFetch(jsonFetch(tableBody));
+  netCalls = 0;
+  const mStraight = await routeMatrix([E1, E2], { useRouting: false });
+  ok(
+    "routeMatrix: useRouting=false pomija OSRM",
+    netCalls === 0 && mStraight.method[0][1] === "straight",
+    { netCalls }
+  );
+
+  // Bezpiecznik na limit /table (demo OSRM: --max-table-size 100).
+  const many = Array.from({ length: MAX_MATRIX_POINTS + 1 }, (_, i) => ({ lat: 52 + i * 0.01, lng: 17 }));
+  netCalls = 0;
+  const mBig = await routeMatrix(many);
+  ok(
+    "routeMatrix: powyżej MAX_MATRIX_POINTS nie rusza sieci",
+    netCalls === 0 && mBig.method[0][1] === "straight",
+    { netCalls, points: many.length }
+  );
 
   // Brak adresu biura → czytelny komunikat
   // Kasujemy WSZYSTKIE pola adresu biura — wystarczy sam kod pocztowy w bazie,

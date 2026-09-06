@@ -67,6 +67,13 @@ export interface ContractorInput {
   email?: string;
   contactPerson?: string;
   notes?: string;
+  // Uzupełniane automatycznie z wykazu VAT MF (wyszukiwarka firm po NIP).
+  regon?: string;
+  krs?: string;
+  vatStatus?: string;
+  vatCheckedAt?: string;
+  /** Opiekun handlowy (null = bez przypisania). */
+  salespersonId?: number | null;
 }
 
 export interface ObjectInput {
@@ -74,12 +81,33 @@ export interface ObjectInput {
   name: string;
   address?: string;
   city?: string;
-  type: ObjectType;
+  /**
+   * @deprecated Zastąpione rozdzielnymi usługami niżej. Front go już nie wysyła;
+   * dopóki kolumna `objects.type` istnieje (NOT NULL), backend wylicza ją z usług.
+   */
+  type?: ObjectType;
+  /** USŁUGI OBIEKTU — niezależne, dowolny mix (patrz src/db/schema.ts). */
+  hasCameras?: boolean;
+  /** null = „usługa jest, ale kamer nikt nie policzył” — to NIE jest zero. */
+  cameraCount?: number | null;
+  hasSswin?: boolean;
+  hasVideoreception?: boolean;
+  hasOfi?: boolean;
   installationType: InstallationType;
   status?: ObjectStatus;
   department?: Department;
   monthlyValue?: number;
+  /** Dzierżawa sprzętu (zł netto/mies.) — druga część przychodu obok abonamentu. */
+  monthlyRental?: number | null;
+  /** Miesięczny koszt obsługi obiektu (null = nieuzupełniony, to NIE jest zero). */
+  monthlyCost?: number | null;
+  /** Jednorazowy koszt uruchomienia (null = nieuzupełniony, to NIE jest zero). */
+  setupCost?: number | null;
   notes?: string;
+  /** Handlowiec prowadzący obiekt (null = opiekun kontrahenta). */
+  salespersonId?: number | null;
+  /** Spółka grupy obsługująca obiekt (null = nieprzypisana). */
+  companyId?: number | null;
 }
 
 export interface ContractInput {
@@ -144,7 +172,17 @@ export interface OrderInput {
   contractorEmail?: string;
   contractorContactPerson?: string;
   // Additional object data when creating new
+  /**
+   * @deprecated Zastąpione usługami (`objectHas*`). Nadal akceptowane, bo publiczny
+   * formularz ZDW i starsi klienci API mogą je jeszcze przysyłać.
+   */
   objectType?: ObjectType;
+  /** Usługi zakładanego obiektu — patrz `ObjectInput` wyżej. */
+  objectHasCameras?: boolean;
+  objectCameraCount?: number | null;
+  objectHasSswin?: boolean;
+  objectHasVideoreception?: boolean;
+  objectHasOfi?: boolean;
   objectInstallationType?: InstallationType;
 }
 

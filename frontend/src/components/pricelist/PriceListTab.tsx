@@ -43,6 +43,7 @@ import {
   type Technician,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { pillClass, type PillTone } from "@/lib/calendar-labels";
 import { tip } from "@/components/ui/tooltip";
 
 const pln = new Intl.NumberFormat("pl-PL", {
@@ -64,9 +65,9 @@ const KIND_FILTER_LABEL: Record<KindFilter, string> = {
 };
 
 /** Kolor pigułki rodzaju — usługa i materiał mają się różnić na pierwszy rzut oka. */
-const KIND_BADGE: Record<PriceItemKind, string> = {
-  service: "bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300",
-  material: "bg-amber-100 text-amber-800 dark:bg-amber-500/15 dark:text-amber-300",
+const KIND_TONE: Record<PriceItemKind, PillTone> = {
+  service: "sky",
+  material: "amber",
 };
 
 const KIND_TIP: Record<PriceItemKind, string> = {
@@ -377,13 +378,23 @@ export function PriceListTab({ editable }: PriceListTabProps) {
                               {l.name}
                             </span>
                             {l.isDefault && (
-                              <span className="inline-flex shrink-0 items-center gap-1 rounded-md bg-amber-100 px-1.5 py-0.5 text-[11px] font-medium text-amber-700">
-                                <Star className="h-3 w-3" />
+                              <span
+                                className={pillClass("amber", {
+                                  compact: true,
+                                  className: "shrink-0",
+                                })}
+                              >
+                                <Star className="h-3 w-3" aria-hidden />
                                 główny
                               </span>
                             )}
                             {!l.active && (
-                              <span className="shrink-0 rounded-md bg-muted px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground">
+                              <span
+                                className={pillClass("muted", {
+                                  compact: true,
+                                  className: "shrink-0",
+                                })}
+                              >
                                 nieaktywny
                               </span>
                             )}
@@ -633,10 +644,7 @@ export function PriceListTab({ editable }: PriceListTabProps) {
                           <td className="px-3 py-2">
                             <span
                               data-testid={`price-kind-badge-${item.id}`}
-                              className={cn(
-                                "inline-flex rounded-md px-2 py-0.5 text-xs font-medium",
-                                KIND_BADGE[priceItemKind(item)]
-                              )}
+                              className={pillClass(KIND_TONE[priceItemKind(item)])}
                               {...tip(KIND_TIP[priceItemKind(item)])}
                             >
                               {PRICE_ITEM_KIND_LABEL[priceItemKind(item)]}

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  AlertTriangle,
   Archive,
   ArchiveRestore,
   ArrowLeftRight,
@@ -39,10 +40,16 @@ import {
   DOC_TYPE_META,
   WAREHOUSE_TYPE_META,
   fmtDate,
+  fmtPct,
+  fmtPln,
+  fmtPlnOrDash,
   fmtQty,
   totalStockFor,
   warehouseLabel,
 } from "@/components/warehouse/warehouseShared";
+import { fmtRelative, fmtTimestamp, pillClass } from "@/lib/calendar-labels";
+import { isPriceStale, priceAgeLabel } from "@/lib/price-age";
+import { tip } from "@/components/ui/tooltip";
 
 const alertError = (err: unknown, fallback: string) =>
   window.alert(err instanceof Error ? err.message : fallback);
@@ -56,17 +63,22 @@ export function Warehouse() {
   const [warehouses, setWarehouses] = useState<WarehouseDef[]>([]);
   const [stock, setStock] = useState<StockEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  // Narzut firmowy — formularz liczy z niego cenę sprzedaży na żywo. Lista bierze
+  // gotowe wartości z backendu, więc tutaj potrzebny jest tylko do podglądu.
+  const [warehouseMarkup, setWarehouseMarkup] = useState(0);
 
   const loadCore = useCallback(async () => {
     try {
-      const [itemsRes, whRes, stockRes] = await Promise.all([
+      const [itemsRes, whRes, stockRes, cfgRes] = await Promise.all([
         warehouseApi.getItems(true),
         warehouseApi.getWarehouses(),
         warehouseApi.getStock(),
+        warehouseApi.getPricingConfig(),
       ]);
       setItems(itemsRes.data || []);
       setWarehouses(whRes.data || []);
       setStock(stockRes.data || []);
+      setWarehouseMarkup(cfgRes.data?.warehouseMarkup ?? 0);
     } catch (err) {
       alertError(err, "Błąd wczytywania danych magazynu");
     } finally {
@@ -350,6 +362,18 @@ export function Warehouse() {
     [items]
   );
 
+  const manufacturers = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          items
+            .map((i) => (i.manufacturer || "").trim())
+            .filter((m): m is string => m.length > 0)
+        )
+      ).sort((a, b) => a.localeCompare(b, "pl")),
+    [items]
+  );
+
   const activeWarehouses = useMemo(
     () => warehouses.filter((w) => !w.isArchived),
     [warehouses]
@@ -420,34 +444,32 @@ export function Warehouse() {
     "flex h-10 rounded-md border border-input bg-background px-3 py-2 text-sm";
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       {!editable && <ReadOnlyBanner className="mb-4" />}
 
-      {/* Nagłówek + akcje główne */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-2xl font-bold">Magazyn</h1>
-        {editable && (
-          <div className="flex flex-wrap gap-2">
-            <Button onClick={() => openDocForm("PZ")}>
-              <PackagePlus className="mr-1 h-4 w-4" /> Przyjmij dostawę (PZ)
-            </Button>
-            <Button variant="outline" onClick={() => openDocForm("issue")}>
-              <PackageMinus className="mr-1 h-4 w-4" /> Wydaj
-            </Button>
-            <Button variant="outline" onClick={() => openDocForm("MM")}>
-              <ArrowLeftRight className="mr-1 h-4 w-4" /> Przesuń (MM)
-            </Button>
-          </div>
-        )}
-      </div>
-
       <Tabs value={tab} onValueChange={setTab}>
-        <TabsList>
-          <TabsTrigger value="stany">Stany</TabsTrigger>
-          <TabsTrigger value="dokumenty">Dokumenty</TabsTrigger>
-          <TabsTrigger value="towary">Towary</TabsTrigger>
-          <TabsTrigger value="magazyny">Magazyny</TabsTrigger>
-        </TabsList>
+        {/* Zakładki i akcje główne dzielą jeden rząd */}
+        <div className="flex flex-wrap items-center gap-3">
+          <TabsList>
+            <TabsTrigger value="stany">Stany</TabsTrigger>
+            <TabsTrigger value="dokumenty">Dokumenty</TabsTrigger>
+            <TabsTrigger value="towary">Towary</TabsTrigger>
+            <TabsTrigger value="magazyny">Magazyny</TabsTrigger>
+          </TabsList>
+          {editable && (
+            <div className="ml-auto flex flex-wrap gap-2">
+              <Button onClick={() => openDocForm("PZ")}>
+                <PackagePlus className="mr-1 h-4 w-4" /> Przyjmij dostawę (PZ)
+              </Button>
+              <Button variant="outline" onClick={() => openDocForm("issue")}>
+                <PackageMinus className="mr-1 h-4 w-4" /> Wydaj
+              </Button>
+              <Button variant="outline" onClick={() => openDocForm("MM")}>
+                <ArrowLeftRight className="mr-1 h-4 w-4" /> Przesuń (MM)
+              </Button>
+            </div>
+          )}
+        </div>
 
         {/* ------------------------------ STANY ------------------------------ */}
         <TabsContent value="stany" className="space-y-3">
@@ -496,6 +518,9 @@ export function Warehouse() {
                       <th className="px-3 py-2 text-right font-medium">
                         Stan łączny
                       </th>
+                      <th className="px-3 py-2 text-right font-medium">
+                        Wartość
+                      </th>
                       <th className="px-3 py-2 font-medium">Wg magazynów</th>
                       <th className="px-3 py-2 text-right font-medium">
                         Akcje
@@ -506,7 +531,7 @@ export function Warehouse() {
                     {loading ? (
                       <tr>
                         <td
-                          colSpan={6}
+                          colSpan={7}
                           className="px-3 py-8 text-center text-muted-foreground"
                         >
                           Ładowanie…
@@ -515,7 +540,7 @@ export function Warehouse() {
                     ) : stockRows.length === 0 ? (
                       <tr>
                         <td
-                          colSpan={6}
+                          colSpan={7}
                           className="px-3 py-8 text-center text-muted-foreground"
                         >
                           Brak towarów spełniających kryteria.
@@ -544,10 +569,22 @@ export function Warehouse() {
                                 {fmtQty(total)} {item.unit}
                               </span>
                               {low && (
-                                <span className="ml-2 rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700">
+                                <span className={pillClass("red", { className: "ml-2" })}>
                                   niski stan
                                 </span>
                               )}
+                            </td>
+                            <td
+                              className="px-3 py-2 text-right tabular-nums"
+                              title={
+                                item.purchasePrice != null
+                                  ? `${fmtQty(total)} × ${fmtPln(item.purchasePrice)} (cena zakupu)`
+                                  : "Towar nie ma ceny zakupu — wartości nie da się policzyć"
+                              }
+                            >
+                              {item.purchasePrice != null
+                                ? fmtPln(total * item.purchasePrice)
+                                : "—"}
                             </td>
                             <td className="px-3 py-2">
                               <div className="flex flex-wrap gap-1">
@@ -559,7 +596,9 @@ export function Warehouse() {
                                   entries.map((e) => (
                                     <span
                                       key={e.warehouseId}
-                                      className="rounded-full bg-muted px-2 py-0.5 text-xs"
+                                      className={pillClass("muted", {
+                                        className: "font-normal",
+                                      })}
                                     >
                                       {warehouseChipLabel(e.warehouseId)}:{" "}
                                       {fmtQty(e.quantity)}
@@ -704,14 +743,12 @@ export function Warehouse() {
                           >
                             <td className="px-3 py-2 font-medium">
                               {doc.docNumber || (
-                                <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700">
-                                  szkic
-                                </span>
+                                <span className={pillClass("neutral")}>szkic</span>
                               )}
                             </td>
                             <td className="px-3 py-2">
                               <span
-                                className={`rounded-full px-2 py-0.5 text-xs font-medium ${typeMeta.badge}`}
+                                className={pillClass(typeMeta.tone)}
                               >
                                 {doc.docType}
                               </span>
@@ -732,7 +769,7 @@ export function Warehouse() {
                             </td>
                             <td className="px-3 py-2">
                               <span
-                                className={`rounded-full px-2 py-0.5 text-xs font-medium ${statusMeta.badge}`}
+                                className={pillClass(statusMeta.tone)}
                               >
                                 {statusMeta.label}
                               </span>
@@ -782,11 +819,21 @@ export function Warehouse() {
                       <th className="px-3 py-2 font-medium">Nazwa</th>
                       <th className="px-3 py-2 font-medium">Kategoria</th>
                       <th className="px-3 py-2 font-medium">Jedn.</th>
-                      <th className="px-3 py-2 font-medium">Kod kreskowy</th>
+                      <th className="px-3 py-2 text-right font-medium">
+                        Zakup
+                      </th>
+                      <th className="px-3 py-2 text-right font-medium">
+                        Sprzedaż
+                      </th>
+                      <th className="px-3 py-2 text-right font-medium">
+                        Marża / narzut
+                      </th>
                       <th className="px-3 py-2 text-right font-medium">
                         Min. stan
                       </th>
                       <th className="px-3 py-2 font-medium">Oznaczenia</th>
+                      <th className="px-3 py-2 font-medium">Utworzył</th>
+                      <th className="px-3 py-2 font-medium">Zmienił</th>
                       {editable && (
                         <th className="px-3 py-2 text-right font-medium">
                           Akcje
@@ -798,7 +845,7 @@ export function Warehouse() {
                     {loading ? (
                       <tr>
                         <td
-                          colSpan={editable ? 8 : 7}
+                          colSpan={editable ? 12 : 11}
                           className="px-3 py-8 text-center text-muted-foreground"
                         >
                           Ładowanie…
@@ -807,95 +854,220 @@ export function Warehouse() {
                     ) : visibleItems.length === 0 ? (
                       <tr>
                         <td
-                          colSpan={editable ? 8 : 7}
+                          colSpan={editable ? 12 : 11}
                           className="px-3 py-8 text-center text-muted-foreground"
                         >
                           Kartoteka towarów jest pusta.
                         </td>
                       </tr>
                     ) : (
-                      visibleItems.map((item) => (
-                        <tr
-                          key={item.id}
-                          className={`border-b last:border-0 ${
-                            item.isArchived ? "opacity-60" : ""
-                          }`}
-                        >
-                          <td className="px-3 py-2">{photoThumb(item)}</td>
-                          <td className="px-3 py-2">
-                            <div className="font-medium">{item.name}</div>
-                            {item.sku && (
-                              <div className="text-xs text-muted-foreground">
-                                {item.sku}
-                              </div>
-                            )}
-                          </td>
-                          <td className="px-3 py-2 text-muted-foreground">
-                            {item.category || "—"}
-                          </td>
-                          <td className="px-3 py-2">{item.unit}</td>
-                          <td className="px-3 py-2 text-muted-foreground">
-                            {item.barcode || "—"}
-                          </td>
-                          <td className="px-3 py-2 text-right">
-                            {item.minStock != null
-                              ? fmtQty(item.minStock)
-                              : "—"}
-                          </td>
-                          <td className="px-3 py-2">
-                            <div className="flex flex-wrap gap-1">
-                              {item.isAsset && (
-                                <span className="rounded-full bg-violet-100 px-2 py-0.5 text-xs font-medium text-violet-700">
-                                  zwrotny
-                                </span>
-                              )}
-                              {item.isArchived && (
-                                <span className="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
-                                  archiwum
-                                </span>
-                              )}
-                            </div>
-                          </td>
-                          {editable && (
+                      visibleItems.map((item) => {
+                        /* Towar bez żadnej ceny NIE jest przeterminowany: brak
+                           kwoty to nie jest stara kwota, nie ma czego pilnować
+                           ani czym straszyć. Alarm zapalamy dopiero wtedy, gdy
+                           cena istnieje, a stempel `priceUpdatedAt` mówi, że
+                           nikt jej nie potwierdzał od pół roku (lub go nie ma —
+                           to reguła z lib/price-age.ts). */
+                        const hasPrice =
+                          item.purchasePrice !== null ||
+                          item.effectiveSalePrice !== null;
+                        const priceStale =
+                          hasPrice && isPriceStale(item.priceUpdatedAt, "warehouse");
+                        const priceTip = priceStale
+                          ? tip(priceAgeLabel(item.priceUpdatedAt, "warehouse"))
+                          : null;
+                        // Czerwień tylko na komórce, która faktycznie pokazuje
+                        // kwotę — kreska „brak ceny" nie ma się co czerwienić.
+                        const staleCell = (value: number | null) =>
+                          priceStale && value !== null
+                            ? "font-medium text-red-600"
+                            : "";
+                        return (
+                          <tr
+                            key={item.id}
+                            className={`border-b last:border-0 ${
+                              item.isArchived ? "opacity-60" : ""
+                            }`}
+                          >
+                            <td className="px-3 py-2">{photoThumb(item)}</td>
                             <td className="px-3 py-2">
-                              <div className="flex justify-end gap-1">
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  title="Edytuj"
-                                  onClick={() => {
-                                    setEditingItem(item);
-                                    setItemFormOpen(true);
-                                  }}
+                              <div className="font-medium">{item.name}</div>
+                              {(item.sku || item.manufacturer) && (
+                                <div className="text-xs text-muted-foreground">
+                                  {[item.manufacturer, item.sku]
+                                    .filter(Boolean)
+                                    .join(" · ")}
+                                </div>
+                              )}
+                            </td>
+                            <td className="px-3 py-2 text-muted-foreground">
+                              {item.category || "—"}
+                            </td>
+                            <td className="px-3 py-2">{item.unit}</td>
+                            <td
+                              className={`px-3 py-2 text-right tabular-nums ${staleCell(
+                                item.purchasePrice
+                              )}`}
+                            >
+                              {priceStale && item.purchasePrice !== null ? (
+                                <span
+                                  className="inline-flex items-center gap-1"
+                                  {...priceTip}
                                 >
-                                  <Pencil className="h-4 w-4" />
-                                </Button>
-                                {item.isArchived ? (
-                                  <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    title="Przywróć z archiwum"
-                                    onClick={() => handleItemRestore(item)}
+                                  <AlertTriangle className="h-3 w-3" />
+                                  {fmtPlnOrDash(item.purchasePrice)}
+                                </span>
+                              ) : (
+                                fmtPlnOrDash(item.purchasePrice)
+                              )}
+                            </td>
+                            {/* nowrap: z ikoną ostrzeżenia kwota i plakietka
+                                „auto" przestają się mieścić w jednej linii
+                                i komórka rozjeżdża się na dwa wiersze. */}
+                            <td
+                              className={`whitespace-nowrap px-3 py-2 text-right tabular-nums ${staleCell(
+                                item.effectiveSalePrice
+                              )}`}
+                            >
+                              {priceStale && item.effectiveSalePrice !== null ? (
+                                <span
+                                  className="inline-flex items-center gap-1"
+                                  {...priceTip}
+                                >
+                                  <AlertTriangle className="h-3 w-3" />
+                                  {fmtPlnOrDash(item.effectiveSalePrice)}
+                                </span>
+                              ) : (
+                                fmtPlnOrDash(item.effectiveSalePrice)
+                              )}
+                              {item.salePriceAuto &&
+                                item.effectiveSalePrice !== null && (
+                                  <span
+                                    className="ml-1 rounded bg-muted px-1 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground"
+                                    title={`Liczona z narzutu ${warehouseMarkup}% — towar nie ma własnej ceny`}
                                   >
-                                    <ArchiveRestore className="mr-1 h-4 w-4" />
-                                    Przywróć
-                                  </Button>
-                                ) : (
-                                  <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    title="Archiwizuj"
-                                    className="text-muted-foreground hover:text-destructive"
-                                    onClick={() => handleItemArchive(item)}
-                                  >
-                                    <Archive className="h-4 w-4" />
-                                  </Button>
+                                    auto
+                                  </span>
+                                )}
+                            </td>
+                            <td
+                              className="px-3 py-2 text-right tabular-nums"
+                              title={
+                                item.marginAmount !== null
+                                  ? `Zysk ${fmtPln(item.marginAmount)} na ${item.unit}`
+                                  : "Brak ceny zakupu — marży nie da się policzyć"
+                              }
+                            >
+                              {item.marginPct !== null ? (
+                                <>
+                                  {fmtPct(item.marginPct)}
+                                  <span className="text-muted-foreground">
+                                    {" / "}
+                                    {fmtPct(item.markupPct)}
+                                  </span>
+                                </>
+                              ) : (
+                                "—"
+                              )}
+                            </td>
+                            <td className="px-3 py-2 text-right">
+                              {item.minStock != null
+                                ? fmtQty(item.minStock)
+                                : "—"}
+                            </td>
+                            <td className="px-3 py-2">
+                              <div className="flex flex-wrap gap-1">
+                                {item.isAsset && (
+                                  <span className={pillClass("violet")}>zwrotny</span>
+                                )}
+                                {item.isArchived && (
+                                  <span className={pillClass("muted")}>archiwum</span>
                                 )}
                               </div>
                             </td>
-                          )}
-                        </tr>
-                      ))
+                            {/* Autor i data w jednej kolumnie — dokładnie ten sam
+                                układ co w tabeli ofert, żeby „kto i kiedy" czytało
+                                się tak samo w obu modułach. Pełny znacznik czasu
+                                siedzi w dymku, bo „2 dni temu" czyta się szybciej
+                                niż „30.08.2026 14:12". */}
+                            <td className="px-3 py-2 text-xs">
+                              <div>
+                                {item.createdByLabel || (
+                                  <span className="text-muted-foreground">—</span>
+                                )}
+                              </div>
+                              <div
+                                className="whitespace-nowrap text-muted-foreground"
+                                {...tip(fmtTimestamp(item.createdAt))}
+                              >
+                                {fmtRelative(item.createdAt)}
+                              </div>
+                            </td>
+                            <td className="px-3 py-2 text-xs">
+                              {item.updatedAt && item.updatedAt !== item.createdAt ? (
+                                <>
+                                  <div>
+                                    {item.updatedByLabel || (
+                                      <span className="text-muted-foreground">—</span>
+                                    )}
+                                  </div>
+                                  <div
+                                    className="whitespace-nowrap text-muted-foreground"
+                                    {...tip(fmtTimestamp(item.updatedAt))}
+                                  >
+                                    {fmtRelative(item.updatedAt)}
+                                  </div>
+                                </>
+                              ) : (
+                                <span
+                                  className="text-muted-foreground"
+                                  {...tip("Kartoteka nie była zmieniana od utworzenia")}
+                                >
+                                  —
+                                </span>
+                              )}
+                            </td>
+                            {editable && (
+                              <td className="px-3 py-2">
+                                <div className="flex justify-end gap-1">
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    title="Edytuj"
+                                    onClick={() => {
+                                      setEditingItem(item);
+                                      setItemFormOpen(true);
+                                    }}
+                                  >
+                                    <Pencil className="h-4 w-4" />
+                                  </Button>
+                                  {item.isArchived ? (
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      title="Przywróć z archiwum"
+                                      onClick={() => handleItemRestore(item)}
+                                    >
+                                      <ArchiveRestore className="mr-1 h-4 w-4" />
+                                      Przywróć
+                                    </Button>
+                                  ) : (
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      title="Archiwizuj"
+                                      className="text-muted-foreground hover:text-destructive"
+                                      onClick={() => handleItemArchive(item)}
+                                    >
+                                      <Archive className="h-4 w-4" />
+                                    </Button>
+                                  )}
+                                </div>
+                              </td>
+                            )}
+                          </tr>
+                        );
+                      })
                     )}
                   </tbody>
                 </table>
@@ -980,7 +1152,11 @@ export function Warehouse() {
                             <td className="px-3 py-2 font-medium">
                               {wh.name}
                               {wh.isArchived && (
-                                <span className="ml-2 rounded-full bg-muted px-2 py-0.5 text-xs font-normal text-muted-foreground">
+                                <span
+                                  className={pillClass("muted", {
+                                    className: "ml-2 font-normal",
+                                  })}
+                                >
                                   archiwum
                                 </span>
                               )}
@@ -990,7 +1166,7 @@ export function Warehouse() {
                             </td>
                             <td className="px-3 py-2">
                               <span
-                                className={`rounded-full px-2 py-0.5 text-xs font-medium ${typeMeta.badge}`}
+                                className={pillClass(typeMeta.tone)}
                               >
                                 {typeMeta.label}
                               </span>
@@ -1094,6 +1270,8 @@ export function Warehouse() {
           onSubmit={handleItemSubmit}
           item={editingItem}
           categories={categories}
+          manufacturers={manufacturers}
+          warehouseMarkup={warehouseMarkup}
         />
       )}
 

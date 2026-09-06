@@ -94,7 +94,7 @@ export function PersonaSection({
         error={errors.customInstructions}
         description={`Stałe zasady, których asystent ma się trzymać w każdej rozmowie (np. preferowane godziny, czego nie planować). Dopisywane do promptu po zapisie. Użyte: ${(val("customInstructions") ?? "").length}/8000.`}
       >
-        <Textarea id="f-customInstructions" rows={6} value={val("customInstructions") ?? ""} placeholder="np. Zawsze proponuj serwisy w godzinach 8–14. Nie planuj wizji lokalnych w piątki." maxLength={8000} onChange={(e) => setField("customInstructions", e.target.value)} className="font-mono text-xs" />
+        <Textarea id="f-customInstructions" rows={6} value={val("customInstructions") ?? ""} placeholder="np. Zawsze proponuj serwisy w godzinach 8–14. Nie planuj wizji w piątki." maxLength={8000} onChange={(e) => setField("customInstructions", e.target.value)} className="font-mono text-xs" />
       </Field>
 
       <div className="rounded-md border">

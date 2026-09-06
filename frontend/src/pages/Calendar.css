@@ -22,6 +22,19 @@
   --cal-konserwacja: 173 80% 40%;    /* teal-500 */
   --cal-urlop: 350 89% 60%;          /* rose-500 */
   --cal-overdue: 0 84% 60%;          /* red-500 */
+
+  /*
+   * Pojazdy planera trasy — OSOBNA paleta, celowo z innej rodziny niż --cal-<typ>.
+   * Zasada pliku („kolor = typ wydarzenia") zostaje nienaruszona: kolor pojazdu rysuje
+   * wyłącznie OBRYS pinezki i LINIĘ trasy, nigdy wypełnienia, i zawsze stoi obok litery
+   * pojazdu (A/B/C) — sam kolor niczego nie koduje.
+   */
+  --cal-veh-1: 221 83% 53%;          /* blue-600 */
+  --cal-veh-2: 271 81% 56%;          /* purple-600 */
+  --cal-veh-3: 187 92% 40%;          /* cyan-600 */
+  --cal-veh-4: 330 81% 55%;          /* pink-600 */
+  --cal-veh-5: 84 81% 40%;           /* lime-600 */
+  --cal-veh-6: 20 90% 48%;           /* orange-700 */
 }
 .alfa-calendar {
   min-width: 0;
@@ -39,6 +52,13 @@
   --cal-konserwacja: 173 70% 50%;
   --cal-urlop: 350 89% 70%;
   --cal-overdue: 0 84% 68%;
+
+  --cal-veh-1: 217 91% 68%;
+  --cal-veh-2: 270 95% 75%;
+  --cal-veh-3: 187 85% 58%;
+  --cal-veh-4: 330 81% 70%;
+  --cal-veh-5: 84 70% 58%;
+  --cal-veh-6: 24 94% 63%;
 }
 
 .alfa-calendar .fc {
@@ -292,6 +312,43 @@
   cursor: default;
 }
 
+/*
+ * Pas dojazdu: od godziny wyjazdu do początku wydarzenia, w kolumnie jego dnia.
+ * Pokazywany wyłącznie pod kursorem (hover na kafelku), więc nie może przechwytywać
+ * myszy — inaczej sam by się chował, zasłaniając wydarzenie pod spodem.
+ */
+.cal-travel-band {
+  position: fixed;
+  z-index: 20;
+  pointer-events: none;
+  border-top: 2px dashed hsl(var(--primary));
+  background: linear-gradient(
+    to bottom,
+    hsl(var(--primary) / 0.12),
+    hsl(var(--primary) / 0.04)
+  );
+}
+/* Pas urwany u góry — etykieta schodzi pod linię, żeby nie wychodzić poza siatkę. */
+.cal-travel-band[data-clipped="true"] .cal-travel-band-label {
+  transform: none;
+  top: 3px;
+}
+.cal-travel-band-label {
+  position: absolute;
+  top: 0;
+  left: 6px;
+  transform: translateY(-50%);
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid hsl(var(--primary) / 0.45);
+  background: hsl(var(--background));
+  color: hsl(var(--primary));
+  font-size: 0.62rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 /* Własna treść wydarzenia (eventContent) */
 .alfa-calendar .cal-ev {
   display: flex;
@@ -352,6 +409,44 @@
   white-space: nowrap;
   width: 100%;
 }
+/*
+ * Wąskie kafelki (kilka wydarzeń równolegle dzieli slot na kolumny): zamiast ściskać
+ * wszystko, kolejno chowamy to, co najmniej istotne — podtytuł, znaczniki, w skrajności
+ * godzinę. Zapytania kontenerowe, bo o szerokości decyduje kafelek, nie okno.
+ */
+.alfa-calendar .fc-timegrid-event .cal-ev {
+  container-type: inline-size;
+}
+@container (max-width: 150px) {
+  .alfa-calendar .fc-timegrid-event .cal-ev-sub {
+    display: none;
+  }
+}
+@container (max-width: 115px) {
+  .alfa-calendar .fc-timegrid-event .cal-ev-mark {
+    display: none;
+  }
+}
+@container (max-width: 100px) {
+  .alfa-calendar .fc-timegrid-event .cal-ev-time,
+  .alfa-calendar .fc-timegrid-event .cal-ev-icon {
+    display: none;
+  }
+  .alfa-calendar .fc-timegrid-event .cal-ev {
+    padding-left: 3px;
+    padding-right: 3px;
+  }
+  /* Cała wysokość kafelka idzie na tytuł — lepiej cztery krótkie wiersze niż „Mon… szaf…”. */
+  .alfa-calendar .fc-timegrid-event .cal-ev-title {
+    -webkit-line-clamp: 4;
+    font-size: 0.66rem;
+    line-height: 1.15;
+    /* Bez tego długie słowa („teletechnicznej”) urywają się wielokropkiem w każdym
+       wierszu zamiast przechodzić do następnego. */
+    overflow-wrap: anywhere;
+  }
+}
+
 /* Krótkie eventy (30 min) — jeden wiersz, bez podtytułu */
 .alfa-calendar .fc-timegrid-event-short .cal-ev-sub {
   display: none;
@@ -635,7 +730,8 @@
 
 /* ---- Tablica ---- */
 .alfa-board-col-body {
-  max-height: calc(100vh - 21rem);
+  /* Bez nagłówka strony (tytuł żyje w menu) kolumny sięgają wyżej. */
+  max-height: calc(100vh - 17rem);
   min-height: 8rem;
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -643,7 +739,7 @@
 }
 @media (max-width: 767px) {
   .alfa-board-col-body {
-    max-height: calc(100vh - 17rem);
+    max-height: calc(100vh - 13rem);
   }
 }
 
@@ -748,4 +844,397 @@
   .alfa-calendar .fc-list-event-title {
     overflow-wrap: anywhere;
   }
+}
+
+
+/* ==========================================================================
+   Planer trasy (widok „Trasa")
+
+   Układ: mapa po lewej, oś czasu po prawej. Oś czasu jest pełnym tekstowym
+   odpowiednikiem mapy — mapa jest z natury nieczytelna dla czytnika ekranu,
+   więc żadna informacja nie może istnieć wyłącznie na niej.
+
+   Stany (kłódka, spóźnienie, postój, propozycja) kodujemy IKONĄ I TEKSTEM,
+   nie samym kolorem — tak jak reszta tego pliku.
+   ========================================================================== */
+
+.alfa-calendar .cal-route {
+  gap: 0.75rem;
+}
+
+/* Mapa: w trybie „fit" kontener zmienia wysokość, dlatego Leaflet dostaje
+   ResizeObserver po stronie komponentu — tu tylko ramy. */
+.alfa-calendar .cal-route-map-wrap {
+  position: relative;
+  min-width: 0;
+  border: 1px solid hsl(var(--border));
+  border-radius: calc(var(--radius) - 2px);
+  overflow: hidden;
+  background: hsl(var(--muted) / 0.35);
+}
+.alfa-calendar .cal-route-map {
+  height: 100%;
+  width: 100%;
+}
+
+/* Stała informacja, że linie są schematem — bez niej wyglądają jak przebieg dróg. */
+.alfa-calendar .cal-route-map-note {
+  position: absolute;
+  left: 0.5rem;
+  bottom: 0.5rem;
+  z-index: 500;
+  padding: 0.15rem 0.4rem;
+  border-radius: 0.25rem;
+  background: hsl(var(--background) / 0.85);
+  color: hsl(var(--muted-foreground));
+  font-size: 0.7rem;
+  pointer-events: none;
+}
+
+.alfa-calendar .cal-route-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  min-width: 0;
+}
+
+.alfa-calendar .cal-route-notice,
+.alfa-calendar .cal-route-note,
+.alfa-calendar .cal-route-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+  padding: 0.4rem 0.55rem;
+  border-radius: calc(var(--radius) - 4px);
+  font-size: 0.8rem;
+  line-height: 1.35;
+}
+.alfa-calendar .cal-route-notice {
+  border: 1px dashed hsl(var(--border));
+  background: hsl(var(--muted) / 0.5);
+  color: hsl(var(--muted-foreground));
+}
+.alfa-calendar .cal-route-note {
+  background: hsl(var(--muted) / 0.4);
+  color: hsl(var(--muted-foreground));
+}
+.alfa-calendar .cal-route-error {
+  background: hsl(var(--cal-overdue) / 0.12);
+  color: hsl(var(--cal-overdue));
+}
+
+.alfa-calendar .cal-route-summary {
+  padding: 0.55rem 0.65rem;
+  border: 1px solid hsl(var(--border));
+  border-radius: calc(var(--radius) - 2px);
+  background: hsl(var(--card));
+}
+
+/* --- Pojazd --- */
+.alfa-calendar .cal-route-vehicle {
+  border: 1px solid hsl(var(--border));
+  /* Jedyne miejsce, gdzie kolor pojazdu jest widoczny w panelu: pasek przy krawędzi,
+     zawsze obok litery pojazdu w nagłówku. */
+  border-left: 3px solid hsl(var(--veh));
+  border-radius: calc(var(--radius) - 2px);
+  padding: 0.55rem 0.65rem;
+  background: hsl(var(--card));
+}
+.alfa-calendar .cal-route-vehicle-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.alfa-calendar .cal-route-vehicle-letter {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.4rem;
+  height: 1.4rem;
+  border-radius: 0.3rem;
+  border: 1.5px solid hsl(var(--veh));
+  color: hsl(var(--veh));
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+.alfa-calendar .cal-route-vehicle-name {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  font-weight: 600;
+  font-size: 0.875rem;
+  color: inherit;
+}
+.alfa-calendar .cal-route-vehicle-name:focus-visible {
+  outline: 2px solid hsl(var(--ring));
+  outline-offset: 2px;
+  border-radius: 0.2rem;
+}
+.alfa-calendar .cal-route-vehicle-total {
+  margin-top: 0.4rem;
+  font-size: 0.8rem;
+  color: hsl(var(--muted-foreground));
+}
+
+.alfa-calendar .cal-route-crew {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin: 0.35rem 0;
+  font-size: 0.75rem;
+}
+.alfa-calendar .cal-route-crew-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.1rem 0.35rem;
+  border: 1px solid hsl(var(--border));
+  border-radius: 999px;
+  background: hsl(var(--muted) / 0.5);
+}
+.alfa-calendar .cal-route-crew-chip select {
+  border: 0;
+  background: transparent;
+  font-size: 0.7rem;
+  color: hsl(var(--muted-foreground));
+}
+
+.alfa-calendar .cal-route-order-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.35rem;
+  font-size: 0.72rem;
+}
+.alfa-calendar .cal-route-layer {
+  color: hsl(var(--muted-foreground));
+}
+/* Ręczna zmiana kolejności musi być widoczna — inaczej użytkownik nie wie,
+   dlaczego „Optymalizuj" nic nie zmienia. */
+.alfa-calendar .cal-route-layer.is-manual {
+  color: hsl(var(--foreground));
+  font-weight: 600;
+}
+.alfa-calendar .cal-route-layer.is-manual::before {
+  content: "● ";
+}
+
+.alfa-calendar .cal-route-proposal {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.4rem 0.55rem;
+  margin-bottom: 0.4rem;
+  border: 1px dashed hsl(var(--border));
+  border-radius: calc(var(--radius) - 4px);
+  font-size: 0.8rem;
+}
+
+/* --- Oś czasu --- */
+.alfa-calendar .cal-route-timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.alfa-calendar .cal-route-edge {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+  color: hsl(var(--muted-foreground));
+}
+.alfa-calendar .cal-route-depart {
+  margin-left: auto;
+  border: 1px solid hsl(var(--border));
+  border-radius: 0.25rem;
+  background: transparent;
+  font-size: 0.7rem;
+  padding: 0 0.2rem;
+  color: inherit;
+}
+.alfa-calendar .cal-route-leg {
+  padding: 0.15rem 0 0.15rem 1.1rem;
+  font-size: 0.72rem;
+  color: hsl(var(--muted-foreground));
+}
+.alfa-calendar .cal-route-stop {
+  padding: 0.15rem 0;
+}
+.alfa-calendar .cal-route-stop-head {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.8rem;
+}
+.alfa-calendar .cal-route-no {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.15rem;
+  height: 1.15rem;
+  flex: none;
+  border-radius: 999px;
+  background: hsl(var(--muted));
+  font-size: 0.65rem;
+  font-weight: 700;
+}
+.alfa-calendar .cal-route-title {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.alfa-calendar .cal-route-title:hover {
+  text-decoration: underline;
+}
+.alfa-calendar .cal-route-lock,
+.alfa-calendar .cal-route-move button {
+  color: hsl(var(--muted-foreground));
+  padding: 0.1rem;
+  border-radius: 0.2rem;
+}
+.alfa-calendar .cal-route-lock[aria-pressed="true"] {
+  color: hsl(var(--foreground));
+}
+.alfa-calendar .cal-route-move {
+  display: inline-flex;
+  gap: 0.1rem;
+}
+.alfa-calendar .cal-route-move button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.alfa-calendar .cal-route-lock:focus-visible,
+.alfa-calendar .cal-route-move button:focus-visible,
+.alfa-calendar .cal-route-title:focus-visible {
+  outline: 2px solid hsl(var(--ring));
+  outline-offset: 1px;
+}
+
+/* Propozycja godziny to NIE jest stan zapisany — przerywana ramka i kursywa
+   celowo odróżniają ją od wszystkich badge'y statusów. */
+.alfa-calendar .cal-route-badge-proposal,
+.alfa-calendar .cal-route-badge-late,
+.alfa-calendar .cal-route-badge-idle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-left: 1.45rem;
+  font-size: 0.7rem;
+}
+.alfa-calendar .cal-route-badge-proposal {
+  padding: 0.05rem 0.3rem;
+  border: 1px dashed hsl(var(--muted-foreground) / 0.6);
+  border-radius: 0.25rem;
+  font-style: italic;
+  color: hsl(var(--muted-foreground));
+}
+.alfa-calendar .cal-route-badge-late {
+  color: hsl(var(--cal-overdue));
+  font-weight: 600;
+}
+.alfa-calendar .cal-route-badge-idle {
+  color: hsl(var(--muted-foreground));
+}
+
+.alfa-calendar .cal-route-overflow,
+.alfa-calendar .cal-route-warnings,
+.alfa-calendar .cal-route-offroute {
+  padding: 0.45rem 0.6rem;
+  border: 1px solid hsl(var(--border));
+  border-radius: calc(var(--radius) - 4px);
+  font-size: 0.78rem;
+}
+.alfa-calendar .cal-route-overflow h4,
+.alfa-calendar .cal-route-warnings h4 {
+  font-weight: 600;
+  margin-bottom: 0.2rem;
+}
+.alfa-calendar .cal-route-overflow ul,
+.alfa-calendar .cal-route-warnings ul,
+.alfa-calendar .cal-route-offroute ul {
+  list-style: disc;
+  padding-left: 1.1rem;
+  color: hsl(var(--muted-foreground));
+}
+.alfa-calendar .cal-route-warnings {
+  border-color: hsl(var(--cal-overdue) / 0.4);
+}
+
+/* --- Pinezki na mapie (renderowane przez Leaflet poza .alfa-calendar) --- */
+.cal-route-pin-wrap {
+  background: transparent;
+  border: 0;
+}
+.cal-route-pin {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 999px;
+  /* Wypełnienie = typ wydarzenia, obrys = pojazd. */
+  background: var(--pin-fill, #64748b);
+  border: 3px solid var(--pin-ring, #2563eb);
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.35);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+}
+.cal-route-pin.is-active {
+  transform: scale(1.15);
+}
+.cal-route-pin-office {
+  background: #0f172a;
+  border-color: #e2e8f0;
+  width: 26px;
+  height: 26px;
+  font-size: 14px;
+}
+.cal-route-pin-lock {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  display: flex;
+  padding: 1px;
+  border-radius: 999px;
+  background: #fff;
+  color: #0f172a;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cal-route-pin.is-active {
+    transform: none;
+  }
+}
+
+/* Ramy dnia: trasy po kilkaset km nie mieszczą się w zwykłych godzinach pracy,
+   więc okno musi być regulowane, a nie zaszyte w kodzie. */
+.alfa-calendar .cal-route-window {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  font-size: 0.75rem;
+  color: hsl(var(--muted-foreground));
+}
+.alfa-calendar .cal-route-window input {
+  border: 1px solid hsl(var(--border));
+  border-radius: 0.25rem;
+  background: transparent;
+  padding: 0 0.2rem;
+  color: hsl(var(--foreground));
+}
+.alfa-calendar .cal-route-window-hint {
+  flex-basis: 100%;
+  font-size: 0.7rem;
+}
+.alfa-calendar .cal-route-empty {
+  font-size: 0.78rem;
+  color: hsl(var(--muted-foreground));
+  font-style: italic;
 }

@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   Dialog,
@@ -33,6 +32,7 @@ import {
   type MonitoredObjectChange,
   type ObjectImport,
 } from "@/lib/api";
+import { pillClass, type PillTone } from "@/lib/calendar-labels";
 
 // Etykiety pól obiektu (klucz z API -> nagłówek raportu)
 const FIELD_LABELS: Record<string, string> = {
@@ -79,12 +79,12 @@ const FIELD_LABELS: Record<string, string> = {
 
 const CHANGE_META: Record<
   MonitoredObjectChange["changeType"],
-  { label: string; badge: string }
+  { label: string; tone: PillTone }
 > = {
-  created: { label: "Dodany", badge: "bg-emerald-100 text-emerald-700" },
-  updated: { label: "Zmiana", badge: "bg-sky-100 text-sky-700" },
-  removed: { label: "Usunięty z raportu", badge: "bg-red-100 text-red-700" },
-  restored: { label: "Przywrócony", badge: "bg-amber-100 text-amber-700" },
+  created: { label: "Dodany", tone: "emerald" },
+  updated: { label: "Zmiana", tone: "sky" },
+  removed: { label: "Usunięty z raportu", tone: "red" },
+  restored: { label: "Przywrócony", tone: "amber" },
 };
 
 // Pola pokazywane w szczegółach obiektu (kolejność wyświetlania)
@@ -412,13 +412,9 @@ export function TechnicalObjects() {
                     </TableCell>
                     <TableCell>
                       {obj.active ? (
-                        <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100">
-                          Aktywny
-                        </Badge>
+                        <span className={pillClass("emerald")}>Aktywny</span>
                       ) : (
-                        <Badge className="bg-red-100 text-red-700 hover:bg-red-100">
-                          Usunięty
-                        </Badge>
+                        <span className={pillClass("red")}>Usunięty</span>
                       )}
                     </TableCell>
                   </TableRow>
@@ -554,11 +550,13 @@ export function TechnicalObjects() {
                         key={change.id}
                         className="flex items-start gap-3 rounded-md border p-2 text-sm"
                       >
-                        <Badge
-                          className={`${CHANGE_META[change.changeType].badge} hover:${CHANGE_META[change.changeType].badge} shrink-0`}
+                        <span
+                          className={pillClass(CHANGE_META[change.changeType].tone, {
+                            className: "shrink-0",
+                          })}
                         >
                           {CHANGE_META[change.changeType].label}
-                        </Badge>
+                        </span>
                         <div className="min-w-0 flex-1">{changeSummary(change)}</div>
                         <span className="shrink-0 whitespace-nowrap text-xs text-muted-foreground">
                           {change.createdAt}

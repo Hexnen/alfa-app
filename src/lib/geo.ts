@@ -26,12 +26,25 @@ import { getCompanyConfig, officeAddressLine, type KmSource } from "./company-co
 export const GEO_CACHE_TTL_DAYS = 90;
 export const NOMINATIM_SEARCH_URL = "https://nominatim.openstreetmap.org/search";
 export const OSRM_ROUTE_URL = "https://router.project-osrm.org/route/v1/driving";
+/** Table API — macierz n×n jednym zapytaniem (planer trasy). */
+export const OSRM_TABLE_URL = "https://router.project-osrm.org/table/v1/driving";
+/** Twardy limit punktów w jednym `/table` (demo OSRM: `--max-table-size` 100). */
+export const MAX_MATRIX_POINTS = 25;
 /** Nominatim wymaga identyfikującego User-Agenta (ToS). */
 export const GEO_USER_AGENT = "AlfaApp/1.0 (alfa-app; kalkulacja dystansu biuro-obiekt)";
 const TIMEOUT_MS = 8000;
 const MIN_GAP_MS = 1000;
 /** Mnożnik linii prostej → przybliżenie trasy drogowej. */
 export const STRAIGHT_LINE_FACTOR = 1.3;
+
+/**
+ * Średnie prędkości do estymacji czasu przejazdu, gdy OSRM nie podał `duration`
+ * (fallback na linię prostą albo wpis cache'u sprzed dodania czasu).
+ */
+export const EST_SPEED_KMH_LOCAL = 35;
+export const EST_SPEED_KMH_ROAD = 60;
+/** Poniżej tego dystansu liczymy prędkością miejską. */
+export const EST_LOCAL_KM = 15;
 
 // ---------------------------------------------------------------------------
 // Typy
@@ -67,7 +80,11 @@ export type DistanceMethod = "route" | "straight";
 export interface RouteDistance {
   /** Dystans w jedną stronę, kilometry (1 miejsce po przecinku). */
   km: number;
+  /** Czas przejazdu w jedną stronę, pełne minuty. Zawsze liczba — UI nigdy nie zostaje bez wartości. */
+  minutes: number;
   method: DistanceMethod;
+  /** true = minuty policzone z km (średnia prędkość), a nie wzięte z OSRM `routes[0].duration`. */
+  minutesEstimated: boolean;
   cached: boolean;
 }
 
@@ -262,6 +279,15 @@ export function haversineKm(a: { lat: number; lng: number }, b: { lat: number; l
   return 2 * R_EARTH_KM * Math.asin(Math.min(1, Math.sqrt(s)));
 }
 
+/**
+ * Dystans → przewidywany czas jazdy (pełne minuty, minimum 1). Jedyne miejsce z estymacją:
+ * krótkie trasy liczymy prędkością miejską, dłuższe drogową.
+ */
+export function estimateMinutes(km: number): number {
+  const speed = km < EST_LOCAL_KM ? EST_SPEED_KMH_LOCAL : EST_SPEED_KMH_ROAD;
+  return Math.max(1, Math.round((km / speed) * 60));
+}
+
 /** Przybliżenie trasy drogowej linią prostą × 1,3 (używane jako fallback i tryb „straight”). */
 export function straightLineKm(a: { lat: number; lng: number }, b: { lat: number; lng: number }): number {
   return round1(haversineKm(a, b) * STRAIGHT_LINE_FACTOR);
@@ -283,13 +309,31 @@ export async function routeDistanceKm(
   opts: RouteOptions = {}
 ): Promise<RouteDistance> {
   const dbx = opts.dbx ?? db;
-  const straight = { km: straightLineKm(from, to), method: "straight" as const, cached: false };
+  const straightKm = straightLineKm(from, to);
+  const straight = {
+    km: straightKm,
+    minutes: estimateMinutes(straightKm),
+    method: "straight" as const,
+    minutesEstimated: true,
+    cached: false,
+  };
   if (opts.useRouting === false) return straight;
 
   const key = routeCacheKey(from, to);
-  const hit = geoCacheGet<{ km: number; method: DistanceMethod }>(key, dbx);
+  // `minutes` jest opcjonalne: wpisy sprzed dodania czasu przejazdu mają samo { km, method }.
+  // Dopełniamy je estymacją, zamiast traktować jak brak trafienia — miss w trybie cacheOnly
+  // cofnąłby km z trasy OSRM na linię prostą, a z tych km liczą się kwoty w realizacjach.
+  const hit = geoCacheGet<{ km: number; minutes?: number; method: DistanceMethod }>(key, dbx);
   if (hit && Number.isFinite(hit.km)) {
-    return { km: hit.km, method: hit.method === "straight" ? "straight" : "route", cached: true };
+    const method = hit.method === "straight" ? "straight" : "route";
+    const fromOsrm = method === "route" && typeof hit.minutes === "number" && Number.isFinite(hit.minutes);
+    return {
+      km: hit.km,
+      minutes: fromOsrm ? Math.max(1, Math.round(hit.minutes as number)) : estimateMinutes(hit.km),
+      method,
+      minutesEstimated: !fromOsrm,
+      cached: true,
+    };
   }
   if (opts.cacheOnly) return straight;
 
@@ -297,13 +341,173 @@ export async function routeDistanceKm(
   const res = await getJson(url, "OSRM");
   if (isGeoError(res)) return straight;
 
-  const body = res.json as { code?: string; routes?: { distance?: number }[] } | null;
+  const body = res.json as { code?: string; routes?: { distance?: number; duration?: number }[] } | null;
   const meters = body?.routes?.[0]?.distance;
+  const seconds = body?.routes?.[0]?.duration;
   if (body?.code !== "Ok" || typeof meters !== "number" || !Number.isFinite(meters)) return straight;
 
-  const value = { km: round1(meters / 1000), method: "route" as const };
-  geoCacheSet(key, value, dbx);
-  return { ...value, cached: false };
+  const km = round1(meters / 1000);
+  const fromOsrm = typeof seconds === "number" && Number.isFinite(seconds) && seconds > 0;
+  const minutes = fromOsrm ? Math.max(1, Math.round((seconds as number) / 60)) : estimateMinutes(km);
+  // Do cache'u trafia tylko czas z OSRM — estymacja jest funkcją km, więc jej zapis nic nie daje,
+  // a zacierałby informację o pochodzeniu wartości.
+  geoCacheSet(key, fromOsrm ? { km, minutes, method: "route" } : { km, method: "route" }, dbx);
+  return { km, minutes, method: "route", minutesEstimated: !fromOsrm, cached: false };
+}
+
+// ---------------------------------------------------------------------------
+// Macierz odległości (OSRM Table)
+// ---------------------------------------------------------------------------
+
+export interface RouteMatrixOptions extends GeocodeOptions {
+  /** false = pomiń OSRM i wypełnij całą macierz linią prostą. */
+  useRouting?: boolean;
+}
+
+export interface RouteMatrixResult {
+  /** km[i][j] — z punktu i do j (macierz jest ASYMETRYCZNA). Przekątna = 0. */
+  km: number[][];
+  minutes: number[][];
+  method: DistanceMethod[][];
+  /** Liczba par, które zostały przybliżone linią prostą. */
+  missing: number;
+  /** true = w tym wywołaniu coś przyszło z sieci. */
+  fetched: boolean;
+  /** true = komplet z cache'u, zero ruchu sieciowego. */
+  cached: boolean;
+}
+
+/** Odczyt pary z cache'u — ta sama logika co w `routeDistanceKm` (stare wpisy bez `minutes`). */
+function cachedPair(
+  from: { lat: number; lng: number },
+  to: { lat: number; lng: number },
+  dbx: DbOrTx
+): { km: number; minutes: number; method: DistanceMethod } | null {
+  const hit = geoCacheGet<{ km: number; minutes?: number; method: DistanceMethod }>(
+    routeCacheKey(from, to),
+    dbx
+  );
+  if (!hit || !Number.isFinite(hit.km)) return null;
+  const method = hit.method === "straight" ? "straight" : "route";
+  const fromOsrm = method === "route" && typeof hit.minutes === "number" && Number.isFinite(hit.minutes);
+  return {
+    km: hit.km,
+    minutes: fromOsrm ? Math.max(1, Math.round(hit.minutes as number)) : estimateMinutes(hit.km),
+    method,
+  };
+}
+
+/**
+ * Macierz odległości i czasów między punktami — JEDNO zapytanie OSRM Table zamiast n² zapytań
+ * `routeDistanceKm`. To nie jest optymalizacja dla wygody: `routeDistanceKm` idzie przez
+ * `throttled()` (1 req/s, kolejka wspólna z Nominatim), więc 12 punktów = 132 pary = ponad
+ * 2 minuty zajętej kolejki dla jednego widoku.
+ *
+ * Cache jest per para i idzie przez `routeCacheKey`, więc pary są WSPÓLNE z `routeDistanceKm`:
+ * dojazd biuro→obiekt policzony wcześniej przez /company/travel jest tutaj darmowy i odwrotnie.
+ *
+ * Nigdy nie rzuca — pary bez wyniku wracają jako linia prosta ×1,3, dokładnie jak w
+ * `routeDistanceKm`. Błędów nie cache'ujemy (zasada modułu).
+ */
+export async function routeMatrix(
+  points: { lat: number; lng: number }[],
+  opts: RouteMatrixOptions = {}
+): Promise<RouteMatrixResult> {
+  const dbx = opts.dbx ?? db;
+  const n = points.length;
+
+  const km: number[][] = [];
+  const minutes: number[][] = [];
+  const method: DistanceMethod[][] = [];
+  for (let i = 0; i < n; i++) {
+    km.push(new Array<number>(n).fill(0));
+    minutes.push(new Array<number>(n).fill(0));
+    method.push(new Array<DistanceMethod>(n).fill("route"));
+  }
+
+  /** Pary, które wciąż czekają na trasę (indeksy). */
+  const gaps: [number, number][] = [];
+
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < n; j++) {
+      if (i === j) continue;
+      const hit = cachedPair(points[i], points[j], dbx);
+      if (hit) {
+        km[i][j] = hit.km;
+        minutes[i][j] = hit.minutes;
+        method[i][j] = hit.method;
+        continue;
+      }
+      const straightKm = straightLineKm(points[i], points[j]);
+      km[i][j] = straightKm;
+      minutes[i][j] = estimateMinutes(straightKm);
+      method[i][j] = "straight";
+      gaps.push([i, j]);
+    }
+  }
+
+  const done = (missing: number, fetched: boolean): RouteMatrixResult => ({
+    km,
+    minutes,
+    method,
+    missing,
+    fetched,
+    cached: !fetched && missing === 0,
+  });
+
+  if (gaps.length === 0) return done(0, false);
+  if (opts.cacheOnly || opts.useRouting === false || !geoNetworkEnabled()) return done(gaps.length, false);
+  // Bezpiecznik — wołający powinien obciąć wcześniej (demo OSRM: --max-table-size 100).
+  if (n > MAX_MATRIX_POINTS) return done(gaps.length, false);
+
+  const coords = points.map((p) => `${p.lng},${p.lat}`).join(";");
+  const res = await getJson(`${OSRM_TABLE_URL}/${coords}?annotations=duration,distance`, "OSRM");
+  if (isGeoError(res)) return done(gaps.length, false);
+
+  const body = res.json as
+    | { code?: string; distances?: (number | null)[][]; durations?: (number | null)[][] }
+    | null;
+  const dist = body?.distances;
+  const dur = body?.durations;
+  if (body?.code !== "Ok" || !Array.isArray(dist) || !Array.isArray(dur)) return done(gaps.length, false);
+
+  // Pytamy o cały kwadrat (OSRM nie przyjmuje podzbioru par) — i dobrze, bo do cache'u
+  // trafiają wtedy także pary, o które nikt jeszcze nie pytał.
+  const writes: { key: string; value: { km: number; minutes?: number; method: "route" } }[] = [];
+  let filled = 0;
+  for (const [i, j] of gaps) {
+    const meters = dist[i]?.[j];
+    const seconds = dur[i]?.[j];
+    // `null` = punkt nieosiągalny; ta para zostaje linią prostą.
+    if (typeof meters !== "number" || !Number.isFinite(meters)) continue;
+
+    const pairKm = round1(meters / 1000);
+    const fromOsrm = typeof seconds === "number" && Number.isFinite(seconds) && seconds > 0;
+    km[i][j] = pairKm;
+    minutes[i][j] = fromOsrm ? Math.max(1, Math.round((seconds as number) / 60)) : estimateMinutes(pairKm);
+    method[i][j] = "route";
+    filled++;
+    writes.push({
+      key: routeCacheKey(points[i], points[j]),
+      value: fromOsrm
+        ? { km: pairKm, minutes: minutes[i][j], method: "route" }
+        : { km: pairKm, method: "route" },
+    });
+  }
+
+  if (writes.length > 0) {
+    // Jedna transakcja zamiast n² osobnych fsyncy (15 punktów = 210 wpisów).
+    // Gdy `dbx` jest już transakcją, zagnieżdżenie by się wysypało — piszemy wprost.
+    if (dbx === db) {
+      db.transaction((tx) => {
+        for (const w of writes) geoCacheSet(w.key, w.value, tx);
+      });
+    } else {
+      for (const w of writes) geoCacheSet(w.key, w.value, dbx);
+    }
+  }
+
+  return done(gaps.length - filled, filled > 0);
 }
 
 // ---------------------------------------------------------------------------

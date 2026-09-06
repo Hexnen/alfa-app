@@ -8,6 +8,8 @@ import type {
   WarehouseDocument,
 } from "../db/schema.js";
 import { getUser } from "../middleware/auth.js";
+import { getCompanyConfig } from "../lib/company-config.js";
+import { pricingFor } from "../lib/margin.js";
 
 const app = new Hono();
 
@@ -141,6 +143,25 @@ function parseItemBody(body: Record<string, unknown>): {
     minStock = v;
   }
 
+  // Ceny: puste pole = NULL, czyli „nieznana cena zakupu" / „licz cenę sprzedaży
+  // z narzutu". Zero jest wartością dozwoloną (towar powierzony, gratis od
+  // dostawcy), więc `|| null` byłoby błędem — stąd jawne sprawdzenie pustki.
+  const money = (
+    raw: unknown,
+    label: string
+  ): { value?: number | null; error?: string } => {
+    if (raw === undefined || raw === null || raw === "") return { value: null };
+    const v = typeof raw === "string" ? Number(raw.replace(",", ".")) : Number(raw);
+    if (!Number.isFinite(v) || v < 0)
+      return { error: `${label} musi być liczbą nieujemną` };
+    return { value: Math.round(v * 100) / 100 };
+  };
+
+  const purchase = money(body.purchasePrice, "Cena zakupu");
+  if (purchase.error) return { error: purchase.error };
+  const sale = money(body.salePrice, "Cena sprzedaży");
+  if (sale.error) return { error: sale.error };
+
   let photoData: string | null = null;
   if (typeof body.photoData === "string" && body.photoData) {
     // Format przed rozmiarem — licznik bajtów zakłada payload po przecinku.
@@ -163,6 +184,12 @@ function parseItemBody(body: Record<string, unknown>): {
         typeof body.category === "string" && body.category.trim()
           ? body.category.trim()
           : null,
+      manufacturer:
+        typeof body.manufacturer === "string" && body.manufacturer.trim()
+          ? body.manufacturer.trim()
+          : null,
+      purchasePrice: purchase.value ?? null,
+      salePrice: sale.value ?? null,
       unit: unitRaw || "szt",
       description:
         typeof body.description === "string" && body.description.trim()
@@ -242,7 +269,43 @@ function assertItemStockZeroSync(tx: Tx, itemId: number, unit: string) {
   }
 }
 
-// Lista towarów (domyślnie bez zarchiwizowanych)
+/**
+ * Login (email) → nazwa użytkownika, rozwiązywane JEDNYM zapytaniem po całej
+ * tabeli `users`, a nie zapytaniem na wiersz listy (N+1 przy 500 towarach).
+ * Ten sam wzorzec co w liście ofert (src/routes/offers.ts, `userByEmail`).
+ */
+function userLabelByEmail(): (email: string | null) => string | null {
+  const byEmail = new Map(
+    db
+      .select({ email: schema.users.email, displayName: schema.users.displayName })
+      .from(schema.users)
+      .all()
+      .map((u) => [u.email.toLowerCase(), u.displayName || u.email])
+  );
+  // Surowy login zostaje, gdy konto zniknęło z bazy — lepszy ślad niż kreska.
+  return (email) => (email ? byEmail.get(email.toLowerCase()) ?? email : null);
+}
+
+/**
+ * Czy cena FAKTYCZNIE się zmieniła. `null` i `0` to dwie różne rzeczy
+ * (null = „nikt nie podał", 0 = „za darmo"), więc porównanie musi być ścisłe —
+ * `a != b` uznałoby przejście z NULL na 0 za brak zmiany i cena „za darmo"
+ * odziedziczyłaby stary stempel.
+ */
+function priceChanged(
+  before: { purchasePrice: number | null; salePrice: number | null },
+  after: { purchasePrice?: number | null; salePrice?: number | null }
+): boolean {
+  return (
+    (after.purchasePrice ?? null) !== before.purchasePrice ||
+    (after.salePrice ?? null) !== before.salePrice
+  );
+}
+
+// Lista towarów (domyślnie bez zarchiwizowanych).
+// Do każdego wiersza doklejamy wyliczone pola cenowe — cena sprzedaży z narzutu
+// oraz marża i narzut. Liczymy tutaj, a nie w bazie, żeby zmiana globalnego
+// narzutu od razu objęła cały katalog (patrz src/lib/margin.ts).
 app.get("/items", async (c) => {
   const includeArchived = c.req.query("includeArchived") === "1";
   const rows = await db
@@ -252,7 +315,72 @@ app.get("/items", async (c) => {
       includeArchived ? undefined : eq(schema.warehouseItems.isArchived, false)
     )
     .orderBy(asc(schema.warehouseItems.name));
-  return c.json({ success: true, data: rows });
+  const { values } = getCompanyConfig();
+  const userLabel = userLabelByEmail();
+  const data = rows.map((r) => ({
+    ...r,
+    ...pricingFor(r, values.warehouseMarkup),
+    createdByLabel: userLabel(r.createdBy),
+    updatedByLabel: userLabel(r.updatedBy),
+  }));
+  return c.json({ success: true, data });
+});
+
+/**
+ * Parametry cenowe potrzebne formularzowi do liczenia na żywo.
+ *
+ * Montowane pod `/warehouse`, a nie w `/company`: tamten router celowo nie
+ * wystawia żadnych danych kosztowych (patrz komentarz w src/routes/company.ts),
+ * a tutaj narzut jest chroniony tym samym kluczem `technical/magazyn`, co reszta
+ * kartoteki, w której ceny i tak są widoczne.
+ */
+app.get("/pricing-config", async (c) => {
+  const { values } = getCompanyConfig();
+  return c.json({
+    success: true,
+    data: {
+      warehouseMarkup: values.warehouseMarkup,
+      minMarginPct: values.minMarginPct,
+    },
+  });
+});
+
+/**
+ * Ostatnia cena zakupu towaru — podpowiedź do przycisku „Przepisz z ostatniego PZ".
+ *
+ * Bierzemy wyłącznie ZATWIERDZONE przyjęcia: dokument w szkicu może mieć cenę
+ * wpisaną na próbę i jeszcze nikt jej nie zaakceptował. Endpoint niczego nie
+ * zapisuje — decyzję o nadpisaniu ceny w kartotece podejmuje człowiek.
+ */
+app.get("/items/:id/last-purchase", async (c) => {
+  const id = parseInt(c.req.param("id"));
+  if (!Number.isInteger(id) || id <= 0)
+    return jsonError(c, 400, "Nieprawidłowy identyfikator towaru");
+
+  const rows = await db
+    .select({
+      unitPrice: schema.warehouseDocumentItems.unitPrice,
+      docNumber: schema.warehouseDocuments.docNumber,
+      confirmedAt: schema.warehouseDocuments.confirmedAt,
+      issuedAt: schema.warehouseDocuments.issuedAt,
+    })
+    .from(schema.warehouseDocumentItems)
+    .innerJoin(
+      schema.warehouseDocuments,
+      eq(schema.warehouseDocumentItems.documentId, schema.warehouseDocuments.id)
+    )
+    .where(
+      and(
+        eq(schema.warehouseDocumentItems.itemId, id),
+        eq(schema.warehouseDocuments.docType, "PZ"),
+        eq(schema.warehouseDocuments.status, "confirmed"),
+        sql`${schema.warehouseDocumentItems.unitPrice} IS NOT NULL`
+      )
+    )
+    .orderBy(desc(schema.warehouseDocuments.confirmedAt))
+    .limit(1);
+
+  return c.json({ success: true, data: rows[0] ?? null });
 });
 
 // Nowy towar
@@ -266,12 +394,33 @@ app.post("/items", async (c) => {
     if (conflict) return jsonError(c, 400, conflict);
   }
 
+  const user = getUser(c);
+  // Stempel wieku ceny tylko wtedy, gdy jakąś cenę faktycznie podano —
+  // kartoteka założona bez cen ma pustą datę, a nie „cena z dziś".
+  const hasPrice = data.purchasePrice !== null || data.salePrice !== null;
+
   try {
     const result = await db
       .insert(schema.warehouseItems)
-      .values(data as NewWarehouseItem)
+      .values({
+        ...data,
+        createdBy: user?.email ?? null,
+        priceUpdatedAt: hasPrice ? nowISO() : null,
+      } as NewWarehouseItem)
       .returning();
-    return c.json({ success: true, data: result[0], message: "Towar dodany" }, 201);
+    const label = userLabelByEmail();
+    return c.json(
+      {
+        success: true,
+        data: {
+          ...result[0],
+          createdByLabel: label(result[0].createdBy),
+          updatedByLabel: label(result[0].updatedBy),
+        },
+        message: "Towar dodany",
+      },
+      201
+    );
   } catch (err) {
     // Wyścig z równoległym zapisem tego samego SKU — pre-check przeszedł,
     // INSERT dostał UNIQUE; mapujemy na ten sam 400 co pre-check.
@@ -310,6 +459,8 @@ app.put("/items/:id", async (c) => {
       ? existing[0].isArchived
       : Boolean(body.isArchived);
 
+  const user = getUser(c);
+
   try {
     const result = db.transaction((tx) => {
       const cur = tx
@@ -323,14 +474,35 @@ app.put("/items/:id", async (c) => {
       if (isArchived && !cur.isArchived) {
         assertItemStockZeroSync(tx, id, data.unit ?? cur.unit);
       }
+      // Wiek ceny przestawia WYŁĄCZNIE zmiana ceny. Poprawka nazwy czy
+      // kategorii ma zostawić stempel w spokoju, inaczej cały katalog
+      // wyglądałby na świeżo wyceniony po jednym porządkowaniu opisów.
+      // Porównanie ze stanem odczytanym W TEJ transakcji, nie z `existing`
+      // sprzed niej — równoległy zapis mógł już zmienić cenę.
+      const stampPrice = priceChanged(cur, data);
       return tx
         .update(schema.warehouseItems)
-        .set({ ...data, isArchived, updatedAt: nowISO() })
+        .set({
+          ...data,
+          isArchived,
+          updatedBy: user?.email ?? null,
+          ...(stampPrice ? { priceUpdatedAt: nowISO() } : {}),
+          updatedAt: nowISO(),
+        })
         .where(eq(schema.warehouseItems.id, id))
         .returning()
         .get();
     });
-    return c.json({ success: true, data: result, message: "Towar zaktualizowany" });
+    const label = userLabelByEmail();
+    return c.json({
+      success: true,
+      data: {
+        ...result,
+        createdByLabel: label(result.createdBy),
+        updatedByLabel: label(result.updatedBy),
+      },
+      message: "Towar zaktualizowany",
+    });
   } catch (err) {
     if (err instanceof ApiError) return jsonError(c, err.status, err.message);
     if (data.sku && isSkuUniqueViolation(err)) {
@@ -610,13 +782,15 @@ app.get("/stock", async (c) => {
 // DOKUMENTY (PZ / WZ / RW / MM)
 // ============================================================
 
-interface DocItemInput {
+/** Pozycja dokumentu — także wejście publicznego `createDocumentSync`. */
+export interface DocItemInput {
   itemId: number;
   quantity: number;
   unitPrice: number | null;
 }
 
-interface DocHeadInput {
+/** Nagłówek dokumentu — także wejście publicznego `createDocumentSync`. */
+export interface DocHeadInput {
   docType: DocType;
   warehouseFromId: number | null;
   warehouseToId: number | null;
@@ -1245,6 +1419,47 @@ app.get("/documents/:id/invoice", async (c) => {
 });
 
 // Nowy dokument (draft; confirm=true tworzy i zatwierdza w jednej transakcji)
+/**
+ * Tworzy dokument magazynowy WEWNĄTRZ podanej transakcji.
+ *
+ * Wyciągnięte z handlera `POST /documents`, żeby inne moduły mogły założyć
+ * dokument w tej samej transakcji co własna zmiana — akceptacja oferty tworzy
+ * zlecenie i szkic WZ jednym ruchem, więc rozjazd między nimi nie może się
+ * zdarzyć nawet przy błędzie w połowie drogi.
+ *
+ * Szkic NIE rusza stanów magazynowych: ruchy powstają dopiero w
+ * `confirmDocumentSync`, wołanym przy `confirm = true` albo później z UI.
+ */
+export function createDocumentSync(
+  tx: Tx,
+  head: DocHeadInput,
+  items: DocItemInput[],
+  createdBy: string | null,
+  confirm = false
+): WarehouseDocument {
+  validateDocRefsSync(tx, head, items);
+
+  const doc = tx
+    .insert(schema.warehouseDocuments)
+    .values({ ...head, status: "draft", createdBy })
+    .returning()
+    .get();
+
+  items.forEach((it, i) => {
+    tx.insert(schema.warehouseDocumentItems)
+      .values({
+        documentId: doc.id,
+        itemId: it.itemId,
+        quantity: it.quantity,
+        unitPrice: it.unitPrice,
+        positionNo: i + 1,
+      })
+      .run();
+  });
+
+  return confirm ? confirmDocumentSync(tx, doc, createdBy) : doc;
+}
+
 app.post("/documents", async (c) => {
   const body = await c.req.json<Record<string, unknown>>();
 
@@ -1261,36 +1476,15 @@ app.post("/documents", async (c) => {
   const createdBy = user?.email ?? null;
 
   try {
-    const created = db.transaction((tx) => {
-      validateDocRefsSync(tx, head.data!, parsedItems.items!);
-
-      const doc = tx
-        .insert(schema.warehouseDocuments)
-        .values({
-          ...head.data!,
-          status: "draft",
-          createdBy,
-        })
-        .returning()
-        .get();
-
-      parsedItems.items!.forEach((it, i) => {
-        tx.insert(schema.warehouseDocumentItems)
-          .values({
-            documentId: doc.id,
-            itemId: it.itemId,
-            quantity: it.quantity,
-            unitPrice: it.unitPrice,
-            positionNo: i + 1,
-          })
-          .run();
-      });
-
-      if (confirm) {
-        return confirmDocumentSync(tx, doc, createdBy);
-      }
-      return doc;
-    });
+    const created = db.transaction((tx) =>
+      createDocumentSync(
+        tx,
+        head.data!,
+        parsedItems.items!,
+        createdBy,
+        confirm
+      )
+    );
 
     const { invoiceFileData: _omit, ...rest } = created;
     return c.json(

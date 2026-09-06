@@ -1,6 +1,7 @@
 /**
- * Ustawienia firmy (tabela app_settings, klucze `company.*`) — adres biura, stawki domyślne
- * i konfiguracja automatu uzupełniającego realizacje (src/lib/realization-autofill.ts).
+ * Ustawienia firmy (tabela app_settings, klucze `company.*`) — adres biura, stawki domyślne,
+ * narzuty składek pracodawcy (src/lib/object-personnel-cost.ts) i konfiguracja automatu
+ * uzupełniającego realizacje (src/lib/realization-autofill.ts).
  *
  * Precedencja: DB → wartość domyślna (bez env, tak jak w src/lib/calendar-config.ts).
  * Wartości czytane przy KAŻDEJ operacji (bez restartu backendu), z fallbackiem na domyślne,
@@ -73,6 +74,11 @@ export const DEFAULT_AUTOFILL_FIELDS: AutofillField[] = AUTOFILL_FIELDS.filter(
 // ---------------------------------------------------------------------------
 
 export interface CompanySettingsValues {
+  /**
+   * Nazwa firmy — prefiks etykiety działu kadrowego („ALFA GROUP:Handlowy”).
+   * Pusta = etykieta to sama nazwa działu. Patrz `departmentLabel()`.
+   */
+  companyName: string;
   /** Ulica i numer biura (punkt startowy kalkulacji km). */
   officeAddress: string;
   officeCity: string;
@@ -80,6 +86,12 @@ export interface CompanySettingsValues {
   /** Współrzędne biura; null = wyliczane geokoderem z adresu przy każdej kalkulacji. */
   officeLat: number | null;
   officeLng: number | null;
+  /**
+   * Norma dnia roboczego (godz.) — długość, jaką automat PROPONUJE dla wydarzenia całodniowego,
+   * które nie ma godzin. Nigdy nie zapisuje się sama: wchodzi wyłącznie jako sugestia
+   * w „Uzupełnij z danych” protokołu (src/lib/protocol-prefill.ts).
+   */
+  workDayHours: number;
   /** Stawka netto za roboczogodzinę (zł/RBH) — fallback, gdy cennik nie ma pozycji RBH. */
   rateHour: number;
   /** Wewnętrzny koszt roboczogodziny (zł/h) → realizations.hourlyCost. */
@@ -92,6 +104,66 @@ export interface CompanySettingsValues {
   kmSource: KmSource;
   /** Narzut procentowy na materiały z protokołu (0 = bez narzutu). */
   materialMarkup: number;
+  /**
+   * Narzut procentowy na towary z magazynu — z niego liczy się cena sprzedaży
+   * towaru, który nie ma własnej (`warehouse_items.sale_price` = NULL).
+   *
+   * CELOWO OSOBNY od `materialMarkup`: tamten dotyczy materiałów przepisywanych
+   * z protokołu na wycenę powykonawczą po cenach CENNIKA, ten — sprzedaży towaru
+   * z kartoteki magazynu po cenie ZAKUPU. Sklejenie ich zmieniłoby po cichu
+   * kwoty w działającym automacie protokół → wycena.
+   */
+  warehouseMarkup: number;
+  /**
+   * Próg marży (%) — poniżej niego oferta i jej pozycje są oznaczane na czerwono.
+   * 0 = bez ostrzeżeń.
+   */
+  minMarginPct: number;
+  /**
+   * Domyślny procent ROCZNY dzierżawy sprzętu. Rata = wartość sprzętu × ten
+   * procent ÷ 12, więc 117% znaczy, że w rok najem zwraca nieco więcej niż
+   * wartość sprzętu — tak wycenia się dzierżawę z obsługą, a nie sprzedaż
+   * ratalną. Podpowiadany przy włączaniu dzierżawy; na ofercie zawsze można
+   * go nadpisać.
+   */
+  leaseAnnualRate: number;
+  /*
+   * NARZUTY SKŁADEK PRACODAWCY — współczynniki, przez które moduł kosztu osobowego
+   * (src/lib/object-personnel-cost.ts) mnoży wypłatę NETTO, żeby dostać szacunkowy
+   * koszt pracodawcy. Wartości globalne; spółka może mieć własne
+   * (`companies.employer_markup_*`, NULL = bierzemy stąd).
+   *
+   * DLACZEGO MNOŻNIK OD NETTO, A NIE PROCENT OD BRUTTO: aplikacja nie zna kwot brutto.
+   * Księgowość podaje do kadr wyłącznie kwoty „na rękę" (`hr_payroll.main_amount`),
+   * a podstawy wymiaru składek nie ma w żadnej tabeli. Liczenie 20,48% od brutto
+   * wymagałoby odtworzenia całej drabinki podatkowo-składkowej z netto — z ulgami,
+   * progami i kosztami uzyskania — czyli budowy drugiego systemu płacowego.
+   * Zamiast tego mnożymy netto przez jeden współczynnik na formę zatrudnienia.
+   * To JAWNE PRZYBLIŻENIE i tak ma być opisane w UI.
+   *
+   * SKĄD DOMYŚLNE LICZBY (do zweryfikowania i podważenia przez księgową):
+   *   składki po stronie pracodawcy ≈ 20,48% brutto
+   *     = emerytalna 9,76 + rentowa 6,50 + wypadkowa ~1,67 + FP 2,45 + FGŚP 0,10;
+   *   UoP:            netto/brutto ≈ 0,73 → koszt/netto ≈ 1,2048 / 0,73 ≈ 1,65
+   *   zlecenie ZUA:   bez chorobowego pracownika, netto/brutto ≈ 0,76 →   ≈ 1,59
+   *   zlecenie ZZA:   pracodawca nie dopłaca nic, netto/brutto ≈ 0,82 →   ≈ 1,22
+   * Wypadkowa jest indywidualna dla płatnika (branża + wielkość), stąd nadpisania
+   * per spółka. Liczby są ORIENTACYJNE — realne współczynniki podstawia księgowa
+   * ze swoich list płac (koszt całkowity / suma wypłat netto za miesiąc).
+   */
+  /** Umowa o pracę (zawsze ZUA). */
+  employerMarkupUop: number;
+  /** Zlecenie zgłoszone na ZUA. */
+  employerMarkupZlecenieZua: number;
+  /** Zlecenie zgłoszone tylko na ZZA (samo zdrowotne). */
+  employerMarkupZlecenieZza: number;
+  /**
+   * Rozliczenia biura (`hr_office_payroll`) bez odpowiadającej umowy w `hr_contracts`.
+   * W praktyce dotyczy to większości wierszy biura — arkusz biura jest prowadzony
+   * niezależnie od arkusza umów i nie da się z niego odczytać formy zatrudnienia.
+   * Gdy umowa ISTNIEJE, wygrywa jej forma; ten narzut jest tylko awaryjny.
+   */
+  employerMarkupOfficeDefault: number;
   /** Główny włącznik automatu (dotyczy też haka po podpisaniu protokołu). */
   autofillEnabled: boolean;
   /** Pola objęte automatem. */
@@ -107,17 +179,26 @@ export type CompanySettingField = keyof CompanySettingsValues;
 export type Source = "db" | "default";
 
 export const COMPANY_DEFAULTS: CompanySettingsValues = {
+  companyName: "",
   officeAddress: "",
   officeCity: "",
   officePostcode: "",
   officeLat: null,
   officeLng: null,
+  workDayHours: 8,
   rateHour: 0,
   hourlyCost: 0,
   rateKm: 0,
   kmRoundTrip: true,
   kmSource: "route",
   materialMarkup: 0,
+  warehouseMarkup: 0,
+  minMarginPct: 0,
+  leaseAnnualRate: 117,
+  employerMarkupUop: 1.65,
+  employerMarkupZlecenieZua: 1.59,
+  employerMarkupZlecenieZza: 1.22,
+  employerMarkupOfficeDefault: 1.65,
   autofillEnabled: true,
   autofillFields: DEFAULT_AUTOFILL_FIELDS,
   autofillOnEventDone: true,
@@ -200,6 +281,43 @@ function numberField(
     },
     serialize: (v) => String(v),
     format: (v) => `${v}${opts.unit ? ` ${opts.unit}` : ""}`,
+  };
+}
+
+/**
+ * Granice narzutu składkowego. Dolna to 1, bo mnożnik poniżej jedynki znaczyłby,
+ * że pracodawcę kosztuje MNIEJ, niż wypłaca pracownikowi — składki nie bywają ujemne.
+ * Górna 3 jest workiem na literówki (16,5 zamiast 1,65): nawet umowa o pracę
+ * z maksymalną wypadkową nie zbliża się do trzykrotności kwoty netto.
+ */
+export const EMPLOYER_MARKUP_MIN = 1;
+export const EMPLOYER_MARKUP_MAX = 3;
+
+function markupField(dbKey: string, label: string): CompanyFieldDef<number> {
+  const inRange = (n: number) => n >= EMPLOYER_MARKUP_MIN && n <= EMPLOYER_MARKUP_MAX;
+  return {
+    dbKey,
+    label,
+    type: "number",
+    validate: (v) => {
+      if (typeof v !== "number" || !Number.isFinite(v)) return `${label}: oczekiwano liczby`;
+      if (v < EMPLOYER_MARKUP_MIN) {
+        return `${label}: współczynnik nie może być mniejszy niż ${EMPLOYER_MARKUP_MIN} — koszt pracodawcy nigdy nie jest niższy od wypłaty netto`;
+      }
+      if (v > EMPLOYER_MARKUP_MAX) {
+        return `${label}: współczynnik nie może przekraczać ${EMPLOYER_MARKUP_MAX} (np. 1,65 = koszt o 65% wyższy od kwoty na rękę)`;
+      }
+      return null;
+    },
+    coerce: toNumber,
+    parse: (raw) => {
+      const n = Number(raw.trim().replace(",", "."));
+      return Number.isFinite(n) && inRange(n) ? n : undefined;
+    },
+    serialize: (v) => String(v),
+    // „×1,65 (+65%)” — mnożnik jest tym, co siedzi w bazie, a procent tym,
+    // co człowiek ma w głowie, mówiąc „składki to jakieś 20 procent".
+    format: (v) => `×${v} (+${Math.round((v - 1) * 100)}%)`,
   };
 }
 
@@ -295,17 +413,35 @@ const autofillFieldsField: CompanyFieldDef<AutofillField[]> = {
 };
 
 export const COMPANY_FIELDS: { [K in CompanySettingField]: CompanyFieldDef<CompanySettingsValues[K]> } = {
+  companyName: stringField("company.name", "Nazwa firmy", 80),
   officeAddress: stringField("company.office_address", "Adres biura"),
   officeCity: stringField("company.office_city", "Miejscowość biura", 80),
   officePostcode: stringField("company.office_postcode", "Kod pocztowy biura", 12),
   officeLat: coordField("company.office_lat", "Szerokość geograficzna biura", "latitude", 90),
   officeLng: coordField("company.office_lng", "Długość geograficzna biura", "longitude", 180),
+  workDayHours: numberField("company.work_day_hours", "Norma dnia roboczego", { min: 0, max: 24, unit: "godz./dzień" }),
   rateHour: numberField("company.rate_hour", "Stawka za roboczogodzinę", { min: 0, max: 100000, unit: "zł/RBH" }),
   hourlyCost: numberField("company.hourly_cost", "Koszt roboczogodziny", { min: 0, max: 100000, unit: "zł/h" }),
   rateKm: numberField("company.rate_km", "Stawka za kilometr", { min: 0, max: 1000, unit: "zł/km" }),
   kmRoundTrip: booleanField("company.km_round_trip", "Dystans w obie strony"),
   kmSource: kmSourceField,
   materialMarkup: numberField("company.material_markup", "Narzut na materiały", { min: -100, max: 1000, unit: "%" }),
+  warehouseMarkup: numberField("company.warehouse_markup", "Narzut na towary z magazynu", { min: -100, max: 1000, unit: "%" }),
+  minMarginPct: numberField("company.min_margin_pct", "Minimalna marża (ostrzeżenie)", { min: 0, max: 100, unit: "%" }),
+  leaseAnnualRate: numberField("company.lease_annual_rate", "Dzierżawa — procent roczny", { min: 0, max: 1000, unit: "%" }),
+  employerMarkupUop: markupField("company.employer_markup_uop", "Narzut składek — umowa o pracę"),
+  employerMarkupZlecenieZua: markupField(
+    "company.employer_markup_zlecenie_zua",
+    "Narzut składek — zlecenie ZUA"
+  ),
+  employerMarkupZlecenieZza: markupField(
+    "company.employer_markup_zlecenie_zza",
+    "Narzut składek — zlecenie ZZA"
+  ),
+  employerMarkupOfficeDefault: markupField(
+    "company.employer_markup_office_default",
+    "Narzut składek — biuro (bez umowy)"
+  ),
   autofillEnabled: booleanField("company.autofill_enabled", "Automat uzupełniania"),
   autofillFields: autofillFieldsField,
   autofillOnEventDone: booleanField(
@@ -358,6 +494,25 @@ export function officeAddressLine(values: Pick<CompanySettingsValues, "officeAdd
   return [values.officeAddress.trim(), tail].filter(Boolean).join(", ");
 }
 
+/**
+ * Etykieta działu kadrowego: „ALFA GROUP:Handlowy” (bez spacji wokół dwukropka).
+ *
+ * DLACZEGO SKŁADAMY JĄ NA SERWERZE, a nie w komponencie Kadr: `company.name` żyje
+ * w `app_settings` za `requireAdmin` (src/routes/admin-company.ts), więc front Kadr
+ * NIE MA JAK jej przeczytać — kadrowa nie jest adminem. Dorabianie publicznego
+ * endpointu na jeden string byłoby drugą drogą do tych samych ustawień; zamiast tego
+ * `GET /hr/departments` i `GET /hr/hours` zwracają etykietę gotową. Reguła istnieje
+ * wtedy w jednym miejscu i ta sama etykieta wychodzi w godzinach, wydrukach
+ * i eksportach — bez ryzyka, że któryś z nich zapisze dwukropek inaczej.
+ */
+export function departmentLabel(
+  name: string,
+  values: Pick<CompanySettingsValues, "companyName">,
+): string {
+  const company = values.companyName.trim();
+  return company ? `${company}:${name}` : name;
+}
+
 /** Słowniki dla panelu admina (meta w GET /admin/company/settings). */
 export function companySettingsMeta() {
   return {
@@ -368,6 +523,9 @@ export function companySettingsMeta() {
       hint: AUTOFILL_FIELD_HINTS[f],
       available: !AUTOFILL_UNAVAILABLE_FIELDS.includes(f),
     })),
+    // Zakres suwaka/pola dla narzutów składkowych — front nie musi go zgadywać
+    // ani duplikować (walidacja i tak stoi po stronie API).
+    employerMarkupRange: { min: EMPLOYER_MARKUP_MIN, max: EMPLOYER_MARKUP_MAX },
     defaultAutofillFields: [...DEFAULT_AUTOFILL_FIELDS],
     unavailableAutofillFields: [...AUTOFILL_UNAVAILABLE_FIELDS],
     fieldTypes: Object.fromEntries(

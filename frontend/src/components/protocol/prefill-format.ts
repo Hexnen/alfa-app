@@ -39,7 +39,7 @@ export function prefillSourceGenitive(source: string): string {
 const WORK_TYPE_LABEL: Record<string, string> = {
   serwis: "Serwis",
   montaz: "Montaż",
-  wizja: "Wizja lokalna",
+  wizja: "Wizja",
   inne: "Inne",
 };
 

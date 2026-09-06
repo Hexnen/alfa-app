@@ -3,7 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Card, CardContent } from "@/components/ui/card";
+import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -11,7 +11,8 @@ import {
   DialogTitle,
   DialogFooter,
 } from "@/components/ui/dialog";
-import { Plus, Pencil, Trash2, ExternalLink, Cctv, FileText } from "lucide-react";
+import { Plus, Pencil, Trash2, ExternalLink, Cctv, FileText, Receipt } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 import { MonitoringOfferDialog } from "@/components/MonitoringOfferDialog";
 import { usePerms } from "@/auth/permissions";
 import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
@@ -20,7 +21,9 @@ import {
   createMonitoringProject,
   updateMonitoringProject,
   deleteMonitoringProject,
+  offersApi,
   type MonitoringProject,
+  type OfferPackage,
 } from "@/lib/api";
 
 // Designer to samodzielna strona (frontend/public/monitoring/designer.html) —
@@ -41,6 +44,62 @@ export function Monitoring() {
   const [offerProject, setOfferProject] = useState<MonitoringProject | null>(
     null
   );
+
+  /*
+   * Wycena projektu: liczba kamer z planu w designerze zasila pakiet
+   * parametryczny, więc z gotowego projektu robi się wyceniona oferta bez
+   * przepisywania czegokolwiek ręcznie.
+   *
+   * Przycisk pokazujemy tylko komuś, kto ma prawo edycji Ofert — inaczej
+   * kliknięcie kończyłoby się 403 z backendu.
+   */
+  const navigate = useNavigate();
+  const canQuote = canEdit("technical/oferty");
+  const [cctvPackages, setCctvPackages] = useState<OfferPackage[]>([]);
+  const [quoting, setQuoting] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!canQuote) return;
+    offersApi
+      .listPackages({ category: "cctv" })
+      .then((r) => setCctvPackages(r.data || []))
+      .catch(() => setCctvPackages([]));
+  }, [canQuote]);
+
+  const makeOffer = async (project: MonitoringProject) => {
+    // Bez pakietu oferta powstałaby pusta — wtedy lepiej powiedzieć wprost,
+    // czego brakuje, niż zakładać dokument bez ani jednej pozycji.
+    if (cctvPackages.length === 0) {
+      window.alert(
+        "Brak pakietów CCTV w bibliotece ofert. Dodaj pakiet w zakładce Oferty → Pakiety, " +
+          "wtedy projekt da się wycenić jednym kliknięciem."
+      );
+      return;
+    }
+    const chosen =
+      cctvPackages.length === 1
+        ? cctvPackages[0]
+        : cctvPackages.find(
+            (p) =>
+              p.name ===
+              window.prompt(
+                `Pakiet do wyceny (${project.cameras} kamer):\n` +
+                  cctvPackages.map((x) => `• ${x.name}`).join("\n"),
+                cctvPackages[0].name
+              )
+          );
+    if (!chosen) return;
+
+    setQuoting(project.id);
+    try {
+      const res = await offersApi.fromMonitoring(project.id, { packageId: chosen.id });
+      if (res.data) navigate("/technical/oferty");
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : "Nie udało się utworzyć oferty");
+    } finally {
+      setQuoting(null);
+    }
+  };
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -103,26 +162,19 @@ export function Monitoring() {
   };
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-          <h1 className="text-3xl font-bold">Projekty — CCTV</h1>
-          <p className="text-muted-foreground">
-            Projekty i oferty systemów CCTV
-          </p>
-        </div>
-        {editable && (
-          <Button onClick={() => openForm(null)}>
-            <Plus className="h-4 w-4 mr-2" />
-            Nowy projekt
-          </Button>
-        )}
-      </div>
-
+    <div className="space-y-3">
       {!editable && <ReadOnlyBanner className="mb-4" />}
 
       <Card>
-        <CardContent className="pt-6">
+        {editable && (
+          <CardHeader className="flex flex-row items-center justify-end p-3">
+            <Button onClick={() => openForm(null)}>
+              <Plus className="h-4 w-4 mr-2" />
+              Nowy projekt
+            </Button>
+          </CardHeader>
+        )}
+        <CardContent className={editable ? "p-2 pt-0" : "p-2"}>
           {loading ? (
             <div className="text-center py-8">Ładowanie...</div>
           ) : projects.length === 0 ? (
@@ -194,10 +246,21 @@ export function Monitoring() {
                             variant="ghost"
                             size="icon"
                             onClick={() => setOfferProject(p)}
-                            title="Oferta (zdjęcia + generowanie HTML)"
+                            title="Dokument z wizji (zdjęcia + generowanie HTML)"
                           >
                             <FileText className="h-4 w-4" />
                           </Button>
+                          {canQuote && (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              disabled={quoting === p.id}
+                              onClick={() => makeOffer(p)}
+                              title={`Wyceń: utwórz ofertę na ${p.cameras} kamer z tego projektu`}
+                            >
+                              <Receipt className="h-4 w-4" />
+                            </Button>
+                          )}
                           {editable && (
                             <>
                               <Button
@@ -273,7 +336,7 @@ export function Monitoring() {
                 value={notes}
                 onChange={(e) => setNotes(e.target.value)}
                 rows={5}
-                placeholder="kontakt, stan obecny, ustalenia z wizji lokalnej..."
+                placeholder="kontakt, stan obecny, ustalenia z wizji..."
               />
             </div>
           </div>

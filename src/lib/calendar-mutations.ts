@@ -77,6 +77,8 @@ export interface ParsedInput {
   billing: CalendarBilling | null;
   /** Jawnie przypięty protokół (null = protokół realizacji / brak). */
   protocolId: number | null;
+  /** Jawnie przypięta wycena (null = wycena realizacji / brak). */
+  quoteId: number | null;
   technicianIds: number[];
   recurrence: RecurrenceRule | null;
 }
@@ -235,6 +237,7 @@ export function parseInput(body: unknown): ParsedInput {
     realizationOptout: optBool(b.realizationOptout, "realizationOptout"),
     billing,
     protocolId: isUrlop ? null : optInt(b.protocolId, "protocolId"),
+    quoteId: isUrlop ? null : optInt(b.quoteId, "quoteId"),
     technicianIds,
     recurrence: parseRecurrence(b.recurrence),
   };
@@ -272,6 +275,10 @@ export function assertRefs(tx: DbOrTx, input: ParsedInput, excludeEventId: numbe
     const p = tx.select({ id: schema.protocols.id }).from(schema.protocols).where(eq(schema.protocols.id, input.protocolId)).get();
     if (!p) throw new ApiError(400, `Protokół #${input.protocolId} nie istnieje`);
   }
+  if (input.quoteId != null) {
+    const q = tx.select({ id: schema.quotes.id }).from(schema.quotes).where(eq(schema.quotes.id, input.quoteId)).get();
+    if (!q) throw new ApiError(400, `Wycena #${input.quoteId} nie istnieje`);
+  }
   if (input.technicianIds.length > 0) {
     const found = tx
       .select({ id: schema.technicians.id })
@@ -303,9 +310,11 @@ function techNameById(dbx: DbOrTx, id: number): string {
   return t ? `${t.firstName} ${t.lastName}`.trim() : `#${id}`;
 }
 
+/** Nazwa obiektu do wpisu w dzienniku — odczyt PO ID, nigdy odwrotnie. */
 function objectNameById(dbx: DbOrTx, id: number | null): string {
   if (id == null) return "—";
-  const o = dbx.select({ name: schema.objects.name }).from(schema.objects).where(eq(schema.objects.id, id)).get();
+  // identity-ok: id → nazwa (migawka na opis zmiany), nie nazwa → id.
+  const o = dbx.select({ name: schema.objects.name }).from(schema.objects).where(eq(schema.objects.id, id)).get(); // identity-ok
   return o ? o.name : `#${id}`;
 }
 
@@ -313,6 +322,12 @@ function protocolNumberById(dbx: DbOrTx, id: number | null): string {
   if (id == null) return "—";
   const p = dbx.select({ number: schema.protocols.number }).from(schema.protocols).where(eq(schema.protocols.id, id)).get();
   return p ? p.number : `#${id}`;
+}
+
+function quoteNumberById(dbx: DbOrTx, id: number | null): string {
+  if (id == null) return "—";
+  const q = dbx.select({ number: schema.quotes.number }).from(schema.quotes).where(eq(schema.quotes.id, id)).get();
+  return q ? q.number : `#${id}`;
 }
 
 export function currentAssignees(dbx: DbOrTx, eventId: number): number[] {
@@ -384,6 +399,7 @@ function logEventDiff(tx: Tx, before: CalendarEventRow, after: CalendarEventRow,
       { key: "realizationOptout", label: "automatyczną realizację", format: (v) => (v ? "wyłączona (ręcznie odpięta)" : "włączona") },
       { key: "billing", label: "rozliczenie", format: (v) => (v == null ? "—" : (BILLING_LABELS[v as CalendarBilling] ?? String(v))) },
       { key: "protocolId", label: "protokół", format: (v) => protocolNumberById(tx, (v as number | null) ?? null) },
+      { key: "quoteId", label: "wycenę", format: (v) => quoteNumberById(tx, (v as number | null) ?? null) },
     ],
   });
 }
@@ -452,6 +468,7 @@ function applyUpdate(
       realizationOptout: optout,
       billing: input.billing,
       protocolId: input.protocolId,
+      quoteId: input.quoteId,
       updatedBy: ctx.user.id,
       updatedAt: sql`(datetime('now'))`,
     })
@@ -528,6 +545,7 @@ export function createEvent(tx: Tx, input: ParsedInput, ctx: MutationCtx): { fir
         realizationOptout: input.realizationOptout ?? false,
         billing: input.billing,
         protocolId: input.protocolId,
+        quoteId: input.quoteId,
         seriesId,
         createdBy: ctx.user.id,
         updatedBy: ctx.user.id,

@@ -43,6 +43,10 @@ plan_zlecenie_auto_create.md
 # Stray data artifacts
 images.jpg
 *.xls
+# Pliki testowe importu PZT wrzucane do katalogu głównego (rysunki klientów).
+# Zostają lokalnie — nie są fikstursami repo, a zaśmiecają każdy `git status`.
+/*.pdf
+/*.dwg
 
 # Local designer test snapshots
 data/snapshots/

@@ -61,6 +61,21 @@ const API_TAB_MAP: { prefix: string; tabs: string[] }[] = [
   { prefix: "/objects", tabs: ["objects"] },
   { prefix: "/contracts", tabs: ["contracts"] },
   { prefix: "/orders", tabs: ["orders"] },
+  // Analityka — TRZY OSOBNE wpisy, a nie jeden { prefix: "/analytics", tabs: [wszystkie trzy] }.
+  // maxLevel() bierze NAJWYŻSZY poziom spośród wypisanych zakładek, więc wspólny wpis
+  // byłby dziurą: ktoś z samą „analityka/obiekty" czytałby też rentowność klientów
+  // i wynagrodzenia handlowców. Każdy widok pilnuje wyłącznie swojego klucza.
+  { prefix: "/analytics/kontrahenci", tabs: ["analityka/kontrahenci"] },
+  { prefix: "/analytics/obiekty", tabs: ["analityka/obiekty"] },
+  { prefix: "/analytics/handlowcy", tabs: ["analityka/handlowcy"] },
+  // Skrócona lista pracowników kadr (id + nazwisko, bez płac) — czytają ją
+  // formularze handlowca i technika, żeby powiązać osobę z listą płac.
+  // MUSI stać PRZED "/hr": find() bierze pierwsze dopasowanie, więc szerszy
+  // wpis kadrowy przykryłby ten węższy i handlowiec-edytor dostałby 403.
+  {
+    prefix: "/hr/directory",
+    tabs: ["kadry/pracownicy", "handlowcy", "technical/technicy"],
+  },
   // Kadry — jedno API dla wszystkich podzakładek; kontrola per-podzakładka
   // (ukrywanie + read-only) odbywa się na froncie, backend pilnuje modułu.
   {
@@ -68,10 +83,9 @@ const API_TAB_MAP: { prefix: string; tabs: string[] }[] = [
     tabs: [
       "kadry/wynagrodzenia",
       "kadry/godziny",
-      "kadry/biuro",
-      "kadry/umowy",
       "kadry/pracownicy",
       "kadry/obiekty",
+      "kadry/dzialy",
       "kadry/normy",
     ],
   },
@@ -81,8 +95,27 @@ const API_TAB_MAP: { prefix: string; tabs: string[] }[] = [
   { prefix: "/protocols", tabs: ["technical/protokoly"] },
   { prefix: "/quotes", tabs: ["technical/wyceny"] },
   { prefix: "/pricelist", tabs: ["technical/cennik"] },
+  // Katalog usług czyta nie tylko własna zakładka, ale i edytor ofert —
+  // bez tego handlowiec z dostępem wyłącznie do ofert nie doda robocizny.
+  { prefix: "/services", tabs: ["technical/uslugi", "technical/oferty"] },
+  // Oferty. Klucz kosztowy `technical/oferty-koszty` NIE jest tutaj: on nie
+  // otwiera ani nie zamyka tras, tylko decyduje, czy w odpowiedzi zostają pola
+  // kosztowe (redactCosts w src/routes/offers.ts).
+  { prefix: "/offers", tabs: ["technical/oferty"] },
   { prefix: "/technicians", tabs: ["technical/technicy", "technical/kalendarz"] },
-  { prefix: "/monitored-objects", tabs: ["technical/obiekty"] },
+  // Handlowcy: własna zakładka, ale listę czytają też formularze kontrahenta i obiektu.
+  { prefix: "/salespeople", tabs: ["handlowcy", "contractors", "objects"] },
+  // Spółki: własna zakładka; listę czyta też formularz obiektu i kadry.
+  // Spółki: własna zakładka; słownik czytają też formularz obiektu i kadry
+  // (umowa/biuro wybierają spółkę z listy).
+  { prefix: "/companies", tabs: ["spolki", "objects", "kadry/wynagrodzenia", "kadry/pracownicy"] },
+  // Import raportu obiektów nadpisuje CAŁY rejestr — zostaje wyłącznie przy
+  // dziale technicznym. MUSI stać PRZED szerszym "/monitored-objects", bo
+  // find() bierze pierwsze dopasowanie.
+  { prefix: "/monitored-objects/import", tabs: ["technical/obiekty"] },
+  // Rejestr czytają dwa ekrany: kartoteka techniczna i ekran mapowania w CMA
+  // (mapowanie na kartotekę obiektów robi operator monitoringu).
+  { prefix: "/monitored-objects", tabs: ["technical/obiekty", "cma/obiekty"] },
   { prefix: "/monitoring", tabs: ["technical/projekty"] },
   { prefix: "/camera-models", tabs: ["technical/szablony"] },
   { prefix: "/warehouse", tabs: ["technical/magazyn"] },

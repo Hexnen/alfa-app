@@ -1,13 +1,17 @@
 import {
   ArrowRightLeft,
+  Ban,
   Banknote,
   Building2,
+  Calculator,
   FileCheck2,
   FileX,
   Gift,
   ShieldCheck,
   CalendarCheck,
   CalendarClock,
+  Check,
+  CircleCheck,
   ClipboardList,
   Eye,
   HardHat,
@@ -29,6 +33,7 @@ import type {
   ActivityEntry,
   CalendarBilling,
   CalendarEvent,
+  CalendarEventQuote,
   CalendarEventRealization,
   CalendarEventStatus,
   CalendarEventType,
@@ -83,7 +88,7 @@ export const EVENT_TYPE_META: Record<CalendarEventType, EventTypeMeta> = {
     cssVar: "--cal-montaz",
   },
   wizja: {
-    label: "Wizja lokalna",
+    label: "Wizja",
     icon: Eye,
     chip: "border-violet-500/50 text-violet-700 dark:text-violet-300",
     chipActive: "bg-violet-500 border-violet-500 text-white",
@@ -138,26 +143,47 @@ export const EVENT_STATUS_ORDER: CalendarEventStatus[] = [
 
 export const EVENT_STATUS_META: Record<
   CalendarEventStatus,
-  { label: string; badge: string; /** Krótki opis do legendy. */ hint: string }
+  {
+    label: string;
+    icon: LucideIcon;
+    badge: string;
+    /** Segment wyboru statusu w dialogu — te same konwencje co BILLING_META. */
+    chip: string;
+    chipActive: string;
+    /** Krótki opis do legendy. */
+    hint: string;
+  }
 > = {
   planned: {
     label: "Zaplanowane",
+    icon: CalendarClock,
     badge: "bg-sky-100 text-sky-800 dark:bg-sky-500/20 dark:text-sky-200",
+    chip: "border-sky-500/50 text-sky-700 dark:text-sky-300",
+    chipActive: "bg-sky-500 border-sky-500 text-white",
     hint: "termin wstępny — czeka na potwierdzenie",
   },
   confirmed: {
     label: "Potwierdzone",
+    icon: CircleCheck,
     badge: "bg-emerald-100 text-emerald-800 dark:bg-emerald-500/20 dark:text-emerald-200",
+    chip: "border-emerald-500/50 text-emerald-700 dark:text-emerald-300",
+    chipActive: "bg-emerald-500 border-emerald-500 text-white",
     hint: "termin uzgodniony z klientem i ekipą",
   },
   done: {
     label: "Wykonane",
+    icon: Check,
     badge: "bg-slate-200 text-slate-700 dark:bg-slate-500/25 dark:text-slate-200",
+    chip: "border-slate-400/60 text-slate-700 dark:text-slate-300",
+    chipActive: "bg-slate-500 border-slate-500 text-white",
     hint: "zakończone — wyszarzone, ze znacznikiem ✓",
   },
   cancelled: {
     label: "Anulowane",
+    icon: Ban,
     badge: "bg-red-100 text-red-800 dark:bg-red-500/20 dark:text-red-200",
+    chip: "border-red-500/50 text-red-700 dark:text-red-300",
+    chipActive: "bg-red-500 border-red-500 text-white",
     hint: "odwołane — przekreślone, przerywana ramka",
   },
 };
@@ -172,7 +198,61 @@ export const STATUS_BADGE_DARK: Record<CalendarEventStatus, string> = {
 
 /** Pełna klasa badge'a statusu (pigułka + kolory jasne/ciemne). */
 export function statusBadgeClass(s: CalendarEventStatus): string {
-  return cn("inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium", EVENT_STATUS_META[s]?.badge);
+  return cn(pillClass("neutral"), EVENT_STATUS_META[s]?.badge);
+}
+
+// ---------------------------------------------------------------------------
+// Pigułki (pills) — wspólny kształt badge'y w całym dziale technicznym
+// ---------------------------------------------------------------------------
+
+/**
+ * Tony pigułek: jeden zestaw kolorów jasny/ciemny dla wszystkich zakładek
+ * Technicznego (realizacje, protokoły, magazyn, technicy). Dzięki temu badge
+ * poza kalendarzem wygląda dokładnie tak samo jak status czy rozliczenie
+ * wydarzenia — i nie znika w trybie ciemnym (klasa `bg-*-100` bez wariantu
+ * `dark:` daje ciemny tekst na jasnym tle tylko w jednym motywie).
+ */
+export type PillTone =
+  | "sky"
+  | "emerald"
+  | "amber"
+  | "violet"
+  | "orange"
+  | "indigo"
+  | "teal"
+  | "rose"
+  | "red"
+  | "neutral"
+  | "muted";
+
+export const PILL_TONE: Record<PillTone, string> = {
+  sky: "bg-sky-100 text-sky-800 dark:bg-sky-500/20 dark:text-sky-200",
+  emerald: "bg-emerald-100 text-emerald-800 dark:bg-emerald-500/20 dark:text-emerald-200",
+  amber: "bg-amber-100 text-amber-800 dark:bg-amber-500/20 dark:text-amber-200",
+  violet: "bg-violet-100 text-violet-800 dark:bg-violet-500/20 dark:text-violet-200",
+  orange: "bg-orange-100 text-orange-800 dark:bg-orange-500/20 dark:text-orange-200",
+  indigo: "bg-indigo-100 text-indigo-800 dark:bg-indigo-500/20 dark:text-indigo-200",
+  teal: "bg-teal-100 text-teal-800 dark:bg-teal-500/20 dark:text-teal-200",
+  rose: "bg-rose-100 text-rose-800 dark:bg-rose-500/20 dark:text-rose-200",
+  red: "bg-red-100 text-red-800 dark:bg-red-500/20 dark:text-red-200",
+  neutral: "bg-slate-200 text-slate-700 dark:bg-slate-500/25 dark:text-slate-200",
+  muted: "bg-muted text-muted-foreground",
+};
+
+/**
+ * Pigułka o tym samym kształcie co badge statusu/rozliczenia w kalendarzu.
+ * `compact` = wersja do gęstych tabel (jak `ProtocolBadge compact`).
+ */
+export function pillClass(
+  tone: PillTone,
+  opts?: { compact?: boolean; className?: string }
+): string {
+  return cn(
+    "inline-flex items-center gap-1 whitespace-nowrap rounded-full font-medium",
+    opts?.compact ? "px-1.5 py-px text-[10px]" : "px-2 py-0.5 text-xs",
+    PILL_TONE[tone],
+    opts?.className
+  );
 }
 
 /** Kolory typów jako klasy Tailwind — do pasków/ikon poza Calendar.css (dialog, karta obiektu). */
@@ -294,6 +374,19 @@ export function fmtDayHeading(dayKey: string, now = new Date()): string {
   return `${d.getDate()} ${MONTHS_GEN[d.getMonth()]} ${d.getFullYear()}`;
 }
 
+/** „90” → „1 godz. 30 min”, „30” → „30 min”, „1500” → „1 dzień 1 godz.” */
+export function fmtMinutes(m: number): string {
+  if (m <= 0) return "";
+  const days = Math.floor(m / 1440);
+  const hrs = Math.floor((m % 1440) / 60);
+  const rest = m % 60;
+  const parts: string[] = [];
+  if (days) parts.push(days === 1 ? "1 dzień" : `${days} dni`);
+  if (hrs) parts.push(`${hrs} godz.`);
+  if (rest) parts.push(`${rest} min`);
+  return parts.join(" ");
+}
+
 /** Czas relatywny PL: „przed chwilą”, „5 min temu”, „wczoraj 14:32”, „12.03.2026”. */
 export function fmtRelative(v: string | null | undefined, now = Date.now()): string {
   if (!v) return "—";
@@ -364,6 +457,39 @@ export function fmtRange(startAt: string, endAt: string, allDay: boolean): strin
     return `${fmtLong(startAt)} – ${pad(e.getHours())}:${pad(e.getMinutes())}`;
   }
   return `${fmtLong(startAt)} – ${fmtLong(endAt)}`;
+}
+
+/**
+ * Zakres bez daty, gdy wydarzenie mieści się w jednym dniu („08:00 – 10:00”). W kalendarzu
+ * dzień widać z siatki, więc data w dymku tylko zabiera miejsce. Wielodniowe zostają z pełną
+ * datą, a jednodniowe całodniowe zwracają pusty string — zostaje samo „cały dzień”.
+ */
+export function fmtRangeCompact(startAt: string, endAt: string, allDay: boolean): string {
+  const s = parseLocal(startAt);
+  const e = parseLocal(endAt);
+  if (allDay) {
+    const last = new Date(e);
+    last.setDate(last.getDate() - 1); // koniec exclusive → ostatni dzień
+    return toDateStr(s) === toDateStr(last) ? "" : fmtRange(startAt, endAt, allDay);
+  }
+  if (toDateStr(s) === toDateStr(e)) {
+    return `${pad(s.getHours())}:${pad(s.getMinutes())} – ${pad(e.getHours())}:${pad(e.getMinutes())}`;
+  }
+  return fmtRange(startAt, endAt, allDay);
+}
+
+/** Linia terminu do dymków: „08:00 – 10:00 (2 godz.)”, „cały dzień”, „12.09.2026 – 14.09.2026 (3 dni) · cały dzień”. */
+export function eventTermLine(
+  ev: { startAt: string; endAt: string; allDay: boolean },
+  compact = false
+): string {
+  const range = compact
+    ? fmtRangeCompact(ev.startAt, ev.endAt, ev.allDay)
+    : fmtRange(ev.startAt, ev.endAt, ev.allDay);
+  if (!range) return "cały dzień";
+  const duration = fmtDuration(ev.startAt, ev.endAt, ev.allDay);
+  const withDuration = duration ? `${range} (${duration})` : range;
+  return ev.allDay ? `${withDuration} · cały dzień` : withDuration;
 }
 
 // ---------------------------------------------------------------------------
@@ -676,7 +802,7 @@ export const billingLabel = (b: string | null | undefined): string =>
 
 /** Pełna klasa badge'a rozliczenia (pigułka + kolory jasne/ciemne). */
 export function billingBadgeClass(b: CalendarBilling): string {
-  return cn("inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium", BILLING_META[b]?.badge);
+  return cn(pillClass("neutral"), BILLING_META[b]?.badge);
 }
 
 /** Typy, dla których rozliczenie nie ma sensu (pole ukryte, zawsze null). */
@@ -729,7 +855,7 @@ export const PROTOCOL_BADGE_META: Record<
 
 /** Pełna klasa badge'a protokołu. */
 export function protocolBadgeClass(kind: ProtocolBadgeKind): string {
-  return cn("inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium", PROTOCOL_BADGE_META[kind].badge);
+  return cn(pillClass("neutral"), PROTOCOL_BADGE_META[kind].badge);
 }
 
 /** Deep-link do protokołu w module Protokoły (Technical.tsx obsługuje ?protocol=ID). */
@@ -832,7 +958,7 @@ export const REALIZATION_BADGE_META: Record<
 
 /** Pełna klasa badge'a realizacji. */
 export function realizationBadgeClass(kind: RealizationBadgeKind): string {
-  return cn("inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium", REALIZATION_BADGE_META[kind].badge);
+  return cn(pillClass("neutral"), REALIZATION_BADGE_META[kind].badge);
 }
 
 /** Kwota realizacji w formacie PLN (badge / podgląd). */
@@ -845,6 +971,82 @@ export const realizationMoney = (v: number | null | undefined): string => plnFmt
  */
 export const realizationHref = (id: number, date?: string | null): string =>
   `/technical/realizacje?realization=${id}${date ? `&date=${date.slice(0, 10)}` : ""}`;
+
+// ---------------------------------------------------------------------------
+// Wyceny wydarzeń — dokument „za ile” dla prac PŁATNYCH
+// ---------------------------------------------------------------------------
+
+export type QuoteBadgeKind = "filled" | "draft" | "missing";
+
+/**
+ * Stan wyceny dla badge'a: `filled` (ma wpisane ilości, zielony), `draft` (szkic
+ * z cennika, szary), `missing` (bursztynowy „Brak wyceny” — TYLKO praca płatna,
+ * objęta realizacją i już WYKONANA; dopóki jest zaplanowana, brak wyceny nie jest
+ * niczym niepokojącym). null = nic nie pokazuj (gwarancja, darmowe, urlop, biuro…).
+ */
+export function quoteBadgeKind(e: {
+  type: CalendarEventType | string;
+  status?: CalendarEventStatus | string;
+  billing?: CalendarBilling | null;
+  quote?: CalendarEventQuote | null;
+}): QuoteBadgeKind | null {
+  if (e.quote) return e.quote.filledItems > 0 ? "filled" : "draft";
+  if (e.billing === "paid" && e.status === "done" && realizationApplies(e.type)) return "missing";
+  return null;
+}
+
+export const QUOTE_BADGE_META: Record<
+  QuoteBadgeKind,
+  { icon: LucideIcon; badge: string; /** Kolor samej ikony — kompaktowy znacznik. */ tone: string; label: (num?: string) => string }
+> = {
+  filled: {
+    icon: Calculator,
+    badge: "bg-emerald-100 text-emerald-800 dark:bg-emerald-500/20 dark:text-emerald-200",
+    tone: "text-emerald-600 dark:text-emerald-300",
+    label: (num) => `Wycena ${num ?? ""}`.trim(),
+  },
+  draft: {
+    icon: Calculator,
+    badge: "bg-slate-200 text-slate-700 dark:bg-slate-500/25 dark:text-slate-200",
+    tone: "text-slate-500 dark:text-slate-300",
+    label: (num) => `Wycena ${num ?? ""}`.trim(),
+  },
+  missing: {
+    icon: FileX,
+    badge: "bg-amber-100 text-amber-800 dark:bg-amber-500/20 dark:text-amber-200",
+    tone: "text-amber-600 dark:text-amber-400",
+    label: () => "Brak wyceny",
+  },
+};
+
+/** Pełna klasa badge'a wyceny. */
+export function quoteBadgeClass(kind: QuoteBadgeKind): string {
+  return cn(pillClass("neutral"), QUOTE_BADGE_META[kind].badge);
+}
+
+/** Deep-link do wyceny w module Techniczny (Technical.tsx obsługuje ?quote=ID). */
+export const quoteHref = (id: number): string => `/technical/wyceny?quote=${id}`;
+
+/**
+ * Tooltip znacznika wyceny:
+ *   „Wycena W/2026/03/004 — 1 200,00 zł (2 poz.)”
+ *   „Wycena W/2026/03/004 — szkic z cennika, bez wpisanych ilości”
+ *   „Brak wyceny — praca płatna, wycena nie została utworzona”
+ */
+export function quoteTip(e: {
+  type: CalendarEventType | string;
+  status?: CalendarEventStatus | string;
+  billing?: CalendarBilling | null;
+  quote?: CalendarEventQuote | null;
+}): string | null {
+  const kind = quoteBadgeKind(e);
+  if (!kind) return null;
+  if (kind === "missing") return "Brak wyceny — praca płatna i wykonana, wycena nie została utworzona";
+  const num = e.quote?.number ? `Wycena ${e.quote.number}` : "Wycena";
+  if (kind === "draft") return `${num} — szkic z cennika, bez wpisanych ilości`;
+  const q = e.quote!;
+  return `${num} — ${realizationMoneyExact(q.total)} (${pluralPl(q.filledItems, "pozycja", "pozycje", "pozycji")})`;
+}
 
 /** Deep-link do wydarzenia w kalendarzu (Calendar.tsx obsługuje ?event=ID&date=). */
 export const calendarEventHref = (id: number, startAt?: string | null): string =>
@@ -977,11 +1179,10 @@ export function eventTooltipText(
   now: Date | number = Date.now()
 ): string {
   const typeLabel = eventTypeLabel(String(ev.type));
-  const duration = fmtDuration(ev.startAt, ev.endAt, ev.allDay);
   const lines: string[] = [
     ev.title,
     [typeLabel, ev.objectName || ""].filter(Boolean).join(" · "),
-    `${fmtRange(ev.startAt, ev.endAt, ev.allDay)}${duration ? ` (${duration})` : ""}${ev.allDay ? " · cały dzień" : ""}`,
+    eventTermLine(ev),
   ];
   if (ev.location) lines.push(`Lokalizacja: ${ev.location}`);
   if (ev.technicians?.length) {
@@ -1060,21 +1261,22 @@ export const EVENT_TIP_HINT = "Kliknij, by otworzyć · prawy przycisk: więcej"
  */
 export function eventTipData(
   ev: EventTipInput,
-  opts: { hint?: string | null; warnings?: string[]; now?: Date | number } = {}
+  opts: {
+    hint?: string | null;
+    warnings?: string[];
+    now?: Date | number;
+    /** W kalendarzu dzień widać z siatki — wtedy termin bez daty (fmtRangeCompact). */
+    compactDate?: boolean;
+    /** Gotowa linia dojazdu („wyjazd 05:21 · dojazd 1 godz.”) — liczy ją `departureLine` z lib/travel. */
+    departure?: string | null;
+  } = {}
 ): RichTip {
   const now = opts.now ?? Date.now();
   const type = ev.type as CalendarEventType;
   const typeLabel = eventTypeLabel(String(ev.type));
-  const duration = fmtDuration(ev.startAt, ev.endAt, ev.allDay);
 
-  const rows: TipRow[] = [
-    {
-      icon: "clock",
-      text: `${fmtRange(ev.startAt, ev.endAt, ev.allDay)}${duration ? ` (${duration})` : ""}${
-        ev.allDay ? " · cały dzień" : ""
-      }`,
-    },
-  ];
+  const rows: TipRow[] = [{ icon: "clock", text: eventTermLine(ev, opts.compactDate) }];
+  if (opts.departure) rows.push({ icon: "route", text: opts.departure });
   if (ev.technicians?.length) {
     rows.push({
       icon: "users",

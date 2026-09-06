@@ -37,6 +37,14 @@ function cleanup() {
   for (const r of db.select({ id: schema.realizations.id }).from(schema.realizations).where(sql`${schema.realizations.note} LIKE ${`%${PREFIX}%`}`).all()) realIds.push(r.id);
   if (realIds.length) {
     db.delete(schema.protocols).where(inArray(schema.protocols.realizationId, realIds)).run();
+    // Wyceny prac płatnych (src/lib/calendar-realizations.ts) — przed realizacjami:
+    // FK `quotes.realization_id` dodany przez ALTER TABLE nie ma ON DELETE CASCADE
+    // w bazach sprzed migracji 0043.
+    const quoteIds = db.select({ id: schema.quotes.id }).from(schema.quotes).where(inArray(schema.quotes.realizationId, realIds)).all().map((q) => q.id);
+    if (quoteIds.length) {
+      db.update(schema.calendarEvents).set({ quoteId: null }).where(inArray(schema.calendarEvents.quoteId, quoteIds)).run();
+      db.delete(schema.quotes).where(inArray(schema.quotes.id, quoteIds)).run();
+    }
     db.delete(schema.realizations).where(inArray(schema.realizations.id, realIds)).run();
   }
   if (eventIds.length) {

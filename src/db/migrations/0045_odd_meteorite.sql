@@ -1,0 +1,1 @@
+ALTER TABLE `contractors` ADD `active` integer DEFAULT true NOT NULL;

@@ -107,44 +107,16 @@ export function CmaReports() {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-3">
       {!editable && <ReadOnlyBanner className="mb-4" />}
 
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-          <h1 className="text-3xl font-bold text-slate-900">CMA</h1>
-          <p className="text-slate-500">
-            Centrum monitorowania alarmów - raporty z przeglądu kamer
-          </p>
-        </div>
-        {editable && (
-          <Button
-            onClick={() => fileInputRef.current?.click()}
-            disabled={importing}
-            className="bg-indigo-600 hover:bg-indigo-700 text-white"
-          >
-            {importing ? (
-              <>
-                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                Importowanie...
-              </>
-            ) : (
-              <>
-                <Upload className="w-4 h-4 mr-2" />
-                Importuj raport
-              </>
-            )}
-          </Button>
-        )}
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept=".xls,.xlsx"
-          className="hidden"
-          onChange={handleFileSelected}
-        />
-      </div>
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".xls,.xlsx"
+        className="hidden"
+        onChange={handleFileSelected}
+      />
 
       {/* Import error */}
       {importError && (
@@ -191,6 +163,31 @@ export function CmaReports() {
         </div>
       ) : (
         <div className="bg-white rounded-lg border border-slate-200 overflow-hidden">
+          {editable && (
+            <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-4 py-2">
+              <span className="text-sm text-slate-500">
+                {reports.length} {reports.length === 1 ? "raport" : "raportów"}
+              </span>
+              <Button
+                size="sm"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={importing}
+                className="bg-indigo-600 hover:bg-indigo-700 text-white"
+              >
+                {importing ? (
+                  <>
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                    Importowanie...
+                  </>
+                ) : (
+                  <>
+                    <Upload className="w-4 h-4 mr-2" />
+                    Importuj raport
+                  </>
+                )}
+              </Button>
+            </div>
+          )}
           <Table>
             <TableHeader>
               <TableRow className="bg-slate-50">

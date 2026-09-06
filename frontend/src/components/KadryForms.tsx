@@ -13,7 +13,10 @@ import {
   DialogFooter,
 } from "./ui/dialog";
 import type {
+  Company,
   HrBonusType,
+  HrDepartment,
+  HrEmployeeKind,
   HrChannel,
   HrContract,
   HrContractInput,
@@ -28,18 +31,45 @@ import type {
   HrPayrollRow,
   HrPayrollSaveInput,
 } from "@/lib/api";
+// pola liczbowe (puste = null, przecinek dozwolony) oraz kodowanie przypisania
+// wiersza godzin (obiekt albo dział) — wspólne z tabelami Kadr
+import {
+  fieldToNum,
+  formatAssignment,
+  numToField,
+  parseAssignment,
+} from "./kadry/shared";
 
 const SELECT_CLS =
   "flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm";
 
-// pole liczbowe: puste = brak wartości (null), przecinek dozwolony
-type NumVal = number | string | null | undefined;
-const numToField = (v: NumVal) => (v == null ? "" : String(v));
-const fieldToNum = (v: string): number | null => {
-  if (v.trim() === "") return null;
-  const n = parseFloat(v.replace(",", "."));
-  return Number.isFinite(n) ? n : null;
-};
+/**
+ * Nazwy spółek do wyboru: aktywne ze słownika + wartość już zapisana w wierszu,
+ * choćby spółka była zarchiwizowana albo (dane historyczne) spoza słownika —
+ * inaczej edycja innego pola po cichu podmieniałaby spółkę.
+ */
+function companyOptions(companies: Company[], current?: string | null): string[] {
+  const names = companies.filter((c) => c.active).map((c) => c.name);
+  const cur = (current ?? "").trim();
+  if (cur && !names.includes(cur)) names.push(cur);
+  return names.sort((a, b) => a.localeCompare(b, "pl"));
+}
+
+/**
+ * Działy do wyboru: aktywne + ten już przypisany, choćby był zarchiwizowany —
+ * inaczej edycja dowolnego innego pola kartoteki po cichu kasowałaby dział.
+ */
+function departmentOptions(
+  departments: HrDepartment[],
+  currentId?: number | null,
+): HrDepartment[] {
+  const list = departments.filter(
+    (d) => d.active || (currentId != null && d.id === currentId),
+  );
+  return [...list].sort(
+    (a, b) => a.sortOrder - b.sortOrder || a.label.localeCompare(b.label, "pl"),
+  );
+}
 
 function NumField({
   id,
@@ -77,19 +107,25 @@ export function HrEmployeeForm({
   onClose,
   onSubmit,
   employee,
+  departments,
 }: {
   open: boolean;
   onClose: () => void;
   onSubmit: (data: HrEmployeeInput) => Promise<void>;
   employee?: HrEmployee | null;
+  /** Działy firmy — lista wyboru macierzystego działu pracownika. */
+  departments: HrDepartment[];
 }) {
   const [loading, setLoading] = useState(false);
   const [formData, setFormData] = useState<HrEmployeeInput>({
     fullName: employee?.fullName || "",
     code: employee?.code || "",
+    kind: employee?.kind || "ochrona",
+    departmentId: employee?.departmentId ?? null,
     notes: employee?.notes || "",
     active: employee?.active ?? true,
   });
+  const deptChoices = departmentOptions(departments, employee?.departmentId);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -124,6 +160,60 @@ export function HrEmployeeForm({
               placeholder="np. Kowalski Jan"
               required
             />
+          </div>
+          <div className="space-y-2">
+            <Label
+              htmlFor="hre-kind"
+              title="Ochrona rozlicza się z umów kadrowych; biuro — z zestawienia biura w Wynagrodzeniach"
+              className="cursor-help"
+            >
+              Rodzaj rozliczenia
+            </Label>
+            <select
+              id="hre-kind"
+              value={formData.kind || "ochrona"}
+              onChange={(e) =>
+                setFormData((p) => ({
+                  ...p,
+                  kind: e.target.value as HrEmployeeKind,
+                }))
+              }
+              className={SELECT_CLS}
+            >
+              <option value="ochrona">Ochrona (umowy)</option>
+              <option value="biuro">Biuro</option>
+            </select>
+          </div>
+          <div className="space-y-2">
+            <Label
+              htmlFor="hre-dept"
+              title="Macierzysty dział pracownika — podpowiadany przy nowym wpisie godzin"
+              className="cursor-help"
+            >
+              Dział
+            </Label>
+            <select
+              id="hre-dept"
+              value={
+                formData.departmentId == null ? "" : String(formData.departmentId)
+              }
+              onChange={(e) =>
+                setFormData((p) => ({
+                  ...p,
+                  // Pusta opcja = jawny null, nie `undefined`: PUT nadpisuje
+                  // rekord, więc pominięcie pola zostawiłoby stary dział.
+                  departmentId: e.target.value ? Number(e.target.value) : null,
+                }))
+              }
+              className={SELECT_CLS}
+            >
+              <option value="">— brak —</option>
+              {deptChoices.map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.label}
+                </option>
+              ))}
+            </select>
           </div>
           <div className="space-y-2">
             <Label htmlFor="hre-code">Kod (status)</Label>
@@ -189,6 +279,7 @@ export function HrHoursForm({
   entry,
   employees,
   objects,
+  departments,
   year,
   month,
 }: {
@@ -198,6 +289,8 @@ export function HrHoursForm({
   entry?: HrHoursEntry | null;
   employees: HrEmployee[];
   objects: HrObject[];
+  /** Działy do drugiej grupy w selekcie przypisania. */
+  departments: HrDepartment[];
   year: number;
   month: number;
 }) {
@@ -205,8 +298,10 @@ export function HrHoursForm({
   const [employeeId, setEmployeeId] = useState(
     entry ? String(entry.employeeId) : "",
   );
-  const [objectId, setObjectId] = useState(
-    entry?.objectId ? String(entry.objectId) : "",
+  // Jeden stan na obiekt i dział — pola są rozłączne, więc trzymanie dwóch
+  // niezależnych selectów pozwalałoby wypełnić oba i dostać 400 przy zapisie.
+  const [assignment, setAssignment] = useState(
+    entry ? formatAssignment(entry) : "",
   );
   const [fields, setFields] = useState({
     nightHours: numToField(entry?.nightHours),
@@ -222,13 +317,36 @@ export function HrHoursForm({
   const set = (k: keyof typeof fields) => (v: string) =>
     setFields((p) => ({ ...p, [k]: v }));
 
+  /**
+   * Wybór pracownika PODPOWIADA jego macierzysty dział z kartoteki — to tylko
+   * podpowiedź, nie reguła: człowiek z działu technicznego bywa rozliczany na
+   * konkretnym obiekcie, a wtedy dział byłby błędem. Dlatego podstawiamy go
+   * wyłącznie przy NOWYM wpisie i tylko gdy przypisanie jest jeszcze puste —
+   * nigdy nie nadpisujemy tego, co użytkownik już wybrał, ani istniejącego
+   * wiersza (tam dział ustalono kiedyś świadomie).
+   */
+  const handleEmployeeChange = (value: string) => {
+    setEmployeeId(value);
+    if (entry) return;
+    const emp = employees.find((e) => String(e.id) === value);
+    const deptId = emp?.departmentId ?? null;
+    // Dział zarchiwizowany nie ma opcji w selekcie — podstawiony token
+    // pokazałby puste pole, więc podpowiadamy tylko to, co da się wybrać.
+    if (deptId == null || !departments.some((d) => d.id === deptId)) return;
+    setAssignment((prev) => (prev === "" ? `d:${deptId}` : prev));
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     try {
+      // Oba id lecą zawsze (jedno null): zapis nadpisuje cały wiersz, więc
+      // przełączenie obiekt→dział musi jawnie wyzerować poprzednie pole.
+      const { objectId, departmentId } = parseAssignment(assignment);
       await onSubmit({
         employeeId,
-        objectId: objectId || null,
+        objectId,
+        departmentId,
         year: entry?.year ?? year,
         month: entry?.month ?? month,
         nightHours: fieldToNum(fields.nightHours),
@@ -263,7 +381,7 @@ export function HrHoursForm({
               <select
                 id="hrh-emp"
                 value={employeeId}
-                onChange={(e) => setEmployeeId(e.target.value)}
+                onChange={(e) => handleEmployeeChange(e.target.value)}
                 className={SELECT_CLS}
                 required
               >
@@ -276,23 +394,35 @@ export function HrHoursForm({
               </select>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="hrh-obj">Obiekt</Label>
+              <Label htmlFor="hrh-obj">Obiekt / dział</Label>
+              {/* Dwa słowniki w jednym natywnym selekcie: wartością opcji jest
+                  token `o:`/`d:`, bo obie tabele numerują się od 1 i samo id
+                  nie odróżniłoby obiektu od działu. */}
               <select
                 id="hrh-obj"
-                value={objectId}
-                onChange={(e) => setObjectId(e.target.value)}
+                value={assignment}
+                onChange={(e) => setAssignment(e.target.value)}
                 className={SELECT_CLS}
               >
                 <option value="">—</option>
-                {objects.map((o) => (
-                  <option key={o.id} value={o.id}>
-                    {o.name}
-                  </option>
-                ))}
+                <optgroup label="Obiekty">
+                  {objects.map((o) => (
+                    <option key={o.id} value={`o:${o.id}`}>
+                      {o.name}
+                    </option>
+                  ))}
+                </optgroup>
+                <optgroup label="Działy">
+                  {departments.map((d) => (
+                    <option key={d.id} value={`d:${d.id}`}>
+                      {d.label}
+                    </option>
+                  ))}
+                </optgroup>
               </select>
               {entry?.objectUncertain && (
                 <p className="text-xs text-amber-600">
-                  Obiekt przeniesiony z poprzedniego miesiąca — potwierdź
+                  Przypisanie przeniesione z poprzedniego miesiąca — potwierdź
                 </p>
               )}
             </div>
@@ -304,7 +434,7 @@ export function HrHoursForm({
               label="Wypracowane"
               value={fields.workedHours}
               onChange={set("workedHours")}
-              hint="Godziny wypracowane na obiekcie w miesiącu"
+              hint="Godziny wypracowane na obiekcie albo w dziale w miesiącu"
             />
             <NumField
               id="hrh-night"
@@ -393,17 +523,25 @@ export function HrContractForm({
   contract,
   employees,
   companies,
+  defaultEmployeeId,
 }: {
   open: boolean;
   onClose: () => void;
   onSubmit: (data: HrContractInput) => Promise<void>;
   contract?: HrContract | null;
   employees: HrEmployee[];
-  companies: string[];
+  /** Słownik spółek (zakładka Spółki) — spółka umowy jest z niego wybierana. */
+  companies: Company[];
+  /** Pracownik podstawiany w nowej umowie (dodawanie z wiersza kartoteki). */
+  defaultEmployeeId?: number;
 }) {
   const [loading, setLoading] = useState(false);
   const [formData, setFormData] = useState<HrContractInput>({
-    employeeId: contract ? String(contract.employeeId) : "",
+    employeeId: contract
+      ? String(contract.employeeId)
+      : defaultEmployeeId
+        ? String(defaultEmployeeId)
+        : "",
     company: contract?.company || "",
     contractType: contract?.contractType || "zlecenie",
     chor: contract?.chor ?? false,
@@ -458,22 +596,34 @@ export function HrContractForm({
               </select>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="hrc-company">Spółka *</Label>
-              <Input
+              <Label
+                htmlFor="hrc-company"
+                title="Spółka zatrudniająca ze słownika (zakładka Spółki) — nazwa wiąże umowę ze spółką w zestawieniach"
+                className="cursor-help"
+              >
+                Spółka *
+              </Label>
+              <select
                 id="hrc-company"
                 value={formData.company}
                 onChange={(e) =>
                   setFormData((p) => ({ ...p, company: e.target.value }))
                 }
-                list="hrc-companies"
-                placeholder="np. ALFA"
+                className={SELECT_CLS}
                 required
-              />
-              <datalist id="hrc-companies">
-                {companies.map((c) => (
-                  <option key={c} value={c} />
+              >
+                <option value="">— wybierz —</option>
+                {companyOptions(companies, contract?.company).map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
                 ))}
-              </datalist>
+              </select>
+              {companies.length === 0 && (
+                <p className="text-xs text-muted-foreground">
+                  Słownik spółek jest pusty — dodaj spółkę w zakładce Spółki.
+                </p>
+              )}
             </div>
           </div>
 
@@ -839,6 +989,8 @@ export function HrOfficeForm({
   onSubmit,
   row,
   employees,
+  companies,
+  defaultEmployeeId,
   year,
   month,
 }: {
@@ -847,12 +999,15 @@ export function HrOfficeForm({
   onSubmit: (data: HrOfficeInput) => Promise<void>;
   row?: HrOfficeRow | null;
   employees: HrEmployee[];
+  /** Słownik spółek — biuro trzyma tam też formy zatrudnienia (ALFA ETAT / ALFA UZ). */
+  companies: Company[];
+  defaultEmployeeId?: number;
   year: number;
   month: number;
 }) {
   const [loading, setLoading] = useState(false);
   const [employeeId, setEmployeeId] = useState(
-    row ? String(row.employeeId) : "",
+    row ? String(row.employeeId) : defaultEmployeeId ? String(defaultEmployeeId) : "",
   );
   const [company, setCompany] = useState(row?.company || "");
   const [fields, setFields] = useState({
@@ -927,20 +1082,29 @@ export function HrOfficeForm({
               </select>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="hro-company">Spółka / forma</Label>
-              <Input
+              {/* Biuro rozlicza się na spółce razem z formą zatrudnienia
+                  ("ALFA ETAT", "ALFA UZ") — te warianty są pozycjami słownika
+                  spółek, więc pole jest zwykłym wyborem z listy. */}
+              <Label
+                htmlFor="hro-company"
+                title="Spółka / forma zatrudnienia ze słownika (zakładka Spółki)"
+                className="cursor-help"
+              >
+                Spółka / forma
+              </Label>
+              <select
                 id="hro-company"
                 value={company}
                 onChange={(e) => setCompany(e.target.value)}
-                placeholder="np. ALFA ETAT / ALFA UZ"
-                list="hro-companies"
-              />
-              <datalist id="hro-companies">
-                <option value="ALFA ETAT" />
-                <option value="ALFA UZ" />
-                <option value="ALFA S" />
-                <option value="CONTROL ETAT" />
-              </datalist>
+                className={SELECT_CLS}
+              >
+                <option value="">— wybierz —</option>
+                {companyOptions(companies, row?.company).map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
             </div>
           </div>
 

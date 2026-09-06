@@ -1,0 +1,1 @@
+ALTER TABLE `hr_objects` DROP COLUMN `is_cma_pool`;

@@ -34,6 +34,7 @@ import { tip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import {
   calendarEventHref,
+  pillClass,
   realizationHref,
   REALIZATION_KIND_LABEL,
 } from "@/lib/calendar-labels";
@@ -485,7 +486,7 @@ export function RealizationsMap({ rows, className }: RealizationsMapProps) {
         </button>
         {missing > 0 && (
           <span
-            className="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground"
+            className={pillClass("muted", { className: "font-normal" })}
             data-testid="realizations-map-missing"
             {...tip(
               "Realizacje bez współrzędnych obiektu nie trafiają na mapę.\nUzupełnij pinezkę w karcie obiektu (Techniczny → Obiekty)."

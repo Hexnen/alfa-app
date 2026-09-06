@@ -17,11 +17,22 @@
  */
 import { Hono } from "hono";
 import { db, schema } from "../src/db/index.js";
-import { eq, inArray, like } from "drizzle-orm";
+import { asc, eq, inArray, like } from "drizzle-orm";
 import realizations from "../src/routes/realizations.js";
 import type { User } from "../src/db/schema.js";
 
 let failures = 0;
+
+/**
+ * Kanarek „dane produkcyjne nietknięte”: najstarsza realizacja istniejąca PRZED testem.
+ * Wcześniej było tu twarde `id === 1`, ale baza demonstracyjna numeruje realizacje od nowa.
+ */
+const canaryRealizationId: number | null =
+  db
+    .select({ id: schema.realizations.id })
+    .from(schema.realizations)
+    .orderBy(asc(schema.realizations.id))
+    .get()?.id ?? null;
 function ok(label: string, cond: boolean, extra?: unknown) {
   console.log(`${cond ? "OK  " : "FAIL"} ${label}${cond ? "" : `\n     got: ${JSON.stringify(extra)}`}`);
   if (!cond) failures++;
@@ -321,7 +332,12 @@ async function main() {
     .from(schema.realizations)
     .where(eq(schema.realizations.id, 1))
     .get();
-  ok("realizacja #1 (produkcyjna) nadal istnieje", prod?.id === 1, prod);
+  ok(
+    "realizacja sprzed testu nadal istnieje",
+    canaryRealizationId === null ||
+      !!db.select().from(schema.realizations).where(eq(schema.realizations.id, canaryRealizationId)).get(),
+    canaryRealizationId
+  );
 }
 
 main()

@@ -2,9 +2,10 @@
  * Wstępne wypełnianie protokołu powykonawczego — „żeby technik i biuro wpisywali jak najmniej”.
  *
  * Łańcuch danych jest zawsze ten sam:
- *   calendar_events (termin, technicy, tytuł/opis, object_id)
- *     → objects (nazwa, adres, miasto, contractor_id)
- *       → contractors (nazwa, NIP, miasto, telefon/e-mail/osoba kontaktowa)
+ *   calendar_events (termin, technicy, tytuł/opis)
+ *     → objects przez KLUCZ OBCY (realizations.object_id → calendar_events.object_id;
+ *       rozstrzyga src/lib/object-identity.ts, nigdy nazwa z `site`)
+ *         → contractors (nazwa, NIP, miasto, telefon/e-mail/osoba kontaktowa)
  *   + price_list (materiały z cennika technika albo domyślnego)
  *   + realizations (to, czego kalendarz nie wie: km z kalkulacji, opiekun, kwoty)
  *
@@ -31,8 +32,10 @@ import type {
   Protocol,
   Realization,
 } from "../db/schema.js";
-import type { DbOrTx } from "./activity-log.js";
+import { logActivity, type ActivityUser, type DbOrTx } from "./activity-log.js";
 import { diffMinutes } from "./calendar-recurrence.js";
+import { getCompanyConfig } from "./company-config.js";
+import { resolveRealizationObject } from "./object-identity.js";
 
 // ---------------------------------------------------------------------------
 // Typy publiczne
@@ -123,6 +126,13 @@ export interface ProtocolPrefillOrigin {
   source: ProtocolPrefillSource;
   /** Czytelne „skąd to wyszło” — pokazywane pod polem i w dialogu. */
   detail: string;
+  /**
+   * true = wartość SZACOWANA (norma dnia dla wydarzenia całodniowego), a nie zmierzona.
+   * Takie pole nigdy nie zapisuje się samo: nie trafia do szkicu przy tworzeniu protokołu
+   * (`prefillInsertValues`) i zawsze dostaje `confident: false`, czyli wymaga kliknięcia
+   * człowieka w „Uzupełnij z danych”.
+   */
+  assumed?: boolean;
 }
 
 export interface ProtocolPrefillContext {
@@ -149,8 +159,10 @@ export interface ProtocolSuggestion {
   suggested: string | number;
   source: ProtocolPrefillSource;
   detail: string;
-  /** true = pole puste (podstawiamy bez pytania); false = ma inną wartość, wymaga potwierdzenia. */
+  /** true = pole puste (podstawiamy bez pytania); false = ma inną wartość albo jest to szacunek. */
   confident: boolean;
+  /** true = wartość szacowana (norma dnia dla wydarzenia całodniowego), nie zmierzona. */
+  assumed?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -169,6 +181,29 @@ function hoursOfEvent(ev: Pick<CalendarEvent, "startAt" | "endAt" | "allDay">): 
   const minutes = diffMinutes(ev.startAt, ev.endAt);
   if (!Number.isFinite(minutes) || minutes <= 0) return 0;
   return Math.round((minutes / 60) * 4) / 4;
+}
+
+/** Liczba dni wydarzenia całodniowego (koniec jest wyłączny, jak w FullCalendar). */
+export function allDayDays(ev: Pick<CalendarEvent, "startAt" | "endAt">): number {
+  const start = Date.parse(`${ev.startAt.slice(0, 10)}T00:00:00Z`);
+  const end = Date.parse(`${ev.endAt.slice(0, 10)}T00:00:00Z`);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return 1;
+  const days = Math.round((end - start) / 86_400_000);
+  return days > 0 ? days : 1;
+}
+
+/**
+ * Godziny SZACOWANE dla wydarzenia całodniowego: liczba dni × norma dnia roboczego
+ * (`company.work_day_hours`). Kalendarz nie wie, ile faktycznie trwała robota, więc ta
+ * wartość jest wyłącznie propozycją — patrz `ProtocolPrefillOrigin.assumed`.
+ */
+function assumedHoursOfEvent(
+  ev: Pick<CalendarEvent, "startAt" | "endAt" | "allDay">,
+  workDayHours: number
+): { hours: number; days: number } | null {
+  if (!ev.allDay || !(workDayHours > 0)) return null;
+  const days = allDayDays(ev);
+  return { hours: Math.round(days * workDayHours * 4) / 4, days };
 }
 
 /** Typ prac protokołu z typu wydarzenia; `null` = typ, którego protokół nie rozróżnia. */
@@ -251,42 +286,6 @@ function eventTechnicians(dbx: DbOrTx, eventId: number) {
     .where(eq(schema.calendarEventAssignees.eventId, eventId))
     .orderBy(asc(sql`calendar_event_assignees.rowid`))
     .all();
-}
-
-/**
- * Obiekt: z wydarzenia (`object_id`), a gdy go nie ma — po nazwie z `realizations.site`
- * (dopasowanie musi być jednoznaczne, inaczej wolimy nic nie podstawiać).
- * Ta sama zasada, co w automacie realizacji — powielona świadomie, żeby protokół nie
- * ciągnął za sobą modułu kalkulacji kwot.
- */
-function resolveObject(dbx: DbOrTx, site: string, objectId: number | null) {
-  const cols = {
-    id: schema.objects.id,
-    name: schema.objects.name,
-    address: schema.objects.address,
-    city: schema.objects.city,
-    contractorId: schema.objects.contractorId,
-  };
-  if (objectId != null) {
-    const row = dbx.select(cols).from(schema.objects).where(eq(schema.objects.id, objectId)).get();
-    if (row) return row;
-  }
-
-  const needle = site.trim();
-  if (!needle) return null;
-  const exact = dbx
-    .select(cols)
-    .from(schema.objects)
-    .where(sql`lower(${schema.objects.name}) = lower(${needle})`)
-    .all();
-  if (exact.length === 1) return exact[0];
-
-  const partial = dbx
-    .select(cols)
-    .from(schema.objects)
-    .where(sql`lower(${schema.objects.name}) LIKE lower(${`%${needle}%`})`)
-    .all();
-  return partial.length === 1 ? partial[0] : null;
 }
 
 /** Cennik: technika z wydarzenia → technika z „Wykonawca 1” → cennik domyślny. */
@@ -373,6 +372,11 @@ export interface BuildPrefillOptions {
    * insercie protokołu), więc wydarzenia nie da się odszukać po realizacji.
    */
   event?: CalendarEvent | null;
+  /**
+   * Norma dnia roboczego dla wydarzeń całodniowych; domyślnie `company.work_day_hours`.
+   * Wynik ląduje w `values.actualHours` z `origins.actualHours.assumed = true`.
+   */
+  workDayHours?: number;
 }
 
 /**
@@ -385,13 +389,22 @@ export function buildProtocolPrefill(
   opts: BuildPrefillOptions = {}
 ): ProtocolPrefill {
   const origins: Partial<Record<ProtocolPrefillField, ProtocolPrefillOrigin>> = {};
-  const from = (field: ProtocolPrefillField, source: ProtocolPrefillSource, detail: string) => {
-    origins[field] = { source, detail };
+  const from = (
+    field: ProtocolPrefillField,
+    source: ProtocolPrefillSource,
+    detail: string,
+    assumed = false
+  ) => {
+    origins[field] = assumed ? { source, detail, assumed } : { source, detail };
   };
 
   const ev = opts.event ?? loadEventFor(dbx, r.id);
   const techs = ev ? eventTechnicians(dbx, ev.id) : [];
-  const object = resolveObject(dbx, r.site, ev?.objectId ?? null);
+  // Obiekt WYŁĄCZNIE z klucza obcego (realizacja → wydarzenie). Wydarzenie mamy już
+  // wczytane, więc podajemy je jawnie: `[]` znaczy „sprawdzone, nie ma żadnego", i nie
+  // każe modułowi tożsamości pytać bazy drugi raz. Gdy FK nie ma — `null`, a protokół
+  // zostaje bez kontrahenta i adresu obiektu (patrz src/lib/object-identity.ts).
+  const object = resolveRealizationObject(dbx, r, { events: ev ? [ev] : [] });
   const contractorRow =
     object != null
       ? dbx
@@ -430,6 +443,20 @@ export function buildProtocolPrefill(
     if (h > 0) {
       actualHours = h;
       from("actualHours", "kalendarz", `długość wydarzenia #${ev.id}: ${h} godz.`);
+    } else {
+      // Wydarzenie całodniowe nie niesie godzin — proponujemy normę dnia, ale wyłącznie
+      // jako szacunek do potwierdzenia (assumed), żeby nic samo się nie wpisało.
+      const workDayHours = opts.workDayHours ?? getCompanyConfig().values.workDayHours;
+      const est = assumedHoursOfEvent(ev, workDayHours);
+      if (est && est.hours > 0) {
+        actualHours = est.hours;
+        from(
+          "actualHours",
+          "kalendarz",
+          `wydarzenie całodniowe #${ev.id}: ${est.days} ${est.days === 1 ? "dzień" : "dni"} × norma ${workDayHours} godz. (szacunek)`,
+          true
+        );
+      }
     }
   }
   const actualKm = r.actualKm;
@@ -620,7 +647,10 @@ export function protocolPrefillSuggestions(
       suggested,
       source: origin.source,
       detail: origin.detail,
-      confident: empty,
+      // Szacunek (norma dnia) nigdy nie jest „pewny” — nawet do pustego pola musi go
+      // wpuścić człowiek, bo system nie wie, ile robota faktycznie trwała.
+      confident: empty && !origin.assumed,
+      ...(origin.assumed ? { assumed: true } : {}),
     });
   };
 
@@ -669,4 +699,108 @@ export function prefillPatch(
     else patch[f] = prefill.values[f];
   }
   return patch;
+}
+
+// ---------------------------------------------------------------------------
+// Zapis: szkic protokołu i dosypywanie tego, co doliczyła realizacja
+// ---------------------------------------------------------------------------
+
+/**
+ * Wartości do INSERT-a szkicu protokołu: to samo, co `prefill.values`, ale bez pól
+ * oznaczonych jako szacunek (`origins[field].assumed`). Szacunku nikt nie zatwierdził,
+ * więc do dokumentu nie wchodzi — zostaje wyłącznie sugestią w „Uzupełnij z danych”.
+ */
+export function prefillInsertValues(prefill: ProtocolPrefill): ProtocolPrefillValues {
+  const values = { ...prefill.values };
+  for (const field of PROTOCOL_PREFILL_FIELDS) {
+    if (!prefill.origins[field]?.assumed) continue;
+    if (field === "actualHours" || field === "actualKm") values[field] = 0;
+  }
+  return values;
+}
+
+/** Pola liczbowe, które realizacja potrafi doliczyć PO utworzeniu protokołu. */
+const REALIZATION_NUMERIC_FIELDS = [
+  { field: "actualHours" as const, label: "godziny" },
+  { field: "actualKm" as const, label: "km" },
+];
+
+export interface ProtocolFillFromRealizationCtx {
+  user: ActivityUser;
+  /** Skąd wzięła się wartość — trafia do summary w activity_log. */
+  reason: string;
+  /** Dopisek „czym” wykonano zmianę; domyślnie „(przez automat)”. */
+  summarySuffix?: string | null;
+}
+
+export interface ProtocolFillOutcome {
+  protocolId: number;
+  number: string;
+  applied: ("actualHours" | "actualKm")[];
+}
+
+/**
+ * Dosypuje do NIEPODPISANEGO protokołu godziny i km, które realizacja policzyła już po
+ * utworzeniu szkicu (kalkulacja dystansu, automat po „wykonane”, ręczne uzupełnienie).
+ *
+ * Protokół jest dokumentem końcowym, więc obowiązuje ta sama żelazna zasada, co w automacie
+ * realizacji: uzupełniamy WYŁĄCZNIE pola zerowe. Cokolwiek człowiek wpisał, zostaje —
+ * rozbieżność zobaczy w „Uzupełnij z danych” jako sugestię do potwierdzenia.
+ *
+ * Zwraca `null`, gdy nie ma czego (albo do czego) zapisać: brak protokołu, protokół
+ * podpisany/zatwierdzony, komplet pól już wypełniony.
+ */
+export function fillProtocolFromRealizationSync(
+  dbx: DbOrTx,
+  r: Realization,
+  ctx: ProtocolFillFromRealizationCtx
+): ProtocolFillOutcome | null {
+  const protocol = dbx
+    .select()
+    .from(schema.protocols)
+    .where(eq(schema.protocols.realizationId, r.id))
+    .get();
+  if (!protocol) return null;
+  if (protocol.signedAt || protocol.signaturePng || protocol.contentHash) return null;
+  if (protocol.status === "final") return null;
+
+  const patch: Record<string, number> = {};
+  const applied: ("actualHours" | "actualKm")[] = [];
+  const bits: string[] = [];
+  for (const { field, label } of REALIZATION_NUMERIC_FIELDS) {
+    const value = r[field];
+    if (!(value > 0) || protocol[field] !== 0) continue;
+    patch[field] = value;
+    applied.push(field);
+    bits.push(`${label} ${value}`);
+  }
+  if (applied.length === 0) return null;
+
+  const updated = dbx
+    .update(schema.protocols)
+    .set({ ...patch, updatedAt: new Date().toISOString() })
+    .where(
+      and(
+        eq(schema.protocols.id, protocol.id),
+        isNull(schema.protocols.signedAt),
+        ne(schema.protocols.status, "final")
+      )
+    )
+    .returning()
+    .all();
+  if (updated.length === 0) return null;
+
+  logActivity(dbx, {
+    entityType: "protocol",
+    entityId: protocol.id,
+    user: ctx.user,
+    action: "updated",
+    field: "prefill",
+    oldValue: null,
+    newValue: JSON.stringify(applied),
+    summary: `Uzupełniono protokół ${protocol.number} z realizacji #${r.id} (${ctx.reason}): ${bits.join(", ")}`,
+    summarySuffix: ctx.summarySuffix === undefined ? "(przez automat)" : ctx.summarySuffix,
+  });
+
+  return { protocolId: protocol.id, number: protocol.number, applied };
 }

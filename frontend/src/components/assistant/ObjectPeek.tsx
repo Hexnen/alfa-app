@@ -5,7 +5,7 @@ import { Building2, CalendarDays, Check, ExternalLink, Loader2, MapPin, User, X 
 import { Button } from "@/components/ui/button";
 import { calendarApi, getObject, type CalendarEvent, type ObjectWithDetails } from "@/lib/api";
 import { eventTypeLabel, fmtRange } from "@/lib/calendar-labels";
-import { cn, objectTypeLabels, statusLabels } from "@/lib/utils";
+import { cn, objectServicesLabel, statusLabels } from "@/lib/utils";
 
 /**
  * Podgląd obiektu bez opuszczania czatu: klik w nazwę (karta ask_choice, wynik find_object,
@@ -196,7 +196,9 @@ function ObjectPeekPopover({
           <div className="font-semibold leading-snug">{obj?.name ?? (error ? "Obiekt" : "Wczytywanie…")}</div>
           {obj && (
             <div className="mt-0.5 flex flex-wrap gap-1 text-[11px] text-muted-foreground">
-              <span className="rounded-full border px-1.5 py-px">{objectTypeLabels[obj.type] ?? obj.type}</span>
+              {/* Skład usług zamiast dawnego „typu ochrony” — „brak usług”
+                  zamiast pustej plakietki, żeby luka w kartotece była widoczna. */}
+              <span className="rounded-full border px-1.5 py-px">{objectServicesLabel(obj, "brak usług")}</span>
               <span className="rounded-full border px-1.5 py-px">{statusLabels[obj.status] ?? obj.status}</span>
             </div>
           )}

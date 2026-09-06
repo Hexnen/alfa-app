@@ -198,7 +198,7 @@ try {
     ok("search_events: escape LIKE (bez wildcard)", s8.count === 0, s8);
     // type=wizja daje 0 → narzędzie samo zdejmuje filtr i oznacza relaxed: ["type"] + note
     const s9 = (await exec(tools.search_events, { query: `${PREFIX} Magazynie`, type: "wizja" })) as { events: { id: number }[]; relaxed?: string[]; note?: string };
-    ok("search_events: 0 dla type=wizja → fallback bez typu, relaxed: [\"type\"] + note", s9.events.some((e) => e.id === evServ) && s9.relaxed?.length === 1 && s9.relaxed[0] === "type" && /wizja lokalna|typu/i.test(s9.note ?? ""), s9);
+    ok("search_events: 0 dla type=wizja → fallback bez typu, relaxed: [\"type\"] + note", s9.events.some((e) => e.id === evServ) && s9.relaxed?.length === 1 && s9.relaxed[0] === "type" && /wizja|typu/i.test(s9.note ?? ""), s9);
     // filtr z trafieniami → bez relaxed; filtr bez innych kryteriów (sam type) nie jest zdejmowany
     const s10 = (await exec(tools.search_events, { query: PREFIX, type: "serwis" })) as { events: { id: number }[]; relaxed?: string[] };
     ok("search_events: type z trafieniami → bez relaxed", s10.events.some((e) => e.id === evServ) && !s10.events.some((e) => e.id === evUrlop) && s10.relaxed === undefined, s10);

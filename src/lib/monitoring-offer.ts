@@ -1,6 +1,6 @@
 // Generator oferty monitoringu — jeden samodzielny plik HTML do wysyłki:
 // interaktywny plan kamer (Leaflet + Esri) z projektu designera, osadzone
-// (base64) zdjęcia z wizji lokalnej i edytowalne sekcje tekstowe.
+// (base64) zdjęcia z wizji i edytowalne sekcje tekstowe.
 // Przepisane 1:1 z oferta-template.html + generuj-oferte.ps1
 // (monitoring-system-aluzyjna25.zip); tam działało to jako skrypt PowerShell.
 import type { MonitoringPhoto, MonitoringProject } from "../db/schema.js";
@@ -9,7 +9,7 @@ import type { MonitoringPhoto, MonitoringProject } from "../db/schema.js";
 export interface OfferFields {
   kicker: string; // nagłówek nad tytułem
   subtitle: string; // podtytuł (domyślnie adres)
-  visitDate: string; // data wizji lokalnej
+  visitDate: string; // data wizji
   purpose: string; // cel opracowania
   contact: string; // kontakt na obiekcie
   summary: string; // "W skrócie" — jedna pozycja na linię
@@ -19,7 +19,7 @@ export interface OfferFields {
 }
 
 export const DEFAULT_OFFER: OfferFields = {
-  kicker: "Wizja lokalna — materiał do wyceny (dział techniczny)",
+  kicker: "Wizja — materiał do wyceny (dział techniczny)",
   subtitle: "",
   visitDate: "",
   purpose: "wycena kosztów przez dział techniczny",
@@ -56,6 +56,78 @@ const bullets = (text: string) =>
     .map((l) => `<li>${rich(l)}</li>`)
     .join("\n        ");
 
+// ── Legenda grup kamer ──────────────────────────────────────────────────────
+// Kolor pinu i stożka kamery na planie = kolor jej grupy z designera, więc w ofercie
+// (także po wydrukowaniu do PDF) legenda tłumaczy te kolory na nazwy grup.
+interface OfferCam {
+  color?: string;
+  group?: string | null;
+}
+interface OfferGroup {
+  id: string;
+  name?: string;
+  color?: string;
+}
+
+const plCams = (n: number) => {
+  const d = n % 10;
+  const s = n % 100;
+  if (n === 1) return "1 kamera";
+  if (d >= 2 && d <= 4 && !(s >= 12 && s <= 14)) return `${n} kamery`;
+  return `${n} kamer`;
+};
+
+const swatches = (colors: string[]) =>
+  colors
+    .map((c) => `<span class="sw" style="background:${esc(c)}"></span>`)
+    .join("");
+
+function legendSection(dataRaw: string): string {
+  let d: { cameras?: OfferCam[]; camGroups?: OfferGroup[] };
+  try {
+    d = JSON.parse(dataRaw);
+  } catch {
+    return "";
+  }
+  const cams = Array.isArray(d.cameras) ? d.cameras : [];
+  const groups = Array.isArray(d.camGroups) ? d.camGroups : [];
+  // bez grup nie ma czego tłumaczyć — starsze projekty zostają bez tej sekcji
+  if (!groups.length || !cams.length) return "";
+
+  const known = new Set(groups.map((g) => g.id));
+  const items = groups
+    .map((g) => ({
+      name: g.name?.trim() || "Grupa",
+      colors: [g.color || "#22d3ee"],
+      n: cams.filter((c) => c.group === g.id).length,
+    }))
+    .filter((g) => g.n > 0);
+  if (!items.length) return "";
+
+  const loose = cams.filter((c) => !c.group || !known.has(c.group));
+  if (loose.length) {
+    // kamery spoza grup bywają w różnych kolorach — pokaż do czterech próbek
+    const cols = [...new Set(loose.map((c) => c.color || "#22d3ee"))].slice(0, 4);
+    items.push({ name: "Pozostałe kamery", colors: cols, n: loose.length });
+  }
+
+  return `
+  <section>
+    <h2>Legenda — grupy kamer</h2>
+    <div class="card">
+      <div class="legend">
+        ${items
+          .map(
+            (i) =>
+              `<div class="li"><span class="sws">${swatches(i.colors)}</span><span>${esc(i.name)} <span class="n">— ${plCams(i.n)}</span></span></div>`
+          )
+          .join("\n        ")}
+      </div>
+      <p class="legend-note">Kolor pinu i stożka widoczności na planie odpowiada grupie, do której należy kamera.</p>
+    </div>
+  </section>`;
+}
+
 export function renderOffer(
   project: MonitoringProject,
   photos: MonitoringPhoto[]
@@ -75,7 +147,7 @@ export function renderOffer(
   }
 
   const meta = [
-    o.visitDate && `<span>Wizja lokalna: <b>${esc(o.visitDate)}</b></span>`,
+    o.visitDate && `<span>Wizja: <b>${esc(o.visitDate)}</b></span>`,
     o.purpose && `<span>Cel: <b>${esc(o.purpose)}</b></span>`,
     o.contact && `<span>Kontakt na obiekcie: <b>${esc(o.contact)}</b></span>`,
   ]
@@ -118,6 +190,8 @@ export function renderOffer(
     </div>
   </section>`
     : "";
+
+  const groupLegendSection = legendSection(project.data);
 
   const existingSection = o.existing.trim()
     ? `
@@ -162,6 +236,12 @@ export function renderOffer(
   .callout b{color:var(--warn)}
   #map{height:520px;border:1px solid var(--line);border-radius:12px}
   .maphint{font-size:13px;color:var(--muted);margin-top:8px}
+  .legend{display:flex;flex-wrap:wrap;gap:10px 26px}
+  .legend .li{display:flex;align-items:center;gap:9px;font-size:14px}
+  .legend .sws{display:inline-flex;gap:3px;flex:0 0 auto}
+  .legend .sw{width:15px;height:15px;border-radius:4px;border:1px solid rgba(15,23,42,.28);display:inline-block}
+  .legend .n{color:var(--muted);font-size:13px}
+  .legend-note{margin:12px 0 0;font-size:13px;color:var(--muted)}
   .cam-pin{width:24px;height:24px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);border:2px solid #fff;display:flex;align-items:center;justify-content:center;box-shadow:0 1px 4px rgba(0,0,0,.5)}
   .cam-pin span{transform:rotate(45deg);font-size:11px;font-weight:700;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.7)}
   .pt-pin{width:26px;height:26px;border-radius:6px;border:2px solid #fff;display:flex;align-items:center;justify-content:center;font-size:14px;box-shadow:0 1px 5px rgba(0,0,0,.5)}
@@ -179,7 +259,7 @@ export function renderOffer(
   .lb .cap{position:absolute;bottom:16px;left:0;right:0;text-align:center;color:#e2e8f0;font-size:14px}
   .lb .zoomhint{position:absolute;top:16px;left:20px;color:#94a3b8;font-size:12px}
   footer{margin-top:40px;padding-top:16px;border-top:1px solid var(--line);color:var(--muted);font-size:12px;text-align:center}
-  @media print{body{background:#fff}header.cover{background:#fff;color:#000;border-bottom:2px solid #000}header.cover .kicker,header.cover .sub,header.cover .meta{color:#333}#map{height:420px}.lb{display:none!important}figure.ph{break-inside:avoid}}
+  @media print{body{background:#fff}.legend .sw{print-color-adjust:exact;-webkit-print-color-adjust:exact}section{break-inside:avoid}header.cover{background:#fff;color:#000;border-bottom:2px solid #000}header.cover .kicker,header.cover .sub,header.cover .meta{color:#333}#map{height:420px}.lb{display:none!important}figure.ph{break-inside:avoid}}
 </style>
 </head>
 <body>
@@ -200,6 +280,7 @@ ${summarySection}
     <div id="map"></div>
     <div class="maphint">Wstępny projekt obejmuje <b id="camCnt">—</b> kamer rozmieszczonych dla maksymalnego pokrycia terenu. Interaktywna mapa — <b>przewiń kółkiem, aby przybliżyć</b>, przeciągnij, aby przesunąć. <b>Skala</b> w lewym dolnym rogu. Stożki pokazują pole widzenia i zasięg kamer.</div>
   </section>
+${groupLegendSection}
 ${calloutSection}
 ${gallerySection}
 ${existingSection}

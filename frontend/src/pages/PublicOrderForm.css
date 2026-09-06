@@ -184,3 +184,25 @@
     scroll-behavior: auto !important;
   }
 }
+
+/* wyszukiwarka firm po NIP (wykaz VAT MF) */
+.zdw-lookup { display: flex; gap: 8px; align-items: stretch; }
+.zdw-lookup .zdw-input { flex: 1; min-width: 0; }
+.zdw-lookup-btn {
+  flex: none; white-space: nowrap; cursor: pointer;
+  border-radius: 11px; padding: 0 15px; font-size: 14px; font-weight: 600;
+  color: #fff; background: rgba(255,255,255,.08);
+  border: 1px solid rgba(255,255,255,.24);
+  transition: background .18s, border-color .18s, opacity .18s;
+}
+.zdw-lookup-btn:hover:not(:disabled) { background: rgba(255,255,255,.14); border-color: rgba(255,255,255,.4); }
+.zdw-lookup-btn:disabled { opacity: .4; cursor: default; }
+.zdw-lookup-note {
+  margin: 7px 0 0; font-size: 13px; line-height: 1.45;
+  color: rgba(255,255,255,.62);
+}
+.zdw-lookup-note.warn { color: #fcd34d; }
+@media (max-width: 560px) {
+  .zdw-lookup { flex-direction: column; }
+  .zdw-lookup-btn { padding: 11px 15px; }
+}

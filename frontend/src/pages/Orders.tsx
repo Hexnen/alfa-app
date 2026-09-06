@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import {
   Select,
@@ -170,15 +170,7 @@ export function Orders() {
   };
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <h1 className="text-3xl font-bold text-slate-900">Zlecenia montażu</h1>
-        <p className="text-slate-500">
-          Zarządzaj zleceniami instalacji i montażu systemów
-        </p>
-      </div>
-
+    <div className="space-y-3">
       {!editable && <ReadOnlyBanner className="mb-4" />}
 
       {activeTab === "formularz" ? (
@@ -201,62 +193,34 @@ export function Orders() {
           </div>
         )
       ) : (
-        <div className="space-y-6">
-          {editable && (
-            <div className="flex justify-end">
-              <Button
-                onClick={() => setIsFormOpen(true)}
-                className="bg-indigo-600 hover:bg-indigo-700 text-white"
-              >
-                <Plus className="w-4 h-4 mr-2" />
-                Nowe zlecenie
-              </Button>
-            </div>
-          )}
-
+        <div className="space-y-4">
           {/* Stats Cards */}
       <div className="grid grid-cols-4 gap-4">
         <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-slate-500">
-              Wszystkie zlecenia
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
+          <CardContent className="p-4">
+            <p className="text-sm font-medium text-slate-500">Wszystkie zlecenia</p>
             <div className="text-2xl font-bold text-slate-900">{total}</div>
           </CardContent>
         </Card>
         <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-slate-500">
-              Nowe
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
+          <CardContent className="p-4">
+            <p className="text-sm font-medium text-slate-500">Nowe</p>
             <div className="text-2xl font-bold text-blue-600">
               {orders.filter((o) => o.status === "new").length}
             </div>
           </CardContent>
         </Card>
         <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-slate-500">
-              W trakcie
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
+          <CardContent className="p-4">
+            <p className="text-sm font-medium text-slate-500">W trakcie</p>
             <div className="text-2xl font-bold text-yellow-600">
               {orders.filter((o) => o.status === "in_progress").length}
             </div>
           </CardContent>
         </Card>
         <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-slate-500">
-              Zakończone
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
+          <CardContent className="p-4">
+            <p className="text-sm font-medium text-slate-500">Zakończone</p>
             <div className="text-2xl font-bold text-green-600">
               {orders.filter((o) => o.status === "completed").length}
             </div>
@@ -265,7 +229,7 @@ export function Orders() {
       </div>
 
       {/* Filters */}
-      <div className="flex items-center gap-4 p-4 bg-white rounded-lg border border-slate-200">
+      <div className="flex flex-wrap items-center gap-4 p-4 bg-white rounded-lg border border-slate-200">
         <div className="relative flex-1 max-w-md">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
           <Input
@@ -287,6 +251,15 @@ export function Orders() {
             ))}
           </SelectContent>
         </Select>
+        {editable && (
+          <Button
+            onClick={() => setIsFormOpen(true)}
+            className="ml-auto bg-indigo-600 hover:bg-indigo-700 text-white"
+          >
+            <Plus className="w-4 h-4 mr-2" />
+            Nowe zlecenie
+          </Button>
+        )}
       </div>
 
       {/* Orders Table */}

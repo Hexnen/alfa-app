@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { db, schema } from "../db/index.js";
-import { eq, like, or, sql, desc } from "drizzle-orm";
+import { eq, like, or, and, sql, desc, asc } from "drizzle-orm";
 import type { ContractorInput, ApiResponse } from "../types/index.js";
 import { normalizeNIP, validateNIP } from "../utils/nip.js";
 
@@ -49,39 +49,128 @@ app.get("/by-nip/:nip", async (c) => {
   });
 });
 
-// Get all contractors with optional search
+/**
+ * Lista kontrahentów z podsumowaniem ich obiektów (liczba, ile aktywnych, suma abonamentów).
+ * Agregaty liczy baza jednym LEFT JOIN-em — front pokazuje je przy każdym kontrahencie,
+ * a w widoku rozwiniętym dociąga jeszcze same obiekty (GET /objects).
+ */
 app.get("/", async (c) => {
   const search = c.req.query("search");
   const page = parseInt(c.req.query("page") || "1");
   const pageSize = parseInt(c.req.query("pageSize") || "20");
   const offset = (page - 1) * pageSize;
 
-  let query = db.select().from(schema.contractors);
-
-  if (search) {
-    query = query.where(
-      or(
+  // Zakładki: "1" = aktualni, "0" = archiwalni, brak parametru = wszyscy.
+  const activeParam = c.req.query("active");
+  const salespersonParam = c.req.query("salespersonId");
+  const companyParam = c.req.query("companyId");
+  const searchClause = search
+    ? or(
         like(schema.contractors.name, `%${search}%`),
         like(schema.contractors.nip, `%${search}%`),
         like(schema.contractors.city, `%${search}%`)
       )
-    ) as typeof query;
-  }
+    : undefined;
+  const activeClause =
+    activeParam === "1"
+      ? eq(schema.contractors.active, true)
+      : activeParam === "0"
+        ? eq(schema.contractors.active, false)
+        : undefined;
+  // "none" = bez przypisanego handlowca (przydaje się do wyłapania zaniedbanych klientów).
+  const salespersonClause =
+    salespersonParam === "none"
+      ? sql`${schema.contractors.salespersonId} is null`
+      : salespersonParam
+        ? eq(schema.contractors.salespersonId, parseInt(salespersonParam))
+        : undefined;
+  // Spółka nie jest atrybutem kontrahenta tylko jego obiektów, więc filtr znaczy
+  // „ma PRZYNAJMNIEJ JEDEN obiekt w tej spółce" ("none" = obiekt bez przypisanej
+  // spółki). EXISTS zamiast warunku na dołączonej tabeli, żeby nie okroić agregatów
+  // liczonych po GROUP BY — kontrahent nadal pokazuje sumy z całego swojego portfela.
+  const companyClause =
+    companyParam === "none"
+      ? sql`exists (select 1 from objects o_company where o_company.contractor_id = contractors.id and o_company.company_id is null)`
+      : companyParam
+        ? sql`exists (select 1 from objects o_company where o_company.contractor_id = contractors.id and o_company.company_id = ${parseInt(companyParam)})`
+        : undefined;
+  const parts = [searchClause, activeClause, salespersonClause, companyClause].filter(Boolean);
+  const whereClause = parts.length > 1 ? and(...parts) : parts[0];
 
-  const contractors = await query.limit(pageSize).offset(offset);
+  const rows = await db
+    .select({
+      contractor: schema.contractors,
+      salesperson: {
+        id: schema.salespeople.id,
+        firstName: schema.salespeople.firstName,
+        lastName: schema.salespeople.lastName,
+        active: schema.salespeople.active,
+      },
+      objectsCount: sql<number>`count(${schema.objects.id})`,
+      activeObjectsCount: sql<number>`sum(case when ${schema.objects.status} = 'active' then 1 else 0 end)`,
+      objectsMonthlyValue: sql<number>`coalesce(sum(coalesce(objects.monthly_value, 0) + coalesce(objects.monthly_rental, 0)), 0)`,
+      objectsMonthlyCost: sql<number>`coalesce(sum(${schema.objects.monthlyCost}), 0)`,
+      objectsSetupCost: sql<number>`coalesce(sum(${schema.objects.setupCost}), 0)`,
+    })
+    .from(schema.contractors)
+    .leftJoin(schema.objects, eq(schema.objects.contractorId, schema.contractors.id))
+    .leftJoin(schema.salespeople, eq(schema.salespeople.id, schema.contractors.salespersonId))
+    .where(whereClause)
+    .groupBy(schema.contractors.id)
+    .orderBy(asc(sql`lower(${schema.contractors.name})`))
+    .limit(pageSize)
+    .offset(offset);
 
+  // Licznik MUSI respektować szukajkę — inaczej paginacja po filtrze pokazuje złe „total”.
   const countResult = await db
     .select({ count: sql<number>`count(*)` })
-    .from(schema.contractors);
+    .from(schema.contractors)
+    .where(whereClause);
   const total = countResult[0].count;
+
+  // Podsumowanie całego wyniku filtrowania (nie tylko bieżącej strony).
+  const totalsResult = await db
+    .select({
+      objects: sql<number>`count(${schema.objects.id})`,
+      value: sql<number>`coalesce(sum(coalesce(objects.monthly_value, 0) + coalesce(objects.monthly_rental, 0)), 0)`,
+      monthlyCost: sql<number>`coalesce(sum(${schema.objects.monthlyCost}), 0)`,
+      setupCost: sql<number>`coalesce(sum(${schema.objects.setupCost}), 0)`,
+    })
+    .from(schema.contractors)
+    .leftJoin(schema.objects, eq(schema.objects.contractorId, schema.contractors.id))
+    .where(whereClause);
+
+  // Liczniki obu zakładek liczymy z samą szukajką — mają pokazywać, ile jest
+  // aktualnych i archiwalnych przy bieżącym wyszukiwaniu.
+  const tabsResult = await db
+    .select({
+      active: sql<number>`sum(case when ${schema.contractors.active} then 1 else 0 end)`,
+      archived: sql<number>`sum(case when ${schema.contractors.active} then 0 else 1 end)`,
+    })
+    .from(schema.contractors)
+    .where(searchClause);
 
   return c.json({
     success: true,
-    data: contractors,
+    data: rows.map((r) => ({
+      ...r.contractor,
+      salesperson: r.salesperson?.id ? r.salesperson : null,
+      objectsCount: r.objectsCount ?? 0,
+      activeObjectsCount: r.activeObjectsCount ?? 0,
+      objectsMonthlyValue: r.objectsMonthlyValue ?? 0,
+      objectsMonthlyCost: r.objectsMonthlyCost ?? 0,
+      objectsSetupCost: r.objectsSetupCost ?? 0,
+    })),
     total,
     page,
     pageSize,
     totalPages: Math.ceil(total / pageSize),
+    totalObjects: totalsResult[0].objects ?? 0,
+    totalMonthlyValue: totalsResult[0].value ?? 0,
+    totalMonthlyCost: totalsResult[0].monthlyCost ?? 0,
+    totalSetupCost: totalsResult[0].setupCost ?? 0,
+    activeCount: tabsResult[0].active ?? 0,
+    archivedCount: tabsResult[0].archived ?? 0,
   });
 });
 
@@ -183,6 +272,12 @@ app.post("/", async (c) => {
         email: body.email,
         contactPerson: body.contactPerson,
         notes: body.notes,
+        salespersonId: body.salespersonId ?? null,
+        // Dane z wykazu MF, gdy formularz skorzystał z wyszukiwarki firm.
+        regon: body.regon,
+        krs: body.krs,
+        vatStatus: body.vatStatus,
+        vatCheckedAt: body.vatCheckedAt,
       })
       .returning();
   } catch (err) {

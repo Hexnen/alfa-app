@@ -17,6 +17,7 @@ import {
   fmtDateTime,
   fmtQty,
 } from "./warehouseShared";
+import { pillClass } from "@/lib/calendar-labels";
 
 interface WarehouseMovementsDialogProps {
   open: boolean;
@@ -103,7 +104,7 @@ export function WarehouseMovementsDialog({
                       <span className="flex items-center gap-2">
                         {m.docType && DOC_TYPE_META[m.docType] && (
                           <span
-                            className={`rounded-full px-2 py-0.5 text-xs font-medium ${DOC_TYPE_META[m.docType].badge}`}
+                            className={pillClass(DOC_TYPE_META[m.docType].tone)}
                           >
                             {m.docType}
                           </span>

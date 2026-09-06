@@ -7,7 +7,8 @@
  * anulowanie → usunięcie „nietkniętej”, a z kwotami → zostaje + adnotacja; zmiana typu na nieobjęty
  * → odpięcie; tryb on_done (brak przy planned, powstaje przy done); tryb off; urlop/biuro/przygotowanie
  * nigdy; usunięcie i przywrócenie wydarzenia; ręczne podpięcie realizacji (zajęta → 400); backfill
- * (dry-run + apply); kształt CalendarEventJson.realization.
+ * (dry-run + apply); kształt CalendarEventJson.realization; wyceny dla prac płatnych
+ * (powstaje z cennika, znika przy zmianie na gwarancyjne, zostaje gdy ma wpisane ilości).
  *
  * Wydarzenia testowe: tytuł z prefiksem ZZ-CALREAL, terminy w 2027-03 (poza danymi produkcyjnymi).
  * Sprząta po sobie HARD (events + assignees + activity_log + realizacje + protokoły + ustawienia
@@ -81,6 +82,14 @@ function realization(id: number | null) {
   return db.select().from(schema.realizations).where(eq(schema.realizations.id, id)).get();
 }
 
+function quoteOf(realizationId: number) {
+  return db.select().from(schema.quotes).where(eq(schema.quotes.realizationId, realizationId)).get();
+}
+
+function setAutoQuote(v: boolean) {
+  setSetting(CALENDAR_FIELDS.autoQuote.dbKey, v ? "1" : "0", user!.id);
+}
+
 function protocolOf(realizationId: number) {
   return db.select().from(schema.protocols).where(eq(schema.protocols.realizationId, realizationId)).get();
 }
@@ -133,6 +142,13 @@ function cleanup(): { events: number; realizations: number } {
   }
   if (realIds.length) {
     db.delete(schema.protocols).where(inArray(schema.protocols.realizationId, realIds)).run();
+    // Wyceny testowe: kasujemy przed realizacjami (FK dodane przez ALTER TABLE nie ma
+    // ON DELETE CASCADE w bazach sprzed migracji 0043).
+    const quoteIds = db.select({ id: schema.quotes.id }).from(schema.quotes).where(inArray(schema.quotes.realizationId, realIds)).all().map((q) => q.id);
+    if (quoteIds.length) {
+      db.update(schema.calendarEvents).set({ quoteId: null }).where(inArray(schema.calendarEvents.quoteId, quoteIds)).run();
+      db.delete(schema.quotes).where(inArray(schema.quotes.id, quoteIds)).run();
+    }
     db.delete(schema.realizations).where(inArray(schema.realizations.id, realIds)).run();
   }
   resetSettings();
@@ -158,6 +174,11 @@ try {
   const j1 = loadEvent(db, ev1);
   ok("CalendarEventJson.realization {id,date,site,kind,invoiced,total}", j1?.realization?.id === r1id && j1?.realization?.date === "2027-03-10" && j1?.realization?.site === "Ul. Testowa 1" && j1?.realization?.kind === "service" && j1?.realization?.invoiced === false && j1?.realization?.total === 0, j1?.realization);
   ok("CalendarEventJson.protocol: protokół realizacji", j1?.protocol?.id === p1?.id, j1?.protocol);
+  const q1 = quoteOf(r1id!);
+  ok("praca płatna (billing pusty = płatny) → powstała wycena z cennika", q1 != null && /^W\/2027\/03\/\d{3}$/.test(q1.number) && q1.date === "2027-03-10" && q1.site === "Ul. Testowa 1", q1);
+  ok("wycena: pozycje bez ilości (szkic do wypełnienia)", JSON.parse(q1?.items ?? "[]").every((i: { qty: string }) => i.qty === ""), q1?.items?.slice(0, 120));
+  ok("activity_log: utworzenie wymienia realizację, protokół i wycenę", logs(ev1).some((l) => l.action === "linked" && /Utworzono realizację #\d+ i protokół P\/.+ oraz wycenę W\//.test(l.summary ?? "")), logs(ev1).map((l) => l.summary));
+  ok("CalendarEventJson.quote {id,number,date,total,filledItems}", j1?.quote?.id === q1?.id && j1?.quote?.number === q1?.number && j1?.quote?.total === 0 && j1?.quote?.filledItems === 0, j1?.quote);
 
   // 2. sync: zmiana daty i technika → realizacja + niepodpisany protokół
   update(ev1, base({ title: `${PREFIX} Serwis 1`, startAt: "2027-03-12T09:00", endAt: "2027-03-12T13:00", technicianIds: [t2.id, t1.id] }));
@@ -175,6 +196,11 @@ try {
   // 2c. billing=warranty → kind warranty; montaz → installation
   update(ev1, base({ title: `${PREFIX} Serwis 1`, startAt: "2027-03-13T09:00", endAt: "2027-03-13T11:00", billing: "warranty" }));
   ok("sync: billing warranty → kind warranty", realization(r1id)?.kind === "warranty", realization(r1id));
+  ok("sync: gwarancja → pusta wycena usunięta", quoteOf(r1id!) == null, quoteOf(r1id!));
+  ok("sync: log „Usunięto pustą wycenę …”", logs(ev1).some((l) => /Usunięto pustą wycenę W\//.test(l.summary ?? "")), logs(ev1).map((l) => l.summary));
+  update(ev1, base({ title: `${PREFIX} Serwis 1`, startAt: "2027-03-13T09:00", endAt: "2027-03-13T11:00", billing: "paid" }));
+  ok("sync: powrót na płatne → wycena powstaje na nowo", quoteOf(r1id!) != null, quoteOf(r1id!));
+  update(ev1, base({ title: `${PREFIX} Serwis 1`, startAt: "2027-03-13T09:00", endAt: "2027-03-13T11:00", billing: "warranty" }));
   const evM = create(base({ type: "montaz", title: `${PREFIX} Montaz`, startAt: "2027-03-14T08:00", endAt: "2027-03-14T12:00" }));
   const rM = realization(eventRow(evM).realizationId);
   ok("montaz → kind installation, protokół workType montaz", rM?.kind === "installation" && protocolOf(rM!.id)?.workType === "montaz", rM);
@@ -199,7 +225,7 @@ try {
   const rC = eventRow(evC).realizationId!;
   update(evC, base({ title: `${PREFIX} Anulowany`, startAt: "2027-03-17T08:00", endAt: "2027-03-17T10:00", status: "cancelled" }));
   ok("cancel (nietknięta): realizacja i protokół usunięte, event odpięty", realization(rC) == null && protocolOf(rC) == null && eventRow(evC).realizationId === null, eventRow(evC));
-  ok("cancel: activity_log unlinked „Usunięto realizację #…”", logs(evC).some((l) => l.action === "unlinked" && /Usunięto realizację #\d+ \(wydarzenie anulowane\)/.test(l.summary ?? "")), logs(evC).map((l) => l.summary));
+  ok("cancel: activity_log unlinked „Usunięto realizację #…”", logs(evC).some((l) => l.action === "unlinked" && /Usunięto realizację #\d+( i wycenę W\/\S+)? \(wydarzenie anulowane\)/.test(l.summary ?? "")), logs(evC).map((l) => l.summary));
 
   // 5. anulowanie realizacji z kwotami → zostaje + adnotacja
   const evK = create(base({ title: `${PREFIX} Anulowany z kwota`, startAt: "2027-03-18T08:00", endAt: "2027-03-18T10:00" }));
@@ -343,9 +369,71 @@ try {
   track(evBF2);
   ok("backfill apply: utworzono 2 realizacje mimo trybu off", applied.created?.length === 2 && eventRow(evBF1).realizationId != null && eventRow(evBF2).realizationId != null, applied);
   ok("backfill apply: numery protokołów w wyniku", applied.created?.every((x) => typeof x.protocolNumber === "string" && x.protocolNumber.startsWith("P/")) === true, applied.created);
+  ok("backfill apply: numery wycen w wyniku (prace płatne)", applied.created?.every((x) => typeof x.quoteNumber === "string" && x.quoteNumber.startsWith("W/")) === true, applied.created);
   ok("backfill apply: ręcznie odpięte nadal bez realizacji", eventRow(evBF4).realizationId === null, eventRow(evBF4));
   const again = db.transaction((tx) => runBackfill(tx, ctx, { from: "2027-04-01", dryRun: false }));
   ok("backfill idempotentny: drugi przebieg nic nie tworzy", (again.created?.length ?? 0) === 0 && again.candidates.length === 2, again);
+
+  // 13. wyceny: ilości chronią przed usunięciem, ustawienie calendar.auto_quote, anulowanie
+  setMode("on_create");
+  const evQ = create(base({ title: `${PREFIX} Wycena`, startAt: "2027-03-27T08:00", endAt: "2027-03-27T10:00" }));
+  const rQ = eventRow(evQ).realizationId!;
+  const qQ = quoteOf(rQ)!;
+  ok("płatne: wycena podpięta do realizacji", qQ != null && qQ.realizationId === rQ, qQ);
+  // Człowiek wpisuje ilość → dokument przestaje być pusty.
+  db.update(schema.quotes).set({ items: JSON.stringify([{ name: "RBH", qty: "3", unit: "RBH", price: "120" }]) }).where(eq(schema.quotes.id, qQ.id)).run();
+  update(evQ, base({ title: `${PREFIX} Wycena`, startAt: "2027-03-27T08:00", endAt: "2027-03-27T10:00", billing: "free" }));
+  ok("wypełniona wycena: zostaje mimo zmiany na darmowe", quoteOf(rQ)?.id === qQ.id, quoteOf(rQ));
+  ok("wypełniona wycena: ostrzeżenie w activity_log", logs(evQ).some((l) => /ma już wpisane ilości/.test(l.summary ?? "")), logs(evQ).map((l) => l.summary));
+  const jQ = loadEvent(db, evQ);
+  ok("CalendarEventJson.quote: suma i liczba wypełnionych pozycji", jQ?.quote?.total === 360 && jQ?.quote?.filledItems === 1, jQ?.quote);
+  ok("wypełniona wycena: anulowanie NIE kasuje realizacji", (() => {
+    update(evQ, base({ title: `${PREFIX} Wycena`, startAt: "2027-03-27T08:00", endAt: "2027-03-27T10:00", billing: "free", status: "cancelled" }));
+    return realization(rQ) != null && quoteOf(rQ) != null;
+  })(), { r: realization(rQ), q: quoteOf(rQ) });
+
+  // backfill wycen: płatna realizacja bez wyceny (np. sprzed wpięcia wycen w kalendarz)
+  setAutoQuote(false);
+  const evBQ = create(base({ title: `${PREFIX} Backfill wyceny`, startAt: "2027-04-09T08:00", endAt: "2027-04-09T10:00" }));
+  const rBQ = eventRow(evBQ).realizationId!;
+  setAutoQuote(true);
+  const dryQ = db.transaction((tx) => runBackfill(tx, ctx, { from: "2027-04-09", dryRun: true }));
+  ok("backfill dry-run: liczy wydarzenia bez wyceny", dryQ.quoteCandidates === 1 && dryQ.quotesCreated === undefined, dryQ);
+  ok("backfill dry-run: wycena nie powstała", quoteOf(rBQ) == null, quoteOf(rBQ));
+  const applyQ = db.transaction((tx) => runBackfill(tx, ctx, { from: "2027-04-09", dryRun: false }));
+  ok("backfill apply: brakująca wycena utworzona", applyQ.quotesCreated === 1 && quoteOf(rBQ) != null, applyQ);
+  const againQ = db.transaction((tx) => runBackfill(tx, ctx, { from: "2027-04-09", dryRun: false }));
+  ok("backfill wycen idempotentny", (againQ.quotesCreated ?? 0) === 0 && againQ.quoteCandidates === 0, againQ);
+
+  // ręczne przypięcie wyceny (jak protokołu): jawny quoteId wygrywa z wyceną realizacji
+  const evQP = create(base({ title: `${PREFIX} Wycena pin`, startAt: "2027-03-30T08:00", endAt: "2027-03-30T10:00" }));
+  const rQP = eventRow(evQP).realizationId!;
+  const ownQuote = quoteOf(rQP)!;
+  const foreign = db
+    .insert(schema.quotes)
+    .values({ number: `W/2027/03/900`, date: "2027-03-30", site: `${PREFIX} obca`, address: "", items: "[]" })
+    .returning()
+    .get();
+  update(evQP, base({ title: `${PREFIX} Wycena pin`, startAt: "2027-03-30T08:00", endAt: "2027-03-30T10:00", quoteId: foreign.id }));
+  ok("ręczne przypięcie wyceny: JSON pokazuje przypiętą, nie realizacyjną", loadEvent(db, evQP)?.quote?.id === foreign.id, loadEvent(db, evQP)?.quote);
+  update(evQP, base({ title: `${PREFIX} Wycena pin`, startAt: "2027-03-30T08:00", endAt: "2027-03-30T10:00" }));
+  ok("odpięcie: wraca wycena realizacji", loadEvent(db, evQP)?.quote?.id === ownQuote.id && eventRow(evQP).quoteId === null, loadEvent(db, evQP)?.quote);
+  db.delete(schema.quotes).where(eq(schema.quotes.id, foreign.id)).run();
+
+  // calendar.auto_quote = off → płatne wydarzenie bez wyceny
+  setAutoQuote(false);
+  const evNQ = create(base({ title: `${PREFIX} Bez wyceny`, startAt: "2027-03-28T08:00", endAt: "2027-03-28T10:00" }));
+  const rNQ = eventRow(evNQ).realizationId!;
+  ok("auto_quote=off: realizacja i protokół są, wyceny nie ma", realization(rNQ) != null && protocolOf(rNQ) != null && quoteOf(rNQ) == null, quoteOf(rNQ));
+  setAutoQuote(true);
+
+  // anulowanie „nietkniętego” płatnego wydarzenia kasuje realizację, protokół i wycenę
+  const evQC = create(base({ title: `${PREFIX} Wycena anulowana`, startAt: "2027-03-29T08:00", endAt: "2027-03-29T10:00" }));
+  const rQC = eventRow(evQC).realizationId!;
+  const qQC = quoteOf(rQC)!;
+  update(evQC, base({ title: `${PREFIX} Wycena anulowana`, startAt: "2027-03-29T08:00", endAt: "2027-03-29T10:00", status: "cancelled" }));
+  ok("cancel: pusta wycena znika razem z realizacją", realization(rQC) == null && quoteOf(rQC) == null, { r: realization(rQC) });
+  ok("cancel: log wymienia numer wyceny", logs(evQC).some((l) => new RegExp(`Usunięto realizację #\\d+ i wycenę ${qQC.number.replace(/\//g, "\\/")}`).test(l.summary ?? "")), logs(evQC).map((l) => l.summary));
 
   // 14. filtr GET /realizations?source= (logika zapytania)
   setMode("on_create");

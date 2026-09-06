@@ -1,3 +1,7 @@
+// Klucze usług obiektu mają jedno źródło prawdy — słownik etykiet w utils.
+// (utils nic z api nie importuje, więc zależność jest jednokierunkowa.)
+import type { ObjectServiceKey } from "./utils";
+
 const API_BASE = "/api";
 
 interface ApiResponse<T> {
@@ -58,18 +62,25 @@ export async function getStats() {
 // Contractors
 export async function getContractors(params?: {
   search?: string;
+  /** Zakładka: "1" = aktualni, "0" = archiwalni, brak = wszyscy. */
+  active?: "1" | "0";
+  /** Id handlowca albo "none" = kontrahenci bez opiekuna. */
+  salespersonId?: number | "none";
+  /** Id spółki albo "none" = kontrahenci bez spółki. */
+  companyId?: number | "none";
   page?: number;
   pageSize?: number;
 }) {
   const searchParams = new URLSearchParams();
   if (params?.search) searchParams.set("search", params.search);
+  if (params?.active) searchParams.set("active", params.active);
+  if (params?.salespersonId !== undefined) searchParams.set("salespersonId", String(params.salespersonId));
+  if (params?.companyId !== undefined) searchParams.set("companyId", String(params.companyId));
   if (params?.page) searchParams.set("page", String(params.page));
   if (params?.pageSize) searchParams.set("pageSize", String(params.pageSize));
 
   const query = searchParams.toString();
-  return request<PaginatedResponse<Contractor>>(
-    `/contractors${query ? `?${query}` : ""}`
-  );
+  return request<ContractorsResponse>(`/contractors${query ? `?${query}` : ""}`);
 }
 
 export async function getContractor(id: number) {
@@ -97,12 +108,68 @@ export async function deleteContractor(id: number) {
 }
 
 // Objects
+/** Klucze sortowania listy obiektów — te same, co CASE-y w src/routes/objects.ts. */
+export type ObjectSortKey =
+  | "name"
+  | "contractor"
+  | "city"
+  | "status"
+  | "department"
+  | "salesperson"
+  | "company"
+  | "value"
+  | "cost"
+  | "profit"
+  | "created";
+
+/** Lista obiektów + podsumowanie CAŁEGO wyniku filtrowania (nie tylko strony). */
+export interface ObjectsResponse extends PaginatedResponse<ObjectWithContractor> {
+  sort: ObjectSortKey;
+  dir: "asc" | "desc";
+  scope: "current" | "archived" | "all";
+  /** Liczniki zakładek przy bieżących filtrach. */
+  currentCount: number;
+  archivedCount: number;
+  /** Suma wartości miesięcznych obiektów spełniających filtry. */
+  totalMonthlyValue: number;
+  /** Ile z nich ma niezerowy abonament. */
+  withMonthlyValue: number;
+  /** Suma kosztów miesięcznych (puste liczone jak 0 — patrz withMonthlyCost). */
+  totalMonthlyCost: number;
+  /** Ile obiektów ma UZUPEŁNIONY koszt. Puste ≠ 0 zł, więc bez tej liczby marża kłamie. */
+  withMonthlyCost: number;
+  /** Suma jednorazowych kosztów instalacji. */
+  totalSetupCost: number;
+}
+
 export async function getObjects(params?: {
   search?: string;
   status?: string;
   department?: string;
-  type?: string;
+  /**
+   * Filtr po USŁUDZE: obiekty MAJĄCE daną usługę. Podział nie jest rozłączny —
+   * obiekt z kamerami i SSWiN-em wpada do obu filtrów.
+   */
+  service?: ObjectServiceKey;
   contractorId?: number;
+  /** Widełki wartości miesięcznej (obiekt bez kwoty nigdy w nie nie wpada). */
+  minValue?: number;
+  maxValue?: number;
+  /** "1" = tylko z abonamentem, "0" = tylko bez. */
+  hasValue?: "1" | "0";
+  /** Widełki kosztu miesięcznego (obiekt bez kosztu nigdy w nie nie wpada). */
+  minCost?: number;
+  maxCost?: number;
+  /** "1" = tylko z uzupełnionym kosztem, "0" = tylko nieuzupełnione. */
+  hasCost?: "1" | "0";
+  /** Zakładka: bieżące (wszystko poza „nieaktywny”) albo archiwalne. */
+  scope?: "current" | "archived";
+  /** Id handlowca albo "none" = obiekty bez opiekuna. */
+  salespersonId?: number | "none";
+  /** Id spółki albo "none" = obiekty bez przypisanej spółki. */
+  companyId?: number | "none";
+  sort?: ObjectSortKey;
+  dir?: "asc" | "desc";
   page?: number;
   pageSize?: number;
 }) {
@@ -110,15 +177,24 @@ export async function getObjects(params?: {
   if (params?.search) searchParams.set("search", params.search);
   if (params?.status) searchParams.set("status", params.status);
   if (params?.department) searchParams.set("department", params.department);
-  if (params?.type) searchParams.set("type", params.type);
+  if (params?.service) searchParams.set("service", params.service);
   if (params?.contractorId) searchParams.set("contractorId", String(params.contractorId));
+  if (params?.minValue !== undefined) searchParams.set("minValue", String(params.minValue));
+  if (params?.maxValue !== undefined) searchParams.set("maxValue", String(params.maxValue));
+  if (params?.hasValue) searchParams.set("hasValue", params.hasValue);
+  if (params?.minCost !== undefined) searchParams.set("minCost", String(params.minCost));
+  if (params?.maxCost !== undefined) searchParams.set("maxCost", String(params.maxCost));
+  if (params?.hasCost) searchParams.set("hasCost", params.hasCost);
+  if (params?.scope) searchParams.set("scope", params.scope);
+  if (params?.salespersonId !== undefined) searchParams.set("salespersonId", String(params.salespersonId));
+  if (params?.companyId !== undefined) searchParams.set("companyId", String(params.companyId));
+  if (params?.sort) searchParams.set("sort", params.sort);
+  if (params?.dir) searchParams.set("dir", params.dir);
   if (params?.page) searchParams.set("page", String(params.page));
   if (params?.pageSize) searchParams.set("pageSize", String(params.pageSize));
 
   const query = searchParams.toString();
-  return request<PaginatedResponse<ObjectWithContractor>>(
-    `/objects${query ? `?${query}` : ""}`
-  );
+  return request<ObjectsResponse>(`/objects${query ? `?${query}` : ""}`);
 }
 
 export async function getObject(id: number) {
@@ -229,8 +305,38 @@ export interface Contractor {
   email: string | null;
   contactPerson: string | null;
   notes: string | null;
+  // Dane z wykazu VAT MF (wyszukiwarka firm po NIP).
+  regon?: string | null;
+  krs?: string | null;
+  vatStatus?: string | null;
+  vatCheckedAt?: string | null;
   createdAt: string;
   updatedAt: string;
+  /** Kontrahent bieżący (true) albo archiwalny (false). */
+  active: boolean;
+  /** Opiekun handlowy (null = nieprzypisany). */
+  salespersonId?: number | null;
+  salesperson?: SalespersonRef | null;
+  // Podsumowanie obiektów kontrahenta (liczy je GET /contractors; brak = starsze API).
+  objectsCount?: number;
+  activeObjectsCount?: number;
+  /** Suma wartości miesięcznych obiektów tego kontrahenta. */
+  objectsMonthlyValue?: number;
+  /** Suma kosztów miesięcznych jego obiektów (puste liczone jak 0). */
+  objectsMonthlyCost?: number;
+  /** Suma jednorazowych kosztów instalacji jego obiektów. */
+  objectsSetupCost?: number;
+}
+
+/** Lista kontrahentów + podsumowanie całego wyniku filtrowania. */
+export interface ContractorsResponse extends PaginatedResponse<Contractor> {
+  totalObjects: number;
+  totalMonthlyValue: number;
+  totalMonthlyCost: number;
+  totalSetupCost: number;
+  /** Liczniki zakładek „Aktualni” / „Archiwalni” przy bieżącej szukajce. */
+  activeCount: number;
+  archivedCount: number;
 }
 
 export interface ContractorInput {
@@ -243,6 +349,12 @@ export interface ContractorInput {
   email?: string;
   contactPerson?: string;
   notes?: string;
+  regon?: string;
+  krs?: string;
+  vatStatus?: string;
+  vatCheckedAt?: string;
+  active?: boolean;
+  salespersonId?: number | null;
 }
 
 export interface ObjectRecord {
@@ -251,11 +363,36 @@ export interface ObjectRecord {
   name: string;
   address: string | null;
   city: string | null;
+  /**
+   * @deprecated Zastąpione rozdzielnymi usługami (`hasCameras` + `cameraCount`,
+   * `hasSswin`, `hasVideoreception`, `hasOfi`). Backend jeszcze je zwraca, ale
+   * front go NIE czyta — kolumna zniknie z bazy osobną migracją.
+   */
   type: "monitoring" | "physical" | "alarm" | "mixed";
+  /**
+   * USŁUGI ŚWIADCZONE NA OBIEKCIE — niezależne, dowolny mix. Decydują o tym,
+   * którym kluczem liczy się koszt osobowy: OFI z godzin pracowników obiektu,
+   * reszta udziałem w koszcie centrum monitorowania.
+   */
+  hasCameras: boolean;
+  /** null przy `hasCameras` = usługa jest, ale nikt nie policzył kamer — to NIE zero. */
+  cameraCount: number | null;
+  hasSswin: boolean;
+  hasVideoreception: boolean;
+  hasOfi: boolean;
   installationType: "new" | "takeover";
   status: "pending" | "in_progress" | "active" | "inactive";
   department: "sales" | "technical" | "accounting";
   monthlyValue: number | null;
+  /**
+   * Dzierżawa sprzętu (zł netto/mies.) — druga część miesięcznego przychodu obok
+   * abonamentu. Przychód obiektu to SUMA obu, nie samo `monthlyValue`.
+   */
+  monthlyRental: number | null;
+  /** Miesięczny koszt obsługi. null = NIEUZUPEŁNIONY, co nie znaczy 0 zł. */
+  monthlyCost: number | null;
+  /** Jednorazowy koszt instalacji / wdrożenia. */
+  setupCost: number | null;
   notes: string | null;
   /**
    * Współrzędne obiektu (kalkulacja dystansu biuro → obiekt). Uzupełniane
@@ -263,12 +400,19 @@ export interface ObjectRecord {
    */
   latitude?: number | null;
   longitude?: number | null;
+  /** Handlowiec przypisany wprost do obiektu (null = dziedziczy po kontrahencie). */
+  salespersonId?: number | null;
+  /** Spółka grupy obsługująca obiekt. */
+  companyId?: number | null;
   createdAt: string;
   updatedAt: string;
 }
 
 export interface ObjectWithContractor extends ObjectRecord {
   contractor: Contractor | null;
+  /** Handlowiec obiektu, a gdy go nie ma — opiekun kontrahenta (`inherited: true`). */
+  salesperson?: SalespersonRef | null;
+  company?: CompanyRef | null;
 }
 
 export interface ObjectWithDetails extends ObjectWithContractor {
@@ -280,15 +424,38 @@ export interface ObjectInput {
   name: string;
   address?: string;
   city?: string;
-  type: "monitoring" | "physical" | "alarm" | "mixed";
+  /** Usługi obiektu; backend dolicza z nich sposób liczenia kosztu osobowego. */
+  hasCameras?: boolean;
+  /** null = „usługa jest, ale kamer nikt nie policzył” (a nie zero kamer). */
+  cameraCount?: number | null;
+  hasSswin?: boolean;
+  hasVideoreception?: boolean;
+  hasOfi?: boolean;
   installationType: "new" | "takeover";
   status?: "pending" | "in_progress" | "active" | "inactive";
   department?: "sales" | "technical" | "accounting";
-  monthlyValue?: number;
+  /**
+   * Abonament miesięczny; null czyści wartość („obiekt bez abonamentu”).
+   * Bez `| null` wyczyszczone pole w ogóle nie docierało do backendu: `undefined`
+   * wypada z JSON-a, a PUT /objects/:id robi `.set({ ...body })` — użytkownik
+   * kasował kwotę, zapisywał i wracała stara. Ta sama umowa co przy
+   * `monthlyCost` i `setupCost` niżej.
+   */
+  monthlyValue?: number | null;
+  /** Dzierżawa sprzętu (zł netto/mies.); null czyści wartość. */
+  monthlyRental?: number | null;
+  /** Koszt miesięczny; null czyści wartość („nieuzupełniony”). */
+  monthlyCost?: number | null;
+  /** Jednorazowy koszt instalacji; null czyści wartość. */
+  setupCost?: number | null;
   notes?: string;
   /** Ignorowane przez starszy backend — bezpieczne do wysłania zawsze. */
   latitude?: number | null;
   longitude?: number | null;
+  /** Handlowiec obiektu; null = dziedziczy opiekuna kontrahenta. */
+  salespersonId?: number | null;
+  /** Spółka grupy obsługująca obiekt. */
+  companyId?: number | null;
 }
 
 export interface WorkflowTransition {
@@ -427,8 +594,44 @@ export interface OrderInput {
   contractorEmail?: string;
   contractorContactPerson?: string;
   // Additional object data when creating new
-  objectType?: "monitoring" | "physical" | "alarm" | "mixed";
+  /** Usługi zakładanego obiektu (zamiast dawnego jednego „typu ochrony”). */
+  objectHasCameras?: boolean;
+  /** null/undefined = usługa jest, ale kamer nikt nie policzył. */
+  objectCameraCount?: number | null;
+  objectHasSswin?: boolean;
+  objectHasVideoreception?: boolean;
+  objectHasOfi?: boolean;
   objectInstallationType?: "new" | "takeover";
+}
+
+// --- Wyszukiwarka firm (wykaz podatników VAT MF) ---
+
+/** Dane firmy pobrane z wykazu MF po NIP. */
+export interface CompanyData {
+  nip: string;
+  name: string;
+  address: string;
+  postalCode: string;
+  city: string;
+  regon: string;
+  krs: string;
+  /** "Czynny" | "Zwolniony" | "Niezarejestrowany" | null (MF nie podał). */
+  statusVat: "Czynny" | "Zwolniony" | "Niezarejestrowany" | null;
+  accountNumbers: string[];
+  rawAddress: string;
+  /** Dzień, na który MF zwrócił dane ("YYYY-MM-DD"). */
+  date: string;
+}
+
+/**
+ * Szuka firmy po NIP w wykazie VAT MF. Rzuca Error ze `status` 502, gdy rejestr
+ * nie odpowiada — UI ma wtedy pokazać ostrzeżenie, a nie blokować formularza.
+ */
+export async function lookupCompanyByNip(nip: string, refresh = false) {
+  const query = refresh ? "?refresh=1" : "";
+  return request<ApiResponse<{ found: boolean; company: CompanyData | null; cached: boolean; source: string }>>(
+    `/company-lookup/nip/${nip}${query}`
+  );
 }
 
 // Check contractor by NIP
@@ -522,6 +725,28 @@ export interface PublicOrderIntakeInput {
   interventionGroup?: boolean;
   videoReception?: boolean;
   installationStartDate?: string;
+}
+
+/** Dane firmy dostępne dla formularza publicznego (węższe niż w panelu). */
+export interface PublicCompanyData {
+  nip: string;
+  name: string;
+  address: string;
+  postalCode: string;
+  city: string;
+  statusVat: "Czynny" | "Zwolniony" | "Niezarejestrowany" | null;
+  date: string;
+}
+
+/**
+ * Wyszukiwarka firm dla anonimowego formularza ZDW. Trasa jest ostro limitowana
+ * (5 zapytań na 5 minut z jednego adresu), więc wołamy ją tylko na żądanie
+ * użytkownika — nigdy automatycznie przy pisaniu.
+ */
+export async function lookupPublicCompanyByNip(nip: string) {
+  return request<ApiResponse<{ found: boolean; company: PublicCompanyData | null }>>(
+    `/public/company-lookup/nip/${nip}`
+  );
 }
 
 export async function submitPublicOrderIntake(data: PublicOrderIntakeInput) {
@@ -947,9 +1172,11 @@ export interface RealizationProtocol {
 
 /**
  * Obiekt powiązany z realizacją — pinezka na mapie miesiąca. Backend bierze go
- * z wydarzenia kalendarza (`source: "event"`), a dla wpisów ręcznych dopasowuje
- * po nazwie `site` (`source: "name"`). `lat`/`lng` null = obiekt bez współrzędnych
- * (realizacja trafia do licznika „bez lokalizacji”, nie na mapę).
+ * WYŁĄCZNIE z klucza obcego: `realizations.object_id` (`source: "realizacja"`),
+ * a gdy go nie ma — z obiektu wpiętego wydarzenia (`source: "kalendarz"`).
+ * Dopasowania po nazwie `site` już nie ma: mylilo się w 29 z 289 realizacji, bo
+ * kilkanaście obiektów w kartotece nazywa się tak samo. `lat`/`lng` null = obiekt
+ * bez współrzędnych (realizacja trafia do licznika „bez lokalizacji”, nie na mapę).
  */
 export interface RealizationLocation {
   objectId: number;
@@ -958,7 +1185,7 @@ export interface RealizationLocation {
   city: string | null;
   lat: number | null;
   lng: number | null;
-  source: "event" | "name";
+  source: "realizacja" | "kalendarz";
 }
 
 /** Adres i współrzędne biura — znacznik na mapie (GET /company/office). */
@@ -967,6 +1194,72 @@ export interface CompanyOffice {
   city: string;
   lat: number | null;
   lng: number | null;
+}
+
+/** Dojazd biuro → obiekt, w jedną stronę (GET /company/travel). */
+export interface CompanyTravel {
+  objectId: number;
+  km: number | null;
+  minutes: number | null;
+  method: "route" | "straight" | null;
+  /** true = czas ze średniej prędkości, nie z trasy OSRM. */
+  minutesEstimated: boolean;
+  cached: boolean;
+  /** true = wynik tymczasowy, trasa dolicza się w tle — warto zapytać ponownie. */
+  pending: boolean;
+  from: { lat: number; lng: number; label: string } | null;
+  to: { lat: number; lng: number; label: string } | null;
+  /** Komunikat PL (brak adresu, tryb ręczny, brak sieci) — wtedy km/minutes są null. */
+  error: string | null;
+}
+
+/** Dlaczego wydarzenie nie weszło na trasę planera. */
+export type DayRouteSkip = "no-object" | "no-coords" | "all-day" | "off-site" | "cancelled" | "limit";
+
+/** Punkt na trasie dnia: biuro albo obiekt. */
+export interface DayRoutePoint {
+  /** "office" albo "obj:<id>" — spina punkt z macierzą i z wydarzeniami. */
+  key: string;
+  kind: "office" | "object";
+  objectId: number | null;
+  label: string;
+  address: string | null;
+  city: string | null;
+  lat: number;
+  lng: number;
+}
+
+export interface DayRouteEventRef {
+  eventId: number;
+  /** Klucz punktu; null zawsze razem z `skip`. */
+  pointKey: string | null;
+  skip: DayRouteSkip | null;
+  skipMessage: string | null;
+}
+
+/** Macierz odległości dnia — ASYMETRYCZNA (jednokierunkowe, zakazy skrętu). */
+export interface DayRouteMatrix {
+  keys: string[];
+  km: number[][];
+  minutes: number[][];
+  method: ("route" | "straight")[][];
+}
+
+/**
+ * Surowce planera trasy (GET /calendar/day-route). Celowo BEZ danych kosztowych —
+ * stawki zostają w panelu admina (patrz komentarz w src/routes/company.ts).
+ */
+export interface DayRoute {
+  date: string;
+  office: DayRoutePoint | null;
+  officeError: string | null;
+  points: DayRoutePoint[];
+  events: DayRouteEventRef[];
+  matrix: DayRouteMatrix | null;
+  /** true = część par to jeszcze linia prosta; trasy doliczają się w tle. */
+  pending: boolean;
+  truncated: number;
+  notes: string[];
 }
 
 /** Ślad automatu przy pojedynczym polu realizacji (kolumna `autofill`). */
@@ -980,6 +1273,12 @@ export interface AutofillMark {
 export interface Realization {
   id: number;
   date: string; // YYYY-MM-DD
+  /**
+   * Obiekt z kartoteki — KLUCZ tożsamości realizacji. `null` = wpis ręczny sprzed
+   * powiązania z kartoteką. Brak pola = starszy backend.
+   */
+  objectId?: number | null;
+  /** Nazwa obiektu w chwili prac — MIGAWKA na dokument, nie klucz (patrz `objectId`). */
   site: string;
   /** Rodzaj prac. Brak pola = starszy backend (przed rozdzieleniem `kind`). */
   workType: RealizationWorkType;
@@ -1031,6 +1330,13 @@ export interface Realization {
 
 export interface RealizationInput {
   date: string;
+  /**
+   * Obiekt z kartoteki — jedyne, co wiąże realizację z obiektem. Pominięcie pola
+   * zostawia powiązanie bez zmian (PUT), `null` je zdejmuje. Nazwa z `site` NIE
+   * służy do odszukania obiektu.
+   */
+  objectId?: number | null;
+  /** Nazwa obiektu na dokument (migawka) — wypełniana z wybranego obiektu. */
   site: string;
   workType: RealizationWorkType;
   billing: RealizationBilling;
@@ -1097,6 +1403,42 @@ export async function getCompanyOffice() {
   return request<ApiResponse<CompanyOffice>>("/company/office");
 }
 
+/**
+ * Dystans i przewidywany czas dojazdu z biura do obiektu. `null` = starszy backend
+ * bez tej trasy albo błąd sieci — pole „Dojazd” jest informacyjne i nie może niczego blokować.
+ */
+export async function getCompanyTravel(objectId: number): Promise<CompanyTravel | null> {
+  try {
+    const res = await request<ApiResponse<CompanyTravel>>(`/company/travel?objectId=${objectId}`);
+    return res.data ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Dojazd dla wielu obiektów naraz — dymki kalendarza pytają o cały widok jednym zapytaniem.
+ * Pusta tablica = starszy backend bez trybu zbiorczego albo błąd; wołający ponowi przy
+ * następnym odświeżeniu widoku.
+ */
+export async function getCompanyTravelBatch(objectIds: number[]): Promise<CompanyTravel[]> {
+  if (objectIds.length === 0) return [];
+  // Backend przyjmuje 200 id na raz (COMPANY_TRAVEL_BATCH_LIMIT) — dzielimy, żeby wołający
+  // nie musiał pilnować limitu.
+  const chunks: number[][] = [];
+  for (let i = 0; i < objectIds.length; i += 200) chunks.push(objectIds.slice(i, i + 200));
+  try {
+    const results = await Promise.all(
+      chunks.map((chunk) =>
+        request<ApiResponse<CompanyTravel[]>>(`/company/travel?objectIds=${chunk.join(",")}`)
+      )
+    );
+    return results.flatMap((r) => r.data ?? []);
+  } catch {
+    return [];
+  }
+}
+
 export async function createRealization(data: RealizationInput) {
   return request<ApiResponse<Realization>>("/realizations", {
     method: "POST",
@@ -1153,6 +1495,10 @@ export interface Technician {
   active: boolean;
   /** Cennik przypisany technikowi; null = korzysta z cennika głównego. */
   priceListId: number | null;
+  /** Ta sama osoba w kartotece kadrowej; null = technik spoza listy płac. */
+  employeeId: number | null;
+  /** Nazwisko z Kadr doklejane przez API (null = brak powiązania). */
+  employeeName?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -1169,6 +1515,8 @@ export interface TechnicianInput {
   active?: boolean;
   /** null / brak = cennik główny. */
   priceListId?: number | null;
+  /** Powiązanie z kartoteką kadrową; null czyści powiązanie. */
+  employeeId?: number | null;
 }
 
 export async function getTechnicians(onlyActive = false) {
@@ -1195,6 +1543,190 @@ export async function deleteTechnician(id: number) {
   return request<ApiResponse<null>>(`/technicians/${id}`, {
     method: "DELETE",
   });
+}
+
+// ---------------------------------------------------------------------------
+// Handlowcy (opiekunowie kontrahentów i obiektów)
+// ---------------------------------------------------------------------------
+
+export interface Salesperson {
+  id: number;
+  firstName: string;
+  lastName: string;
+  phone: string | null;
+  email: string | null;
+  region: string | null;
+  /** Ile handlowiec kosztuje firmę miesięcznie. null = nieuzupełniony. */
+  monthlyCost: number | null;
+  /** Prowizja w % od przychodu portfela (0–100). null = brak prowizji. */
+  commissionRate: number | null;
+  /**
+   * Ta sama osoba w kartotece kadrowej; null = handlowiec spoza listy płac.
+   * Gdy jest ustawiona, koszt własny bierze się z wypłat, a `monthlyCost`
+   * jest ignorowany — inaczej ten sam człowiek kosztowałby firmę dwa razy.
+   */
+  employeeId: number | null;
+  /** Nazwisko z Kadr doklejane przez API (null = brak powiązania). */
+  employeeName?: string | null;
+  notes: string | null;
+  active: boolean;
+  /** Liczone przez API: ilu kontrahentów i ile obiektów prowadzi. */
+  contractorsCount?: number;
+  objectsCount?: number;
+  /**
+   * Portfel handlowca: obiekty przypisane wprost ORAZ odziedziczone po kontrahencie —
+   * ta sama reguła, co na liście obiektów i w Analityce.
+   */
+  objectsMonthlyValue?: number;
+  objectsMonthlyCost?: number;
+  objectsSetupCost?: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SalespersonInput {
+  firstName: string;
+  lastName: string;
+  phone?: string;
+  email?: string;
+  region?: string;
+  /** Koszt miesięczny handlowca; null czyści wartość. */
+  monthlyCost?: number | null;
+  /** Prowizja w % (0–100); null czyści wartość. Backend odrzuca spoza zakresu. */
+  commissionRate?: number | null;
+  /** Powiązanie z kartoteką kadrową; null czyści powiązanie. */
+  employeeId?: number | null;
+  notes?: string;
+  active?: boolean;
+}
+
+/** Skrót handlowca dołączany do kontrahenta i obiektu. */
+export interface SalespersonRef {
+  id: number;
+  firstName: string;
+  lastName: string;
+  active: boolean;
+  /** Tylko przy obiekcie: true = handlowiec odziedziczony po kontrahencie. */
+  inherited?: boolean;
+}
+
+export function salespersonName(s: SalespersonRef | Salesperson | null | undefined): string {
+  if (!s) return "—";
+  return `${s.firstName} ${s.lastName}`.trim();
+}
+
+export async function getSalespeople(onlyActive = false) {
+  return request<ApiResponse<Salesperson[]>>(
+    `/salespeople${onlyActive ? "?active=true" : ""}`
+  );
+}
+
+export async function createSalesperson(data: SalespersonInput) {
+  return request<ApiResponse<Salesperson>>("/salespeople", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateSalesperson(id: number, data: Partial<SalespersonInput>) {
+  return request<ApiResponse<Salesperson>>(`/salespeople/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteSalesperson(id: number) {
+  return request<ApiResponse<null>>(`/salespeople/${id}`, { method: "DELETE" });
+}
+
+// ---------------------------------------------------------------------------
+// Spółki grupy (słownik wspólny z kadrami)
+// ---------------------------------------------------------------------------
+
+export interface Company {
+  id: number;
+  /** Skrót używany w kadrach („ALFA S”, „GUARD 21”) — klucz zgodności z arkuszem WYNAGRODZENIA. */
+  name: string;
+  fullName: string | null;
+  nip: string | null;
+  // Dane z wykazu VAT MF (uzupełniane wyszukiwarką po NIP).
+  regon: string | null;
+  krs: string | null;
+  address: string | null;
+  postalCode: string | null;
+  city: string | null;
+  vatStatus: string | null;
+  vatCheckedAt: string | null;
+  notes: string | null;
+  active: boolean;
+  // Nadpisania narzutów składek pracodawcy dla tej spółki. NULL = bierzemy
+  // wartość globalną z Ustawień firmy (Administracja → Firma → Składki pracodawcy).
+  employerMarkupUop: number | null;
+  employerMarkupZlecenieZua: number | null;
+  employerMarkupZlecenieZza: number | null;
+  /** Liczone przez API. */
+  objectsCount?: number;
+  objectsMonthlyValue?: number;
+  /** Ile umów w kadrach wskazuje na tę spółkę (po nazwie). */
+  contractsCount?: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CompanyInput {
+  name: string;
+  fullName?: string;
+  nip?: string;
+  regon?: string;
+  krs?: string;
+  address?: string;
+  postalCode?: string;
+  city?: string;
+  vatStatus?: string;
+  vatCheckedAt?: string;
+  notes?: string;
+  active?: boolean;
+  /** null = wyczyść nadpisanie i wróć do wartości globalnej. */
+  employerMarkupUop?: number | null;
+  employerMarkupZlecenieZua?: number | null;
+  employerMarkupZlecenieZza?: number | null;
+}
+
+/** Skrót spółki dołączany do obiektu. */
+export interface CompanyRef {
+  id: number;
+  name: string;
+  active: boolean;
+}
+
+export async function getCompanies(onlyActive = false) {
+  return request<ApiResponse<Company[]>>(`/companies${onlyActive ? "?active=true" : ""}`);
+}
+
+export async function createCompany(data: CompanyInput) {
+  return request<ApiResponse<Company>>("/companies", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateCompany(id: number, data: Partial<CompanyInput>) {
+  return request<ApiResponse<Company>>(`/companies/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+}
+
+/** Sprawdzenie spółki w wykazie VAT MF po jej NIP-ie i zapis pobranych danych. */
+export async function lookupCompanyInMf(id: number, refresh = false) {
+  return request<ApiResponse<Company> & { message?: string }>(
+    `/companies/${id}/lookup${refresh ? "?refresh=1" : ""}`,
+    { method: "POST" }
+  );
+}
+
+export async function deleteCompany(id: number) {
+  return request<ApiResponse<null>>(`/companies/${id}`, { method: "DELETE" });
 }
 
 // ---------------------------------------------------------------------------
@@ -1353,7 +1885,7 @@ export async function deletePriceItem(id: number) {
 // Szablony kamer (standardowe modele kamer i ich parametry)
 // ---------------------------------------------------------------------------
 
-export type CameraModelType = "bullet" | "dome" | "ptz" | "pano";
+export type CameraModelType = "bullet" | "dome" | "ptz" | "pano" | "lpr";
 
 export interface CameraModel {
   id: number;
@@ -1539,8 +2071,10 @@ export interface ProtocolSuggestion {
   /** „kalendarz" | „obiekt" | „kontrahent" | „cennik" | „realizacja". */
   source: string;
   detail: string;
-  /** true = pole puste, można podstawić bez pytania; false = nadpisze istniejącą wartość. */
+  /** true = pole puste, można podstawić bez pytania; false = nadpisze wartość albo jest szacunkiem. */
   confident: boolean;
+  /** true = wartość szacowana (norma dnia dla wydarzenia całodniowego) — zawsze do potwierdzenia. */
+  assumed?: boolean;
 }
 
 export interface ProtocolPrefillContext {
@@ -1584,6 +2118,905 @@ export const protocolPrefillApi = {
 };
 
 // ---------------------------------------------------------------------------
+// Usługi — katalog robocizny i abonamentów dla ofert (koszt własny + cena).
+// Osobny byt od Cennika (`priceListsApi`), który obsługuje wyceny powykonawcze
+// i nie zna kosztów.
+// ---------------------------------------------------------------------------
+
+export const SERVICE_CATEGORIES = [
+  "montaz",
+  "uruchomienie",
+  "konfiguracja",
+  "serwis",
+  "projekt",
+  "abonament",
+  "inne",
+] as const;
+export type ServiceCategory = (typeof SERVICE_CATEGORIES)[number];
+
+export const SERVICE_SYSTEMS = [
+  "cctv",
+  "sswin",
+  "kd",
+  "ppoz",
+  "sieci",
+  "inne",
+] as const;
+export type ServiceSystem = (typeof SERVICE_SYSTEMS)[number];
+
+export interface Service {
+  id: number;
+  name: string;
+  category: ServiceCategory;
+  /** null = usługa uniwersalna, niezwiązana z konkretnym systemem. */
+  system: ServiceSystem | null;
+  unit: string;
+  /** Koszt własny netto (robocizna). */
+  cost: number;
+  /** Cena sprzedaży netto. */
+  price: number;
+  description: string | null;
+  active: boolean;
+  position: number;
+  /** Login (email) osoby, która założyła pozycję katalogu. */
+  createdBy: string | null;
+  /** Login (email) osoby, która ostatnia zapisała pozycję. */
+  updatedBy: string | null;
+  /**
+   * Kiedy ostatnio zmieniła się stawka — `cost` albo `price` (nie kiedy
+   * ktokolwiek dotknął rekordu; od tego jest `updatedAt`). null = nie wiadomo,
+   * co reguła z `lib/price-age.ts` traktuje jak stawkę przeterminowaną.
+   */
+  priceUpdatedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  /** Nazwa autora rozwiązana przez backend; surowy login, gdy konta już nie ma. */
+  createdByLabel?: string | null;
+  /** Nazwa ostatniego edytora — jak `createdByLabel`. */
+  updatedByLabel?: string | null;
+  // --- wyliczane przez backend (src/lib/margin.ts) ---
+  marginAmount: number | null;
+  marginPct: number | null;
+  markupPct: number | null;
+}
+
+export interface ServiceInput {
+  name: string;
+  category: ServiceCategory;
+  system?: ServiceSystem | "";
+  unit: string;
+  cost?: number | string;
+  price?: number | string;
+  description?: string;
+  active?: boolean;
+  position?: number;
+}
+
+export const servicesApi = {
+  async list(opts: {
+    includeInactive?: boolean;
+    category?: ServiceCategory;
+    system?: ServiceSystem;
+  } = {}) {
+    const params = new URLSearchParams();
+    if (opts.includeInactive) params.set("includeInactive", "1");
+    if (opts.category) params.set("category", opts.category);
+    if (opts.system) params.set("system", opts.system);
+    const q = params.toString();
+    return request<ApiResponse<Service[]>>(`/services${q ? `?${q}` : ""}`);
+  },
+
+  async create(data: ServiceInput) {
+    return request<ApiResponse<Service>>("/services", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  },
+
+  /** PUT = pełna podmiana pozycji (backend waliduje komplet pól). */
+  async update(id: number, data: ServiceInput) {
+    return request<ApiResponse<Service>>(`/services/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    });
+  },
+
+  /** DELETE = archiwizacja (active=false); oferty nadal wskazują na tę pozycję. */
+  async archive(id: number) {
+    return request<ApiResponse<null>>(`/services/${id}`, { method: "DELETE" });
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Oferty — dokument handlowy dla klienta (inny byt niż „Wyceny" niżej, które są
+// powykonawcze). Model i słownik pojęć: src/db/schema.ts, sekcja OFERTY.
+//
+// UWAGA: pola kosztowe (`unitCost`, `lineCost`, `oneTimeCost`, `monthlyCost`,
+// `margin`, `belowMinMargin`) backend WYCINA z odpowiedzi użytkownikom bez
+// uprawnienia `technical/oferty-koszty` — dlatego są opcjonalne w typach.
+// ---------------------------------------------------------------------------
+
+export const OFFER_KINDS = ["rozbudowa", "montaz", "serwis"] as const;
+export type OfferKind = (typeof OFFER_KINDS)[number];
+
+export const OFFER_STATUSES = ["draft", "sent", "accepted", "rejected", "expired"] as const;
+export type OfferStatus = (typeof OFFER_STATUSES)[number];
+
+export const OFFER_LEASE_MODES = ["none", "y1", "y2", "custom"] as const;
+export type OfferLeaseMode = (typeof OFFER_LEASE_MODES)[number];
+
+export const OFFER_SECTION_CATEGORIES = [
+  "cctv",
+  "sswin",
+  "kd",
+  "wideoweryfikacja",
+  "abonament",
+  "inne",
+] as const;
+export type OfferSectionCategory = (typeof OFFER_SECTION_CATEGORIES)[number];
+
+export const OFFER_ITEM_SOURCES = ["warehouse", "service", "manual"] as const;
+export type OfferItemSource = (typeof OFFER_ITEM_SOURCES)[number];
+
+export const OFFER_ITEM_KINDS = ["material", "labour", "subscription", "other"] as const;
+export type OfferItemKind = (typeof OFFER_ITEM_KINDS)[number];
+
+export const OFFER_ITEM_BILLINGS = ["one_time", "monthly"] as const;
+export type OfferItemBilling = (typeof OFFER_ITEM_BILLINGS)[number];
+
+export const OFFER_PACKAGE_MODES = ["parametric", "fixed"] as const;
+export type OfferPackageMode = (typeof OFFER_PACKAGE_MODES)[number];
+
+export const OFFER_QTY_ROUNDINGS = ["none", "up"] as const;
+export type OfferQtyRounding = (typeof OFFER_QTY_ROUNDINGS)[number];
+
+export interface Offer {
+  id: number;
+  number: string;
+  parentId: number | null;
+  version: number;
+  date: string;
+  validUntil: string | null;
+  sentAt: string | null;
+  kind: OfferKind;
+  status: OfferStatus;
+  contractorId: number | null;
+  clientName: string;
+  clientNip: string;
+  objectId: number | null;
+  site: string;
+  address: string;
+  salespersonId: number | null;
+  companyId: number | null;
+  discountPct: number;
+  /** Przewidywany czas kontraktu (mies.) — okres, na którym liczy się marża. */
+  contractMonths: number | null;
+  leaseMode: OfferLeaseMode;
+  leaseMonths: number | null;
+  leaseAnnualRate: number | null;
+  leaseIncludeLabour: boolean;
+  orderId: number | null;
+  warehouseDocId: number | null;
+  notes: string | null;
+  /** Token linku dla klienta; null = oferta nieudostępniona. */
+  shareToken: string | null;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+  /** Liczba miesięcy wynikająca z trybu dzierżawy (12 / 24 / własna). */
+  leaseMonthsEffective?: number | null;
+  /** Kto wykonał ofertę: handlowiec prowadzący, a bez niego autor dokumentu. */
+  preparedBy?: string | null;
+}
+
+export interface OfferSection {
+  id: number;
+  offerId: number;
+  position: number;
+  category: OfferSectionCategory;
+  title: string;
+  packageId: number | null;
+  params: string;
+  isOptional: boolean;
+  variantGroup: string | null;
+  variantSelected: boolean;
+  notes: string | null;
+}
+
+export interface OfferItem {
+  id: number;
+  offerId: number;
+  sectionId: number;
+  position: number;
+  source: OfferItemSource;
+  warehouseItemId: number | null;
+  serviceId: number | null;
+  name: string;
+  unit: string;
+  qty: number;
+  kind: OfferItemKind;
+  billing: OfferItemBilling;
+  unitPrice: number;
+  discountPct: number;
+  isOptional: boolean;
+  lineTotal: number;
+  /** Stan magazynowy towaru; null dla pozycji nietowarowych. */
+  stock: number | null;
+  /** Aktualna cena w kartotece, gdy odjechała od migawki. null = zgodna. */
+  priceDrift: number | null;
+  /**
+   * Kiedy w kartotece źródła (towar albo usługa) ostatnio zmieniła się cena.
+   * Wiek liczy `lib/price-age.ts` — próg zależy od `source`. null dla pozycji
+   * wpisanych ręcznie, bez źródła.
+   */
+  priceUpdatedAt?: string | null;
+  // --- widoczne tylko z uprawnieniem do kosztów ---
+  unitCost?: number | null;
+  lineCost?: number | null;
+}
+
+/**
+ * Pozycja, którą ruszy „Aktualizuj" — ceny „przed" i „po" wprost z backendu,
+ * żeby modal pokazywał dokładnie to, co zapisze zatwierdzenie.
+ */
+export interface OfferRepriceChange {
+  itemId: number;
+  sectionTitle: string;
+  name: string;
+  unit: string;
+  qty: number;
+  oldUnitPrice: number;
+  newUnitPrice: number;
+  /** Widoczne tylko z uprawnieniem do kosztów. */
+  oldUnitCost?: number | null;
+  newUnitCost?: number | null;
+}
+
+export interface OfferMargin {
+  amount: number;
+  marginPct: number;
+  markupPct: number;
+}
+
+export interface OfferTotals {
+  oneTimePrice: number;
+  monthlyPrice: number;
+  leaseBase: number;
+  leaseMonthly: number;
+  equipmentValue: number;
+  oneTimePayable: number;
+  /** Rata i abonament PO rabacie — te liczby sumują się do `monthlyTotal`. */
+  leaseMonthlyNet: number;
+  monthlyPriceNet: number;
+  monthlyTotal: number;
+  /** Opcje dodatkowe, rozdzielone na strumienie (poza kwotą do zapłaty). */
+  optionsOneTime: number;
+  optionsMonthly: number;
+  /** Okres, na którym liczona jest marża: czas kontraktu, dzierżawy albo 12 mies. */
+  marginHorizonMonths: number;
+  /** Skąd wziął się ten okres — ekran ma powiedzieć wprost, czym jest liczba. */
+  horizonSource?: "contract" | "lease" | "default";
+  horizonRevenue: number;
+  // --- widoczne tylko z uprawnieniem do kosztów ---
+  /** Koszt wdrożenia: co firma wykłada na starcie (sprzęt + robocizna). */
+  oneTimeCost?: number | null;
+  oneTimeCostMaterial?: number | null;
+  oneTimeCostLabour?: number | null;
+  monthlyCost?: number | null;
+  /** Koszt w okresie `marginHorizonMonths` — podstawa marży. */
+  horizonCost?: number | null;
+  margin?: OfferMargin | null;
+  belowMinMargin?: boolean;
+  /** Stawka prowizji handlowca z oferty (%); null = brak handlowca albo stawki. */
+  salesCommissionPct?: number | null;
+  /** Prowizja handlowca w kwocie, w okresie `marginHorizonMonths`. */
+  salesCommission?: number | null;
+  /** Zysk firmy po odjęciu prowizji. */
+  companyProfit?: number | null;
+  /** Ten zysk jako procent przychodu w okresie. */
+  companyProfitPct?: number | null;
+}
+
+/** Znacznik zakresu spoza kategorii sekcji — dzierżawa jest parametrem oferty. */
+export const OFFER_SCOPE_LEASE = "dzierzawa";
+
+/** Wiersz listy ofert — nagłówek z policzonymi sumami i faktycznym zakresem. */
+export interface OfferListRow extends Offer {
+  totals: OfferTotals;
+  /** Handlowiec prowadzący — rozwiązany na backendzie, bo kartoteka jest za osobnym kluczem. */
+  salespersonName?: string | null;
+  /** Autor dokumentu: nazwa użytkownika, a gdy konta już nie ma — jego login. */
+  createdByLabel?: string | null;
+  /**
+   * Czego oferta NAPRAWDĘ dotyczy: kategorie sekcji z pozycjami + „abonament"
+   * przy pozycjach miesięcznych + „dzierzawa" przy aktywnej dzierżawie.
+   * Liczone na backendzie (`scopeOf`), żeby lista i dokument mówiły to samo.
+   */
+  scope: string[];
+}
+
+/** Pełna oferta z sekcjami, pozycjami i sumami. */
+export interface OfferDetail {
+  offer: Offer;
+  sections: OfferSection[];
+  items: OfferItem[];
+  totals: OfferTotals;
+  /** Bloki opisowe doklejone do dokumentu — drukują się pod Uwagami. */
+  texts: OfferTextBlock[];
+  /** Wypełniane tylko przez akceptację. */
+  created?: { orderId: number; orderNumber: string; warehouseDocId: number | null };
+}
+
+/**
+ * Oferta widziana przez klienta spod linku — lustro białej listy z backendu
+ * (`src/routes/offers.ts`). Świadomie NIE zawiera kosztów, marży, uwag
+ * wewnętrznych, handlowca, autora ani niewybranych wariantów: te pola nie
+ * opuszczają serwera, więc nie ma ich nawet w JSON-ie w narzędziach przeglądarki.
+ */
+export interface PublicOfferDetail {
+  offer: {
+    number: string;
+    version: number;
+    date: string;
+    validUntil: string | null;
+    kind: OfferKind;
+    clientName: string;
+    clientNip: string;
+    site: string;
+    address: string;
+    discountPct: number;
+    leaseMode: OfferLeaseMode;
+    leaseMonthsEffective: number | null;
+    preparedBy: string | null;
+  };
+  company: {
+    name: string;
+    fullName: string | null;
+    nip: string | null;
+    regon: string | null;
+    krs: string | null;
+    address: string | null;
+    postalCode: string | null;
+    city: string | null;
+  } | null;
+  sections: { id: number; title: string; position: number; isOptional: boolean }[];
+  items: {
+    sectionId: number;
+    position: number;
+    name: string;
+    unit: string;
+    qty: number;
+    unitPrice: number;
+    discountPct: number;
+    isOptional: boolean;
+    billing: OfferItemBilling;
+    lineTotal: number;
+  }[];
+  texts: { title: string; body: string }[];
+  totals: {
+    oneTimePayable: number;
+    equipmentValue: number;
+    leaseMonthly: number;
+    leaseMonthlyNet: number;
+    monthlyPrice: number;
+    monthlyPriceNet: number;
+    monthlyTotal: number;
+    optionsOneTime: number;
+    optionsMonthly: number;
+  };
+  isExpired: boolean;
+}
+
+/**
+ * Adres oferty dla klienta.
+ *
+ * Składany W PRZEGLĄDARCE, bo tylko ona zna adres, którego naprawdę używa
+ * człowiek. Serwer widzi origin żądania wewnętrznego: w dev vite proxuje `/api`
+ * na `localhost:4001` z `changeOrigin`, a na produkcji przed aplikacją stoi
+ * reverse proxy — w obu przypadkach wyszedłby link działający tylko lokalnie.
+ */
+export function offerShareUrl(token: string): string {
+  return `${window.location.origin}/oferta/${token}`;
+}
+
+/** Oferta spod linku dla klienta — trasa BEZ autoryzacji. */
+export async function fetchPublicOffer(token: string) {
+  return request<ApiResponse<PublicOfferDetail>>(
+    `/public-offer/${encodeURIComponent(token)}`
+  );
+}
+
+export interface OfferInput {
+  date: string;
+  validUntil?: string | null;
+  kind?: OfferKind;
+  contractorId?: number | null;
+  clientName?: string;
+  clientNip?: string;
+  objectId?: number | null;
+  site?: string;
+  address?: string;
+  salespersonId?: number | null;
+  companyId?: number | null;
+  discountPct?: number;
+  contractMonths?: number | null;
+  leaseMode?: OfferLeaseMode;
+  leaseMonths?: number | null;
+  leaseAnnualRate?: number | null;
+  leaseIncludeLabour?: boolean;
+  notes?: string;
+}
+
+export interface OfferPackageParam {
+  key: string;
+  label: string;
+  default?: number;
+  min?: number;
+  max?: number;
+}
+
+export interface OfferPackage {
+  id: number;
+  name: string;
+  category: OfferSectionCategory;
+  manufacturer: string | null;
+  description: string | null;
+  mode: OfferPackageMode;
+  /** JSON z definicją parametrów — parsuj przez `parsePackageParams`. */
+  params: string;
+  active: boolean;
+  position: number;
+  createdAt: string;
+  updatedAt: string;
+  itemCount?: number;
+}
+
+export interface OfferPackageItem {
+  id: number;
+  packageId: number;
+  position: number;
+  source: OfferItemSource;
+  warehouseItemId: number | null;
+  serviceId: number | null;
+  name: string;
+  unit: string;
+  kind: OfferItemKind;
+  billing: OfferItemBilling;
+  qtyBase: number;
+  qtyPerParam: number;
+  paramKey: string | null;
+  qtyRound: OfferQtyRounding;
+  /** Slot wariantów („Rejestrator"); null = pozycja wchodzi zawsze. */
+  slot: string | null;
+  /** Zakres parametru, przy którym ten wariant wygrywa slot; null = strona otwarta. */
+  paramMin: number | null;
+  paramMax: number | null;
+  unitPriceOverride: number | null;
+}
+
+export interface OfferPackageDetail extends OfferPackage {
+  items: OfferPackageItem[];
+}
+
+export interface OfferPackageItemInput {
+  source: OfferItemSource;
+  warehouseItemId?: number | null;
+  serviceId?: number | null;
+  name?: string;
+  unit?: string;
+  kind?: OfferItemKind;
+  billing?: OfferItemBilling;
+  qtyBase?: number;
+  qtyPerParam?: number;
+  paramKey?: string | null;
+  qtyRound?: OfferQtyRounding;
+  slot?: string | null;
+  paramMin?: number | null;
+  paramMax?: number | null;
+  unitPriceOverride?: number | null;
+}
+
+export interface OfferPackageInput {
+  name: string;
+  category?: OfferSectionCategory;
+  manufacturer?: string;
+  description?: string;
+  mode?: OfferPackageMode;
+  params?: OfferPackageParam[];
+  active?: boolean;
+  items?: OfferPackageItemInput[];
+}
+
+/**
+ * Wzorzec opisu z biblioteki — powtarzalny blok tekstu (warunki gwarancji,
+ * zakres wsparcia), który handlowiec dokleja do oferty. Treść w markdownie,
+ * renderowana przez `lib/markdownLite.ts`.
+ */
+export interface OfferText {
+  id: number;
+  name: string;
+  category: OfferSectionCategory;
+  title: string;
+  body: string;
+  isDefault: boolean;
+  active: boolean;
+  position: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Wzorzec opisu — payload POST i PUT (pełny zapis, nie patch). `title` i `body`
+ * są WYMAGANE: pominięcie któregoś kasowało treść wzorca po stronie serwera, a
+ * TS to przepuszczał. Edytor zawsze wysyła komplet (pusty `title` to legalne
+ * „bez nagłówka", pusty `body` odrzuca walidacja formularza).
+ */
+export interface OfferTextInput {
+  name: string;
+  category?: OfferSectionCategory;
+  title: string;
+  body: string;
+  isDefault?: boolean;
+  active?: boolean;
+  position?: number;
+}
+
+/** Opis DOŁĄCZONY do oferty — kopia treści wzorca, nie referencja. */
+export interface OfferTextBlock {
+  id: number;
+  offerId: number;
+  /** Ślad pochodzenia; null dla opisu własnego albo po skasowaniu wzorca. */
+  textId: number | null;
+  title: string;
+  body: string;
+  position: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Bezpieczny parse definicji parametrów pakietu (lustro backendu). */
+export function parsePackageParams(raw: string): OfferPackageParam[] {
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? (v as OfferPackageParam[]).filter((p) => p && p.key) : [];
+  } catch {
+    return [];
+  }
+}
+
+export const offersApi = {
+  async list(opts: { status?: OfferStatus; kind?: OfferKind; year?: number; q?: string } = {}) {
+    const params = new URLSearchParams();
+    if (opts.status) params.set("status", opts.status);
+    if (opts.kind) params.set("kind", opts.kind);
+    if (opts.year) params.set("year", String(opts.year));
+    if (opts.q) params.set("q", opts.q);
+    const q = params.toString();
+    return request<ApiResponse<OfferListRow[]>>(`/offers${q ? `?${q}` : ""}`);
+  },
+
+  async get(id: number) {
+    return request<ApiResponse<OfferDetail>>(`/offers/${id}`);
+  },
+
+  /** Oferta spod adresu strony („of202608014") — do wejścia z linku i po odświeżeniu. */
+  async getByNumber(slug: string) {
+    return request<ApiResponse<OfferDetail>>(`/offers/number/${encodeURIComponent(slug)}`);
+  },
+
+  /**
+   * Parametry edytora: próg ostrzeżenia o marży i domyślny procent dzierżawy.
+   * Pod kluczem OFERT — `/warehouse/pricing-config` jest za `technical/magazyn`,
+   * którego handlowiec mieć nie musi.
+   */
+  async config() {
+    return request<ApiResponse<{ minMarginPct: number; leaseAnnualRate: number }>>(
+      "/offers/config"
+    );
+  },
+
+  async create(data: Partial<OfferInput> = {}) {
+    return request<ApiResponse<Offer>>("/offers", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  },
+
+  /** Zapis CZĄSTKOWY: pominięte pole zostaje bez zmian (patrz parseOfferHead). */
+  async update(id: number, data: Partial<OfferInput> | Record<string, unknown>) {
+    return request<ApiResponse<OfferDetail>>(`/offers/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    });
+  },
+
+  async remove(id: number) {
+    return request<ApiResponse<null>>(`/offers/${id}`, { method: "DELETE" });
+  },
+
+  /** Nowa wersja zamkniętej oferty — jedyny sposób na zmianę tego, co poszło do klienta. */
+  async newVersion(id: number) {
+    return request<ApiResponse<Offer>>(`/offers/${id}/version`, { method: "POST" });
+  },
+
+  async send(id: number) {
+    return request<ApiResponse<OfferDetail>>(`/offers/${id}/send`, { method: "POST" });
+  },
+
+  async reject(id: number) {
+    return request<ApiResponse<OfferDetail>>(`/offers/${id}/reject`, { method: "POST" });
+  },
+
+  /**
+   * Wystawia token linku dla klienta (albo zwraca już istniejący). Działa też
+   * na ofercie wysłanej — zamrożenie chroni kwoty, nie sposób dostarczenia.
+   *
+   * Zwraca SAM TOKEN; pełny adres składa `offerShareUrl()`, bo serwer za proxy
+   * nie zna adresu, pod którym ktoś naprawdę używa aplikacji.
+   */
+  async share(id: number) {
+    return request<ApiResponse<{ token: string }>>(`/offers/${id}/share`, {
+      method: "POST",
+    });
+  },
+
+  /** Cofa dostęp — stary link natychmiast przestaje działać. */
+  async unshare(id: number) {
+    return request<ApiResponse<null>>(`/offers/${id}/share`, { method: "DELETE" });
+  },
+
+  /** Akceptacja: tworzy zlecenie i szkic WZ w jednej transakcji. */
+  async accept(
+    id: number,
+    contact: {
+      requesterName?: string;
+      requesterPhone?: string;
+      requesterEmail?: string;
+      contactPerson?: string;
+      contactPhone?: string;
+      contactEmail?: string;
+    } = {}
+  ) {
+    return request<ApiResponse<OfferDetail>>(`/offers/${id}/accept`, {
+      method: "POST",
+      body: JSON.stringify(contact),
+    });
+  },
+
+  /** Podgląd aktualizacji cen — co i z czego na co się zmieni, bez zapisu. */
+  async repricePreview(id: number) {
+    return request<ApiResponse<OfferRepriceChange[]>>(`/offers/${id}/reprice-preview`);
+  },
+
+  /** Bez `itemIds` aktualizuje wszystkie pozycje; z listą — tylko wskazane. */
+  async reprice(id: number, itemIds?: number[]) {
+    return request<ApiResponse<OfferDetail>>(`/offers/${id}/reprice`, {
+      method: "POST",
+      body: JSON.stringify(itemIds ? { itemIds } : {}),
+    });
+  },
+
+  async addSection(
+    id: number,
+    data: {
+      packageId?: number | null;
+      params?: Record<string, number>;
+      category?: OfferSectionCategory;
+      title?: string;
+      variantGroup?: string;
+      isOptional?: boolean;
+    }
+  ) {
+    return request<ApiResponse<OfferDetail>>(`/offers/${id}/sections`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  },
+
+  async updateSection(
+    id: number,
+    sectionId: number,
+    data: {
+      title?: string;
+      category?: OfferSectionCategory;
+      isOptional?: boolean;
+      variantGroup?: string | null;
+      variantSelected?: boolean;
+      notes?: string;
+    }
+  ) {
+    return request<ApiResponse<OfferDetail>>(`/offers/${id}/sections/${sectionId}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    });
+  },
+
+  /**
+   * Przeliczenie sekcji dla nowej wartości parametru — podmienia WSZYSTKIE
+   * pozycje sekcji zgodnie z przepisem pakietu (ręczne zmiany przepadają).
+   */
+  async reexpandSection(id: number, sectionId: number, params: Record<string, number>) {
+    return request<ApiResponse<OfferDetail>>(`/offers/${id}/sections/${sectionId}/reexpand`, {
+      method: "POST",
+      body: JSON.stringify({ params }),
+    });
+  },
+
+  async removeSection(id: number, sectionId: number) {
+    return request<ApiResponse<OfferDetail>>(`/offers/${id}/sections/${sectionId}`, {
+      method: "DELETE",
+    });
+  },
+
+  async saveSectionAsPackage(id: number, sectionId: number, data: { name: string; manufacturer?: string }) {
+    return request<ApiResponse<OfferPackage>>(
+      `/offers/${id}/sections/${sectionId}/save-as-package`,
+      { method: "POST", body: JSON.stringify(data) }
+    );
+  },
+
+  async addItem(
+    id: number,
+    data: {
+      sectionId: number;
+      source: OfferItemSource;
+      warehouseItemId?: number | null;
+      serviceId?: number | null;
+      name?: string;
+      unit?: string;
+      qty?: number;
+      kind?: OfferItemKind;
+      billing?: OfferItemBilling;
+      unitCost?: number | null;
+      unitPrice?: number;
+    }
+  ) {
+    return request<ApiResponse<OfferDetail>>(`/offers/${id}/items`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  },
+
+  async updateItem(
+    id: number,
+    itemId: number,
+    data: {
+      name?: string;
+      unit?: string;
+      qty?: number;
+      kind?: OfferItemKind;
+      billing?: OfferItemBilling;
+      unitCost?: number | null;
+      unitPrice?: number;
+      discountPct?: number;
+      isOptional?: boolean;
+    }
+  ) {
+    return request<ApiResponse<OfferDetail>>(`/offers/${id}/items/${itemId}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    });
+  },
+
+  async removeItem(id: number, itemId: number) {
+    return request<ApiResponse<OfferDetail>>(`/offers/${id}/items/${itemId}`, {
+      method: "DELETE",
+    });
+  },
+
+  /**
+   * Doklejenie opisu do dokumentu. Z `textId` backend kopiuje treść wzorca,
+   * bez niego (albo z własnym `title`/`body`) powstaje opis jednorazowy —
+   * późniejsza edycja wzorca NIE rusza ofert, które już poszły do klienta.
+   */
+  async addTextBlock(id: number, data: { textId?: number | null; title?: string; body?: string }) {
+    return request<ApiResponse<OfferDetail>>(`/offers/${id}/texts`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  },
+
+  async updateTextBlock(
+    id: number,
+    blockId: number,
+    data: { title?: string; body?: string }
+  ) {
+    return request<ApiResponse<OfferDetail>>(`/offers/${id}/texts/${blockId}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    });
+  },
+
+  async removeTextBlock(id: number, blockId: number) {
+    return request<ApiResponse<OfferDetail>>(`/offers/${id}/texts/${blockId}`, {
+      method: "DELETE",
+    });
+  },
+
+  /** Nowa kolejność wydruku — `ids` w docelowej kolejności, od góry. */
+  async reorderTextBlocks(id: number, ids: number[]) {
+    return request<ApiResponse<OfferDetail>>(`/offers/${id}/texts/reorder`, {
+      method: "POST",
+      body: JSON.stringify({ ids }),
+    });
+  },
+
+  // --- Biblioteka pakietów ---
+  async listPackages(opts: { includeInactive?: boolean; category?: OfferSectionCategory } = {}) {
+    const params = new URLSearchParams();
+    if (opts.includeInactive) params.set("includeInactive", "1");
+    if (opts.category) params.set("category", opts.category);
+    const q = params.toString();
+    return request<ApiResponse<OfferPackage[]>>(`/offers/packages${q ? `?${q}` : ""}`);
+  },
+
+  async getPackage(id: number) {
+    return request<ApiResponse<OfferPackageDetail>>(`/offers/packages/${id}`);
+  },
+
+  async createPackage(data: OfferPackageInput) {
+    return request<ApiResponse<OfferPackage>>("/offers/packages", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  },
+
+  async updatePackage(id: number, data: OfferPackageInput) {
+    return request<ApiResponse<OfferPackage>>(`/offers/packages/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    });
+  },
+
+  async archivePackage(id: number) {
+    return request<ApiResponse<null>>(`/offers/packages/${id}`, { method: "DELETE" });
+  },
+
+  // --- Biblioteka opisów ---
+  async listTexts(opts: { includeInactive?: boolean; category?: OfferSectionCategory } = {}) {
+    const params = new URLSearchParams();
+    if (opts.includeInactive) params.set("includeInactive", "1");
+    if (opts.category) params.set("category", opts.category);
+    const q = params.toString();
+    return request<ApiResponse<OfferText[]>>(`/offers/texts${q ? `?${q}` : ""}`);
+  },
+
+  async getText(id: number) {
+    return request<ApiResponse<OfferText>>(`/offers/texts/${id}`);
+  },
+
+  async createText(data: OfferTextInput) {
+    return request<ApiResponse<OfferText>>("/offers/texts", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  },
+
+  async updateText(id: number, data: OfferTextInput) {
+    return request<ApiResponse<OfferText>>(`/offers/texts/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    });
+  },
+
+  /** DELETE = archiwizacja (active=false) — opisy wpięte w oferty zostają nietknięte. */
+  async archiveText(id: number) {
+    return request<ApiResponse<null>>(`/offers/texts/${id}`, { method: "DELETE" });
+  },
+
+  /** Oferta z projektu CCTV — liczba kamer bierze się z planu w designerze. */
+  async fromMonitoring(
+    projectId: number,
+    data: { packageId?: number | null; contractorId?: number | null; objectId?: number | null } = {}
+  ) {
+    return request<ApiResponse<Offer>>(`/offers/from-monitoring/${projectId}`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  },
+};
+
+// ---------------------------------------------------------------------------
 // Wyceny usług serwisowych
 // ---------------------------------------------------------------------------
 
@@ -1602,6 +3035,8 @@ export interface Quote {
   address: string;
   items: QuoteItem[];
   total: number;
+  /** Realizacja, z której powstała wycena (null = wycena wolnostojąca). */
+  realizationId?: number | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -1613,10 +3048,16 @@ export interface QuoteInput {
   items?: QuoteItem[];
 }
 
-export async function getQuotes(year?: number, month?: number) {
+export async function getQuotes(
+  year?: number,
+  month?: number,
+  opts: { q?: string; limit?: number } = {}
+) {
   const params = new URLSearchParams();
   if (year) params.set("year", String(year));
   if (month) params.set("month", String(month));
+  if (opts.q) params.set("q", opts.q);
+  if (opts.limit) params.set("limit", String(opts.limit));
   const query = params.toString();
   return request<ApiResponse<Quote[]>>(`/quotes${query ? `?${query}` : ""}`);
 }
@@ -1713,10 +3154,31 @@ export async function deleteMonitoringProject(id: number) {
   return request<ApiResponse<null>>(`/monitoring/${id}`, { method: "DELETE" });
 }
 
-// --- Rejestr obiektów monitorowanych (Techniczny -> Obiekty) ---
+// --- Rejestr obiektów monitorowanych (Techniczny -> Obiekty, CMA -> Obiekty) ---
+
+/**
+ * Obiekt z kartoteki w formie pozycji listy wyboru przy mapowaniu rejestrów.
+ * Miasto i kontrahent są częścią identyfikacji, a nie ozdobą — kartoteka ma
+ * obiekty o bliźniaczych nazwach u różnych klientów.
+ */
+export interface ObjectCatalogEntry {
+  id: number;
+  name: string;
+  city: string | null;
+  contractorName: string;
+}
 
 export interface MonitoredObject {
   id: number;
+  /**
+   * Obiekt z kartoteki, któremu odpowiada ta pozycja rejestru monitoringu.
+   * null = niezmapowana. Rejestr powstał niezależnie od kartoteki i nie
+   * pokrywa się z nią ani po nazwie, ani po adresie, więc powiązanie ustawia
+   * ręcznie człowiek (CMA → Obiekty).
+   */
+  objectId: number | null;
+  /** Rozwinięcie `objectId` doklejane przez API (null = brak mapowania). */
+  object: ObjectCatalogEntry | null;
   externalId: number;
   account: string | null;
   category: string | null;
@@ -1860,6 +3322,25 @@ export const monitoredObjectsApi = {
 
     return data as ApiResponse<ObjectImport>;
   },
+
+  /**
+   * Ręczne przypisanie pozycji rejestru do obiektu z kartoteki
+   * (null = zdejmij mapowanie). Osobny endpoint, żeby zapis reszty danych
+   * pozycji nie czyścił powiązania.
+   */
+  async setMapping(id: number, objectId: number | null) {
+    return request<ApiResponse<MonitoredObject>>(
+      `/monitored-objects/${id}/mapping`,
+      { method: "PUT", body: JSON.stringify({ objectId }) }
+    );
+  },
+
+  /** Kartoteka obiektów do listy wyboru w mapowaniu (bez modułu Obiekty). */
+  async getObjectCatalog() {
+    return request<ApiResponse<ObjectCatalogEntry[]>>(
+      "/monitored-objects/object-catalog"
+    );
+  },
 };
 
 // --- Oferta monitoringu (zdjęcia + pola tekstowe + generowanie HTML) ---
@@ -1944,10 +3425,24 @@ export async function deleteMonitoringPhoto(photoId: number) {
 // Kadry — pracownicy, obiekty, normy, godziny, umowy, wynagrodzenia, biuro
 // ---------------------------------------------------------------------------
 
+/** Rodzaj rozliczenia pracownika: ochrona = umowy kadrowe, biuro = zestawienie biura. */
+export type HrEmployeeKind = "ochrona" | "biuro";
+
 export interface HrEmployee {
   id: number;
   fullName: string;
   code: string;
+  kind: HrEmployeeKind;
+  /** Spółki z rozliczeń biura (cała historia) — liczone przez API. */
+  officeCompanies?: string[];
+  /** Macierzysty dział z kartoteki (null = brak przypisania). */
+  departmentId: number | null;
+  /**
+   * Etykieta działu gotowa do wyświetlenia (`ALFA GROUP:Handlowy`), sklejona na
+   * serwerze — pusty string, gdy pracownik nie ma działu. Front jej nie składa,
+   * bo nazwa firmy siedzi w ustawieniach za `requireAdmin`.
+   */
+  departmentName: string;
   active: boolean;
   notes: string;
   createdAt: string;
@@ -1957,13 +3452,87 @@ export interface HrEmployee {
 export interface HrEmployeeInput {
   fullName: string;
   code?: string;
+  kind?: HrEmployeeKind;
+  /**
+   * Dział pracownika; `null` kasuje przypisanie, POMINIĘCIE klucza zostawia
+   * bieżący (PUT nie jest już pełnym nadpisaniem — backend dopełnia z wiersza).
+   */
+  departmentId?: number | null;
   active?: boolean;
   notes?: string;
 }
 
+/** Obiekt z kartoteki w formie pozycji listy wyboru przy mapowaniu. */
+/** Pozycja kartoteki w liście wyboru — ten sam kształt co w mapowaniu CMA. */
+export type HrObjectRef = ObjectCatalogEntry;
+
 export interface HrObject {
   id: number;
   name: string;
+  active: boolean;
+  /**
+   * Obiekt z kartoteki, którego dotyczą godziny tej pozycji. null = niezmapowana
+   * (stan domyślny — słownik kadrowy powstał niezależnie od kartoteki i nazwy się
+   * nie pokrywają). Bez tego ogniwa wynagrodzenia nie trafią do Analityki obiektu.
+   */
+  objectId: number | null;
+  /** Rozwinięcie `objectId` doklejane przez API (null = brak mapowania). */
+  object: HrObjectRef | null;
+  /** Suma godzin z CAŁEJ historii — waga pozycji przy mapowaniu. */
+  hoursTotal: number;
+  /** Ilu różnych pracowników kiedykolwiek księgowało godziny na tej pozycji. */
+  employeesCount: number;
+}
+
+/**
+ * Dział firmy — rodzeństwo pozycji kadrowej, nie jej odmiana. Wiersz godzin
+ * wskazuje obiekt ALBO dział; dział nie mapuje się na kartotekę, bo z definicji
+ * dotyczy całej firmy, a nie jednego klienta.
+ */
+export interface HrDepartment {
+  id: number;
+  /** Surowa nazwa działu — to ona idzie do edycji i do POST/PUT. */
+  name: string;
+  /**
+   * Etykieta gotowa do wyświetlenia (`ALFA GROUP:Handlowy`), złożona na
+   * serwerze. Front NIE skleja jej sam: nazwa firmy siedzi w ustawieniach za
+   * `requireAdmin`, więc Kadry nie mają jak jej przeczytać.
+   */
+  label: string;
+  /**
+   * Dział-pula: jego koszt rozdziela się na wszystkie dozorowane obiekty
+   * (centrum monitorowania obsługuje wszystkich klientów naraz). Backend
+   * pilnuje, żeby taki dział był co najwyżej jeden.
+   */
+  isCmaPool: boolean;
+  sortOrder: number;
+  active: boolean;
+  /** Suma godzin z CAŁEJ historii — waga działu w zestawieniu. */
+  hoursTotal: number;
+  /**
+   * Osoby przypisane do działu w KARTOTECE (`hr_employees.department_id`).
+   * Dla działów biura to jedyna więź — biuro nie księguje godzin.
+   */
+  employeesCount: number;
+  /** Ilu różnych pracowników kiedykolwiek księgowało godziny na tym dziale. */
+  hoursEmployeesCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Ciało POST/PUT działu — PUT przyjmuje dowolny podzbiór pól. */
+export interface HrDepartmentInput {
+  name?: string;
+  isCmaPool?: boolean;
+  sortOrder?: number;
+  active?: boolean;
+}
+
+/** Pracownik kadr w wersji do listy wyboru (bez danych płacowych). */
+export interface HrEmployeeRef {
+  id: number;
+  fullName: string;
+  kind: HrEmployeeKind;
   active: boolean;
 }
 
@@ -1979,6 +3548,11 @@ export interface HrHoursEntry {
   id: number;
   employeeId: number;
   objectId: number | null;
+  /**
+   * Dział, którego dotyczą godziny. Rozłączny z `objectId` — wpis wskazuje
+   * obiekt ALBO dział ALBO nic; wysłanie obu naraz backend odrzuca (400).
+   */
+  departmentId: number | null;
   objectUncertain: boolean;
   year: number;
   month: number;
@@ -1992,11 +3566,18 @@ export interface HrHoursEntry {
   notes: string;
   employeeName: string;
   objectName: string;
+  /** Gotowa etykieta działu z prefiksem firmy; pusty string, gdy brak działu. */
+  departmentName: string;
+  // Znacznik ostatniego zapisu — edycja inline odsyła go jako
+  // `expectedUpdatedAt`, żeby nie nadpisać zmiany zrobionej w innej karcie (409).
+  updatedAt: string;
 }
 
 export interface HrHoursInput {
   employeeId: number | string;
   objectId?: number | string | null;
+  /** Rozłączny z `objectId` — oba niepuste naraz to 400 z backendu. */
+  departmentId?: number | string | null;
   year: number;
   month: number;
   nightHours?: number | string | null;
@@ -2190,6 +3771,52 @@ export const updateHrObject = (
 export const deleteHrObject = (id: number) =>
   request<ApiResponse<null>>(`/hr/objects/${id}`, { method: "DELETE" });
 
+export const getHrDepartments = (onlyActive = false) =>
+  request<ApiResponse<HrDepartment[]>>(
+    `/hr/departments${onlyActive ? "?active=true" : ""}`,
+  );
+export const createHrDepartment = (data: HrDepartmentInput) =>
+  request<ApiResponse<HrDepartment>>("/hr/departments", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+export const updateHrDepartment = (id: number, data: HrDepartmentInput) =>
+  request<ApiResponse<HrDepartment>>(`/hr/departments/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+/**
+ * Usunięcie działu. Bez `force` backend odmawia (409), gdy na dziale wiszą
+ * godziny — kasowanie ma być decyzją świadomą, a nie skutkiem ubocznym
+ * `ON DELETE SET NULL`, po którym wiersze cicho tracą przypisanie.
+ */
+export const deleteHrDepartment = (id: number, force = false) =>
+  request<ApiResponse<null>>(
+    `/hr/departments/${id}${force ? "?force=1" : ""}`,
+    { method: "DELETE" },
+  );
+
+/**
+ * Ustawia (albo zdejmuje przy `null`) mapowanie pozycji kadrowej na obiekt
+ * z kartoteki. Osobny endpoint od zapisu nazwy, żeby edycja nazwy nie czyściła
+ * przypadkiem powiązania.
+ */
+export const setHrObjectMapping = (id: number, objectId: number | null) =>
+  request<ApiResponse<HrObject>>(`/hr/objects/${id}/mapping`, {
+    method: "PUT",
+    body: JSON.stringify({ objectId }),
+  });
+
+/** Kartoteka obiektów do listy wyboru w mapowaniu (pod /hr — bez modułu Obiekty). */
+export const getHrObjectCatalog = () =>
+  request<ApiResponse<HrObjectRef[]>>("/hr/object-catalog");
+
+/** Skrócona lista pracowników kadr — do powiązania handlowca / technika z listą płac. */
+export const getHrEmployeeDirectory = (onlyActive = false) =>
+  request<ApiResponse<HrEmployeeRef[]>>(
+    `/hr/directory/employees${onlyActive ? "?active=true" : ""}`,
+  );
+
 export const getHrNorms = (year: number) =>
   request<ApiResponse<HrMonthNorm[]>>(`/hr/norms?year=${year}`);
 export const saveHrNorm = (data: {
@@ -2210,7 +3837,12 @@ export const createHrHours = (data: HrHoursInput) =>
     method: "POST",
     body: JSON.stringify(data),
   });
-export const updateHrHours = (id: number, data: HrHoursInput) =>
+// `expectedUpdatedAt` (opcjonalny) — optymistyczna kontrola współbieżności:
+// backend zapisze wpis tylko wtedy, gdy od odczytu nikt go nie zmienił.
+export const updateHrHours = (
+  id: number,
+  data: HrHoursInput & { expectedUpdatedAt?: string },
+) =>
   request<ApiResponse<HrHoursEntry>>(`/hr/hours/${id}`, {
     method: "PUT",
     body: JSON.stringify(data),
@@ -2279,15 +3911,46 @@ export interface WarehouseItem {
   sku: string | null;
   name: string;
   category: string | null;
+  /** Producent (Dahua, Hikvision, Satel…) — wolny tekst. */
+  manufacturer: string | null;
   unit: string;
   description: string | null;
+  /** Cena zakupu netto = koszt własny. null = nikt jej nie podał. */
+  purchasePrice: number | null;
+  /** Własna cena sprzedaży netto. null = liczona z narzutu firmowego. */
+  salePrice: number | null;
   photoData: string | null;
   minStock: number | null;
   isAsset: boolean;
   barcode: string | null;
   isArchived: boolean;
+  /** Login (email) osoby, która założyła kartotekę. */
+  createdBy: string | null;
+  /** Login (email) osoby, która ostatnia zapisała kartotekę. */
+  updatedBy: string | null;
+  /**
+   * Kiedy ostatnio zmieniła się CENA (zakupu albo sprzedaży) — nie kiedy
+   * ktokolwiek dotknął rekordu (od tego jest `updatedAt`). null = nie wiadomo,
+   * co reguła z `lib/price-age.ts` traktuje jak cenę przeterminowaną.
+   */
+  priceUpdatedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  /** Nazwa autora rozwiązana przez backend; surowy login, gdy konta już nie ma. */
+  createdByLabel?: string | null;
+  /** Nazwa ostatniego edytora — jak `createdByLabel`. */
+  updatedByLabel?: string | null;
+  // --- pola wyliczane przez backend (src/lib/margin.ts), tylko do odczytu ---
+  /** Cena sprzedaży użyta w praktyce: własna albo z narzutu. */
+  effectiveSalePrice: number | null;
+  /** Czy `effectiveSalePrice` pochodzi z automatu. */
+  salePriceAuto: boolean;
+  /** Zysk na jednostce (zł). null = nie da się policzyć (brak ceny zakupu). */
+  marginAmount: number | null;
+  /** Marża: udział zysku w cenie (%). */
+  marginPct: number | null;
+  /** Narzut: o ile procent cena przewyższa koszt (%). */
+  markupPct: number | null;
 }
 
 export interface WarehouseItemInput {
@@ -2295,13 +3958,34 @@ export interface WarehouseItemInput {
   unit: string;
   sku?: string;
   category?: string;
+  manufacturer?: string;
   description?: string;
+  /** Pusty string = wyczyść cenę (NULL w bazie), nie zero. */
+  purchasePrice?: number | string | null;
+  /** Pusty string = wróć do ceny z narzutu firmowego. */
+  salePrice?: number | string | null;
   minStock?: number | null;
   isAsset?: boolean;
   barcode?: string;
   photoData?: string | null;
   /** false = przywrócenie towaru z archiwum */
   isArchived?: boolean;
+}
+
+/** Parametry cenowe firmy używane przez kartotekę magazynu. */
+export interface WarehousePricingConfig {
+  /** Narzut (%), z którego liczy się cena sprzedaży towaru bez własnej ceny. */
+  warehouseMarkup: number;
+  /** Próg marży (%) do ostrzeżeń. 0 = wyłączone. */
+  minMarginPct: number;
+}
+
+/** Ostatnie zatwierdzone przyjęcie towaru — podpowiedź ceny zakupu. */
+export interface WarehouseLastPurchase {
+  unitPrice: number | null;
+  docNumber: string | null;
+  confirmedAt: string | null;
+  issuedAt: string;
 }
 
 export type WarehouseType = "main" | "vehicle" | "employee" | "site" | "other";
@@ -2437,6 +4121,20 @@ export const warehouseApi = {
     return request<ApiResponse<null>>(`/warehouse/items/${id}`, {
       method: "DELETE",
     });
+  },
+
+  /** Cena z ostatniego zatwierdzonego PZ (null = towar nigdy nie był przyjęty z ceną). */
+  async getLastPurchase(id: number) {
+    return request<ApiResponse<WarehouseLastPurchase | null>>(
+      `/warehouse/items/${id}/last-purchase`
+    );
+  },
+
+  /** Narzut firmowy i próg marży — do liczenia cen na żywo w formularzu magazynu. */
+  async getPricingConfig() {
+    return request<ApiResponse<WarehousePricingConfig>>(
+      "/warehouse/pricing-config"
+    );
   },
 
   // Magazyny
@@ -2660,6 +4358,21 @@ export interface CalendarEventRealization {
   total: number;
 }
 
+/**
+ * Skrót wyceny przypiętej do wydarzenia (jawnie `quoteId` albo wycena realizacji).
+ * Powstaje automatycznie dla prac PŁATNYCH — patrz src/lib/calendar-realizations.ts.
+ */
+export interface CalendarEventQuote {
+  id: number;
+  number: string;
+  /** YYYY-MM-DD */
+  date: string;
+  /** Suma netto pozycji (ilość × cena). */
+  total: number;
+  /** Liczba pozycji z wpisaną ilością — 0 = wycena pusta (szkic z cennika). */
+  filledItems: number;
+}
+
 export type CalendarSeriesFreq =
   | "weekly"
   | "monthly"
@@ -2713,6 +4426,10 @@ export interface CalendarEvent {
   protocol?: CalendarEventProtocol | null;
   /** Skrót realizacji z `realizationId`. Brak pola = starszy backend. */
   realization?: CalendarEventRealization | null;
+  /** Jawnie przypięta wycena (null → wycena realizacji, jeśli jest). */
+  quoteId?: number | null;
+  /** Wyliczone przez backend: wycena z `quoteId` albo z realizacji. */
+  quote?: CalendarEventQuote | null;
   /** `true` = realizacja została ręcznie odpięta; automat jej nie odtworzy. */
   realizationOptout: boolean;
   technicians: CalendarEventTechnician[];
@@ -2773,6 +4490,8 @@ export interface CalendarEventInput {
   billing?: CalendarBilling | null;
   /** Jawnie przypięty protokół (null = odepnij → protokół realizacji / brak). */
   protocolId?: number | null;
+  /** Jawnie przypięta wycena (null = odepnij → wycena realizacji / brak). */
+  quoteId?: number | null;
   technicianIds: number[];
   recurrence?: CalendarRecurrenceInput | null;
 }
@@ -2896,6 +4615,17 @@ export const calendarApi = {
     return request<ApiResponse<CalendarEventWithHistory>>(
       `/calendar/events/${id}`
     );
+  },
+
+  /**
+   * Punkty i macierz odległości dla planera trasy. Backend odpowiada z cache'u,
+   * więc `pending: true` znaczy „trasa dolicza się w tle” — warto dopytać za chwilę.
+   * `eventIds` zawęża plan do wydarzeń widocznych po filtrach widoku.
+   */
+  async getDayRoute(date: string, eventIds?: number[]) {
+    const sp = new URLSearchParams({ date });
+    if (eventIds?.length) sp.set("eventIds", eventIds.join(","));
+    return request<ApiResponse<DayRoute>>(`/calendar/day-route?${sp.toString()}`);
   },
 
   async create(data: CalendarEventInput) {
@@ -3700,6 +5430,8 @@ export interface CalendarSettingsValues {
   realizationTypes: string[];
   /** Czy edycja wydarzenia aktualizuje powiązaną realizację. */
   realizationSync: boolean;
+  /** Czy dla płatnego wydarzenia powstaje wycena (razem z realizacją i protokołem). */
+  autoQuote: boolean;
 }
 
 export type CalendarSettingsField = keyof CalendarSettingsValues;
@@ -3735,6 +5467,8 @@ export interface AdminCalendarBackfillCreated {
   eventId: number;
   realizationId: number;
   protocolNumber: string | null;
+  /** Numer wyceny — tylko prace płatne (null = wycena nie powstała). */
+  quoteNumber?: string | null;
 }
 export interface AdminCalendarBackfillSkipped {
   eventId: number;
@@ -3752,6 +5486,10 @@ export interface AdminCalendarBackfillResult {
   created?: AdminCalendarBackfillCreated[] | number;
   /** Pominięte (mają już realizację / typ nieobjęty / błąd). */
   skipped: AdminCalendarBackfillSkipped[] | number;
+  /** Płatne wydarzenia z realizacją, ale bez wyceny (starszy backend nie zwraca pola). */
+  quoteCandidates?: number;
+  /** Wyceny faktycznie utworzone (brak w trybie `dryRun`). */
+  quotesCreated?: number;
 }
 
 /** Liczność pola wyniku backfillu — lista albo gotowa liczba. */
@@ -3927,12 +5665,19 @@ export const KM_SOURCE_LABEL: Record<CompanyKmSource, string> = {
 };
 
 export interface CompanySettingsValues {
+  /**
+   * Nazwa firmy. Poza nagłówkami wydruków steruje prefiksem etykiet działów
+   * w Kadrach (`ALFA GROUP:Handlowy`) — pusta wartość znaczy „bez prefiksu”.
+   */
+  companyName: string;
   officeAddress: string;
   officeCity: string;
   officePostcode: string;
   /** null = współrzędne nieustalone (geokoder ich jeszcze nie policzył). */
   officeLat: number | null;
   officeLng: number | null;
+  /** Norma dnia roboczego (godz.) — szacunek godzin dla wydarzenia całodniowego. */
+  workDayHours: number;
   /** Stawka sprzedaży za roboczogodzinę (netto). */
   rateHour: number;
   /** Koszt wewnętrzny roboczogodziny. */
@@ -3944,6 +5689,23 @@ export interface CompanySettingsValues {
   kmSource: CompanyKmSource;
   /** Narzut procentowy na materiały z protokołu. */
   materialMarkup: number;
+  /** Narzut na towary z magazynu — źródło ceny sprzedaży, gdy towar nie ma własnej. */
+  warehouseMarkup: number;
+  /** Próg marży (%); poniżej niego oferta świeci na czerwono. 0 = bez ostrzeżeń. */
+  minMarginPct: number;
+  /** Domyślny procent ROCZNY dzierżawy — rata = wartość sprzętu × procent ÷ 12. */
+  leaseAnnualRate: number;
+  // Narzuty składek pracodawcy. Wypłaty w kadrach są netto „na rękę”, więc żeby
+  // pokazać realny koszt zatrudnienia, mnożymy je przez współczynnik zależny od
+  // formy zatrudnienia. Spółka może mieć własne wartości (Company.employerMarkup*).
+  /** Umowa o pracę (ZUA) — pełne składki pracodawcy. */
+  employerMarkupUop: number;
+  /** Zlecenie ze zgłoszeniem ZUA — te same składki, bez chorobowego. */
+  employerMarkupZlecenieZua: number;
+  /** Zlecenie ze zgłoszeniem ZZA — tylko zdrowotne po stronie pracownika. */
+  employerMarkupZlecenieZza: number;
+  /** Wiersze wynagrodzeń biura bez dopasowanej umowy — formy nie da się odczytać. */
+  employerMarkupOfficeDefault: number;
   autofillEnabled: boolean;
   autofillFields: string[];
   /** Czy realizacja podlicza się wstępnie już po oznaczeniu wydarzenia jako „wykonane”. */
@@ -4008,17 +5770,26 @@ export interface CompanyDistanceTest {
 
 /** Domyślne wartości używane, dopóki backend nie zwróci swoich. */
 export const COMPANY_FALLBACK_VALUES: CompanySettingsValues = {
+  companyName: "",
   officeAddress: "",
   officeCity: "",
   officePostcode: "",
   officeLat: null,
   officeLng: null,
+  workDayHours: 8,
   rateHour: 0,
   hourlyCost: 0,
   rateKm: 0,
   kmRoundTrip: true,
   kmSource: "route",
   materialMarkup: 0,
+  warehouseMarkup: 0,
+  minMarginPct: 0,
+  leaseAnnualRate: 117,
+  employerMarkupUop: 1.65,
+  employerMarkupZlecenieZua: 1.59,
+  employerMarkupZlecenieZza: 1.22,
+  employerMarkupOfficeDefault: 1.65,
   autofillEnabled: true,
   autofillFields: [...AUTOFILL_FIELDS],
   autofillOnEventDone: true,
@@ -4062,11 +5833,13 @@ function coerceCompanyValues(raw: unknown): CompanySettingsValues {
   const fb = COMPANY_FALLBACK_VALUES;
   const kmSource = asStr(v.kmSource, fb.kmSource);
   return {
+    companyName: asStr(v.companyName, fb.companyName),
     officeAddress: asStr(v.officeAddress, fb.officeAddress),
     officeCity: asStr(v.officeCity, fb.officeCity),
     officePostcode: asStr(v.officePostcode, fb.officePostcode),
     officeLat: asNumOrNull(v.officeLat),
     officeLng: asNumOrNull(v.officeLng),
+    workDayHours: asNum(v.workDayHours, fb.workDayHours),
     rateHour: asNum(v.rateHour, fb.rateHour),
     hourlyCost: asNum(v.hourlyCost, fb.hourlyCost),
     rateKm: asNum(v.rateKm, fb.rateKm),
@@ -4075,6 +5848,13 @@ function coerceCompanyValues(raw: unknown): CompanySettingsValues {
       ? (kmSource as CompanyKmSource)
       : fb.kmSource,
     materialMarkup: asNum(v.materialMarkup, fb.materialMarkup),
+    warehouseMarkup: asNum(v.warehouseMarkup, fb.warehouseMarkup),
+    minMarginPct: asNum(v.minMarginPct, fb.minMarginPct),
+    leaseAnnualRate: asNum(v.leaseAnnualRate, fb.leaseAnnualRate),
+    employerMarkupUop: asNum(v.employerMarkupUop, fb.employerMarkupUop),
+    employerMarkupZlecenieZua: asNum(v.employerMarkupZlecenieZua, fb.employerMarkupZlecenieZua),
+    employerMarkupZlecenieZza: asNum(v.employerMarkupZlecenieZza, fb.employerMarkupZlecenieZza),
+    employerMarkupOfficeDefault: asNum(v.employerMarkupOfficeDefault, fb.employerMarkupOfficeDefault),
     autofillEnabled: asBool(v.autofillEnabled, fb.autofillEnabled),
     autofillFields: Array.isArray(v.autofillFields) ? v.autofillFields.map(String) : fb.autofillFields,
     autofillOnEventDone: asBool(v.autofillOnEventDone, fb.autofillOnEventDone),
@@ -4140,3 +5920,360 @@ export const errStatus = (e: unknown): number | undefined =>
 
 /** Czy błąd oznacza „backend nie ma jeszcze tego endpointu". */
 export const isMissingEndpoint = (e: unknown): boolean => errStatus(e) === 404;
+
+// ---------------------------------------------------------------------------
+// Analityka — przychód / koszt / zysk w trzech przekrojach
+// ---------------------------------------------------------------------------
+//
+// Wszystkie trzy widoki mówią tym samym słownikiem faktów, liczonym w
+// src/routes/analytics.ts:
+//   revenue = coalesce(monthly_value,0) + coalesce(monthly_rental,0)
+//             — abonament PLUS dzierżawa sprzętu
+//   cost    = personnelCost + otherCost      ← KOSZT SKŁADA SIĘ Z DWÓCH CZĘŚCI
+//   profit  = revenue - cost                 margin = profit / revenue * 100
+// gdzie `personnelCost` to koszt osobowy policzony z wypłat kadrowych (mapowanie
+// hr_objects.object_id → obiekt), a `otherCost` to ręczne `objects.monthly_cost`
+// (monitoring, sprzęt, abonamenty). Nigdy jedno ZAMIAST drugiego — podmiana
+// zaniżyłaby koszt obiektów fizycznej ochrony o całą pensję załogi.
+// Kluczowe rozróżnienie: koszt NULL znaczy „nieuzupełniony”, a nie 0 zł.
+// Sumy traktują go jak zero, ale `objectsWithCost` / `coverage` mówią, na ilu
+// obiektach ta arytmetyka w ogóle się opiera — bez tego marża kłamie.
+//
+// KWOTY SĄ NETTO, ale w DWÓCH różnych znaczeniach. Strona handlowa (abonamenty,
+// koszty pozostałe, nakłady) jest netto „bez VAT". Koszt osobowy pochodzi z wypłat,
+// a następnie mnożony przez narzut składek pracodawcy, czyli jest SZACOWANYM pełnym kosztem
+// zatrudnienia — mnożnik jest jednak PRZYBLIŻENIEM, bo składki liczy się od brutto,
+// a aplikacja zna tylko netto. `personnel.employer` niesie użyte narzuty i strukturę
+// form zatrudnienia, żeby UI mogło pokazać, skąd liczba się wzięła.
+
+/** Zakres danych: bieżące (bez archiwum), tylko aktywne, albo wszystko. */
+export type AnalyticsScope = "current" | "active" | "all";
+
+/**
+ * Okno uśredniania KOSZTU OSOBOWEGO: ostatni pełny miesiąc / średnia z 3 / z 12.
+ * Jeden miesiąc bywa wystrzałowy (premie, wyrównania), dwanaście rozmywa sezon —
+ * stąd domyślna trójka po stronie backendu (`DEFAULT_COST_WINDOW`).
+ */
+export type CostWindow = 1 | 3 | 12;
+
+/**
+ * Skąd wziął się koszt osobowy — blok informacyjny, z którego UI robi przypis.
+ *
+ * Bez niego „koszt osobowy 0 zł" jest nie do odróżnienia od „nikt nie zmapował
+ * pozycji kadrowych na obiekty", a to dwie zupełnie różne historie: pierwsza to
+ * wynik, druga to milcząca dziura w danych.
+ */
+export interface PersonnelInfo {
+  costWindow: CostWindow;
+  /** Ile miesięcy FAKTYCZNIE weszło do średniej — bywa mniej niż `costWindow`. */
+  monthsUsed: number;
+  /** Które to miesiące, od najstarszego. */
+  months: Array<{ year: number; month: number }>;
+  /**
+   * Miesiące pominięte w średniej, bo mają wiersze płacowe bez kwot — czekają
+   * na księgową. Wymień je w przypisie: sam licznik „dane za 2 z 3" wygląda na
+   * awarię, a to brak rozliczenia konkretnego miesiąca.
+   */
+  skippedMonths: Array<{ year: number; month: number }>;
+  /** Ile pozycji słownika kadrowego ma mapowanie na kartotekę obiektów. */
+  mappedObjects: number;
+  /** Ile pozycji kadrowych jest w ogóle — do przypisu „12 z 44". */
+  hrObjectsTotal: number;
+  /** 0..1 — jaka część godzin poszła w koszt ogólny firmy zamiast na obiekt. */
+  unmappedHoursShare: number;
+  /**
+   * Podstawa kwoty kosztu osobowego. "employerCost" = wypłata netto przemnożona
+   * przez narzut składek pracodawcy (Administracja → Firma), czyli SZACOWANY pełny
+   * koszt zatrudnienia. Zastąpiło dawne `net: true` — po doliczeniu składek zdanie
+   * „bez składek pracodawcy" przestało być prawdziwe.
+   */
+  costBasis: "employerCost";
+  /** Skąd wzięła się kwota — do przypisu i do obrony liczby przed księgową. */
+  employer: EmployerCostInfo;
+  /**
+   * Druga ścieżka kosztu osobowego: udział w puli centrum monitorowania.
+   * Backend wysyła to od początku, a typ milczał — więc i przypis milczał,
+   * choć chodzi o blisko połowę całego kosztu osobowego.
+   */
+  cma: CmaAllocationInfo;
+}
+
+/**
+ * Audyt podziału kosztu centrum monitorowania (`src/lib/object-personnel-cost.ts`).
+ * Ta sama intencja co przy `employer`: liczba ma dać się OBRONIĆ („obiekt dostał
+ * 3 jednostki × 439 zł"), a braki danych mają być widoczne, a nie po cichu
+ * zaniżać koszt.
+ */
+export interface CmaAllocationInfo {
+  /** Koszt puli CMA w zł/mies. po narzucie składkowym. 0 = mechanizm nieaktywny. */
+  pool: number;
+  /** Mianownik — suma jednostek dozoru wszystkich obiektów firmy. */
+  units: number;
+  /** `pool / units` — ile kosztuje jedna dozorowana jednostka. */
+  perUnit: number;
+  /** Ile obiektów faktycznie weszło do mianownika (jednostki > 0). */
+  objectsInDenominator: number;
+  /** Obiekty z usługą kamer, ale bez podanej ilości — mają ZANIŻONY udział. */
+  objectsMissingCameraCount: number;
+  /** Ile pozycji kadrowych oznaczono jako pula (0 = mechanizm nieaktywny). */
+  poolPositions: number;
+}
+
+/** Rozliczenie narzutu składek: ile wierszy poszło którą formą i jakim mnożnikiem. */
+export interface EmployerCostInfo {
+  applied: true;
+  /** Ile wypłat użyło narzutu danej formy zatrudnienia. */
+  byForm: {
+    uop: number;
+    zlecenieZua: number;
+    zlecenieZza: number;
+    /** Rozliczenia biura bez dopasowanej umowy — narzut domyślny. */
+    officeFallback: number;
+  };
+  /** Globalne wartości narzutów (spółka może mieć własne). */
+  markups: { uop: number; zlecenieZua: number; zlecenieZza: number; officeDefault: number };
+  /** Ile spółek ma własne narzuty zamiast globalnych. */
+  companyOverrides: number;
+  /** Koszt łączny / wypłaty netto łącznie — jedna liczba do pokazania w UI. */
+  effectiveMarkup: number;
+}
+
+export interface AnalyticsTotals {
+  objects: number;
+  /** Ile obiektów ma UZUPEŁNIONY koszt (monthly_cost IS NOT NULL). */
+  objectsWithCost: number;
+  /** objectsWithCost / objects, 0..1 — „na ilu obiektach opiera się marża”. */
+  coverage: number;
+  revenue: number;
+  /** Koszt CAŁKOWITY: `personnelCost + otherCost`. */
+  cost: number;
+  /** Część osobowa — z wypłat kadrowych, netto „na rękę". */
+  personnelCost: number;
+  /** Część pozostała — ręczne `objects.monthly_cost` (monitoring, sprzęt). */
+  otherCost: number;
+  profit: number;
+  /** Procent; null gdy przychód = 0 (marża byłaby dzieleniem przez zero). */
+  margin: number | null;
+  setupCost: number;
+  /** Średni przychód na obiekt; null gdy brak obiektów. */
+  arpo: number | null;
+  /** Obiekty z uzupełnionym kosztem i ujemnym zyskiem. */
+  unprofitable: number;
+  noRevenue: number;
+  personnel: PersonnelInfo;
+}
+
+/** Kubełek zestawienia (wg typu, statusu, spółki, przedziału marży). */
+export interface AnalyticsBucket {
+  key: string;
+  /** Gotowa etykieta z backendu; brak = front zna własną (label mapy z utils). */
+  label?: string;
+  count: number;
+  revenue: number;
+  cost: number;
+  profit: number;
+}
+
+/** Wspólna koperta odpowiedzi wszystkich trzech widoków. */
+interface AnalyticsEnvelope {
+  scope: AnalyticsScope;
+  /** Echo parametru zapytania — okno, z którego policzono koszt osobowy. */
+  costWindow: CostWindow;
+  generatedAt: string;
+  totals: AnalyticsTotals;
+  personnel: PersonnelInfo;
+}
+
+export interface AnalyticsContractorRow {
+  id: number;
+  name: string;
+  city: string | null;
+  active: boolean;
+  salesperson: { id: number; firstName: string; lastName: string } | null;
+  objectsCount: number;
+  activeObjectsCount: number;
+  objectsWithCost: number;
+  revenue: number;
+  cost: number;
+  /** Rozbicie kosztu: osobowy z Kadr + pozostały z kartotek obiektów. */
+  personnelCost: number;
+  otherCost: number;
+  profit: number;
+  margin: number | null;
+  setupCost: number;
+  /** Miesiące zwrotu z instalacji; null = brak nakładu albo zysk <= 0. */
+  payback: number | null;
+  arpo: number | null;
+}
+
+export interface AnalyticsContractorsData extends AnalyticsEnvelope {
+  rows: AnalyticsContractorRow[];
+  /** Kontrahenci bez ani jednego obiektu — poza rankingami, ale warto o nich wiedzieć. */
+  contractorsWithoutObjects: number;
+}
+
+export interface AnalyticsObjectRow {
+  id: number;
+  name: string;
+  city: string | null;
+  /**
+   * Usługi obiektu — z nich składa się kolumna „Usługi” i przekrój po usługach.
+   * Analityka ma własne, zwięzłe nazwy pól (src/routes/analytics.ts →
+   * `ObjectServicesInfo`); kartoteka trzyma je jako `hasCameras` itd.
+   */
+  services?: {
+    sswin: boolean;
+    cameras: boolean;
+    /** null przy `cameras` = usługa jest, ale kamer nikt nie policzył (≠ zero). */
+    cameraCount: number | null;
+    ofi: boolean;
+    videoreception: boolean;
+  };
+  /** Waga obiektu w podziale kosztu centrum monitorowania (SSWiN + wideorecepcja + kamery). */
+  serviceUnits?: number;
+  status: "pending" | "in_progress" | "active" | "inactive";
+  contractorId: number;
+  contractorName: string | null;
+  companyName: string | null;
+  salesperson: {
+    id: number;
+    firstName: string;
+    lastName: string;
+    /** true = opiekun kontrahenta, obiekt nie ma własnego handlowca. */
+    inherited: boolean;
+  } | null;
+  revenue: number;
+  cost: number;
+  /** Rozbicie kosztu: osobowy z Kadr + pozostały z pola `monthly_cost`. */
+  personnelCost: number;
+  otherCost: number;
+  profit: number;
+  margin: number | null;
+  setupCost: number;
+  payback: number | null;
+  /** false = koszt nieuzupełniony; marża i zysk są wtedy nieznane, nie zerowe. */
+  hasCost: boolean;
+}
+
+export interface AnalyticsObjectsData extends AnalyticsEnvelope {
+  rows: AnalyticsObjectRow[];
+  /**
+   * Przekrój po usługach. NIE SUMUJE SIĘ do całości: obiekt z kamerami i SSWiN-em
+   * wchodzi do obu kubełków, a obiekt bez ani jednej usługi — do żadnego.
+   */
+  byService: AnalyticsBucket[];
+  byStatus: AnalyticsBucket[];
+  byCompany: AnalyticsBucket[];
+  /** Zawsze 6 pozycji: „<0%”, „0–20”, „20–40”, „40–60”, „60%+”, „brak danych”. */
+  marginBuckets: AnalyticsBucket[];
+}
+
+export interface AnalyticsSalespersonRow {
+  id: number;
+  firstName: string;
+  lastName: string;
+  region: string | null;
+  active: boolean;
+  /** Powiązanie z kartoteką kadrową; null = osoba spoza listy płac. */
+  employeeId: number | null;
+  contractorsCount: number;
+  objectsCount: number;
+  objectsWithCost: number;
+  unprofitableObjects: number;
+  revenue: number;
+  objectsCost: number;
+  /** Rozbicie kosztu obiektów portfela: osobowy z Kadr + pozostały. */
+  objectsPersonnelCost: number;
+  objectsOtherCost: number;
+  setupCost: number;
+  /** Koszt własny handlowca (wynagrodzenie, auto, telefon). */
+  ownCost: number;
+  /**
+   * Skąd `ownCost`: „kadry" = z wypłat powiązanego pracownika (pole ręczne jest
+   * wtedy IGNOROWANE, inaczej ten sam człowiek kosztowałby firmę dwa razy),
+   * „reczny" = z pola `salespeople.monthly_cost`.
+   */
+  ownCostSource: "kadry" | "reczny";
+  /** Kwota z pola ręcznego; przy źródle „kadry" NIE wchodzi do wyniku. */
+  manualMonthlyCost: number | null;
+  commissionRate: number | null;
+  commission: number;
+  /** Marża portfela PRZED kosztem handlowca: revenue - objectsCost. */
+  contribution: number;
+  /** contribution - ownCost - commission. */
+  profit: number;
+  margin: number | null;
+  /** Ile złotych przychodu na złotówkę kosztu handlowca; < 1 = nie zarabia na siebie. */
+  roi: number | null;
+}
+
+/** Portfel bez opiekuna — przychód, którego nikt nie prowadzi. */
+export interface AnalyticsUnassigned {
+  objectsCount: number;
+  objectsWithCost: number;
+  unprofitableObjects: number;
+  revenue: number;
+  objectsCost: number;
+  objectsPersonnelCost: number;
+  objectsOtherCost: number;
+  setupCost: number;
+  profit: number;
+  margin: number | null;
+}
+
+export interface AnalyticsSalespeopleData extends AnalyticsEnvelope {
+  totals: AnalyticsTotals & {
+    salespeopleCost: number;
+    commission: number;
+    netProfit: number;
+    unassignedRevenue: number;
+    salespeopleWithCost: number;
+  };
+  rows: AnalyticsSalespersonRow[];
+  unassigned: AnalyticsUnassigned;
+}
+
+function analyticsQuery(params?: {
+  scope?: AnalyticsScope;
+  limit?: number;
+  costWindow?: CostWindow;
+}) {
+  const sp = new URLSearchParams();
+  if (params?.scope) sp.set("scope", params.scope);
+  if (params?.limit) sp.set("limit", String(params.limit));
+  // Brak wartości = nie wysyłamy parametru: domyślne okno (3 mies.) zna backend
+  // i nie ma powodu, żeby front trzymał drugą kopię tej decyzji.
+  if (params?.costWindow) sp.set("costWindow", String(params.costWindow));
+  const q = sp.toString();
+  return q ? `?${q}` : "";
+}
+
+export async function getAnalyticsContractors(params?: {
+  scope?: AnalyticsScope;
+  limit?: number;
+  costWindow?: CostWindow;
+}) {
+  return request<ApiResponse<AnalyticsContractorsData>>(
+    `/analytics/kontrahenci${analyticsQuery(params)}`
+  );
+}
+
+export async function getAnalyticsObjects(params?: {
+  scope?: AnalyticsScope;
+  limit?: number;
+  costWindow?: CostWindow;
+}) {
+  return request<ApiResponse<AnalyticsObjectsData>>(
+    `/analytics/obiekty${analyticsQuery(params)}`
+  );
+}
+
+export async function getAnalyticsSalespeople(params?: {
+  scope?: AnalyticsScope;
+  limit?: number;
+  costWindow?: CostWindow;
+}) {
+  return request<ApiResponse<AnalyticsSalespeopleData>>(
+    `/analytics/handlowcy${analyticsQuery(params)}`
+  );
+}

@@ -18,6 +18,7 @@ import {
   Clock,
   MapPin,
   Repeat,
+  Route,
   StickyNote,
   Users,
   type LucideIcon,
@@ -59,7 +60,7 @@ export type TooltipSide = "top" | "bottom" | "left" | "right";
 export type TipTone = "neutral" | "info" | "good" | "warn" | "bad";
 
 /** Ikona wiersza — nazwa zamiast komponentu, bo `data-tip-json` jest tekstem. */
-export type TipIcon = "clock" | "users" | "pin" | "repeat" | "note" | "object";
+export type TipIcon = "clock" | "users" | "pin" | "repeat" | "note" | "object" | "route";
 
 export interface TipPill {
   label: string;
@@ -487,6 +488,7 @@ const TIP_ICONS: Record<TipIcon, LucideIcon> = {
   repeat: Repeat,
   note: StickyNote,
   object: Building2,
+  route: Route,
 };
 
 const PILL_TONE: Record<TipTone, string> = {

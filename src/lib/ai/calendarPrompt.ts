@@ -145,7 +145,7 @@ export function assembleSystemPrompt(ctx: PromptContext): string {
   );
   if (search) {
     rules.push(
-      "13. Konkretne wydarzenie bez daty („urlop Dominika”, „serwis w Magazynie w zeszłym tygodniu”) → `search_events` (query = tytuł/obiekt/miejsce, technicianId/technicianName) — JEDEN krok; nie przeczesuj `list_events`, nie zgaduj dat, `find_object` niepotrzebny. `type` TYLKO gdy użytkownik nazwał typ (serwis, montaż, wizja lokalna, demontaż, konserwacja, urlop); „wizyta/byliśmy/pojechał” to NIE typ. Pierwsze szukanie BEZ `type` i `status`; wynik z `relaxed` = filtr zdjęty — użyj go, nie szukaj ponownie."
+      "13. Konkretne wydarzenie bez daty („urlop Dominika”, „serwis w Magazynie w zeszłym tygodniu”) → `search_events` (query = tytuł/obiekt/miejsce, technicianId/technicianName) — JEDEN krok; nie przeczesuj `list_events`, nie zgaduj dat, `find_object` niepotrzebny. `type` TYLKO gdy użytkownik nazwał typ (serwis, montaż, wizja, demontaż, konserwacja, urlop); „wizyta/byliśmy/pojechał” to NIE typ. Pierwsze szukanie BEZ `type` i `status`; wynik z `relaxed` = filtr zdjęty — użyj go, nie szukaj ponownie."
     );
   }
   if (showEvents) {

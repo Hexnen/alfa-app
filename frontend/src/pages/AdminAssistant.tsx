@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Bot, Loader2, RefreshCw, Save, SlidersHorizontal } from "lucide-react";
+import { Loader2, RefreshCw, Save, SlidersHorizontal } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   AlertDialog,
@@ -244,8 +244,7 @@ export function AdminAssistant() {
   // --- render -------------------------------------------------------------
   if (loadError) {
     return (
-      <div className="space-y-4">
-        <PageHeader />
+      <div className="space-y-3">
         <ErrorBox>{loadError}</ErrorBox>
         <Button variant="outline" onClick={() => loadSettings().then(() => setLoadError(null)).catch((e) => setLoadError(errMsg(e, "Błąd")))}>
           <RefreshCw className="mr-1 h-4 w-4" /> Spróbuj ponownie
@@ -255,8 +254,7 @@ export function AdminAssistant() {
   }
   if (!settings || !values || !defaults || !sources) {
     return (
-      <div className="space-y-4">
-        <PageHeader />
+      <div className="space-y-3">
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
           <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> Wczytywanie ustawień…
         </div>
@@ -268,9 +266,7 @@ export function AdminAssistant() {
   const resetFor = (id: string) => () => setConfirmReset(id);
 
   return (
-    <div className="space-y-6 pb-24">
-      <PageHeader />
-
+    <div className="space-y-3 pb-24">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <nav aria-label="Sekcje ustawień" className="-mx-1 flex gap-1 overflow-x-auto px-1 pb-1">
           {SECTIONS.map((s) => (
@@ -386,15 +382,3 @@ export function AdminAssistant() {
   );
 }
 
-function PageHeader() {
-  return (
-    <div>
-      <h1 className="flex items-center gap-2 text-2xl font-bold">
-        <Bot className="h-6 w-6" /> Asystent AI
-      </h1>
-      <p className="text-sm text-muted-foreground">
-        Konfiguracja asystenta kalendarza: dostawca modelu, zachowanie, reguły planowania, dostęp i zużycie. Zmiany działają od następnej tury — bez restartu.
-      </p>
-    </div>
-  );
-}

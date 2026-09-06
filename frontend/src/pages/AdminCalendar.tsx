@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { CalendarCog, Loader2, Play, RefreshCw, Save, Search } from "lucide-react";
+import { Loader2, Play, RefreshCw, Save, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -35,6 +35,7 @@ const FALLBACK_VALUES: CalendarSettingsValues = {
   autoRealization: "on_create",
   realizationTypes: [...REALIZATION_TYPES],
   realizationSync: true,
+  autoQuote: true,
 };
 
 const AUTO_OPTIONS: { key: CalendarAutoRealization; label: string; desc: string }[] = [
@@ -147,7 +148,13 @@ export function AdminCalendar() {
         from: /^\d{4}-\d{2}-\d{2}$/.test(from) ? from : undefined,
       });
       setBackfill(res);
-      if (!dryRun) flash(`Utworzono realizacje: ${backfillCount(res.created)}.`);
+      if (!dryRun) {
+        flash(
+          `Utworzono realizacje: ${backfillCount(res.created)}` +
+            (res.quotesCreated ? `, wyceny: ${res.quotesCreated}` : "") +
+            "."
+        );
+      }
     } catch (e) {
       setBackfill(null);
       setBackfillError(errMsg(e, "Nie udało się uruchomić uzupełniania"));
@@ -159,8 +166,7 @@ export function AdminCalendar() {
 
   if (loadError) {
     return (
-      <div className="space-y-4">
-        <PageHeader />
+      <div className="space-y-3">
         <ErrorBox>{loadError}</ErrorBox>
         <Button
           variant="outline"
@@ -177,8 +183,7 @@ export function AdminCalendar() {
   }
   if (!settings) {
     return (
-      <div className="space-y-4">
-        <PageHeader />
+      <div className="space-y-3">
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
           <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> Wczytywanie ustawień…
         </div>
@@ -188,15 +193,15 @@ export function AdminCalendar() {
 
   const auto = val("autoRealization");
   const candidates = backfill ? backfillCount(backfill.candidates) : 0;
+  /** Płatne wydarzenia, którym brakuje samej wyceny (realizację już mają). */
+  const quoteCandidates = backfill?.quoteCandidates ?? 0;
   /** Typy do wyboru: z backendu (meta.allowedTypes) albo wszystkie poza urlopem. */
   const allowedTypes = settings.meta?.allowedTypes?.length
     ? settings.meta.allowedTypes
     : EVENT_TYPE_ORDER.filter((t) => t !== "urlop");
 
   return (
-    <div className="space-y-6 pb-24">
-      <PageHeader />
-
+    <div className="space-y-3 pb-24">
       {error && <ErrorBox>{error}</ErrorBox>}
       {notice && (
         <div
@@ -292,10 +297,27 @@ export function AdminCalendar() {
           />
         </Field>
 
+        <Field
+          id="cal-auto-quote"
+          label="Twórz wycenę dla prac płatnych"
+          source={source("autoQuote")}
+          dirty={isDirty("autoQuote")}
+          description="Wydarzenie z rozliczeniem „płatny” dostaje — obok realizacji i protokołu — wycenę z pozycjami cennika technika (ilości uzupełnia człowiek). Zmiana rozliczenia na gwarancyjne lub darmowe kasuje wycenę tylko wtedy, gdy nikt nie wpisał w niej ilości."
+          inline
+        >
+          <Switch
+            id="cal-auto-quote"
+            checked={val("autoQuote")}
+            onChange={(v) => setField("autoQuote", v)}
+            label="Twórz wycenę dla prac płatnych"
+          />
+        </Field>
+
         <div className="rounded-md border bg-muted/30 p-3 text-xs text-muted-foreground">
           <p className="mb-1 font-medium text-foreground">Zasady, których automat nie łamie</p>
           <ul className="list-disc space-y-0.5 pl-4">
             <li>Kwoty (robocizna, materiały, KM, rabat) ustawiasz wyłącznie w module Realizacje.</li>
+            <li>Wycena z wpisanymi ilościami nigdy nie jest kasowana automatycznie.</li>
             <li>Realizacja zafakturowana nie jest już aktualizowana — zmiana wydarzenia trafia tylko do historii.</li>
             <li>Anulowanie wydarzenia usuwa realizację tylko wtedy, gdy jest pusta i nierozliczona.</li>
             <li>Jedno wydarzenie ↔ jedna realizacja; podpięcie zajętej realizacji zostanie odrzucone.</li>
@@ -306,7 +328,7 @@ export function AdminCalendar() {
       <SectionCard
         id="backfill"
         title="Uzupełnij zaległe"
-        description="Tworzy realizacje dla wcześniejszych wydarzeń objętych typów, które jeszcze ich nie mają. Zacznij od podglądu."
+        description="Tworzy realizacje dla wcześniejszych wydarzeń objętych typów, które jeszcze ich nie mają, oraz wyceny dla prac płatnych, które mają realizację bez wyceny. Zacznij od podglądu."
       >
         <div className="flex flex-wrap items-end gap-3">
           <div className="space-y-1.5">
@@ -339,11 +361,11 @@ export function AdminCalendar() {
           <Button
             type="button"
             data-testid="backfill-apply"
-            disabled={backfillBusy != null || !backfill || candidates === 0}
+            disabled={backfillBusy != null || !backfill || (candidates === 0 && quoteCandidates === 0)}
             onClick={() => setConfirmApply(true)}
             title={backfill ? undefined : "Najpierw uruchom podgląd"}
           >
-            <Play className="mr-1 h-4 w-4" /> Utwórz realizacje
+            <Play className="mr-1 h-4 w-4" /> Utwórz realizacje i wyceny
           </Button>
         </div>
 
@@ -357,6 +379,14 @@ export function AdminCalendar() {
               {backfill.created != null && (
                 <span>
                   Utworzono: <strong className="tabular-nums">{backfillCount(backfill.created)}</strong>
+                </span>
+              )}
+              <span>
+                Wyceny do uzupełnienia: <strong className="tabular-nums">{quoteCandidates}</strong>
+              </span>
+              {backfill.quotesCreated != null && (
+                <span>
+                  Utworzono wycen: <strong className="tabular-nums">{backfill.quotesCreated}</strong>
                 </span>
               )}
               <span className="text-muted-foreground">
@@ -405,10 +435,13 @@ export function AdminCalendar() {
       <AlertDialog open={confirmApply} onOpenChange={(o) => !o && setConfirmApply(false)}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Utworzyć {candidates} realizacji?</AlertDialogTitle>
+            <AlertDialogTitle>
+              Utworzyć {candidates} realizacji{quoteCandidates > 0 ? ` i ${quoteCandidates} wycen` : ""}?
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              Dla każdego wydarzenia powstanie realizacja z zerowymi kwotami oraz szkic protokołu. Operacji nie da się
-              cofnąć jednym kliknięciem — istniejące realizacje nie zostaną ruszone.
+              Dla każdego wydarzenia powstanie realizacja z zerowymi kwotami oraz szkic protokołu, a dla prac płatnych —
+              wycena z pozycjami cennika (bez ilości). Operacji nie da się cofnąć jednym kliknięciem — istniejące
+              realizacje, protokoły i wyceny nie zostaną ruszone.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -421,16 +454,3 @@ export function AdminCalendar() {
   );
 }
 
-function PageHeader() {
-  return (
-    <div>
-      <h1 className="flex items-center gap-2 text-2xl font-bold">
-        <CalendarCog className="h-6 w-6" /> Kalendarz
-      </h1>
-      <p className="text-sm text-muted-foreground">
-        Reguły przenoszenia wydarzeń kalendarza do rejestru Realizacji: kiedy realizacja powstaje, jakich typów dotyczy i
-        czy edycja wydarzenia ją aktualizuje.
-      </p>
-    </div>
-  );
-}

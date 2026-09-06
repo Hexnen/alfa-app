@@ -15,7 +15,7 @@ import {
   protocolBadgeKind,
   seriesShortLabel,
 } from "@/lib/calendar-labels";
-import { BillingBadge, ProtocolBadge, RealizationBadge } from "@/components/CalendarEventBadges";
+import { BillingBadge, ProtocolBadge, QuoteBadge, RealizationBadge } from "@/components/CalendarEventBadges";
 import { tipAttrs } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
@@ -447,6 +447,7 @@ function BoardCard({
           )}
           <BillingBadge billing={ev.billing} compact />
           <ProtocolBadge event={ev} compact />
+          <QuoteBadge event={ev} compact />
           <RealizationBadge event={ev} compact />
         </div>
       )}

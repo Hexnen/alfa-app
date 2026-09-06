@@ -6,11 +6,16 @@ import historyRoutes from "./history.js";
 import ordersRoutes from "./orders.js";
 import realizationsRoutes from "./realizations.js";
 import companyRoutes from "./company.js";
+import companyLookupRoutes from "./company-lookup.js";
 import techniciansRoutes from "./technicians.js";
+import salespeopleRoutes from "./salespeople.js";
+import companiesRoutes from "./companies.js";
 import pricelistRoutes from "./pricelist.js";
 import cameraModelsRoutes from "./camera-models.js";
 import protocolsRoutes from "./protocols.js";
 import quotesRoutes from "./quotes.js";
+import servicesRoutes from "./services.js";
+import offersRoutes, { offersPublicRoutes } from "./offers.js";
 import cmaRoutes from "./cma.js";
 import monitoringRoutes from "./monitoring.js";
 import monitoredObjectsRoutes from "./monitored-objects.js";
@@ -26,6 +31,7 @@ import adminCompanyRoutes from "./admin-company.js";
 import assistantRoutes from "./assistant.js";
 import calendarRoutes, { calendarPublicRoutes } from "./calendar.js";
 import activityRoutes from "./activity.js";
+import analyticsRoutes from "./analytics.js";
 import { requireAuth, requireAssistantAccess, tabPermissionGuard } from "../middleware/auth.js";
 import { db, schema } from "../db/index.js";
 import { sql, eq } from "drizzle-orm";
@@ -44,6 +50,10 @@ api.route("/public", publicRoutes);
 // --- KALENDARZ: publiczny feed ICS (auth po tokenie użytkownika w query) ---
 // GET /calendar/feed.ics?token=... — montowane PRZED requireAuth, jak /public.
 api.route("/calendar", calendarPublicRoutes);
+
+// --- OFERTY: dokument dla klienta spod linku (auth po tokenie w ścieżce) ---
+// GET /public-offer/:token — montowane PRZED requireAuth, jak /public.
+api.route("/", offersPublicRoutes);
 
 // --- Wszystkie pozostałe trasy API — chronione sesją ---
 api.use("*", requireAuth);
@@ -73,6 +83,11 @@ api.use("*", tabPermissionGuard);
 // /activity nie jest w API_TAB_MAP — historia obiektu czytelna dla każdego zalogowanego.
 api.route("/calendar", calendarRoutes);
 api.route("/activity", activityRoutes);
+
+// --- WYSZUKIWARKA FIRM (wykaz VAT MF) — poza API_TAB_MAP: korzystają z niej
+// formularze kontrahentów, techników i zleceń, a dane pochodzą z publicznego
+// rejestru, więc wystarczy zalogowana sesja (limit zapytań w samej trasie).
+api.route("/company-lookup", companyLookupRoutes);
 
 // Dashboard statistics
 api.get("/stats", async (c) => {
@@ -118,8 +133,11 @@ api.get("/stats", async (c) => {
     .from(schema.objects)
     .where(eq(schema.objects.department, "accounting"));
 
+  // Przychód miesięczny = abonament + dzierżawa sprzętu (obie kwoty płatne co miesiąc).
   const [monthlyValueSum] = await db
-    .select({ sum: sql<number>`COALESCE(sum(monthly_value), 0)` })
+    .select({
+      sum: sql<number>`COALESCE(sum(COALESCE(monthly_value, 0) + COALESCE(monthly_rental, 0)), 0)`,
+    })
     .from(schema.objects)
     .where(eq(schema.objects.status, "active"));
 
@@ -179,15 +197,23 @@ api.route("/realizations", realizationsRoutes);
 // Dane firmy tylko do odczytu dla zalogowanych (znacznik biura na mapach).
 api.route("/company", companyRoutes);
 api.route("/technicians", techniciansRoutes);
+api.route("/salespeople", salespeopleRoutes);
+api.route("/companies", companiesRoutes);
 api.route("/pricelist", pricelistRoutes);
 api.route("/camera-models", cameraModelsRoutes);
 api.route("/protocols", protocolsRoutes);
 api.route("/quotes", quotesRoutes);
+api.route("/services", servicesRoutes);
+api.route("/offers", offersRoutes);
 api.route("/cma/mail", cmaMailRoutes);
 api.route("/cma", cmaRoutes);
 api.route("/monitoring", monitoringRoutes);
 api.route("/monitored-objects", monitoredObjectsRoutes);
 api.route("/hr", hrRoutes);
 api.route("/warehouse", warehouseRoutes);
+// Analityka finansowa — montowana TUTAJ, czyli poniżej api.use("*", tabPermissionGuard).
+// W bloku nad strażnikiem (obok /calendar czy /company-lookup) wystawiłaby przychody,
+// koszty i wynagrodzenia handlowców każdemu zalogowanemu użytkownikowi.
+api.route("/analytics", analyticsRoutes);
 
 export default api;

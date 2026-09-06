@@ -31,6 +31,9 @@ import {
   type CompanySettingsValues,
 } from "./company-config.js";
 import { distanceForObject, isGeoError, type DistanceMethod, type GeoPoint } from "./geo.js";
+import { resolveRealizationObject } from "./object-identity.js";
+import { matchPriceItem, resolveHourRate, resolveKmRate } from "./price-match.js";
+import { fillProtocolFromRealizationSync } from "./protocol-prefill.js";
 
 // ---------------------------------------------------------------------------
 // Typy publiczne (kontrakt z frontem)
@@ -155,52 +158,17 @@ const round2 = (n: number) => Math.round(n * 100) / 100;
 const round1 = (n: number) => Math.round(n * 10) / 10;
 
 // ---------------------------------------------------------------------------
-// Dopasowanie nazw (protokół ↔ cennik)
+// Dopasowanie nazw i stawki — mieszkają w src/lib/price-match.ts (żeby wycena z protokołu
+// mogła ich użyć bez importowania tego modułu), tutaj tylko re-eksport dla zgodności.
 // ---------------------------------------------------------------------------
 
-/** lower + bez polskich znaków + bez wszystkiego, co nie jest literą/cyfrą. */
-export function normalizeName(s: string): string {
-  return s
-    .replace(/ł/g, "l")
-    .replace(/Ł/g, "L")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]/g, "");
-}
-
-/**
- * Pozycja cennika dla nazwy z protokołu: najpierw dokładne dopasowanie po znormalizowanej
- * nazwie, potem częściowe (jedna nazwa zawiera drugą — wygrywa najdłuższa wspólna).
- */
-export function matchPriceItem(name: string, items: PriceItem[]): PriceItem | null {
-  const target = normalizeName(name);
-  if (!target) return null;
-
-  const exact = items.find((i) => normalizeName(i.name) === target);
-  if (exact) return exact;
-
-  let best: PriceItem | null = null;
-  let bestLen = 0;
-  for (const i of items) {
-    const n = normalizeName(i.name);
-    if (!n) continue;
-    if (n.includes(target) || target.includes(n)) {
-      const len = Math.min(n.length, target.length);
-      if (len > bestLen) {
-        best = i;
-        bestLen = len;
-      }
-    }
-  }
-  // Zbyt krótkie dopasowanie (np. „kabel” do „kabelutpkat5e”) łatwo trafia w przypadkowy wiersz.
-  return bestLen >= 4 ? best : null;
-}
-
-const HOUR_UNITS = new Set(["RBH", "RG", "H", "G", "GODZ", "GODZ.", "GODZINA", "GODZINY"]);
-const KM_UNITS = new Set(["KM", "KM.", "KILOMETR"]);
-
-const unitOf = (i: PriceItem) => i.unit.trim().toUpperCase();
+export {
+  matchPriceItem,
+  normalizeName,
+  resolveHourRate,
+  resolveKmRate,
+  type HourRate,
+} from "./price-match.js";
 
 // ---------------------------------------------------------------------------
 // Wczytanie kontekstu realizacji
@@ -255,39 +223,6 @@ function loadEventsFor(dbx: DbOrTx, realizationId: number) {
     )
     .orderBy(asc(schema.calendarEvents.startAt))
     .all();
-}
-
-/** Obiekt: z wydarzenia (object_id), a gdy brak — po nazwie z `realizations.site`. */
-function resolveObject(
-  dbx: DbOrTx,
-  site: string,
-  events: { objectId: number | null }[]
-): { id: number; name: string } | null {
-  const fromEvent = events.find((e) => e.objectId != null)?.objectId ?? null;
-  if (fromEvent != null) {
-    const row = dbx
-      .select({ id: schema.objects.id, name: schema.objects.name })
-      .from(schema.objects)
-      .where(eq(schema.objects.id, fromEvent))
-      .get();
-    if (row) return row;
-  }
-
-  const needle = site.trim();
-  if (!needle) return null;
-  const exact = dbx
-    .select({ id: schema.objects.id, name: schema.objects.name })
-    .from(schema.objects)
-    .where(sql`lower(${schema.objects.name}) = lower(${needle})`)
-    .all();
-  if (exact.length === 1) return exact[0];
-
-  const partial = dbx
-    .select({ id: schema.objects.id, name: schema.objects.name })
-    .from(schema.objects)
-    .where(sql`lower(${schema.objects.name}) LIKE lower(${`%${needle}%`})`)
-    .all();
-  return partial.length === 1 ? partial[0] : null;
 }
 
 /** Cennik: technika z wydarzenia → technika z pola „Wykonawca 1” → cennik główny. */
@@ -361,46 +296,6 @@ function resolvePriceList(
 }
 
 // ---------------------------------------------------------------------------
-// Stawki z cennika
-// ---------------------------------------------------------------------------
-
-type HourRate =
-  | { mode: "flat"; rate: number; itemName: string }
-  | { mode: "tiered"; first: number; next: number; firstName: string; nextName: string }
-  | { mode: "settings"; rate: number }
-  | null;
-
-/**
- * Stawka RBH szukana WYŁĄCZNIE wśród pozycji usługowych z jednostką godzinową.
- * Cennik usera rozbija robociznę na „PIERWSZA ROZPOCZĘTA GODZINA” i „KOLEJNA…”, więc gdy obie
- * pozycje istnieją, liczymy schodkowo (1 × pierwsza + reszta × kolejna) — inaczej jedna stawka.
- */
-export function resolveHourRate(items: PriceItem[], values: Pick<CompanySettingsValues, "rateHour">): HourRate {
-  const hourly = items.filter((i) => i.kind === "service" && (HOUR_UNITS.has(unitOf(i)) || /godz/i.test(i.unit)));
-  if (hourly.length > 0) {
-    const first = hourly.find((i) => /pierwsz/i.test(i.name));
-    const next = hourly.find((i) => /kolejn|nastepn|następn/i.test(i.name));
-    if (first && next && first.id !== next.id) {
-      return { mode: "tiered", first: first.price, next: next.price, firstName: first.name, nextName: next.name };
-    }
-    const named = hourly.find((i) => /roboczogodz|rbh/i.test(`${i.name} ${i.unit}`));
-    const pickItem = named ?? hourly[0];
-    if (pickItem.price > 0) return { mode: "flat", rate: pickItem.price, itemName: pickItem.name };
-  }
-  return values.rateHour > 0 ? { mode: "settings", rate: values.rateHour } : null;
-}
-
-/** Stawka za km: pozycja usługowa z jednostką KM ma pierwszeństwo przed `company.rate_km`. */
-export function resolveKmRate(
-  items: PriceItem[],
-  values: Pick<CompanySettingsValues, "rateKm">
-): { rate: number; itemName: string | null } | null {
-  const kmItem = items.find((i) => i.kind === "service" && KM_UNITS.has(unitOf(i)) && i.price > 0);
-  if (kmItem) return { rate: kmItem.price, itemName: kmItem.name };
-  return values.rateKm > 0 ? { rate: values.rateKm, itemName: null } : null;
-}
-
-// ---------------------------------------------------------------------------
 // computeAutofill
 // ---------------------------------------------------------------------------
 
@@ -455,7 +350,10 @@ export async function computeAutofill(
       }
     : null;
 
-  const object = resolveObject(dbx, r.site, eventRows);
+  // Obiekt WYŁĄCZNIE z klucza obcego — od niego zależy kalkulacja km (biuro → obiekt),
+  // więc pomyłka kosztuje realnymi kilometrami na fakturze. Wydarzenia mamy wczytane,
+  // podajemy je jawnie (patrz src/lib/object-identity.ts).
+  const object = resolveRealizationObject(dbx, r, { events: eventRows });
   const priceList = resolvePriceList(dbx, r.contractor1 ?? "", eventRows.map((e) => e.id));
   const priceItems: PriceItem[] = priceList
     ? dbx
@@ -611,7 +509,10 @@ export async function computeAutofill(
   const wantsKm = wants("actualKm") || wants("amountKm");
   if (wantsKm && !opts.skipDistance) {
     if (!object) {
-      distanceError = "Nie ustalono obiektu realizacji (brak wydarzenia z obiektem i brak dopasowania po nazwie).";
+      // Świadomie NIE zgadujemy obiektu po nazwie — lepszy jawny brak km niż km
+      // policzone do cudzego adresu (src/lib/object-identity.ts).
+      distanceError =
+        "Realizacja nie wskazuje obiektu z kartoteki (brak object_id i brak wydarzenia z obiektem) — przypisz obiekt, żeby policzyć km.";
     } else {
       const d = await distanceForObject(object.id, { dbx, cacheOnly: opts.cacheOnly });
       if (isGeoError(d)) {
@@ -841,6 +742,15 @@ export function applySuggestions(
       .all();
     if (updated.length === 0) return { status: "conflict" };
 
+    // Protokół jest dokumentem końcowym, więc godziny i km, które właśnie policzyliśmy,
+    // muszą dojść także do niego — ale wyłącznie do pól pustych i tylko dopóki jest szkicem.
+    // Wpis do dziennika robi sama funkcja — przy encji `protocol`, bo to protokół się zmienia;
+    // dziennik realizacji zostaje jednym wpisem „Uzupełniono automatycznie: …”.
+    fillProtocolFromRealizationSync(tx, updated[0], {
+      user: opts.user,
+      reason: "automat realizacji",
+      summarySuffix: opts.summarySuffix === undefined ? "(przez automat)" : opts.summarySuffix,
+    });
     logActivity(tx, {
       entityType: "realization",
       entityId: realizationId,

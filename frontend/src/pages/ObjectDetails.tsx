@@ -34,7 +34,7 @@ import {
   Send,
 } from "lucide-react";
 import { CalendarEventDialog, type CalendarDialogMode } from "@/components/CalendarEventDialog";
-import { BillingBadge, ProtocolBadge, RealizationBadge } from "@/components/CalendarEventBadges";
+import { BillingBadge, ProtocolBadge, QuoteBadge, RealizationBadge } from "@/components/CalendarEventBadges";
 import {
   EVENT_STATUS_META,
   EVENT_TYPE_META,
@@ -69,7 +69,7 @@ import {
   type WorkflowTransition,
 } from "@/lib/api";
 import {
-  objectTypeLabels,
+  objectServicesLabel,
   installationTypeLabels,
   statusLabels,
   departmentLabels,
@@ -285,6 +285,18 @@ export function ObjectDetails() {
   const currentWorkflowKey = `${object.status}-${object.department}`;
   const availableTransitions = workflowOptions[currentWorkflowKey] || [];
 
+  // Ekonomia obiektu. `monthlyCost === null` znaczy „nikt tego nie uzupełnił”,
+  // więc zysku ani marży nie liczymy — inaczej każdy pusty obiekt miałby 100%.
+  const monthlyCost = object.monthlyCost ?? null;
+  const setupCost = object.setupCost ?? null;
+  // Przychód miesięczny = abonament + dzierżawa sprzętu (klient płaci obie pozycje).
+  const monthlyRevenue = (object.monthlyValue ?? 0) + (object.monthlyRental ?? 0);
+  const monthlyProfit = monthlyCost === null ? null : monthlyRevenue - monthlyCost;
+  const marginPct =
+    monthlyProfit === null || !monthlyRevenue
+      ? null
+      : Math.round((monthlyProfit / monthlyRevenue) * 100);
+
   const actionLabels: Record<string, string> = {
     created: "Utworzono",
     updated: "Zaktualizowano",
@@ -332,8 +344,11 @@ export function ObjectDetails() {
                 <dd>{object.city || "-"}</dd>
               </div>
               <div>
-                <dt className="text-sm text-muted-foreground">Typ ochrony</dt>
-                <dd>{objectTypeLabels[object.type]}</dd>
+                {/* Usługi zamiast jednego „typu ochrony” — jedna pozycja za
+                    jedną, więc dwukolumnowa siatka `<dl>` zostaje parzysta.
+                    „Kamery (ilość?)” = usługa jest, ale kamer nikt nie policzył. */}
+                <dt className="text-sm text-muted-foreground">Usługi</dt>
+                <dd>{objectServicesLabel(object)}</dd>
               </div>
               <div>
                 <dt className="text-sm text-muted-foreground">Typ instalacji</dt>
@@ -349,10 +364,80 @@ export function ObjectDetails() {
               </div>
               <div>
                 <dt className="text-sm text-muted-foreground">
-                  Wartosc miesieczna
+                  Przychód miesięczny
                 </dt>
                 <dd className="font-medium">
-                  {formatCurrency(object.monthlyValue)}
+                  {formatCurrency(monthlyRevenue)}
+                  {object.monthlyRental ? (
+                    <div className="text-xs font-normal text-muted-foreground">
+                      abonament {formatCurrency(object.monthlyValue)} + dzierżawa{" "}
+                      {formatCurrency(object.monthlyRental)}
+                    </div>
+                  ) : null}
+                </dd>
+              </div>
+              {/* Koszty: pusty koszt to „nieuzupełniony”, a nie 0 zł — dlatego
+                  zamiast kwoty i 100% marży pokazujemy kreskę. Cztery pozycje,
+                  żeby siatka `grid-cols-2` została parzysta. */}
+              <div>
+                <dt
+                  className="text-sm text-muted-foreground"
+                  title="Koszty poza wynagrodzeniami (monitoring, sprzęt, abonamenty). Pensje załogi dolicza Analityka z Kadr."
+                >
+                  Koszt miesięczny (pozostały)
+                </dt>
+                <dd className="font-medium">
+                  {monthlyCost === null ? (
+                    <span className="text-muted-foreground">—</span>
+                  ) : (
+                    formatCurrency(monthlyCost)
+                  )}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-sm text-muted-foreground">Zysk miesięczny</dt>
+                <dd className="font-medium">
+                  {monthlyProfit === null ? (
+                    <span className="text-muted-foreground">—</span>
+                  ) : (
+                    <>
+                      <span
+                        className={cn(
+                          monthlyProfit > 0 && "text-emerald-700",
+                          monthlyProfit < 0 && "text-red-600"
+                        )}
+                      >
+                        {formatCurrency(monthlyProfit)}
+                      </span>
+                      {marginPct !== null && (
+                        <span className="block text-xs font-normal text-muted-foreground">
+                          (marża {marginPct}%)
+                        </span>
+                      )}
+                    </>
+                  )}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-sm text-muted-foreground">Koszt instalacji</dt>
+                <dd className="font-medium">
+                  {setupCost === null ? (
+                    <span className="text-muted-foreground">—</span>
+                  ) : (
+                    formatCurrency(setupCost)
+                  )}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-sm text-muted-foreground">Okres zwrotu</dt>
+                <dd className="font-medium">
+                  {setupCost === null || monthlyProfit === null ? (
+                    <span className="text-muted-foreground">—</span>
+                  ) : monthlyProfit <= 0 ? (
+                    <span className="text-red-600">nigdy</span>
+                  ) : (
+                    `${Math.ceil(setupCost / monthlyProfit)} mies.`
+                  )}
                 </dd>
               </div>
               {object.notes && (
@@ -362,6 +447,16 @@ export function ObjectDetails() {
                 </div>
               )}
             </dl>
+            {/* Jedno zdanie o konwencji na całą kartę zamiast dopisku „netto”
+                przy każdej kwocie. Druga połowa jest ważniejsza: zysk i marża
+                stoją tu WYŁĄCZNIE na koszcie pozostałym — koszt osobowy z Kadr
+                dokłada dopiero Analityka, więc marża z tej karty jest zawyżona
+                dla każdego obiektu, na którym stoją ludzie. */}
+            <p className="mt-4 text-xs text-muted-foreground">
+              Wszystkie kwoty są netto (bez VAT). Zysk i marża liczone są z
+              samego kosztu pozostałego — koszt osobowy z Kadr dolicza dopiero
+              Analityka.
+            </p>
           </CardContent>
         </Card>
 
@@ -915,6 +1010,7 @@ function ObjectEventList({
                     )}
                     <BillingBadge billing={ev.billing} compact />
                     <ProtocolBadge event={ev} compact link />
+                    <QuoteBadge event={ev} compact link />
                     <RealizationBadge event={ev} compact link />
                   </div>
                   <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">

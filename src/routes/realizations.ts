@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { db, schema } from "../db/index.js";
-import { eq, like, asc, and, isNull, isNotNull } from "drizzle-orm";
+import { eq, like, asc, and, isNull, isNotNull, sql } from "drizzle-orm";
 import type { ApiResponse } from "../types/index.js";
 import type { Protocol, Realization, NewRealization } from "../db/schema.js";
 import { createProtocolForRealizationSync } from "./protocols.js";
@@ -12,6 +12,7 @@ import {
   type Suggestion,
 } from "../lib/realization-autofill.js";
 import { AUTOFILL_FIELDS, type AutofillField } from "../lib/company-config.js";
+import type { ObjectIdentitySource } from "../lib/object-identity.js";
 import {
   isRealizationBilling,
   isRealizationWorkType,
@@ -83,8 +84,13 @@ export interface RealizationLocation {
   city: string | null;
   lat: number | null;
   lng: number | null;
-  /** "event" = obiekt z wydarzenia kalendarza, "name" = dopasowanie po `site`. */
-  source: "event" | "name";
+  /**
+   * Skąd wziął się klucz obiektu: "realizacja" = `realizations.object_id` (źródło
+   * prawdy), "kalendarz" = `calendar_events.object_id` wpiętego wydarzenia — dla
+   * realizacji sprzed migracji tożsamości. Dopasowania po nazwie już NIE MA:
+   * mylilo się w 29 z 289 realizacji (src/lib/object-identity.ts).
+   */
+  source: ObjectIdentitySource;
 }
 
 function withComputed(
@@ -107,8 +113,22 @@ function withComputed(
   };
 }
 
-/** Klucz porównania nazw obiektów: bez białych znaków po bokach, bez wielkości liter. */
-const nameKey = (s: string) => s.trim().toLocaleLowerCase("pl-PL");
+/**
+ * Obiekt z body — po id, nigdy po nazwie. Zwraca `{}`, gdy body w ogóle nie podało
+ * klucza (PUT ma wtedy zostawić istniejące powiązanie), `{ objectId: null }` przy
+ * jawnym odpięciu i `{ error }`, gdy id jest bez sensu albo wskazuje nieistniejący
+ * obiekt — po cichu zapisany NULL wyglądałby potem jak „realizacja bez obiektu".
+ */
+function parseObjectId(body: Record<string, unknown>): { objectId?: number | null } | { error: string } {
+  if (!("objectId" in body)) return {};
+  const raw = body.objectId;
+  if (raw === null || raw === "") return { objectId: null };
+  const id = Number(raw);
+  if (!Number.isInteger(id) || id <= 0) return { error: "Nieprawidłowy identyfikator obiektu" };
+  const found = db.select({ id: schema.objects.id }).from(schema.objects).where(eq(schema.objects.id, id)).get();
+  if (!found) return { error: `Obiekt #${id} nie istnieje` };
+  return { objectId: id };
+}
 
 /**
  * Waliduje i normalizuje body — zwraca payload albo komunikat błędu.
@@ -124,6 +144,14 @@ function parseBody(body: Record<string, unknown>): { data?: Partial<NewRealizati
 
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return { error: "Nieprawidłowa data (wymagany format YYYY-MM-DD)" };
   if (!site) return { error: "Obiekt jest wymagany" };
+
+  // Tożsamość obiektu bierzemy WYŁĄCZNIE z `objectId`. `site` zostaje migawką nazwy
+  // na dokument (protokół ma drukować to, co uzgodniono wtedy) i nigdy nie służy do
+  // odszukania obiektu — po nazwie mylił się w 29 z 289 realizacji, bo dwanaście
+  // obiektów w kartotece nazywa się tak samo (src/lib/object-identity.ts).
+  // Brak klucza w body = „nie ruszam" (PUT zostawia to, co jest; POST zapisze NULL).
+  const objectPick = parseObjectId(body);
+  if ("error" in objectPick) return { error: objectPick.error };
 
   const legacy = splitLegacyKind(typeof body.kind === "string" ? body.kind : null);
   let workType: RealizationWorkType;
@@ -165,6 +193,7 @@ function parseBody(body: Record<string, unknown>): { data?: Partial<NewRealizati
   return {
     data: {
       date,
+      ...("objectId" in objectPick ? { objectId: objectPick.objectId } : {}),
       site,
       workType,
       billing,
@@ -227,7 +256,10 @@ app.get("/", async (c) => {
       protocolNumber: schema.protocols.number,
       protocolStatus: schema.protocols.status,
       protocolSignedAt: schema.protocols.signedAt,
-      // Obiekt wskazany przez wydarzenie kalendarza (mapa realizacji).
+      // Obiekt do pinezki na mapie — z KLUCZA realizacji, a gdy go nie ma (wpis
+      // ręczny sprzed migracji tożsamości) z klucza wpiętego wydarzenia. Nazwa nie
+      // bierze w tym udziału; złączenie idzie po `coalesce` obu FK, żeby lista
+      // została jednym zapytaniem.
       objectId: schema.objects.id,
       objectName: schema.objects.name,
       objectAddress: schema.objects.address,
@@ -238,44 +270,15 @@ app.get("/", async (c) => {
     .from(schema.realizations)
     .leftJoin(schema.calendarEvents, eq(schema.calendarEvents.realizationId, schema.realizations.id))
     .leftJoin(schema.protocols, eq(schema.protocols.realizationId, schema.realizations.id))
-    .leftJoin(schema.objects, eq(schema.objects.id, schema.calendarEvents.objectId))
+    .leftJoin(
+      schema.objects,
+      eq(
+        schema.objects.id,
+        sql`coalesce(${schema.realizations.objectId}, ${schema.calendarEvents.objectId})`
+      )
+    )
     .where(and(...conds))
     .orderBy(asc(schema.realizations.date), asc(schema.realizations.id));
-
-  // Realizacje bez wydarzenia (wpisy ręczne, import z arkusza) próbujemy dopiąć
-  // do obiektu po nazwie — dokładnej, bez wielkości liter. Szukamy tylko wśród
-  // obiektów, które MAJĄ współrzędne: bez nich dopasowanie i tak nic nie wnosi,
-  // a mniej kandydatów = mniej pomyłek przy powtarzających się nazwach.
-  // Żadnego geokodowania na żądanie listy — wyłącznie to, co już jest w bazie.
-  const byName = new Map<string, RealizationLocation>();
-  if (rows.some((row) => row.objectId == null && row.r.site.trim())) {
-    const geocoded = await db
-      .select({
-        id: schema.objects.id,
-        name: schema.objects.name,
-        address: schema.objects.address,
-        city: schema.objects.city,
-        lat: schema.objects.latitude,
-        lng: schema.objects.longitude,
-      })
-      .from(schema.objects)
-      .where(and(isNotNull(schema.objects.latitude), isNotNull(schema.objects.longitude)));
-    for (const o of geocoded) {
-      const key = nameKey(o.name);
-      // Przy duplikatach nazw wygrywa pierwszy (najstarszy) obiekt.
-      if (key && !byName.has(key)) {
-        byName.set(key, {
-          objectId: o.id,
-          name: o.name,
-          address: o.address ?? null,
-          city: o.city ?? null,
-          lat: o.lat ?? null,
-          lng: o.lng ?? null,
-          source: "name",
-        });
-      }
-    }
-  }
 
   return c.json({
     success: true,
@@ -289,9 +292,9 @@ app.get("/", async (c) => {
               city: row.objectCity ?? null,
               lat: row.objectLat ?? null,
               lng: row.objectLng ?? null,
-              source: "event",
+              source: row.r.objectId != null ? "realizacja" : "kalendarz",
             }
-          : byName.get(nameKey(row.r.site)) ?? null;
+          : null;
 
       return withComputed(
         row.r,

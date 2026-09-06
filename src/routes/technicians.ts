@@ -32,11 +32,26 @@ function parseBody(body: Record<string, unknown>): {
     }
     priceListId = n;
   }
+  // Ten sam człowiek w kartotece kadrowej (null = technik spoza listy płac,
+  // np. podwykonawca na własnej działalności). Wolno tylko dodatnie id wiersza.
+  let employeeId: number | null = null;
+  if (
+    body.employeeId !== undefined &&
+    body.employeeId !== null &&
+    body.employeeId !== ""
+  ) {
+    const n = Number(body.employeeId);
+    if (!Number.isInteger(n) || n <= 0) {
+      return { error: "Nieprawidłowy pracownik kadr" };
+    }
+    employeeId = n;
+  }
   return {
     data: {
       firstName,
       lastName,
       priceListId,
+      employeeId,
       phone: typeof body.phone === "string" ? body.phone : "",
       email,
       company,
@@ -59,18 +74,40 @@ async function priceListOk(id: number | null | undefined): Promise<boolean> {
   return rows.length > 0;
 }
 
+/** Czy wskazany pracownik kadr istnieje (null = brak powiązania, zawsze OK). */
+async function employeeOk(id: number | null | undefined): Promise<boolean> {
+  if (!id) return true;
+  const rows = await db
+    .select({ id: schema.hrEmployees.id })
+    .from(schema.hrEmployees)
+    .where(eq(schema.hrEmployees.id, id))
+    .limit(1);
+  return rows.length > 0;
+}
+
 // Lista techników (domyślnie wszyscy; ?active=true tylko aktywni)
 app.get("/", async (c) => {
   const onlyActive = c.req.query("active") === "true";
 
-  let rows = await db
-    .select()
+  const rows = await db
+    .select({
+      technician: schema.technicians,
+      // Nazwisko z kadr doklejamy od razu — lista pokazuje, kto jest na liście
+      // płac, bez osobnego żądania do modułu Kadry.
+      employeeName: schema.hrEmployees.fullName,
+    })
     .from(schema.technicians)
+    .leftJoin(
+      schema.hrEmployees,
+      eq(schema.technicians.employeeId, schema.hrEmployees.id),
+    )
     .orderBy(asc(schema.technicians.type), asc(schema.technicians.lastName));
 
-  if (onlyActive) rows = rows.filter((t) => t.active);
+  const data = rows
+    .filter((r) => !onlyActive || r.technician.active)
+    .map((r) => ({ ...r.technician, employeeName: r.employeeName ?? null }));
 
-  return c.json({ success: true, data: rows });
+  return c.json({ success: true, data });
 });
 
 // Nowy technik
@@ -84,6 +121,13 @@ app.post("/", async (c) => {
   if (!(await priceListOk(data.priceListId))) {
     return c.json<ApiResponse<null>>(
       { success: false, error: "Nie znaleziono cennika" },
+      404
+    );
+  }
+
+  if (!(await employeeOk(data.employeeId))) {
+    return c.json<ApiResponse<null>>(
+      { success: false, error: "Nie znaleziono pracownika w kadrach" },
       404
     );
   }
@@ -124,6 +168,13 @@ app.put("/:id", async (c) => {
   if (!(await priceListOk(data.priceListId))) {
     return c.json<ApiResponse<null>>(
       { success: false, error: "Nie znaleziono cennika" },
+      404
+    );
+  }
+
+  if (!(await employeeOk(data.employeeId))) {
+    return c.json<ApiResponse<null>>(
+      { success: false, error: "Nie znaleziono pracownika w kadrach" },
       404
     );
   }

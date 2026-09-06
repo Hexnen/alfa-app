@@ -23,6 +23,7 @@ const typeOptions: { value: CameraModelType; label: string }[] = [
   { value: "dome", label: "Kopułkowa" },
   { value: "ptz", label: "PTZ" },
   { value: "pano", label: "360°" },
+  { value: "lpr", label: "LPR (tablice)" },
 ];
 
 const selectClass =

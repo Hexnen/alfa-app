@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Wand2 } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Building2, Search, Wand2, X } from "lucide-react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
@@ -23,8 +23,10 @@ import {
 } from "@/lib/calendar-labels";
 import { tip } from "./ui/tooltip";
 import { cn } from "@/lib/utils";
+import { getObjects } from "@/lib/api";
 import type {
   AutofillSuggestion,
+  ObjectWithContractor,
   Realization,
   RealizationInput,
 } from "@/lib/api";
@@ -40,6 +42,137 @@ const AUTOFILLABLE = [
   "caretaker",
 ] as const;
 type AutofillableField = (typeof AUTOFILLABLE)[number];
+
+/**
+ * Wybór obiektu z kartoteki dla realizacji.
+ *
+ * DLACZEGO to nie jest zwykłe pole tekstowe. Realizacja wiąże się z obiektem
+ * WYŁĄCZNIE kluczem (`objectId`); nazwa w `site` jest migawką na dokument.
+ * Dopóki obiekt ustalało się po nazwie, 29 z 289 realizacji (10%) wskazywało cudzy
+ * obiekt, bo kilkanaście obiektów w kartotece nazywa się identycznie — dlatego
+ * lista pokazuje miasto i kontrahenta, żeby dało się rozróżnić bliźniaki.
+ * Nazwę wolno nadpisać ręcznie (tak brzmiała umowa w dniu prac), ale klucz zmienia
+ * wyłącznie wybór z listy.
+ */
+function ObjectPicker({
+  objects,
+  loading,
+  value,
+  fallbackName,
+  onPick,
+  onClear,
+}: {
+  objects: ObjectWithContractor[];
+  loading: boolean;
+  value: number | null;
+  fallbackName: string;
+  onPick: (o: ObjectWithContractor) => void;
+  onClear: () => void;
+}) {
+  const [q, setQ] = useState("");
+  const [openList, setOpenList] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  const selected = objects.find((o) => o.id === value) ?? null;
+  const results = useMemo(() => {
+    const s = q.trim().toLowerCase();
+    const list = s
+      ? objects.filter((o) =>
+          `${o.name} ${o.city ?? ""} ${o.address ?? ""} ${o.contractor?.name ?? ""}`
+            .toLowerCase()
+            .includes(s)
+        )
+      : objects;
+    return list.slice(0, 8);
+  }, [objects, q]);
+
+  useEffect(() => {
+    if (!openList) return;
+    const onDoc = (e: MouseEvent) => {
+      if (!wrapRef.current?.contains(e.target as Node)) setOpenList(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [openList]);
+
+  const describe = (o: ObjectWithContractor) =>
+    [o.city, o.contractor?.name].filter(Boolean).join(" · ");
+
+  if (value != null) {
+    return (
+      <div className="flex items-center gap-2 rounded-md border bg-muted/40 px-2.5 py-1.5 text-sm">
+        <Building2 className="h-4 w-4 shrink-0 text-muted-foreground" />
+        <div className="min-w-0 flex-1">
+          <div className="truncate font-medium">{selected?.name ?? fallbackName ?? `Obiekt #${value}`}</div>
+          <div className="truncate text-xs text-muted-foreground">
+            {selected ? describe(selected) || `#${value}` : `#${value}`}
+          </div>
+        </div>
+        <button
+          type="button"
+          aria-label="Odepnij obiekt"
+          {...tip("Odepnij obiekt — zostanie sama nazwa na dokumencie, bez powiązania z kartoteką")}
+          onClick={() => {
+            onClear();
+            setQ("");
+          }}
+          className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <X className="h-4 w-4" />
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div ref={wrapRef} className="relative">
+      <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+      <Input
+        id="realization-object"
+        role="combobox"
+        aria-expanded={openList}
+        aria-controls="realization-object-list"
+        aria-autocomplete="list"
+        value={q}
+        placeholder={
+          loading ? "Wczytywanie obiektów…" : objects.length ? `Szukaj wśród ${objects.length} obiektów…` : "Brak obiektów"
+        }
+        className="pl-8"
+        onFocus={() => setOpenList(true)}
+        onChange={(e) => {
+          setQ(e.target.value);
+          setOpenList(true);
+        }}
+      />
+      {openList && results.length > 0 && (
+        <ul
+          id="realization-object-list"
+          role="listbox"
+          className="absolute z-50 mt-1 max-h-64 w-full overflow-auto rounded-md border bg-popover p-1 shadow-md"
+        >
+          {results.map((o) => (
+            <li key={o.id}>
+              <button
+                type="button"
+                role="option"
+                aria-selected={false}
+                className="w-full rounded px-2 py-1.5 text-left text-sm hover:bg-accent"
+                onClick={() => {
+                  onPick(o);
+                  setQ("");
+                  setOpenList(false);
+                }}
+              >
+                <div className="truncate font-medium">{o.name}</div>
+                <div className="truncate text-xs text-muted-foreground">{describe(o) || `#${o.id}`}</div>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
 
 interface RealizationFormProps {
   open: boolean;
@@ -68,8 +201,14 @@ export function RealizationForm({
   const [autofillOpen, setAutofillOpen] = useState(false);
   /** Sugestie automatu (po zastosowaniu) — źródło adnotacji pod polami. */
   const [hints, setHints] = useState<Partial<Record<string, AutofillSuggestion>>>({});
+  /** Kartoteka obiektów do wyboru klucza — ten sam zaciąg, co w dialogu kalendarza. */
+  const [objects, setObjects] = useState<ObjectWithContractor[]>([]);
+  const [objectsLoading, setObjectsLoading] = useState(false);
   const [formData, setFormData] = useState<RealizationInput>({
     date: realization?.date || defaultDate,
+    // Klucz obiektu jedzie w payloadzie zawsze — także jako `null`, gdy ktoś obiekt
+    // odepnie. Bez tego realizacja zostałaby z samą nazwą, czyli bez tożsamości.
+    objectId: realization?.objectId ?? null,
     site: realization?.site || "",
     workType: realization?.workType || "serwis",
     billing: realization?.billing || "paid",
@@ -87,6 +226,26 @@ export function RealizationForm({
     actualKm: realization?.actualKm ?? "",
     hourlyCost: realization?.hourlyCost ?? "",
   });
+
+  useEffect(() => {
+    if (!open) return;
+    let alive = true;
+    setObjectsLoading(true);
+    getObjects({ pageSize: 1000 })
+      .then((res) => {
+        if (alive) setObjects(res.data ?? []);
+      })
+      .catch(() => {
+        // Brak kartoteki nie może zablokować zapisu — zostaje sama nazwa w `site`.
+        if (alive) setObjects([]);
+      })
+      .finally(() => {
+        if (alive) setObjectsLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [open]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -293,15 +452,34 @@ export function RealizationForm({
           )}
 
           <div className="space-y-2">
-            <Label htmlFor="site">Obiekt *</Label>
+            <Label htmlFor="realization-object">Obiekt *</Label>
+            <ObjectPicker
+              objects={objects}
+              loading={objectsLoading}
+              value={formData.objectId ?? null}
+              fallbackName={formData.site}
+              // Wybór z listy ustawia KLUCZ i od razu odświeża migawkę nazwy —
+              // dokument ma pokazywać obiekt, który faktycznie wskazano.
+              onPick={(o) => setFormData((prev) => ({ ...prev, objectId: o.id, site: o.name }))}
+              onClear={() => setFormData((prev) => ({ ...prev, objectId: null }))}
+            />
             <Input
               id="site"
               name="site"
               value={formData.site}
               onChange={handleChange}
-              placeholder="np. STE Nasienna"
+              placeholder="Nazwa obiektu na dokumencie"
               required
+              {...tip(
+                "Nazwa drukowana na protokole i wycenie — migawka z dnia prac.\nPowiązanie z kartoteką trzyma wybór obiektu powyżej, nie ta nazwa."
+              )}
             />
+            {formData.objectId == null && (
+              <p className="text-xs text-muted-foreground">
+                Bez wybranego obiektu realizacja nie policzy kilometrów ani nie podstawi kontrahenta
+                do protokołu — sama nazwa do niczego jej nie podepnie.
+              </p>
+            )}
           </div>
 
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">

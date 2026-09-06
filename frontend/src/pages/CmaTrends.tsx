@@ -635,16 +635,8 @@ export function CmaTrends() {
   const maxTopCamera = trends?.topCameras[0]?.noImage ?? 0;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-3">
       {!editable && <ReadOnlyBanner className="mb-4" />}
-
-      {/* Header */}
-      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <h1 className="text-3xl font-bold text-slate-900">CMA</h1>
-        <p className="text-slate-500">
-          Centrum monitorowania alarmów - trendy z zaimportowanych raportów
-        </p>
-      </div>
 
       {loading ? (
         <div className="text-center py-8">Ładowanie...</div>
@@ -678,13 +670,11 @@ export function CmaTrends() {
           {/* Stat tiles */}
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
             <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="flex items-center gap-2 text-sm font-medium text-slate-500">
+              <CardContent className="p-4">
+                <CardTitle className="flex items-center gap-2 text-sm font-medium text-slate-500 mb-2">
                   <FileSpreadsheet className="w-4 h-4" />
                   Raporty
                 </CardTitle>
-              </CardHeader>
-              <CardContent>
                 <div className="text-2xl font-bold text-slate-900">
                   {nf(trends.reportCount)}
                 </div>
@@ -696,13 +686,11 @@ export function CmaTrends() {
               </CardContent>
             </Card>
             <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="flex items-center gap-2 text-sm font-medium text-slate-500">
+              <CardContent className="p-4">
+                <CardTitle className="flex items-center gap-2 text-sm font-medium text-slate-500 mb-2">
                   <Calendar className="w-4 h-4" />
                   Zakres danych
                 </CardTitle>
-              </CardHeader>
-              <CardContent>
                 <div className="text-lg font-bold leading-7 text-slate-900">
                   {trends.range.from ? longDate(trends.range.from) : "-"}
                   {" – "}
@@ -719,26 +707,22 @@ export function CmaTrends() {
               </CardContent>
             </Card>
             <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="flex items-center gap-2 text-sm font-medium text-slate-500">
+              <CardContent className="p-4">
+                <CardTitle className="flex items-center gap-2 text-sm font-medium text-slate-500 mb-2">
                   <Video className="w-4 h-4" />
                   Zdarzenia łącznie
                 </CardTitle>
-              </CardHeader>
-              <CardContent>
                 <div className="text-2xl font-bold text-slate-900">
                   {nf(trends.entryCountTotal)}
                 </div>
               </CardContent>
             </Card>
             <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="flex items-center gap-2 text-sm font-medium text-slate-500">
+              <CardContent className="p-4">
+                <CardTitle className="flex items-center gap-2 text-sm font-medium text-slate-500 mb-2">
                   <CameraOff className="w-4 h-4" />
                   Brak obrazu
                 </CardTitle>
-              </CardHeader>
-              <CardContent>
                 <div className="text-2xl font-bold text-red-600">
                   {nf(totals.noImage)}
                 </div>
@@ -748,13 +732,11 @@ export function CmaTrends() {
               </CardContent>
             </Card>
             <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="flex items-center gap-2 text-sm font-medium text-slate-500">
+              <CardContent className="p-4">
+                <CardTitle className="flex items-center gap-2 text-sm font-medium text-slate-500 mb-2">
                   <UserRound className="w-4 h-4" />
                   Obsłużone przez operatora
                 </CardTitle>
-              </CardHeader>
-              <CardContent>
                 <div className="text-2xl font-bold text-indigo-600">
                   {percentLabel(totals.operatorHandled, totals.entries)}
                 </div>

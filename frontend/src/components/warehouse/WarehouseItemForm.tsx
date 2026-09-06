@@ -1,5 +1,8 @@
-import { useState } from "react";
-import { ImageOff, Upload, X } from "lucide-react";
+import { useMemo, useState } from "react";
+import { fmtRelative, fmtTimestamp } from "@/lib/calendar-labels";
+import { tip } from "@/components/ui/tooltip";
+import { isPriceStale, priceAgeLabel } from "@/lib/price-age";
+import { ImageOff, RotateCcw, Upload, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -11,8 +14,16 @@ import {
   DialogTitle,
   DialogFooter,
 } from "@/components/ui/dialog";
-import type { WarehouseItem, WarehouseItemInput } from "@/lib/api";
-import { COMMON_UNITS, resizeImageToDataUrl } from "./warehouseShared";
+import { warehouseApi, type WarehouseItem, type WarehouseItemInput } from "@/lib/api";
+import {
+  COMMON_UNITS,
+  effectiveSalePrice,
+  fmtPct,
+  fmtPln,
+  fmtPlnOrDash,
+  marginOf,
+  resizeImageToDataUrl,
+} from "./warehouseShared";
 
 interface WarehouseItemFormProps {
   open: boolean;
@@ -21,9 +32,21 @@ interface WarehouseItemFormProps {
   item?: WarehouseItem | null;
   /** Istniejące kategorie do podpowiedzi (datalist). */
   categories: string[];
+  /** Istniejący producenci do podpowiedzi (datalist). */
+  manufacturers: string[];
+  /** Narzut firmowy (%) — z niego liczy się cena sprzedaży bez własnej ceny. */
+  warehouseMarkup: number;
 }
 
 const CUSTOM_UNIT = "__custom__";
+
+/** Liczba z pola tekstowego; pusty string = brak wartości, nie zero. */
+const parseMoney = (raw: string): number | null => {
+  const t = raw.trim();
+  if (!t) return null;
+  const n = Number(t.replace(",", "."));
+  return Number.isFinite(n) ? n : null;
+};
 
 export function WarehouseItemForm({
   open,
@@ -31,6 +54,8 @@ export function WarehouseItemForm({
   onSubmit,
   item,
   categories,
+  manufacturers,
+  warehouseMarkup,
 }: WarehouseItemFormProps) {
   const [loading, setLoading] = useState(false);
   const initialUnit = item?.unit || "szt";
@@ -43,17 +68,54 @@ export function WarehouseItemForm({
     name: item?.name || "",
     sku: item?.sku || "",
     category: item?.category || "",
+    manufacturer: item?.manufacturer || "",
     barcode: item?.barcode || "",
     minStock: item?.minStock != null ? String(item.minStock) : "",
     isAsset: item?.isAsset ?? false,
     description: item?.description || "",
+    purchasePrice: item?.purchasePrice != null ? String(item.purchasePrice) : "",
+    salePrice: item?.salePrice != null ? String(item.salePrice) : "",
   });
   const [photoData, setPhotoData] = useState<string | null>(
     item?.photoData || null
   );
   const [photoBusy, setPhotoBusy] = useState(false);
+  const [lastPurchase, setLastPurchase] = useState<string | null>(null);
+  const [lastPurchaseBusy, setLastPurchaseBusy] = useState(false);
 
   const unit = unitChoice === CUSTOM_UNIT ? customUnit.trim() : unitChoice;
+
+  // Podgląd ceny i marży liczony tą samą arytmetyką co backend (warehouseShared),
+  // żeby to, co widać przy wpisywaniu, zgadzało się z tym, co potem pokaże lista.
+  const preview = useMemo(() => {
+    const cost = parseMoney(form.purchasePrice);
+    const own = parseMoney(form.salePrice);
+    const price = effectiveSalePrice(cost, own, warehouseMarkup);
+    return { cost, price, auto: own === null, margin: marginOf(cost, price) };
+  }, [form.purchasePrice, form.salePrice, warehouseMarkup]);
+
+  const fillFromLastPz = async () => {
+    if (!item) return;
+    setLastPurchaseBusy(true);
+    try {
+      const r = await warehouseApi.getLastPurchase(item.id);
+      const price = r.data?.unitPrice;
+      if (price == null) {
+        setLastPurchase("Brak zatwierdzonego PZ z ceną dla tego towaru.");
+        return;
+      }
+      setForm((p) => ({ ...p, purchasePrice: String(price) }));
+      setLastPurchase(
+        `Przepisano ${fmtPln(price)} z ${r.data?.docNumber || "ostatniego PZ"}.`
+      );
+    } catch (err) {
+      setLastPurchase(
+        err instanceof Error ? err.message : "Nie udało się pobrać ceny z PZ"
+      );
+    } finally {
+      setLastPurchaseBusy(false);
+    }
+  };
 
   const handlePhoto = async (file: File | undefined) => {
     if (!file) return;
@@ -82,7 +144,12 @@ export function WarehouseItemForm({
         unit,
         sku: form.sku.trim() || undefined,
         category: form.category.trim() || undefined,
+        manufacturer: form.manufacturer.trim() || undefined,
         barcode: form.barcode.trim() || undefined,
+        // Pusty string leci jako null: „wyczyść cenę zakupu" i „wróć do ceny
+        // z narzutu" to świadome decyzje, a nie brak zmiany.
+        purchasePrice: form.purchasePrice.trim() || null,
+        salePrice: form.salePrice.trim() || null,
         minStock: form.minStock.trim() ? Number(form.minStock) : null,
         isAsset: form.isAsset,
         description: form.description.trim() || undefined,
@@ -173,6 +240,26 @@ export function WarehouseItemForm({
               </datalist>
             </div>
             <div className="space-y-2">
+              <Label htmlFor="wi-manufacturer">Producent</Label>
+              <Input
+                id="wi-manufacturer"
+                list="wi-manufacturer-list"
+                value={form.manufacturer}
+                onChange={(e) =>
+                  setForm((p) => ({ ...p, manufacturer: e.target.value }))
+                }
+                placeholder="np. Dahua"
+              />
+              <datalist id="wi-manufacturer-list">
+                {manufacturers.map((m) => (
+                  <option key={m} value={m} />
+                ))}
+              </datalist>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-2">
               <Label htmlFor="wi-barcode">Kod kreskowy</Label>
               <Input
                 id="wi-barcode"
@@ -183,6 +270,112 @@ export function WarehouseItemForm({
                 placeholder="np. 5901234567890"
               />
             </div>
+          </div>
+
+          {/* Ceny i marża — wszystkie kwoty NETTO, jak w całej aplikacji. */}
+          <div className="space-y-3 rounded-md border bg-muted/30 p-3">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="wi-purchase-price">Cena zakupu netto</Label>
+                <Input
+                  id="wi-purchase-price"
+                  data-testid="wi-purchase-price"
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  className="tabular-nums"
+                  value={form.purchasePrice}
+                  onChange={(e) =>
+                    setForm((p) => ({ ...p, purchasePrice: e.target.value }))
+                  }
+                  placeholder="np. 420"
+                />
+                {item && (
+                  <button
+                    type="button"
+                    onClick={fillFromLastPz}
+                    disabled={lastPurchaseBusy}
+                    className="text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline disabled:opacity-50"
+                  >
+                    {lastPurchaseBusy
+                      ? "Sprawdzanie…"
+                      : "Przepisz z ostatniego PZ"}
+                  </button>
+                )}
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="wi-sale-price">Cena sprzedaży netto</Label>
+                <Input
+                  id="wi-sale-price"
+                  data-testid="wi-sale-price"
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  className="tabular-nums"
+                  value={form.salePrice}
+                  onChange={(e) =>
+                    setForm((p) => ({ ...p, salePrice: e.target.value }))
+                  }
+                  placeholder={
+                    preview.auto && preview.price !== null
+                      ? `auto: ${fmtPln(preview.price)}`
+                      : `auto: zakup + ${warehouseMarkup}%`
+                  }
+                />
+                {!preview.auto && (
+                  <button
+                    type="button"
+                    onClick={() => setForm((p) => ({ ...p, salePrice: "" }))}
+                    className="inline-flex items-center gap-1 text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                  >
+                    <RotateCcw className="h-3 w-3" /> Wróć do ceny z narzutu
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+              <span className="text-muted-foreground">
+                Cena sprzedaży:{" "}
+                <strong className="text-foreground tabular-nums">
+                  {fmtPlnOrDash(preview.price)}
+                </strong>
+                {preview.auto && preview.price !== null && (
+                  <span className="ml-1 rounded bg-muted px-1 py-0.5 text-[10px] uppercase tracking-wide">
+                    auto
+                  </span>
+                )}
+              </span>
+              <span className="text-muted-foreground">
+                Marża:{" "}
+                <strong className="text-foreground tabular-nums">
+                  {fmtPct(preview.margin?.marginPct)}
+                </strong>
+              </span>
+              <span className="text-muted-foreground">
+                Narzut:{" "}
+                <strong className="text-foreground tabular-nums">
+                  {fmtPct(preview.margin?.markupPct)}
+                </strong>
+              </span>
+              {preview.margin && (
+                <span className="text-muted-foreground">
+                  Zysk:{" "}
+                  <strong className="text-foreground tabular-nums">
+                    {fmtPln(preview.margin.amount)}
+                  </strong>
+                </span>
+              )}
+            </div>
+            {preview.cost === null && (
+              <p className="text-xs text-muted-foreground">
+                Bez ceny zakupu marży nie da się policzyć — pozycja w ofercie
+                pokaże „brak danych" zamiast pełnego zysku.
+              </p>
+            )}
+            {lastPurchase && (
+              <p className="text-xs text-muted-foreground">{lastPurchase}</p>
+            )}
           </div>
 
           <div className="grid grid-cols-2 gap-4">
@@ -265,6 +458,36 @@ export function WarehouseItemForm({
               </div>
             </div>
           </div>
+
+          {/* Ślad edycji i wiek ceny przy przyciskach: przy sporze o cenę
+              pierwsze pytanie brzmi „kto to zmienił i kiedy", a nie „ile
+              wynosi" — i ma być pod ręką bez wchodzenia do dziennika. */}
+          {item && (
+            <p className="text-[11px] text-muted-foreground">
+              Utworzył {item.createdByLabel || "—"},{" "}
+              <span {...tip(fmtTimestamp(item.createdAt))}>{fmtRelative(item.createdAt)}</span>
+              {item.updatedAt !== item.createdAt && (
+                <>
+                  {" · "}Zmienił {item.updatedByLabel || "—"},{" "}
+                  <span {...tip(fmtTimestamp(item.updatedAt))}>{fmtRelative(item.updatedAt)}</span>
+                </>
+              )}
+              {(item.purchasePrice !== null || item.salePrice !== null) && (
+                <>
+                  {" · "}
+                  <span
+                    className={
+                      isPriceStale(item.priceUpdatedAt, "warehouse")
+                        ? "font-medium text-red-600"
+                        : undefined
+                    }
+                  >
+                    {priceAgeLabel(item.priceUpdatedAt, "warehouse")}
+                  </span>
+                </>
+              )}
+            </p>
+          )}
 
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose}>

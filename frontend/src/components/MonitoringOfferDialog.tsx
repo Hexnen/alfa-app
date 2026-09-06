@@ -24,7 +24,7 @@ import {
 } from "@/lib/api";
 
 const EMPTY_OFFER: MonitoringOfferFields = {
-  kicker: "Wizja lokalna — materiał do wyceny (dział techniczny)",
+  kicker: "Wizja — materiał do wyceny (dział techniczny)",
   subtitle: "",
   visitDate: "",
   purpose: "wycena kosztów przez dział techniczny",
@@ -202,7 +202,7 @@ export function MonitoringOfferDialog({
                 />
               </div>
               <div className="space-y-2">
-                <Label>Wizja lokalna (data)</Label>
+                <Label>Wizja (data)</Label>
                 <Input
                   value={offer.visitDate}
                   onChange={(e) => set("visitDate", e.target.value)}

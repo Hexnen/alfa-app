@@ -63,6 +63,7 @@ import {
   Plus,
   RefreshCw,
   Repeat,
+  Route,
   Rss,
   Sparkles,
   StickyNote,
@@ -89,6 +90,7 @@ import {
   activityApi,
   assistantApi,
   calendarApi,
+  getCompanyTravelBatch,
   getTechnicians,
   type ActivityEntry,
   type AssistantStatus,
@@ -100,6 +102,7 @@ import {
   type CalendarEventType,
   type CalendarFilterSetFilters,
   type CalendarSeriesScope,
+  type CompanyTravel,
   type Technician,
 } from "@/lib/api";
 import {
@@ -126,6 +129,7 @@ import {
   realizationMoney,
   fmtDayHeading,
   fmtRange,
+  fmtRangeCompact,
   fmtRelative,
   fmtShort,
   fmtTimestamp,
@@ -148,19 +152,26 @@ import {
   BillingMark,
   ProtocolBadge,
   ProtocolMark,
+  QuoteBadge,
+  QuoteMark,
   RealizationBadge,
   RealizationMark,
 } from "@/components/CalendarEventBadges";
 import { NotesBadge } from "@/components/CalendarEventNotes";
 import { FilterSets } from "@/components/calendar/FilterSets";
+import { RoutePlanner } from "@/components/calendar/RoutePlanner";
 import { Tooltip, applyTip, blockTooltips, hideTooltip, tip } from "@/components/ui/tooltip";
 import { AssistantDrawer, type AssistantEventChangeKind, type AssistantPreview } from "@/components/assistant/AssistantDrawer";
+import { departureAt, departureLine, travelSourceLabel, travelSummary, useTravel } from "@/lib/travel";
 import { cn } from "@/lib/utils";
 import "./Calendar.css";
 
 type FcViewName = "dayGridMonth" | "timeGridWeek" | "timeGridDay" | "listWeek";
-/** "board" = Tablica (kanban wg statusu/typu) — poza FullCalendar. */
-type ViewName = FcViewName | "board";
+/**
+ * "board" = Tablica (kanban wg statusu/typu), "route" = Planer trasy (mapa dnia).
+ * Oba są POZA FullCalendarem — `calendarRef` jest wtedy odmontowany.
+ */
+type ViewName = FcViewName | "board" | "route";
 
 const VIEWS: { key: ViewName; label: string; shortLabel: string; keys: string[] }[] = [
   { key: "dayGridMonth", label: "Miesiąc", shortLabel: "Mies.", keys: ["m"] },
@@ -168,6 +179,7 @@ const VIEWS: { key: ViewName; label: string; shortLabel: string; keys: string[] 
   { key: "timeGridDay", label: "Dzień", shortLabel: "Dzień", keys: ["d"] },
   { key: "listWeek", label: "Lista", shortLabel: "Lista", keys: ["l", "a"] },
   { key: "board", label: "Tablica", shortLabel: "Tabl.", keys: ["b"] },
+  { key: "route", label: "Trasa", shortLabel: "Trasa", keys: ["r"] },
 ];
 
 const VIEW_STORAGE_KEY = "alfa.calendar.view";
@@ -380,6 +392,21 @@ type CtxMenuState =
   | { kind: "slot"; x: number; y: number; startAt: string; endAt: string; allDay: boolean };
 
 /** Podgląd wydarzenia (jeden klik) — zakotwiczony przy elemencie. */
+/**
+ * Pas dojazdu rysowany w siatce godzinowej na czas najechania na wydarzenie: od godziny
+ * wyjazdu do początku wydarzenia, w kolumnie jego dnia. Współrzędne są w układzie okna
+ * (`position: fixed`), bo siatka FullCalendara ma własne przewijanie.
+ */
+interface TravelBand {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  /** Wyjazd przed początkiem widocznego zakresu — pas urwany u góry, etykieta pod linią. */
+  clipped: boolean;
+  label: string;
+}
+
 interface PreviewState {
   ev: CalendarEvent;
   rect: { left: number; top: number; width: number; height: number };
@@ -428,6 +455,7 @@ function renderEventContent(arg: EventContentArg) {
     <>
       <BillingMark billing={ev.billing} className="cal-ev-mark" />
       <ProtocolMark event={ev} className="cal-ev-mark" />
+      <QuoteMark event={ev} className="cal-ev-mark" />
       <RealizationMark event={ev} className="cal-ev-mark" />
     </>
   ) : null;
@@ -444,6 +472,7 @@ function renderEventContent(arg: EventContentArg) {
           <span className="cal-list-badges">
             <BillingBadge billing={ev.billing} compact />
             <ProtocolBadge event={ev} compact />
+            <QuoteBadge event={ev} compact />
             <RealizationBadge event={ev} compact />
           </span>
         )}
@@ -504,8 +533,11 @@ export function Calendar() {
     () => readStoredView() ?? (mobile ? "listWeek" : "dayGridMonth")
   );
   const isBoard = view === "board";
-  const isBoardRef = useRef(isBoard);
-  isBoardRef.current = isBoard;
+  const isRoute = view === "route";
+  /** Widok siatki FullCalendar — jedyny, w którym `calendarRef` jest zamontowany. */
+  const isFc = !isBoard && !isRoute;
+  const isFcRef = useRef(isFc);
+  isFcRef.current = isFc;
   /** Data „kotwicy” — utrzymuje ciągłość nawigacji między siatką a Tablicą. */
   const [anchorDate, setAnchorDate] = useState<Date>(() => new Date());
   /** Grupowanie kolumn Tablicy. */
@@ -539,6 +571,19 @@ export function Calendar() {
     const t = toDateStr(to);
     setRange((r) => (r && r.from === f && r.to === t ? r : { from: f, to: t }));
   }, [isBoard, anchorDate]);
+
+  // Trasa: zakres = jeden dzień kotwicy (FullCalendar jest wtedy odmontowany).
+  useEffect(() => {
+    if (!isRoute) return;
+    const from = new Date(anchorDate.getFullYear(), anchorDate.getMonth(), anchorDate.getDate());
+    const to = new Date(from.getFullYear(), from.getMonth(), from.getDate() + 1);
+    setTitle(
+      new Intl.DateTimeFormat("pl-PL", { weekday: "long", day: "numeric", month: "long", year: "numeric" }).format(from)
+    );
+    const f = toDateStr(from);
+    const t = toDateStr(to);
+    setRange((r) => (r && r.from === f && r.to === t ? r : { from: f, to: t }));
+  }, [isRoute, anchorDate]);
 
   // --- Toasty + aria-live ---
   const [toasts, setToasts] = useState<CalendarToast[]>([]);
@@ -780,9 +825,9 @@ export function Calendar() {
   const visibleCount = useMemo(() => events.filter((e) => !e.deletedAt).length, [events]);
   /** Ile wydarzeń chowa 5-dniowy tydzień (start w sobotę/niedzielę). */
   const weekendHidden = useMemo(() => {
-    if (weekends || isBoard) return 0;
+    if (weekends || !isFc) return 0;
     return events.filter((e) => !e.deletedAt && isWeekendDay(parseLocal(e.startAt))).length;
-  }, [events, weekends, isBoard]);
+  }, [events, weekends, isFc]);
 
   // --- Dialog wydarzenia ---
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -790,6 +835,22 @@ export function Calendar() {
   const [dialogEvent, setDialogEvent] = useState<CalendarEvent | null>(null);
   const [dialogPrefill, setDialogPrefill] = useState<CalendarEventPrefill | null>(null);
   const [dialogNonce, setDialogNonce] = useState(0);
+  /**
+   * Formularz jako szuflada zwężająca kalendarz zamiast okna na środku. Włącza go tylko
+   * przycisk „Edytuj” w podglądzie i tylko na dość szerokim ekranie — niżej kalendarz obok
+   * panelu 480 px przestaje być czytelny, więc zostaje okno modalne.
+   */
+  const [docked, setDocked] = useState(false);
+  const [wide, setWide] = useState(() =>
+    typeof window === "undefined" ? true : window.matchMedia("(min-width: 1024px)").matches
+  );
+  useEffect(() => {
+    const mq = window.matchMedia("(min-width: 1024px)");
+    const on = () => setWide(mq.matches);
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, []);
+
 
   const openCreate = useCallback(
     (prefill?: CalendarEventPrefill) => {
@@ -798,17 +859,19 @@ export function Calendar() {
       setDialogEvent(null);
       setDialogPrefill(prefill ?? null);
       setDialogNonce((n) => n + 1);
+      setDocked(false);
       setDialogOpen(true);
     },
     [editable]
   );
 
   const openEvent = useCallback(
-    (ev: CalendarEvent) => {
+    (ev: CalendarEvent, asDrawer = false) => {
       setDialogMode(editable && !ev.deletedAt ? "edit" : "view");
       setDialogEvent(ev);
       setDialogPrefill(null);
       setDialogNonce((n) => n + 1);
+      setDocked(asDrawer);
       setDialogOpen(true);
     },
     [editable]
@@ -818,6 +881,7 @@ export function Calendar() {
   const gotoDateRef = useRef<(date: string) => void>(() => {});
   gotoDateRef.current = (date) => {
     if (isBoard) setAnchorDate(startOfMonth(new Date(`${date}T00:00`)));
+    else if (isRoute) setAnchorDate(new Date(`${date}T00:00`));
     else calendarRef.current?.getApi().gotoDate(date);
   };
 
@@ -901,7 +965,115 @@ export function Calendar() {
   type ElWithHandlers = HTMLElement & {
     _alfaCtx?: (e: MouseEvent) => void;
     _alfaDbl?: (e: MouseEvent) => void;
+    _alfaOver?: () => void;
+    _alfaOut?: () => void;
   };
+  /**
+   * Dojazd per obiekt pod dymki w siatce. Dymki są atrybutami DOM (budowane synchronicznie),
+   * więc dane muszą być pod ręką zawczasu — stąd jeden strzał na obiekt, nie na wydarzenie.
+   * Backend odpowiada z cache'u, a wyniki wstępne (`pending`) odpytujemy jeszcze raz przy
+   * kolejnym odświeżeniu listy wydarzeń.
+   */
+  const [travelByObject, setTravelByObject] = useState<Map<number, CompanyTravel>>(new Map());
+  const travelAskedRef = useRef(new Set<number>());
+  useEffect(() => {
+    const ids = [
+      ...new Set(
+        events
+          .filter((e) => e.type !== "urlop" && e.objectId && !travelAskedRef.current.has(e.objectId))
+          .map((e) => e.objectId as number)
+      ),
+    ];
+    if (ids.length === 0) return;
+    let cancelled = false;
+    for (const id of ids) travelAskedRef.current.add(id);
+    void (async () => {
+      // Jedno zapytanie na cały widok zamiast kilkudziesięciu równoległych; backend i tak
+      // odpowiada z cache'u, a trasy, których jeszcze nie policzył, dolicza w tle.
+      const list = await getCompanyTravelBatch(ids);
+      if (cancelled) return;
+      if (list.length === 0) {
+        // Nic nie wróciło (błąd / starszy backend) — nie zostawiamy id jako zapytanych,
+        // inaczej dojazd nie pojawiłby się już nigdy w tej sesji.
+        for (const id of ids) travelAskedRef.current.delete(id);
+        return;
+      }
+      const fresh = new Map<number, CompanyTravel>();
+      for (const t of list) {
+        if (t.pending) travelAskedRef.current.delete(t.objectId); // dolicza się w tle — spytamy ponownie
+        if (t.error || t.km == null) continue;
+        fresh.set(t.objectId, t);
+      }
+      if (fresh.size > 0) setTravelByObject((m) => new Map([...m, ...fresh]));
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [events]);
+
+  /** Dojazd wydarzenia: pełna linia do dymka i skrót na kafelek. */
+  const travelCtx = useCallback(
+    (ev: CalendarEvent) => ({
+      travel: ev.objectId ? (travelByObject.get(ev.objectId) ?? null) : null,
+      ctx: { startAt: ev.startAt, allDay: ev.allDay },
+    }),
+    [travelByObject]
+  );
+  const departureFor = useCallback(
+    (ev: CalendarEvent) => {
+      const { travel, ctx } = travelCtx(ev);
+      return departureLine(travel, ctx);
+    },
+    [travelCtx]
+  );
+
+  /** Pas dojazdu pod kursorem (tylko widoki z osią godzin). */
+  const [band, setBand] = useState<TravelBand | null>(null);
+  const travelRef = useRef(travelByObject);
+  travelRef.current = travelByObject;
+  const bandRef = useRef<(ev: CalendarEvent, el: HTMLElement) => void>(() => {});
+  bandRef.current = (ev, el) => {
+    // Sam kafelek daje skalę: jego wysokość to czas trwania wydarzenia, więc godzinę
+    // wyjazdu odkładamy w pikselach bez sięgania do wewnętrznych wymiarów FullCalendara.
+    const body = el.closest(".fc-timegrid-body") as HTMLElement | null;
+    if (!body || ev.allDay) return;
+    const travel = ev.objectId ? (travelRef.current.get(ev.objectId) ?? null) : null;
+    const dep = departureAt(travel, { startAt: ev.startAt, allDay: ev.allDay });
+    if (!dep || travel?.minutes == null) return;
+    const minutes = (parseLocal(ev.endAt).getTime() - parseLocal(ev.startAt).getTime()) / 60_000;
+    const r = el.getBoundingClientRect();
+    if (minutes <= 0 || r.height <= 0) return;
+    const col = (el.closest(".fc-timegrid-col") as HTMLElement | null) ?? el;
+    const cr = col.getBoundingClientRect();
+    // Przycinamy do widocznej części siatki (scroller), a nie do całej tabeli — inaczej pas
+    // wychodzi na nagłówki dni, gdy wyjazd wypada przed początkiem widocznego zakresu godzin.
+    const scroller = (el.closest(".fc-scroller") as HTMLElement | null) ?? body;
+    const limit = scroller.getBoundingClientRect().top;
+    const rawTop = r.top - travel.minutes * (r.height / minutes);
+    const top = Math.max(limit, rawTop);
+    const clipped = rawTop < limit - 0.5;
+    setBand({
+      left: cr.left,
+      top,
+      width: cr.width,
+      height: Math.max(2, r.top - top),
+      clipped,
+      label: `${clipped ? "↑ " : ""}wyjazd ${dep.time}${dep.dayBefore ? " (dzień wcześniej)" : ""}`,
+    });
+  };
+  const hideBand = useCallback(() => setBand(null), []);
+
+  // Pas znika, gdy siatka się przewinie albo na wierzchu jest podgląd/menu/dialog.
+  useEffect(() => {
+    if (!band) return;
+    window.addEventListener("scroll", hideBand, true);
+    window.addEventListener("resize", hideBand);
+    return () => {
+      window.removeEventListener("scroll", hideBand, true);
+      window.removeEventListener("resize", hideBand);
+    };
+  }, [band, hideBand]);
+
   const handleEventDidMount = useCallback((arg: EventMountArg) => {
     const el = arg.el as ElWithHandlers;
     const ev = arg.event.extendedProps.ev as CalendarEvent | undefined;
@@ -914,10 +1086,19 @@ export function Calendar() {
       const cur = freshEvent(arg.event);
       if (cur) eventDblRef.current(cur);
     };
+    const over = () => {
+      const cur = freshEvent(arg.event);
+      if (cur) bandRef.current(cur, el);
+    };
+    const out = () => setBand(null);
     el._alfaCtx = ctx;
     el._alfaDbl = dbl;
+    el._alfaOver = over;
+    el._alfaOut = out;
     el.addEventListener("contextmenu", ctx);
     el.addEventListener("dblclick", dbl);
+    el.addEventListener("mouseenter", over);
+    el.addEventListener("mouseleave", out);
     // Własny dymek zamiast natywnego `title`: kafelki bywają wąskie, więc dymek
     // pokazuje pełny tytuł z kropką typu, termin z czasem trwania, obiekt,
     // techników i stan (status/rozliczenie/protokół/realizacja) jako pigułki.
@@ -925,10 +1106,10 @@ export function Calendar() {
     // obsługiwane przez delegowany listener z `components/ui/tooltip`.
     if (ev) {
       el.dataset.alfaEv = String(ev.id);
-      applyTip(el, eventTipData(ev));
+      applyTip(el, eventTipData(ev, { compactDate: true, departure: departureFor(ev) }));
       el.setAttribute("aria-label", eventTipAria(ev));
     }
-  }, [freshEvent]);
+  }, [freshEvent, departureFor]);
 
   /**
    * FullCalendar recyklinguje kafelki (eventDidMount nie powtarza się po zapisie),
@@ -940,10 +1121,10 @@ export function Calendar() {
     for (const el of Array.from(root.querySelectorAll<HTMLElement>("[data-alfa-ev]"))) {
       const ev = eventsByIdRef.current.get(Number(el.dataset.alfaEv));
       if (!ev) continue;
-      applyTip(el, eventTipData(ev));
+      applyTip(el, eventTipData(ev, { compactDate: true, departure: departureFor(ev) }));
       el.setAttribute("aria-label", eventTipAria(ev));
     }
-  }, [allEvents]);
+  }, [allEvents, departureFor]);
 
   /**
    * Dymki milkną, gdy na wierzchu jest coś ważniejszego: podgląd wydarzenia,
@@ -958,6 +1139,8 @@ export function Calendar() {
     const el = arg.el as ElWithHandlers;
     if (el._alfaCtx) el.removeEventListener("contextmenu", el._alfaCtx);
     if (el._alfaDbl) el.removeEventListener("dblclick", el._alfaDbl);
+    if (el._alfaOver) el.removeEventListener("mouseenter", el._alfaOver);
+    if (el._alfaOut) el.removeEventListener("mouseleave", el._alfaOut);
   }, []);
 
   /**
@@ -1270,36 +1453,39 @@ export function Calendar() {
       setPreview(null);
       // Siatka znika pod tooltipem — chowamy go, żeby nie wisiał nad nowym widokiem.
       hideTooltip();
-      if (v === "board") {
-        // Kotwicy nie zaokrąglamy — Tablica sama liczy miesiąc z anchorDate,
+      if (v === "board" || v === "route") {
+        // Kotwicy nie zaokrąglamy — Tablica liczy z niej miesiąc, Trasa dzień,
         // a powrót do siatki wraca wtedy do tego samego tygodnia/dnia.
         setView(v);
         return;
       }
-      // Z Tablicy wracamy przez remount FullCalendar z initialView/initialDate;
+      // Z Tablicy i Trasy wracamy przez remount FullCalendar z initialView/initialDate;
       // z siatki — zwykła zmiana widoku.
-      if (view !== "board") calendarRef.current?.getApi().changeView(v);
+      if (isFc) calendarRef.current?.getApi().changeView(v);
       setView(v);
     },
-    [view]
+    [isFc]
   );
 
-  /** Nawigacja ‹ Dziś ›: FullCalendar albo miesiąc Tablicy. */
+  /** Nawigacja ‹ Dziś ›: FullCalendar, miesiąc Tablicy albo dzień Trasy. */
   const navPrev = useCallback(() => {
     setPreview(null);
     if (isBoard) setAnchorDate((d) => new Date(d.getFullYear(), d.getMonth() - 1, 1));
+    else if (isRoute) setAnchorDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() - 1));
     else api()?.prev();
-  }, [isBoard]);
+  }, [isBoard, isRoute]);
   const navNext = useCallback(() => {
     setPreview(null);
     if (isBoard) setAnchorDate((d) => new Date(d.getFullYear(), d.getMonth() + 1, 1));
+    else if (isRoute) setAnchorDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1));
     else api()?.next();
-  }, [isBoard]);
+  }, [isBoard, isRoute]);
   const navToday = useCallback(() => {
     setPreview(null);
     if (isBoard) setAnchorDate(startOfMonth(new Date()));
+    else if (isRoute) setAnchorDate(new Date());
     else api()?.today();
-  }, [isBoard]);
+  }, [isBoard, isRoute]);
 
   // Ogłaszaj zmianę okresu czytnikom ekranu.
   useEffect(() => {
@@ -1374,7 +1560,7 @@ export function Calendar() {
       if (raf) cancelAnimationFrame(raf);
       window.removeEventListener("resize", schedule);
     };
-  }, [fit, view, weekends, activityOpen, assistantOpen, activeFilterCount, editable, loadedOnce]);
+  }, [fit, view, weekends, activityOpen, assistantOpen, activeFilterCount, editable, loadedOnce, docked, dialogOpen]);
 
   // FullCalendar przelicza kolumny tylko przy resize okna — a szerokość
   // kontenera zmienia też zwinięcie menu bocznego. Obserwujemy więc kontener.
@@ -1446,7 +1632,7 @@ export function Calendar() {
     const day = r.startAt.slice(0, 10);
     const api = calendarRef.current?.getApi();
     let outside = true;
-    if (api && !isBoardRef.current) {
+    if (api && isFcRef.current) {
       const v = api.view;
       const d = new Date(`${day}T00:00`);
       outside = d < v.activeStart || d >= v.activeEnd;
@@ -1597,7 +1783,7 @@ export function Calendar() {
     });
 
   const orderedViews = mobile
-    ? [VIEWS[3], VIEWS[0], VIEWS[1], VIEWS[2], VIEWS[4]]
+    ? [VIEWS[3], VIEWS[0], VIEWS[1], VIEWS[2], VIEWS[4], VIEWS[5]]
     : VIEWS;
 
   // --- Zapisane zestawy filtrów (components/calendar/FilterSets.tsx) ---
@@ -1633,7 +1819,11 @@ export function Calendar() {
 
   /** Rzeczownik okresu do tooltipów nawigacji: „Poprzedni tydzień”, „Następny miesiąc”. */
   const periodNoun =
-    view === "timeGridDay" ? "dzień" : view === "timeGridWeek" || view === "listWeek" ? "tydzień" : "miesiąc";
+    view === "timeGridDay" || view === "route"
+      ? "dzień"
+      : view === "timeGridWeek" || view === "listWeek"
+        ? "tydzień"
+        : "miesiąc";
 
   /** Chipy typów + selecty — wspólne dla paska desktop i arkusza mobile. */
   const filterControls = (
@@ -1699,82 +1889,52 @@ export function Calendar() {
     </>
   );
 
+  /**
+   * Formularz wydarzenia. Ta sama instancja w dwóch powłokach: jako okno modalne poza siatką
+   * albo jako szuflada w kolumnie obok kalendarza (wtedy kalendarz zwęża się zamiast znikać
+   * pod overlayem). Wariant ustala się przy otwarciu i już się nie zmienia — przeniesienie
+   * formularza między kontenerami to remount, czyli utrata niezapisanych zmian.
+   */
+  const eventEditor = (variant: "modal" | "drawer") => (
+    <CalendarEventDialog
+      key={dialogNonce}
+      variant={variant}
+      open={dialogOpen}
+      mode={dialogMode}
+      event={dialogEvent}
+      prefill={dialogPrefill}
+      onClose={() => {
+        assistantSavedRef.current = null;
+        setDialogOpen(false);
+      }}
+      onSaved={(ev) => {
+        const fromAssistant = assistantSavedRef.current;
+        assistantSavedRef.current = null;
+        if (fromAssistant) {
+          // Propozycja asystenta zapisana z dialogu — toast + wpis systemowy w czacie.
+          fromAssistant(ev);
+          return;
+        }
+        announce(`Zapisano „${ev.title}”`);
+        void loadEvents();
+      }}
+      onDeleted={handleDeleted}
+      onNotesChanged={(id, count) =>
+        setAllEvents((list) => list.map((e) => (e.id === id ? { ...e, notesCount: count } : e)))
+      }
+      onOpenEvent={(id) => void openEventById(id)}
+    />
+  );
+
   return (
-    <div className="space-y-4">
-      {!editable && <ReadOnlyBanner />}
+    // Bez space-y na korzeniu: pusty węzeł aria-live dostawał margines, który
+    // spychał siatkę w dół. Odstępy ustawiają same elementy.
+    <div>
+      {!editable && <ReadOnlyBanner className="mb-3" />}
 
       {/* aria-live: zmiany okresu / przeniesienia / statusy */}
       <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
         {announcement}
-      </div>
-
-      {/* Nagłówek */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-bold">Kalendarz</h1>
-          <p className="text-sm text-muted-foreground">
-            Dział techniczny — serwisy, montaże, wizje, konserwacje
-          </p>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <Button
-            variant={activityOpen ? "secondary" : "outline"}
-            size="sm"
-            className="h-10 md:h-9"
-            aria-pressed={activityOpen}
-            onClick={() => {
-              setAssistantOpen(false);
-              setActivityOpen((o) => !o);
-            }}
-            {...tip(
-              activityOpen
-                ? "Zamknij panel aktywności"
-                : "Dziennik zmian w kalendarzu — kto, co i kiedy zmienił"
-            )}
-          >
-            <Activity className="mr-1 h-4 w-4" /> Aktywność
-          </Button>
-          {assistantAllowed && (
-            <Button
-              variant={assistantOpen ? "secondary" : "outline"}
-              size="sm"
-              className="h-10 md:h-9"
-              aria-pressed={assistantOpen}
-              onClick={() => {
-                setActivityOpen(false);
-                setAssistantOpen((o) => !o);
-              }}
-              {...tip(
-                assistantOpen
-                  ? "Zamknij panel asystenta"
-                  : "Asystent AI — opisz zwykłym zdaniem, co zaplanować lub zmienić w kalendarzu"
-              )}
-              data-testid="assistant-toggle"
-            >
-              <Sparkles className="mr-1 h-4 w-4" /> Asystent
-            </Button>
-          )}
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-10 md:h-9"
-            onClick={() => setIcsOpen(true)}
-            {...tip("Subskrybuj kalendarz w Outlooku lub Google — link ICS tylko do odczytu")}
-          >
-            <Rss className="mr-1 h-4 w-4" /> <span className="hidden sm:inline">Subskrybuj (ICS)</span>
-            <span className="sm:hidden">ICS</span>
-          </Button>
-          {editable && (
-            <Button
-              size="sm"
-              className="h-10 md:h-9"
-              onClick={() => openCreate()}
-              {...tip("Dodaj wydarzenie — otwiera pusty formularz", { shortcut: "N" })}
-            >
-              <Plus className="mr-1 h-4 w-4" /> Nowe wydarzenie
-            </Button>
-          )}
-        </div>
       </div>
 
       <div
@@ -1786,91 +1946,282 @@ export function Calendar() {
           // (asystent) rozpycha wiersz ponad wyliczoną wysokość.
           fit && "min-h-0 [grid-template-rows:minmax(0,1fr)]",
           activityOpen && "lg:grid-cols-[1fr_360px]",
-          assistantOpen && "lg:grid-cols-[1fr_420px]"
+          assistantOpen && "lg:grid-cols-[1fr_420px]",
+          docked && dialogOpen && "lg:grid-cols-[1fr_480px]"
         )}
       >
-        <Card className={cn("min-w-0", fit && "flex min-h-0 flex-col overflow-hidden")}>
-          <CardContent className={cn("space-y-3 p-3 sm:p-4", fit && "flex min-h-0 flex-1 flex-col")}>
-            {/* Toolbar — rząd 1: nawigacja + tytuł | widoki */}
-            <div
-              className={cn(
-                "flex flex-wrap items-center justify-between gap-2",
-                mobile && "sticky top-16 z-20 -mx-3 -mt-3 border-b bg-card px-3 py-2"
+        <div
+          className={cn(
+            "min-w-0 space-y-2",
+            fit && "flex min-h-0 flex-col overflow-hidden"
+          )}
+        >
+          {/* Toolbar — rząd 1: nawigacja + tytuł | widoki */}
+          <div
+            className={cn(
+              "flex flex-wrap items-center justify-between gap-2",
+              mobile && "sticky top-16 z-20 -mx-4 border-b bg-background px-4 py-2"
+            )}
+          >
+            <div className="flex min-w-0 items-center gap-1">
+              <Button
+                variant="outline"
+                size="icon"
+                className="h-10 w-10 md:h-9 md:w-9"
+                onClick={navPrev}
+                aria-label={`Poprzedni ${periodNoun}`}
+                {...tip(`Poprzedni ${periodNoun}`, { shortcut: "←" })}
+              >
+                <ChevronLeft className="h-4 w-4" />
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-10 md:h-9"
+                onClick={navToday}
+                {...tip(`Wróć do bieżącego okresu (${periodNoun} z dzisiejszą datą)`, { shortcut: "T" })}
+              >
+                Dziś
+              </Button>
+              <Button
+                variant="outline"
+                size="icon"
+                className="h-10 w-10 md:h-9 md:w-9"
+                onClick={navNext}
+                aria-label={`Następny ${periodNoun}`}
+                {...tip(`Następny ${periodNoun}`, { shortcut: "→" })}
+              >
+                <ChevronRight className="h-4 w-4" />
+              </Button>
+              <h2
+                className="ml-1 min-w-0 truncate text-base font-semibold capitalize sm:ml-2 sm:text-lg"
+                aria-live="off"
+              >
+                {title}
+              </h2>
+              {loading && loadedOnce && (
+                <Loader2
+                  className="ml-1 h-4 w-4 shrink-0 animate-spin text-muted-foreground"
+                  aria-label="Odświeżanie"
+                />
               )}
-            >
-              <div className="flex min-w-0 items-center gap-1">
-                <Button
-                  variant="outline"
-                  size="icon"
-                  className="h-10 w-10 md:h-9 md:w-9"
-                  onClick={navPrev}
-                  aria-label={`Poprzedni ${periodNoun}`}
-                  {...tip(`Poprzedni ${periodNoun}`, { shortcut: "←" })}
+              {!loading && loadedOnce && overdueTotal > 0 && !isBoard && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    changeView("board");
+                    setBoardGroup("status");
+                  }}
+                  className="ml-2 hidden items-center gap-1 rounded-full bg-red-100 px-2 py-0.5 text-[11px] font-semibold text-red-700 hover:bg-red-200 dark:bg-red-500/20 dark:text-red-200 dark:hover:bg-red-500/30 md:inline-flex"
+                  {...tip(
+                    `Zaplanowane wydarzenia, których termin już minął: ${overdueTotal}\nKliknij, by otworzyć Tablicę pogrupowaną wg statusu`
+                  )}
                 >
-                  <ChevronLeft className="h-4 w-4" />
+                  <AlertTriangle className="h-3 w-3" aria-hidden />
+                  {overdueTotal} po terminie
+                </button>
+              )}
+              {!loading && loadedOnce && weekendHidden > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setWeekends(true)}
+                  className="ml-2 hidden shrink-0 items-center gap-1 whitespace-nowrap rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:inline-flex"
+                  {...tip("Weekendy są ukryte w siatce — kliknij, by je pokazać", { shortcut: "S" })}
+                  data-testid="weekend-hidden-hint"
+                >
+                  <CalendarRange className="h-3 w-3" aria-hidden />
+                  {weekendHidden} {plEvents(weekendHidden)} w weekend — pokaż
+                </button>
+              )}
+            </div>
+            <div className="flex flex-wrap items-center justify-end gap-2 min-w-0">
+              {isBoard && !mobile && (
+                <SegmentedControl
+                  label="Grupowanie tablicy"
+                  value={boardGroup}
+                  onChange={(k) => setBoardGroup(k as BoardGroupBy)}
+                  tone="secondary"
+                  options={[
+                    { key: "status", label: "wg statusu", icon: ListChecks, hint: "Grupuj kolumny wg statusu wydarzenia" },
+                    { key: "type", label: "wg typu", icon: Tags, hint: "Grupuj kolumny wg typu wydarzenia" },
+                  ]}
+                />
+              )}
+              <SegmentedControl
+                label="Widok"
+                value={view}
+                onChange={(k) => changeView(k as ViewName)}
+                options={orderedViews.map((v) => ({
+                  key: v.key,
+                  label: mobile ? v.shortLabel : v.label,
+                  hint: v.key === view ? `Bieżący widok: ${v.label}` : `Przełącz na widok: ${v.label}`,
+                  shortcut: v.keys[0].toUpperCase(),
+                }))}
+              />
+              {isFc && (
+                <Button
+                  variant={weekends ? "secondary" : "outline"}
+                  size="icon"
+                  className="hidden h-10 w-10 md:inline-flex md:h-9 md:w-9"
+                  aria-pressed={weekends}
+                  onClick={() => setWeekends(!weekends)}
+                  aria-label={weekends ? "Ukryj weekendy" : "Pokaż weekendy"}
+                  {...tip(
+                    weekends
+                      ? "Ukryj soboty i niedziele — dni robocze dostaną więcej miejsca"
+                      : "Pokaż soboty i niedziele w siatce",
+                    { shortcut: "S" }
+                  )}
+                  data-testid="weekend-toggle"
+                >
+                  {weekends ? <CalendarDays className="h-4 w-4" /> : <CalendarRange className="h-4 w-4" />}
                 </Button>
+              )}
+              <FilterSets
+                current={currentFilterState}
+                onApply={applyFilterSet}
+                technicians={technicians}
+              />
+              <Button
+                variant={activeFilterCount ? "secondary" : "outline"}
+                size="icon"
+                className="relative h-10 w-10 md:hidden"
+                onClick={() => setFiltersOpen(true)}
+                aria-label={`Filtry${activeFilterCount ? ` (${activeFilterCount} aktywne)` : ""}`}
+              >
+                <Filter className="h-4 w-4" />
+                {activeFilterCount > 0 && (
+                  <span className="absolute -right-1 -top-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-bold text-primary-foreground">
+                    {activeFilterCount}
+                  </span>
+                )}
+              </Button>
+              <div className="relative hidden md:block">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-9 w-9 text-muted-foreground"
+                  onClick={() => setHelpOpen((o) => !o)}
+                  aria-label="Pomoc: legenda i skróty"
+                  aria-expanded={helpOpen}
+                  {...tip("Legenda kolorów, znaczników i skrótów klawiszowych", { shortcut: "?" })}
+                >
+                  <HelpCircle className="h-4 w-4" />
+                </Button>
+                {helpOpen && <HelpPopover onClose={() => setHelpOpen(false)} editable={editable} />}
+              </div>
+              {/* Akcje strony (aktywność, asystent, ICS, nowe wydarzenie) —
+                  w tym samym rzędzie co widoki, żeby siatka dostała wyżej start. */}
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  variant={activityOpen ? "secondary" : "outline"}
+                  size="sm"
+                  className="h-10 md:h-9"
+                  aria-pressed={activityOpen}
+                  onClick={() => {
+                    setAssistantOpen(false);
+                    setActivityOpen((o) => !o);
+                  }}
+                  {...tip(
+                    activityOpen
+                      ? "Zamknij panel aktywności"
+                      : "Dziennik zmian w kalendarzu — kto, co i kiedy zmienił"
+                  )}
+                >
+                  <Activity className="mr-1 h-4 w-4" /> Aktywność
+                </Button>
+                {assistantAllowed && (
+                  <Button
+                    variant={assistantOpen ? "secondary" : "outline"}
+                    size="sm"
+                    className="h-10 md:h-9"
+                    aria-pressed={assistantOpen}
+                    onClick={() => {
+                      setActivityOpen(false);
+                      setAssistantOpen((o) => !o);
+                    }}
+                    {...tip(
+                      assistantOpen
+                        ? "Zamknij panel asystenta"
+                        : "Asystent AI — opisz zwykłym zdaniem, co zaplanować lub zmienić w kalendarzu"
+                    )}
+                    data-testid="assistant-toggle"
+                  >
+                    <Sparkles className="mr-1 h-4 w-4" /> Asystent
+                  </Button>
+                )}
                 <Button
                   variant="outline"
                   size="sm"
                   className="h-10 md:h-9"
-                  onClick={navToday}
-                  {...tip(`Wróć do bieżącego okresu (${periodNoun} z dzisiejszą datą)`, { shortcut: "T" })}
+                  onClick={() => setIcsOpen(true)}
+                  {...tip("Subskrybuj kalendarz w Outlooku lub Google — link ICS tylko do odczytu")}
                 >
-                  Dziś
+                  <Rss className="mr-1 h-4 w-4" /> <span className="hidden sm:inline">Subskrybuj (ICS)</span>
+                  <span className="sm:hidden">ICS</span>
                 </Button>
-                <Button
-                  variant="outline"
-                  size="icon"
-                  className="h-10 w-10 md:h-9 md:w-9"
-                  onClick={navNext}
-                  aria-label={`Następny ${periodNoun}`}
-                  {...tip(`Następny ${periodNoun}`, { shortcut: "→" })}
-                >
-                  <ChevronRight className="h-4 w-4" />
-                </Button>
-                <h2
-                  className="ml-1 min-w-0 truncate text-base font-semibold capitalize sm:ml-2 sm:text-lg"
-                  aria-live="off"
-                >
-                  {title}
-                </h2>
-                {loading && loadedOnce && (
-                  <Loader2
-                    className="ml-1 h-4 w-4 shrink-0 animate-spin text-muted-foreground"
-                    aria-label="Odświeżanie"
-                  />
-                )}
-                {!loading && loadedOnce && overdueTotal > 0 && !isBoard && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      changeView("board");
-                      setBoardGroup("status");
-                    }}
-                    className="ml-2 hidden items-center gap-1 rounded-full bg-red-100 px-2 py-0.5 text-[11px] font-semibold text-red-700 hover:bg-red-200 dark:bg-red-500/20 dark:text-red-200 dark:hover:bg-red-500/30 md:inline-flex"
-                    {...tip(
-                      `Zaplanowane wydarzenia, których termin już minął: ${overdueTotal}\nKliknij, by otworzyć Tablicę pogrupowaną wg statusu`
-                    )}
+                {editable && (
+                  <Button
+                    size="sm"
+                    className="h-10 md:h-9"
+                    onClick={() => openCreate()}
+                    {...tip("Dodaj wydarzenie — otwiera pusty formularz", { shortcut: "N" })}
                   >
-                    <AlertTriangle className="h-3 w-3" aria-hidden />
-                    {overdueTotal} po terminie
-                  </button>
-                )}
-                {!loading && loadedOnce && weekendHidden > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => setWeekends(true)}
-                    className="ml-2 hidden shrink-0 items-center gap-1 whitespace-nowrap rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:inline-flex"
-                    {...tip("Weekendy są ukryte w siatce — kliknij, by je pokazać", { shortcut: "S" })}
-                    data-testid="weekend-hidden-hint"
-                  >
-                    <CalendarRange className="h-3 w-3" aria-hidden />
-                    {weekendHidden} {plEvents(weekendHidden)} w weekend — pokaż
-                  </button>
+                    <Plus className="mr-1 h-4 w-4" /> Nowe wydarzenie
+                  </Button>
                 )}
               </div>
-              <div className="flex flex-wrap items-center justify-end gap-2 min-w-0">
-                {isBoard && !mobile && (
+            </div>
+          </div>
+
+          {/* Toolbar — rząd 2: filtry (desktop) */}
+          <div className="hidden flex-wrap items-center gap-2 md:flex">
+            <span className="inline-flex items-center gap-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              <Filter className="h-3.5 w-3.5" aria-hidden /> Filtry
+              {activeFilterCount > 0 && (
+                <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-bold text-primary-foreground">
+                  {activeFilterCount}
+                </span>
+              )}
+            </span>
+            {filterControls}
+            {activeFilterCount > 0 && (
+              <Tooltip content={`Zdejmij wszystkie filtry (aktywne: ${activeFilterCount}) i pokaż pełny kalendarz`}>
+                <button
+                  type="button"
+                  onClick={clearFilters}
+                  className="inline-flex h-8 items-center gap-1 rounded-md px-2 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <FilterX className="h-3.5 w-3.5" aria-hidden /> Wyczyść filtry
+                </button>
+              </Tooltip>
+            )}
+            {isBoard && mobile && null}
+          </div>
+
+          {/* Aktywne filtry na mobile — pasek podsumowania */}
+          {mobile && activeFilterCount > 0 && (
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <span>
+                Filtry: {activeFilterCount} aktywne
+                {typeFilter.size > 0 && ` · ${Array.from(typeFilter).map((t) => EVENT_TYPE_META[t].label).join(", ")}`}
+              </span>
+              <button type="button" onClick={clearFilters} className="ml-auto underline">
+                wyczyść
+              </button>
+            </div>
+          )}
+
+          {/* Tablica (kanban) — zamiast siatki FullCalendar */}
+          {isBoard && (
+            <div
+              className={cn("alfa-calendar relative min-w-0", fit && "flex min-h-0 flex-1 flex-col")}
+              data-fit={fit ? "true" : undefined}
+              onTouchStart={onTouchStart}
+              onTouchEnd={onTouchEnd}
+            >
+              {mobile && (
+                <div className="mb-2">
                   <SegmentedControl
                     label="Grupowanie tablicy"
                     value={boardGroup}
@@ -1881,243 +2232,141 @@ export function Calendar() {
                       { key: "type", label: "wg typu", icon: Tags, hint: "Grupuj kolumny wg typu wydarzenia" },
                     ]}
                   />
-                )}
-                <SegmentedControl
-                  label="Widok"
-                  value={view}
-                  onChange={(k) => changeView(k as ViewName)}
-                  options={orderedViews.map((v) => ({
-                    key: v.key,
-                    label: mobile ? v.shortLabel : v.label,
-                    hint: v.key === view ? `Bieżący widok: ${v.label}` : `Przełącz na widok: ${v.label}`,
-                    shortcut: v.keys[0].toUpperCase(),
-                  }))}
-                />
-                {!isBoard && (
-                  <Button
-                    variant={weekends ? "secondary" : "outline"}
-                    size="icon"
-                    className="hidden h-10 w-10 md:inline-flex md:h-9 md:w-9"
-                    aria-pressed={weekends}
-                    onClick={() => setWeekends(!weekends)}
-                    aria-label={weekends ? "Ukryj weekendy" : "Pokaż weekendy"}
-                    {...tip(
-                      weekends
-                        ? "Ukryj soboty i niedziele — dni robocze dostaną więcej miejsca"
-                        : "Pokaż soboty i niedziele w siatce",
-                      { shortcut: "S" }
-                    )}
-                    data-testid="weekend-toggle"
-                  >
-                    {weekends ? <CalendarDays className="h-4 w-4" /> : <CalendarRange className="h-4 w-4" />}
-                  </Button>
-                )}
-                <FilterSets
-                  current={currentFilterState}
-                  onApply={applyFilterSet}
-                  technicians={technicians}
-                />
-                <Button
-                  variant={activeFilterCount ? "secondary" : "outline"}
-                  size="icon"
-                  className="relative h-10 w-10 md:hidden"
-                  onClick={() => setFiltersOpen(true)}
-                  aria-label={`Filtry${activeFilterCount ? ` (${activeFilterCount} aktywne)` : ""}`}
-                >
-                  <Filter className="h-4 w-4" />
-                  {activeFilterCount > 0 && (
-                    <span className="absolute -right-1 -top-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-bold text-primary-foreground">
-                      {activeFilterCount}
-                    </span>
-                  )}
-                </Button>
-                <div className="relative hidden md:block">
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-9 w-9 text-muted-foreground"
-                    onClick={() => setHelpOpen((o) => !o)}
-                    aria-label="Pomoc: legenda i skróty"
-                    aria-expanded={helpOpen}
-                    {...tip("Legenda kolorów, znaczników i skrótów klawiszowych", { shortcut: "?" })}
-                  >
-                    <HelpCircle className="h-4 w-4" />
-                  </Button>
-                  {helpOpen && <HelpPopover onClose={() => setHelpOpen(false)} editable={editable} />}
                 </div>
-              </div>
-            </div>
-
-            {/* Toolbar — rząd 2: filtry (desktop) */}
-            <div className="hidden flex-wrap items-center gap-2 md:flex">
-              <span className="inline-flex items-center gap-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                <Filter className="h-3.5 w-3.5" aria-hidden /> Filtry
-                {activeFilterCount > 0 && (
-                  <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-bold text-primary-foreground">
-                    {activeFilterCount}
-                  </span>
-                )}
-              </span>
-              {filterControls}
-              {activeFilterCount > 0 && (
-                <Tooltip content={`Zdejmij wszystkie filtry (aktywne: ${activeFilterCount}) i pokaż pełny kalendarz`}>
-                  <button
-                    type="button"
-                    onClick={clearFilters}
-                    className="inline-flex h-8 items-center gap-1 rounded-md px-2 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  >
-                    <FilterX className="h-3.5 w-3.5" aria-hidden /> Wyczyść filtry
-                  </button>
-                </Tooltip>
               )}
-              {isBoard && mobile && null}
+              {!loadedOnce && <CalendarSkeleton columns={4} />}
+              <CalendarBoard
+                events={events}
+                groupBy={boardGroup}
+                editable={editable}
+                loading={loading}
+                onOpen={openEvent}
+                onContextMenu={handleBoardContextMenu}
+                onMove={handleBoardMove}
+                onCreate={editable ? () => openCreate() : undefined}
+              />
             </div>
+          )}
 
-            {/* Aktywne filtry na mobile — pasek podsumowania */}
-            {mobile && activeFilterCount > 0 && (
-              <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                <span>
-                  Filtry: {activeFilterCount} aktywne
-                  {typeFilter.size > 0 && ` · ${Array.from(typeFilter).map((t) => EVENT_TYPE_META[t].label).join(", ")}`}
-                </span>
-                <button type="button" onClick={clearFilters} className="ml-auto underline">
-                  wyczyść
-                </button>
-              </div>
-            )}
+          {/* Planer trasy (mapa dnia) — zamiast siatki FullCalendar */}
+          {isRoute && (
+            <div
+              className={cn("alfa-calendar relative min-w-0", fit && "flex min-h-0 flex-1 flex-col")}
+              data-fit={fit ? "true" : undefined}
+            >
+              {!loadedOnce && <CalendarSkeleton columns={1} />}
+              <RoutePlanner
+                key={toDateStr(anchorDate)}
+                date={toDateStr(anchorDate)}
+                events={events}
+                technicians={technicians}
+                loading={loading}
+                fit={fit}
+                onOpenEvent={(ev) => openEvent(ev)}
+                onAnnounce={announce}
+              />
+            </div>
+          )}
 
-            {/* Tablica (kanban) — zamiast siatki FullCalendar */}
-            {isBoard && (
-              <div
-                className={cn("alfa-calendar relative min-w-0", fit && "flex min-h-0 flex-1 flex-col")}
-                data-fit={fit ? "true" : undefined}
-                onTouchStart={onTouchStart}
-                onTouchEnd={onTouchEnd}
-              >
-                {mobile && (
-                  <div className="mb-2">
-                    <SegmentedControl
-                      label="Grupowanie tablicy"
-                      value={boardGroup}
-                      onChange={(k) => setBoardGroup(k as BoardGroupBy)}
-                      tone="secondary"
-                      options={[
-                        { key: "status", label: "wg statusu", icon: ListChecks, hint: "Grupuj kolumny wg statusu wydarzenia" },
-                        { key: "type", label: "wg typu", icon: Tags, hint: "Grupuj kolumny wg typu wydarzenia" },
-                      ]}
-                    />
-                  </div>
+          {/* Kalendarz */}
+          {isFc && (
+            <div
+              ref={gridRef}
+              className={cn("alfa-calendar relative", fit && "flex min-h-0 flex-1 flex-col")}
+              data-fit={fit ? "true" : undefined}
+              // FullCalendar sam dokleja `title` do „+N więcej”, linków dni i
+              // przycisku zamknięcia popovera — w tym zakresie przejmuje je
+              // nasz tooltip (patrz `data-tip-scope` w components/ui/tooltip).
+              data-tip-scope=""
+              onContextMenu={handleGridContextMenu}
+              onTouchStart={onTouchStart}
+              onTouchEnd={onTouchEnd}
+              aria-busy={loading || undefined}
+            >
+              {!loadedOnce && <CalendarSkeleton columns={view === "timeGridDay" ? 1 : 7} />}
+              <div className={cn(fit && "min-h-0 flex-1")}>
+              <FullCalendar
+                ref={calendarRef}
+                plugins={[dayGridPlugin, timeGridPlugin, listPlugin, interactionPlugin]}
+                locale={plLocale}
+                initialView={view}
+                initialDate={anchorDate}
+                headerToolbar={false}
+                firstDay={1}
+                height={fit ? "100%" : "auto"}
+                expandRows={fit}
+                weekends={weekends}
+                nowIndicator
+                // Domyślnie FullCalendar nakłada równoległe wydarzenia na siebie z przesunięciem
+                // — tytuły wchodzą jeden na drugi i nic nie da się przeczytać. Dzielimy slot na
+                // kolumny: pojedyncze wydarzenie ma pełną szerokość, równoległe dzielą ją po równo.
+                slotEventOverlap={false}
+                slotMinTime="06:00:00"
+                slotMaxTime="20:00:00"
+                slotDuration="00:30:00"
+                scrollTime="07:00:00"
+                dayMaxEvents={mobile ? 2 : fit ? true : 3}
+                weekNumbers={!mobile}
+                weekText="T"
+                eventTimeFormat={{ hour: "2-digit", minute: "2-digit", hour12: false }}
+                slotLabelFormat={{ hour: "2-digit", minute: "2-digit", hour12: false }}
+                dayPopoverFormat={{ weekday: "long", day: "numeric", month: "long" }}
+                editable={editable}
+                eventStartEditable={editable}
+                eventDurationEditable={editable}
+                selectable={editable}
+                selectMirror
+                unselectAuto
+                events={fcEvents}
+                eventContent={renderEventContent}
+                eventClick={handleEventClick}
+                eventDidMount={handleEventDidMount}
+                eventWillUnmount={handleEventWillUnmount}
+                select={handleSelect}
+                eventDrop={handleMove}
+                eventResize={handleMove}
+                datesSet={handleDatesSet}
+                noEventsContent={() => (
+                  <EmptyState
+                    title={
+                      activeFilterCount
+                        ? "Brak wydarzeń pasujących do filtrów"
+                        : view === "timeGridDay"
+                          ? "Brak wydarzeń tego dnia"
+                          : "Brak wydarzeń w tym tygodniu"
+                    }
+                    onCreate={editable ? () => openCreate() : undefined}
+                    onClearFilters={activeFilterCount ? clearFilters : undefined}
+                    onNext={navNext}
+                  />
                 )}
-                {!loadedOnce && <CalendarSkeleton columns={4} />}
-                <CalendarBoard
-                  events={events}
-                  groupBy={boardGroup}
-                  editable={editable}
-                  loading={loading}
-                  onOpen={openEvent}
-                  onContextMenu={handleBoardContextMenu}
-                  onMove={handleBoardMove}
-                  onCreate={editable ? () => openCreate() : undefined}
-                />
+                moreLinkContent={(a) => `+${a.num} więcej`}
+                moreLinkHint={(n) => `Pokaż pozostałe ${eventsCount(n)} tego dnia`}
+                navLinkHint={(t) => `Przejdź do dnia: ${t}`}
+                closeHint="Zamknij listę wydarzeń dnia"
+                eventHint="Wydarzenie"
+              />
               </div>
-            )}
-
-            {/* Kalendarz */}
-            {!isBoard && (
-              <div
-                ref={gridRef}
-                className={cn("alfa-calendar relative", fit && "flex min-h-0 flex-1 flex-col")}
-                data-fit={fit ? "true" : undefined}
-                // FullCalendar sam dokleja `title` do „+N więcej”, linków dni i
-                // przycisku zamknięcia popovera — w tym zakresie przejmuje je
-                // nasz tooltip (patrz `data-tip-scope` w components/ui/tooltip).
-                data-tip-scope=""
-                onContextMenu={handleGridContextMenu}
-                onTouchStart={onTouchStart}
-                onTouchEnd={onTouchEnd}
-                aria-busy={loading || undefined}
-              >
-                {!loadedOnce && <CalendarSkeleton columns={view === "timeGridDay" ? 1 : 7} />}
-                <div className={cn(fit && "min-h-0 flex-1")}>
-                <FullCalendar
-                  ref={calendarRef}
-                  plugins={[dayGridPlugin, timeGridPlugin, listPlugin, interactionPlugin]}
-                  locale={plLocale}
-                  initialView={view}
-                  initialDate={anchorDate}
-                  headerToolbar={false}
-                  firstDay={1}
-                  height={fit ? "100%" : "auto"}
-                  expandRows={fit}
-                  weekends={weekends}
-                  nowIndicator
-                  slotMinTime="06:00:00"
-                  slotMaxTime="20:00:00"
-                  slotDuration="00:30:00"
-                  scrollTime="07:00:00"
-                  dayMaxEvents={mobile ? 2 : fit ? true : 3}
-                  weekNumbers={!mobile}
-                  weekText="T"
-                  eventTimeFormat={{ hour: "2-digit", minute: "2-digit", hour12: false }}
-                  slotLabelFormat={{ hour: "2-digit", minute: "2-digit", hour12: false }}
-                  dayPopoverFormat={{ weekday: "long", day: "numeric", month: "long" }}
-                  editable={editable}
-                  eventStartEditable={editable}
-                  eventDurationEditable={editable}
-                  selectable={editable}
-                  selectMirror
-                  unselectAuto
-                  events={fcEvents}
-                  eventContent={renderEventContent}
-                  eventClick={handleEventClick}
-                  eventDidMount={handleEventDidMount}
-                  eventWillUnmount={handleEventWillUnmount}
-                  select={handleSelect}
-                  eventDrop={handleMove}
-                  eventResize={handleMove}
-                  datesSet={handleDatesSet}
-                  noEventsContent={() => (
-                    <EmptyState
-                      title={
-                        activeFilterCount
-                          ? "Brak wydarzeń pasujących do filtrów"
-                          : view === "timeGridDay"
-                            ? "Brak wydarzeń tego dnia"
-                            : "Brak wydarzeń w tym tygodniu"
-                      }
-                      onCreate={editable ? () => openCreate() : undefined}
-                      onClearFilters={activeFilterCount ? clearFilters : undefined}
-                      onNext={navNext}
-                    />
+              {/* Pusty stan w siatce (mies./tydz.) — subtelny pasek pod siatką */}
+              {loadedOnce && !loading && visibleCount === 0 && view !== "listWeek" && (
+                <div className="mt-2 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 rounded-md border border-dashed px-3 py-2 text-xs text-muted-foreground">
+                  <CalendarX2 className="h-3.5 w-3.5" aria-hidden />
+                  {activeFilterCount ? "Brak wydarzeń pasujących do filtrów." : "Brak wydarzeń w tym okresie."}
+                  {activeFilterCount > 0 && (
+                    <button type="button" onClick={clearFilters} className="font-medium underline">
+                      Wyczyść filtry
+                    </button>
                   )}
-                  moreLinkContent={(a) => `+${a.num} więcej`}
-                  moreLinkHint={(n) => `Pokaż pozostałe ${eventsCount(n)} tego dnia`}
-                  navLinkHint={(t) => `Przejdź do dnia: ${t}`}
-                  closeHint="Zamknij listę wydarzeń dnia"
-                  eventHint="Wydarzenie"
-                />
+                  {editable && (
+                    <button type="button" onClick={() => openCreate()} className="font-medium underline">
+                      Nowe wydarzenie
+                    </button>
+                  )}
                 </div>
-                {/* Pusty stan w siatce (mies./tydz.) — subtelny pasek pod siatką */}
-                {loadedOnce && !loading && visibleCount === 0 && view !== "listWeek" && (
-                  <div className="mt-2 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 rounded-md border border-dashed px-3 py-2 text-xs text-muted-foreground">
-                    <CalendarX2 className="h-3.5 w-3.5" aria-hidden />
-                    {activeFilterCount ? "Brak wydarzeń pasujących do filtrów." : "Brak wydarzeń w tym okresie."}
-                    {activeFilterCount > 0 && (
-                      <button type="button" onClick={clearFilters} className="font-medium underline">
-                        Wyczyść filtry
-                      </button>
-                    )}
-                    {editable && (
-                      <button type="button" onClick={() => openCreate()} className="font-medium underline">
-                        Nowe wydarzenie
-                      </button>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
-          </CardContent>
-        </Card>
+              )}
+            </div>
+          )}
+        </div>
 
         {/* Panel Aktywność */}
         {activityOpen && (
@@ -2129,6 +2378,9 @@ export function Calendar() {
             onRefresh={() => void loadActivity()}
           />
         )}
+
+        {/* Formularz wydarzenia jako szuflada — zwęża kalendarz zamiast go zasłaniać */}
+        {docked && dialogOpen && eventEditor("drawer")}
 
         {/* Panel Asystent (wg status.allowed) */}
         {assistantOpen && assistantAllowed && (
@@ -2143,6 +2395,19 @@ export function Calendar() {
         )}
       </div>
 
+      {/* Pas dojazdu — widoczny tylko pod kursorem, nie łapie zdarzeń myszy */}
+      {band && !preview && !ctxMenu && !dialogOpen && (
+        <div
+          className="cal-travel-band"
+          data-testid="travel-band"
+          style={{ left: band.left, top: band.top, width: band.width, height: band.height }}
+          data-clipped={band.clipped ? "true" : undefined}
+          aria-hidden
+        >
+          <span className="cal-travel-band-label">{band.label}</span>
+        </div>
+      )}
+
       {/* Podgląd wydarzenia (jeden klik) */}
       {preview && (
         <EventPreview
@@ -2151,7 +2416,7 @@ export function Calendar() {
           onClose={closePreview}
           onEdit={() => {
             closePreview();
-            openEvent(preview.ev);
+            openEvent(preview.ev, wide);
           }}
           onGoToObject={
             preview.ev.objectId ? () => navigate(`/objects/${preview.ev.objectId}`) : undefined
@@ -2160,34 +2425,8 @@ export function Calendar() {
         />
       )}
 
-      {/* Dialog wydarzenia */}
-      <CalendarEventDialog
-        key={dialogNonce}
-        open={dialogOpen}
-        mode={dialogMode}
-        event={dialogEvent}
-        prefill={dialogPrefill}
-        onClose={() => {
-          assistantSavedRef.current = null;
-          setDialogOpen(false);
-        }}
-        onSaved={(ev) => {
-          const fromAssistant = assistantSavedRef.current;
-          assistantSavedRef.current = null;
-          if (fromAssistant) {
-            // Propozycja asystenta zapisana z dialogu — toast + wpis systemowy w czacie.
-            fromAssistant(ev);
-            return;
-          }
-          announce(`Zapisano „${ev.title}”`);
-          void loadEvents();
-        }}
-        onDeleted={handleDeleted}
-        onNotesChanged={(id, count) =>
-          setAllEvents((list) => list.map((e) => (e.id === id ? { ...e, notesCount: count } : e)))
-        }
-        onOpenEvent={(id) => void openEventById(id)}
-      />
+      {/* Formularz wydarzenia — okno modalne (szuflada renderuje się w siatce wyżej) */}
+      {!docked && eventEditor("modal")}
 
       {/* Menu kontekstowe (prawy przycisk na wydarzeniu / pustym dniu) */}
       <ContextMenu
@@ -2234,7 +2473,7 @@ export function Calendar() {
           onClear={clearFilters}
           onClose={() => setFiltersOpen(false)}
         >
-          {!isBoard && (
+          {isFc && (
             <button
               type="button"
               aria-pressed={weekends}
@@ -2542,6 +2781,11 @@ function EventPreview({
   const meta = EVENT_TYPE_META[ev.type];
   const Icon = meta?.icon ?? Building2;
   const status = EVENT_STATUS_META[ev.status];
+  // Dojazd biuro → obiekt; przy urlopie i wydarzeniach bez obiektu nie ma czego liczyć.
+  const { travel, loading: travelLoading } = useTravel(ev.objectId, ev.type !== "urlop");
+  // Dzień widać z siatki kalendarza, więc jednodniowe wydarzenia pokazują sam zakres godzin.
+  const term = fmtRangeCompact(ev.startAt, ev.endAt, ev.allDay);
+  const travelText = travelSummary(travel, { startAt: ev.startAt, allDay: ev.allDay });
   const canMutate = editable && !ev.deletedAt;
   const overdue = isOverdue(ev, new Date());
   const notesCount = ev.notesCount ?? ev.notes?.length ?? 0;
@@ -2635,6 +2879,7 @@ function EventPreview({
           <div className="mt-1 flex flex-wrap items-center gap-1.5 empty:mt-0">
             <BillingBadge billing={ev.billing} />
             <ProtocolBadge event={ev} link />
+            <QuoteBadge event={ev} link />
             <RealizationBadge event={ev} link />
           </div>
         </div>
@@ -2645,7 +2890,7 @@ function EventPreview({
       <dl className="space-y-1.5 px-3 py-2.5 text-xs">
         <div className="flex gap-2">
           <dt className="w-4 shrink-0 text-muted-foreground"><CalendarDays className="h-3.5 w-3.5" aria-label="Termin" /></dt>
-          <dd className="tabular-nums">{fmtRange(ev.startAt, ev.endAt, ev.allDay)}{ev.allDay && " · cały dzień"}</dd>
+          <dd className="tabular-nums">{term || "cały dzień"}{term && ev.allDay && " · cały dzień"}</dd>
         </div>
         {ev.objectName && (
           <div className="flex gap-2">
@@ -2659,14 +2904,22 @@ function EventPreview({
             <dd className="truncate">{ev.location}</dd>
           </div>
         )}
+        {(travelText || travelLoading) && (
+          <div className="flex gap-2" data-testid="preview-travel">
+            <dt className="w-4 shrink-0 text-muted-foreground"><Route className="h-3.5 w-3.5" aria-label="Dojazd" /></dt>
+            <dd className="min-w-0" {...tip(travelSourceLabel(travel, travelLoading) || undefined)}>
+              {travelText ?? "liczę…"}
+            </dd>
+          </div>
+        )}
         {ev.realization && (
           <div className="flex gap-2" data-testid="preview-realization">
             <dt className="w-4 shrink-0 text-muted-foreground"><Receipt className="h-3.5 w-3.5" aria-label="Realizacja" /></dt>
             <dd className="min-w-0 truncate">
+              {/* Obiekt jest już w wierszu wyżej — tu tylko rodzaj i kwota. */}
               {REALIZATION_KIND_LABEL[ev.realization.kind] ?? ev.realization.kind}
               {" · "}
               <span className="tabular-nums">{realizationMoney(ev.realization.total)}</span>
-              <span className="text-muted-foreground"> · {ev.realization.site}</span>
             </dd>
           </div>
         )}
