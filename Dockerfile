@@ -5,8 +5,11 @@
 # (wymóg GPL przy dystrybucji binarek). ODA File Converter jest ZAKAZANY licencyjnie.
 FROM debian:bookworm-slim AS libredwg
 ARG LIBREDWG_VERSION=0.13.3
+# python3-minimal: ./configure LibreDWG woła AM_PATH_PYTHON bezwarunkowo (skrypty
+# testowe), także przy --disable-bindings — bez interpretera kończy się błędem
+# „no suitable Python interpreter found". Zostaje w tym stage'u, do runtime nie idzie.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential curl ca-certificates xz-utils \
+    && apt-get install -y --no-install-recommends build-essential curl ca-certificates xz-utils python3-minimal \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 RUN curl -fsSL -o libredwg-${LIBREDWG_VERSION}.tar.xz \
