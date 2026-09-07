@@ -20,6 +20,7 @@ import {
   ChevronRight,
   CircleCheck,
   Clock,
+  CloudSun,
   ExternalLink,
   FileCheck2,
   FileText,
@@ -88,6 +89,7 @@ import {
   type Realization,
   type Technician,
   type TechnicianAvailability,
+  type WeatherBrief,
 } from "@/lib/api";
 import {
   ACTIVITY_FIELD_LABELS,
@@ -140,6 +142,7 @@ import {
 import { travelLine, travelSourceLabel, useTravel } from "@/lib/travel";
 import { cn } from "@/lib/utils";
 import { CalendarEventNotes, type CalendarEventNotesHandle } from "@/components/CalendarEventNotes";
+import { WeatherSection } from "@/components/CalendarWeather";
 import { tip } from "@/components/ui/tooltip";
 
 export type CalendarDialogMode = "create" | "edit" | "view";
@@ -164,6 +167,11 @@ interface CalendarEventDialogProps {
   mode: CalendarDialogMode;
   /** Wydarzenie do edycji/podglądu (null przy tworzeniu). */
   event?: CalendarEvent | null;
+  /**
+   * Skrót pogody z listy kalendarza — sekcja „Pogoda” pokazuje go od razu,
+   * zanim dociągnie pełną prognozę. Bez niego sekcja i tak działa (dociąga sama).
+   */
+  weather?: WeatherBrief | null;
   /** Wstępne wartości przy tworzeniu (zakres z kliknięcia w siatkę, obiekt). */
   prefill?: CalendarEventPrefill | null;
   /** Wywołane po zapisie (create/update) — rodzic odświeża dane. */
@@ -1611,6 +1619,7 @@ export function CalendarEventDialog({
   onClose,
   mode,
   event,
+  weather,
   prefill,
   onSaved,
   onDeleted,
@@ -2568,6 +2577,19 @@ export function CalendarEventDialog({
               <MapPin className="h-3.5 w-3.5" /> Lokalizacja
             </dt>
             <dd>{event.location || <span className="text-muted-foreground">—</span>}</dd>
+            {/* Pogoda dla dnia i miejsca wydarzenia (nie dotyczy urlopu). */}
+            <dt className="flex items-center gap-1.5 text-muted-foreground">
+              <CloudSun className="h-3.5 w-3.5" /> Pogoda
+            </dt>
+            <dd>
+              <WeatherSection
+                eventId={event.id}
+                brief={weather}
+                startAt={event.startAt}
+                endAt={event.endAt}
+                allDay={event.allDay}
+              />
+            </dd>
           </>
         )}
         {billingApplies(event.type) && (
@@ -2868,6 +2890,21 @@ export function CalendarEventDialog({
               </span>
               <p className="text-sm">{travelText}</p>
               {travelSource && <p className="text-[11px] text-muted-foreground">{travelSource}</p>}
+            </div>
+          )}
+          {/* Pogoda — tylko dla zapisanego wydarzenia (punkt liczy backend z zapisanych danych). */}
+          {event && (
+            <div className="space-y-0.5">
+              <span className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
+                <CloudSun className="h-3.5 w-3.5" /> Pogoda
+              </span>
+              <WeatherSection
+                eventId={event.id}
+                brief={weather}
+                startAt={event.startAt}
+                endAt={event.endAt}
+                allDay={event.allDay}
+              />
             </div>
           )}
         </Section>

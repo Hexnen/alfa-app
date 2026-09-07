@@ -49,6 +49,7 @@ import {
   type IncomingFile,
 } from "../lib/calendar-attachments.js";
 import { canManageNote, getNoteRow } from "../lib/calendar-mutations.js";
+import { loadWeatherEvents, weatherBriefs, weatherDetail, type WeatherBrief } from "../lib/weather.js";
 import calendarFilterSetsRoutes from "./calendar-filter-sets.js";
 import calendarDayRouteRoutes from "./calendar-day-route.js";
 
@@ -402,6 +403,55 @@ app.get("/conflicts", (c) => {
     return c.json({ success: true, data });
   } catch (error) {
     return handleError(c, error, "sprawdzania kolizji");
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Pogoda — GET /weather?ids= (batch) i GET /events/:id/weather (szczegóły)
+//
+// Uprawnienia: te same co odczyt wydarzeń — trasy są pod /calendar, więc łapie je
+// wpis `{ prefix: "/calendar", tabs: ["technical/kalendarz"] }` w API_TAB_MAP
+// (src/middleware/auth.ts); GET przechodzi przy poziomie `view`. Bez dodatkowej bramki.
+//
+// Pogoda NIGDY nie wywraca widoku: brak sieci, brak punktu, dzień poza oknem prognozy
+// czy padnięte IMGW wracają jako `null` w HTTP 200. 500 zostaje wyłącznie dla błędu bazy.
+// ---------------------------------------------------------------------------
+
+/** Ile wydarzeń wolno spytać jednym batchem (widok miesiąca mieści się z zapasem). */
+const WEATHER_MAX_IDS = 200;
+
+app.get("/weather", async (c) => {
+  try {
+    const ids = parseIdList(c.req.query("ids")).slice(0, WEATHER_MAX_IDS);
+    const items: Record<string, WeatherBrief | null> = {};
+    for (const id of ids) items[String(id)] = null;
+    if (ids.length === 0) return c.json({ success: true, data: { items, retry: [] } });
+
+    const events = loadWeatherEvents(ids, db);
+    const batch = await weatherBriefs(events, {});
+    for (const [id, brief] of batch.items) items[String(id)] = brief;
+    // `retry` odróżnia „null, bo nie ma pogody” (urlop, poza oknem, brak punktu) od
+    // „null, bo się nie udało” (offline, brak danych, limit świeżych geokodowań) —
+    // front tylko tych drugich nie zapisuje jako zapytanych i ponawia je później.
+    return c.json({ success: true, data: { items, retry: batch.retry } });
+  } catch (error) {
+    // Świadomie NIE handleError: pogoda ma się degradować do pustki, a nie psuć kalendarz.
+    console.error("Error in calendar weather batch:", error);
+    return c.json({ success: true, data: { items: {}, retry: [] } });
+  }
+});
+
+app.get("/events/:id/weather", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id) || id <= 0) return c.json({ success: false, error: "Nieprawidłowe id" }, 400);
+  const [ev] = loadWeatherEvents([id], db);
+  if (!ev) return c.json({ success: false, error: "Wydarzenie nie istnieje" }, 404);
+  try {
+    const res = await weatherDetail(ev, {});
+    return c.json({ success: true, data: res.value });
+  } catch (error) {
+    console.error("Error in calendar weather detail:", error);
+    return c.json({ success: true, data: null });
   }
 });
 

@@ -4625,6 +4625,77 @@ export interface TechnicianAvailability {
   leaves: TechnicianLeave[];
 }
 
+// --- Pogoda przy wydarzeniach (Open-Meteo + ostrzeżenia IMGW) -------------
+// Kształty 1:1 z `src/lib/weather.ts` na backendzie.
+
+/** Ostrzeżenie meteorologiczne IMGW obowiązujące w dniu wydarzenia. */
+export interface WeatherWarning {
+  /** Nazwa zjawiska, np. „Silny wiatr”. */
+  event: string;
+  /** Stopień IMGW: 1 żółty, 2 pomarańczowy, 3 czerwony. */
+  level: 1 | 2 | 3;
+  from: string;
+  to: string;
+  text: string;
+}
+
+/** Skrót pogody dla wydarzenia — do znaczników na kafelkach/kartach. */
+export interface WeatherBrief {
+  /** YYYY-MM-DD dnia wydarzenia. */
+  date: string;
+  /** Reprezentatywny kod WMO okna wydarzenia (z godziną: [start, koniec); all-day: 07–18). */
+  code: number;
+  /** Średnia temperatura okna wydarzenia. */
+  tempC: number;
+  /** Z godziną: min/max okna. All-day: min/max doby. */
+  tempMinC: number;
+  tempMaxC: number;
+  /** Suma opadów w oknie. */
+  precipMm: number;
+  /** Maks. prawdopodobieństwo opadu w oknie. */
+  precipProb: number | null;
+  /** Maks. wiatr w oknie. */
+  windKmh: number;
+  /** Maks. stopień ostrzeżeń IMGW w dniu wydarzenia (0 = brak). */
+  warningLevel: 0 | 1 | 2 | 3;
+  /** Okno („HH:MM”), z którego policzono prognozę — tylko dla wydarzeń z godziną. */
+  window: { from: string; to: string } | null;
+  /** Punkt prognozy; `label` mówi skąd (adres / obiekt / biuro). */
+  point: { lat: number; lng: number; label: string | null };
+}
+
+export interface WeatherHour {
+  time: string;
+  tempC: number;
+  code: number;
+  precipProb: number | null;
+  precipMm: number;
+  windKmh: number;
+}
+
+export interface WeatherDay {
+  date: string;
+  code: number;
+  tempMinC: number;
+  tempMaxC: number;
+  precipMm: number;
+  precipProb: number | null;
+  windKmh: number;
+}
+
+/** Pełna prognoza dla wydarzenia — godziny dnia, 7 dni, ostrzeżenia, linki. */
+export interface WeatherDetail extends WeatherBrief {
+  hourly: WeatherHour[];
+  daily: WeatherDay[];
+  warnings: WeatherWarning[];
+  county: string | null;
+  links: { windy: string; imgw: string };
+  fetchedAt: string;
+}
+
+/** Maks. liczba id w jednym zapytaniu `calendarApi.weather` (limit backendu). */
+export const WEATHER_BATCH_MAX = 200;
+
 const scopeQuery = (scope?: CalendarSeriesScope) =>
   scope && scope !== "this" ? `?scope=${scope}` : "";
 
@@ -4725,6 +4796,30 @@ export const calendarApi = {
   async objectEvents(objectId: number) {
     return request<ApiResponse<CalendarEvent[]>>(
       `/calendar/objects/${objectId}/events`
+    );
+  },
+
+  // --- Pogoda ---
+
+  /**
+   * Skróty pogody dla wielu wydarzeń naraz (jeden request na widok).
+   * Klucze `items` to id jako stringi; `null` = brak prognozy. Maks. 200 id.
+   *
+   * `retry` to id, dla których `null` jest TYMCZASOWE (brak sieci, brak danych dla dnia,
+   * wyczerpany limit świeżych geokodowań w batchu) — warto o nie spytać jeszcze raz.
+   * Id spoza `retry` z `null` nie mają pogody z definicji: urlop, dzień poza oknem
+   * [dziś-2, dziś+15], brak możliwego do ustalenia punktu. Starszy backend `retry` nie zwraca.
+   */
+  async weather(ids: number[]) {
+    return request<ApiResponse<{ items: Record<string, WeatherBrief | null>; retry?: number[] }>>(
+      `/calendar/weather?ids=${ids.join(",")}`
+    );
+  },
+
+  /** Pełna prognoza dla jednego wydarzenia; `null` = brak prognozy. */
+  async eventWeather(id: number) {
+    return request<ApiResponse<WeatherDetail | null>>(
+      `/calendar/events/${id}/weather`
     );
   },
 

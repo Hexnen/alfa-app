@@ -423,7 +423,8 @@
   }
 }
 @container (max-width: 115px) {
-  .alfa-calendar .fc-timegrid-event .cal-ev-mark {
+  .alfa-calendar .fc-timegrid-event .cal-ev-mark,
+  .alfa-calendar .fc-timegrid-event .cal-ev-weather {
     display: none;
   }
 }
@@ -477,6 +478,21 @@
   flex: 0 0 auto;
   width: 11px;
   height: 11px;
+}
+
+/* Znacznik pogody — ikona + temperatura, więc szerokość zmienna (nie kwadrat jak wyżej) */
+.alfa-calendar .cal-ev-weather {
+  flex: 0 0 auto;
+  line-height: 1;
+  white-space: nowrap;
+}
+.alfa-calendar .cal-ev-weather svg {
+  width: 11px;
+  height: 11px;
+}
+/* W liście pogoda idzie przed pigułkami — nie ona ma odpychać je w prawo */
+.alfa-calendar .cal-list-badges .cal-list-weather {
+  margin-left: 0;
 }
 
 /* ---- „+N więcej” i popover ---- */
