@@ -5,6 +5,7 @@ import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
+import { secureHeaders } from "hono/secure-headers";
 import { readFileSync } from "fs";
 import { runMigrations } from "./db/migrate.js";
 
@@ -19,7 +20,7 @@ const { startMailPoller } = await import("./services/cma-mail.js");
 const { ensureMasterAdmin } = await import("../scripts/bootstrap-admin.js");
 
 // Ensure the master admin exists (no-op without ADMIN_PASSWORD).
-ensureMasterAdmin();
+await ensureMasterAdmin();
 
 // Seed magazynu: pusta tabela warehouses → utwórz "Magazyn główny".
 // Robione przy starcie (nie w GET /warehouses) — odczyt nie może robić zapisów
@@ -58,11 +59,34 @@ const corsOrigins = [
 
 // Middleware
 app.use("*", logger());
+/*
+ * Nagłówki bezpieczeństwa dla całej aplikacji (API + SPA + designer).
+ *  - X-Frame-Options: DENY + frame-ancestors 'none' — nikt nie osadzi panelu
+ *    w ramce na obcej stronie (clickjacking na sesji z cookie SameSite=Lax).
+ *  - X-Content-Type-Options / Referrer-Policy — ustawienia domyślne hono.
+ *  - CSP jest TYLKO z `frame-ancestors`: designer.html i oferty HTML mają
+ *    skrypty inline, a hono domyślnie CSP nie ustawia — nie dopisujemy
+ *    `script-src`, bo wyłączyłoby to designer.
+ *  - Cross-Origin-Resource-Policy wyłączone: front bywa serwowany z innego
+ *    originu (lista CORS wyżej) i wczytuje zdjęcia/obrazy DWG z API przez
+ *    <img>, a CORP `same-origin` blokowałoby je po cichu.
+ */
+app.use(
+  "*",
+  secureHeaders({
+    xFrameOptions: "DENY",
+    contentSecurityPolicy: { frameAncestors: ["'none'"] },
+    crossOriginResourcePolicy: false,
+    referrerPolicy: "strict-origin-when-cross-origin",
+  })
+);
 app.use(
   "*",
   cors({
     origin: corsOrigins,
-    allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    // PATCH: panel admina aktualizuje użytkowników przez PATCH /admin/users/:id;
+    // bez niego preflight z innego originu (dev na :5173) odrzucał zapis.
+    allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowHeaders: ["Content-Type", "Authorization"],
   })
 );

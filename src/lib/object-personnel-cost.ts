@@ -29,8 +29,12 @@
  * w jednym miejscu, a nie w dwóch rozjeżdżających się kopiach.
  *
  * ALGORYTM (miesiąc po miesiącu, potem średnia):
- *  1. koszt pracownika w miesiącu = suma `wyplata` × narzut składkowy po jego umowach
- *     (+ rozliczenie biura z `hr_office_payroll` dla `kind='biuro'`),
+ *  1. koszt pracownika w miesiącu = JEDEN strumień zgodny z `hr_employees.kind`:
+ *     `ochrona` → suma `wyplata` × narzut składkowy po jego umowach,
+ *     `biuro`   → rozliczenie z `hr_office_payroll` × narzut.
+ *     Wpisy w drugim strumieniu są IGNOROWANE i zgłaszane w `warnings` — osoba
+ *     przepięta biuro→ochrona (albo odwrotnie) miałaby inaczej koszt liczony
+ *     dwa razy: raz z umowy, raz z tabeli biura,
  *  2. rozbicie na obiekty proporcjonalnie do `worked_hours` z `hr_hours`,
  *  3. do KOSZTU OGÓLNEGO (nierozdzielonego) idą godziny: bez przypisania,
  *     na pozycjach NIEZMAPOWANYCH (`hr_objects.object_id IS NULL` — #BIURO,
@@ -39,7 +43,8 @@
  *     handlowym oddaje obiektowi połowę swojego kosztu i TAK MA BYĆ,
  *  4. suma po `hr_objects.object_id` (kilka pozycji kadrowych może wskazywać
  *     ten sam obiekt kartoteki — sumujemy),
- *  5. średnia po liczbie miesięcy, które FAKTYCZNIE miały dane płacowe.
+ *  5. średnia po liczbie miesięcy, które FAKTYCZNIE miały dane płacowe OCHRONY
+ *     (kwoty w `hr_payroll`); miesiąc z samym biurem nie wchodzi do mianownika.
  *
  * ┌── DRUGA ŚCIEŻKA: UDZIAŁ W KOSZCIE CENTRUM MONITOROWANIA (CMA) ─────────────┐
  * │ Obiekt bez ochrony fizycznej nie ma „swoich" godzin — nikt na nim nie stoi. │
@@ -70,6 +75,7 @@ import { sql } from "drizzle-orm";
 import type { HrContract, HrHours, HrPayroll } from "../db/schema.js";
 import { buildHoursAggregates, computePayroll } from "../utils/hr-calc.js";
 import { getCompanyConfig } from "./company-config.js";
+import { officeRowTotals } from "./hr-office-total.js";
 
 /** Okno uśredniania w miesiącach: ostatni pełny / średnia z 3 / średnia z 12. */
 export type CostWindow = 1 | 3 | 12;
@@ -206,9 +212,10 @@ export interface PersonnelCostResult {
   /** Które to miesiące, od najstarszego. */
   months: MonthKey[];
   /**
-   * Miesiące pominięte, bo mają wiersze płacowe, ale ŻADNEJ wprowadzonej kwoty —
-   * czekają na księgową. UI ma o nich powiedzieć wprost: inaczej „średnia z 3 (dane
-   * za 2)" wygląda na brak danych, a jest brakiem ROZLICZENIA konkretnego miesiąca.
+   * Miesiące pominięte, bo mają jakieś wiersze (płacowe albo biura), ale ŻADNEJ
+   * wprowadzonej kwoty OCHRONY — czekają na księgową. UI ma o nich powiedzieć
+   * wprost: inaczej „średnia z 3 (dane za 2)" wygląda na brak danych, a jest
+   * brakiem ROZLICZENIA konkretnego miesiąca.
    */
   skippedMonths: MonthKey[];
   /** Ile pozycji słownika kadrowego ma mapowanie na kartotekę. */
@@ -221,6 +228,12 @@ export interface PersonnelCostResult {
   costBasis: PersonnelCostBasis;
   /** Audyt doliczonych składek — patrz `EmployerCostInfo`. */
   employer: EmployerCostInfo;
+  /**
+   * Niespójności danych, które rachunek OMINĄŁ zamiast liczyć podwójnie — po
+   * polsku, gotowe do pokazania: „Kowalski Jan (ochrona) ma wpisy w rozliczeniu
+   * biura za 2026-05 — pominięto". Pusta lista = dane czyste.
+   */
+  warnings: string[];
 }
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
@@ -268,6 +281,7 @@ interface WindowComputation {
   hrObjectsTotal: number;
   unmappedHoursShare: number;
   employer: EmployerCostInfo;
+  warnings: string[];
 }
 
 /* ------------------------------------------------------------------ */
@@ -380,32 +394,6 @@ function groupBy<T>(rows: T[], keyOf: (row: T) => number): Map<number, T[]> {
 }
 
 /**
- * Rozliczenie biura — ta sama formuła, co `withOfficeComputed()` w src/routes/hr.ts
- * (kwota = godziny × stawka, gotówka = kwota − podstawa ROR, razem = ROR + gotówka).
- * Powtórzona tutaj świadomie: tamta funkcja jest prywatna dla routera kadr, a ten
- * moduł nie ma prawa importować routera (cykl: routes/analytics → lib → routes/hr).
- * Jeśli formuła się zmieni, trzeba ruszyć oba miejsca — dlatego jest tak krótka.
- *
- * W praktyce biuro i tak prawie nigdy nie wpływa na koszt OBIEKTU: osoby
- * `kind='biuro'` nie mają wierszy w `hr_hours` (albo mają je na #BIURO), więc
- * wypadają z alokacji. Liczymy je dla `computeEmployeeMonthlyCost()`, gdzie
- * chodzi o koszt konkretnej osoby (handlowiec bywa właśnie z biura).
- */
-function officeTotal(row: typeof schema.hrOfficePayroll.$inferSelect): number {
-  const amount =
-    row.amount ??
-    (row.hoursForAccounting != null && row.rate != null
-      ? row.hoursForAccounting * row.rate
-      : null);
-  const cash =
-    row.cashOverride ??
-    (amount != null && row.rorBase != null && amount > row.rorBase
-      ? amount - row.rorBase
-      : null);
-  return (row.rorBase ?? 0) + (cash ?? 0);
-}
-
-/**
  * Jedno przeliczenie okna. Wszystkie dane wczytujemy HURTEM (sześć zapytań na
  * całe okno, nie sześć na miesiąc) — przy 12 miesiącach × ~140 umów N+1 byłby
  * widoczny w czasie odpowiedzi analityki, która wywołuje to przy każdym żądaniu.
@@ -417,6 +405,17 @@ function computeWindow(window: CostWindow, now = new Date()): WindowComputation 
   // Miesiące okna są ciągłe, więc `rok*100 + miesiąc` jest w tym zakresie
   // monotoniczny i BETWEEN wystarczy zamiast listy par (rok, miesiąc).
   const contracts = db.select().from(schema.hrContracts).all();
+  // Kartoteka osób — `kind` decyduje, KTÓRY strumień płacowy liczy się dla
+  // danej osoby (umowy albo biuro), a nazwisko trafia do ostrzeżeń.
+  const employeeRows = db
+    .select({
+      id: schema.hrEmployees.id,
+      fullName: schema.hrEmployees.fullName,
+      kind: schema.hrEmployees.kind,
+    })
+    .from(schema.hrEmployees)
+    .all();
+  const employeeById = new Map(employeeRows.map((e) => [e.id, e]));
   const payrollRows = db
     .select()
     .from(schema.hrPayroll)
@@ -525,6 +524,24 @@ function computeWindow(window: CostWindow, now = new Date()): WindowComputation 
   const byForm = emptyByForm();
   let netTotal = 0;
   let grossCostTotal = 0;
+  const warnings: string[] = [];
+  /**
+   * Ostrzeżenie o osobie z wpisami w NIEWŁAŚCIWYM strumieniu — raz na
+   * (osoba, miesiąc), nie raz na wiersz: osoba biura z trzema umowami dałaby
+   * inaczej trzy identyczne linijki.
+   */
+  const warned = new Set<string>();
+  const warnWrongStream = (employeeId: number, m: MonthKey, stream: "biuro" | "umowy") => {
+    const key = `${employeeId}:${ymKey(m.year, m.month)}:${stream}`;
+    if (warned.has(key)) return;
+    warned.add(key);
+    const emp = employeeById.get(employeeId);
+    const who = emp ? `${emp.fullName} (${emp.kind})` : `pracownik #${employeeId}`;
+    const where = stream === "biuro" ? "w rozliczeniu biura" : "w wypłatach z umów";
+    warnings.push(
+      `${who} ma wpisy ${where} za ${m.year}-${String(m.month).padStart(2, "0")} — pominięto, koszt liczony tylko z rozliczenia zgodnego z rodzajem`,
+    );
+  };
 
   for (const m of wanted) {
     const key = ymKey(m.year, m.month);
@@ -546,13 +563,19 @@ function computeWindow(window: CostWindow, now = new Date()): WindowComputation 
      * strefy szarej: albo księgowa wprowadziła miesiąc, albo nie.
      */
     const hasPayrollAmounts = monthPayroll.some((r) => r.mainAmount != null);
-    const hasOfficeAmounts = monthOffice.some((r) => r.amount != null);
-    if (!hasPayrollAmounts && !hasOfficeAmounts) continue;
-    if (monthPayroll.length > 0 && !hasPayrollAmounts) {
-      // Wiersze są, kwot nie ma: miesiąc czeka na księgową. Biuro bywa już
-      // rozliczone, ale ochrona to ~90% kosztu, więc taki miesiąc nie opisuje
-      // żadnej realnej stawki miesięcznej. Zgłaszamy go osobno.
-      skippedMonths.push(m);
+    if (!hasPayrollAmounts) {
+      // Kwot ochrony nie ma — miesiąc NIE wchodzi do średniej, niezależnie od
+      // tego, czy wierszy payrollu jest 90 (czekają na księgową) czy ZERO (nikt
+      // nawet nie założył miesiąca). Zero wierszy to brak danych, nie zerowy
+      // koszt: miesiąc z samym rozliczeniem biura liczony jako pełnoprawny
+      // dzielił koszt ochrony przez jeden miesiąc więcej — przy oknie z dwóch
+      // miesięcy zaniżał go o połowę. Ochrona to ~90% kosztu, więc taki miesiąc
+      // nie opisuje żadnej realnej stawki miesięcznej.
+      //
+      // Do `skippedMonths` (UI: „czeka na rozliczenie") trafia miesiąc, który ma
+      // JAKIEKOLWIEK wiersze — payrollu albo biura. Miesiąc bez żadnych danych
+      // po prostu nie istnieje w oknie i nie ma o czym mówić.
+      if (monthPayroll.length > 0 || monthOffice.length > 0) skippedMonths.push(m);
       continue;
     }
     usedMonths.push(m);
@@ -593,16 +616,33 @@ function computeWindow(window: CostWindow, now = new Date()): WindowComputation 
       }
       return net * markup;
     };
+    // JEDEN strumień na osobę, wybierany po `hr_employees.kind`: ochrona → umowy,
+    // biuro → tabela biura. Drugi strumień jest pomijany i zgłaszany. Bez tego
+    // osoba przepięta z biura do ochrony (stare wiersze biura zostają w bazie,
+    // nowe idą już z umowy) kosztowała firmę dwa razy — a `wyplata = 0` umowy
+    // bez kwoty nie ratuje, bo stare wiersze biura kwoty mają.
+    // Osoba nieznana kartotece (nie powinno się zdarzyć — FK CASCADE) idzie
+    // ścieżką swojego strumienia, żeby nie gubić kosztu po cichu.
     for (const row of computed) {
+      const kind = employeeById.get(row.employeeId)?.kind ?? "ochrona";
+      if (kind !== "ochrona") {
+        if (row.wyplata !== 0) warnWrongStream(row.employeeId, m, "umowy");
+        continue;
+      }
       add(costByEmployee, row.employeeId, withEmployerCost(row.wyplata, contractById.get(row.contractId)));
     }
     for (const row of monthOffice) {
+      const kind = employeeById.get(row.employeeId)?.kind ?? "biuro";
+      if (kind !== "biuro") {
+        warnWrongStream(row.employeeId, m, "biuro");
+        continue;
+      }
       // Gdy pracownik biura MA umowę w kadrach, jej forma wygrywa z narzutem domyślnym —
       // domyślny jest tylko dla tych 12 z 13 osób, których w `hr_contracts` nie ma wcale.
       add(
         costByEmployee,
         row.employeeId,
-        withEmployerCost(officeTotal(row), contractOfEmployee.get(row.employeeId)),
+        withEmployerCost(officeRowTotals(row).total, contractOfEmployee.get(row.employeeId)),
       );
     }
 
@@ -751,6 +791,7 @@ function computeWindow(window: CostWindow, now = new Date()): WindowComputation 
       effectiveMarkup:
         netTotal > 0 ? Math.round((grossCostTotal / netTotal) * 10000) / 10000 : 1,
     },
+    warnings,
   };
 }
 
@@ -889,6 +930,7 @@ export function computeObjectPersonnelCost(
     unmappedHoursShare: c.unmappedHoursShare,
     costBasis: "employerCost",
     employer: c.employer,
+    warnings: c.warnings,
   };
 }
 

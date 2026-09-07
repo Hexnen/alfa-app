@@ -1,8 +1,26 @@
 import { db, schema } from "../db/index.js";
 import { eq } from "drizzle-orm";
-import type { OrderInput } from "../types/index.js";
+import type { OrderInput, OrderStatus } from "../types/index.js";
 import { normalizeNIP, validateNIP } from "../utils/nip.js";
 import { legacyObjectType } from "../lib/object-services.js";
+import {
+  asRecord,
+  compact,
+  parseBool,
+  parseDate,
+  parseEmail,
+  parseEnum,
+  parseFk,
+  parseHttpUrl,
+  parseId,
+  parseNumber,
+  parsePhone,
+  parseString,
+  rejectReadonlyFields,
+  requireString,
+  STR,
+  ValidationError,
+} from "../lib/validate.js";
 import Database from "better-sqlite3";
 
 // Get raw SQLite instance for transactions
@@ -13,6 +31,163 @@ export function generateOrderNumber(): string {
   const year = new Date().getFullYear();
   const random = Math.floor(10000 + Math.random() * 90000);
   return `ZL-${year}-${random}`;
+}
+
+export const ORDER_STATUSES = ["new", "in_progress", "completed", "cancelled"] as const;
+const OBJECT_TYPES = ["monitoring", "physical", "alarm", "mixed"] as const;
+const INSTALLATION_TYPES = ["new", "takeover"] as const;
+
+/**
+ * Pola zlecenia, które klient może ustawić — zarówno przy tworzeniu, jak i w PUT.
+ * Każde przechodzi przez walidator typu i długości; wszystko poza tą listą jest
+ * IGNOROWANE (formularz publiczny próbował `status`, `objectId`, `payerContractorId`).
+ *
+ * `undefined` = pola nie było w body (PUT: bez zmian). Rzuca `ValidationError`.
+ */
+export function parseOrderFields(raw: unknown) {
+  const b = asRecord(raw);
+  return {
+    requesterName: parseString(b.requesterName, { label: "Osoba zlecająca", max: STR.NAME }),
+    requesterPhone: parsePhone(b.requesterPhone, "Telefon zlecającego"),
+    requesterEmail: parseEmail(b.requesterEmail, "E-mail zlecającego"),
+    payerName: parseString(b.payerName, { label: "Nazwa płatnika", max: STR.NAME }),
+    payerNip: parseString(b.payerNip, { label: "NIP płatnika", max: 20 }),
+    payerInvoiceEmail: parseEmail(b.payerInvoiceEmail, "E-mail do faktur"),
+    objectName: parseString(b.objectName, { label: "Nazwa obiektu", max: STR.NAME }),
+    objectKind: parseString(b.objectKind, { label: "Rodzaj obiektu", max: STR.SHORT }),
+    objectAddress: parseString(b.objectAddress, { label: "Adres obiektu", max: STR.ADDRESS }),
+    objectCity: parseString(b.objectCity, { label: "Miejscowość obiektu", max: STR.SHORT }),
+    objectLocationUrl: parseHttpUrl(b.objectLocationUrl, "Link do lokalizacji"),
+    contactPerson: parseString(b.contactPerson, { label: "Osoba kontaktowa", max: STR.NAME }),
+    contactPhone: parsePhone(b.contactPhone, "Telefon kontaktowy"),
+    contactEmail: parseEmail(b.contactEmail, "E-mail kontaktowy"),
+    isCameraInstallation: parseBool(b.isCameraInstallation, "Montaż kamer"),
+    cameraCount: parseNumber(b.cameraCount, { label: "Liczba kamer", integer: true, max: 10_000 }),
+    megaphoneCount: parseNumber(b.megaphoneCount, { label: "Liczba megafonów", integer: true, max: 10_000 }),
+    vtoolsOfferNumber: parseString(b.vtoolsOfferNumber, { label: "Numer oferty vTools", max: STR.SHORT }),
+    internetIncluded: parseBool(b.internetIncluded, "Internet w cenie"),
+    interventionGroup: parseBool(b.interventionGroup, "Grupa interwencyjna"),
+    videoReception: parseBool(b.videoReception, "Wideorecepcja"),
+    monthlyAmount: parseNumber(b.monthlyAmount, { label: "Abonament miesięczny", max: 10_000_000 }),
+    contractLengthMonths: parseNumber(b.contractLengthMonths, { label: "Długość umowy (mies.)", integer: true, max: 1200 }),
+    rentalAmount: parseNumber(b.rentalAmount, { label: "Dzierżawa", max: 10_000_000 }),
+    rentalLengthMonths: parseNumber(b.rentalLengthMonths, { label: "Długość dzierżawy (mies.)", integer: true, max: 1200 }),
+    invoiceIssuer: parseString(b.invoiceIssuer, { label: "Wystawca faktury", max: STR.NAME }),
+    status: parseEnum(b.status, ORDER_STATUSES, "Status"),
+    serviceStartDate: parseDate(b.serviceStartDate, "Data rozpoczęcia usługi"),
+    installationStartDate: parseDate(b.installationStartDate, "Data rozpoczęcia montażu"),
+    notes: parseString(b.notes, { label: "Uwagi", max: STR.NOTES, keepWhitespace: true }),
+  };
+}
+
+/**
+ * Pełne wejście `POST /orders` (także publiczny ZDW, który podaje już wymuszone
+ * flagi polityki). Pola wymagane (NOT NULL w tabeli) muszą być niepuste; flagi
+ * tworzenia kontrahenta/obiektu i ich dodatkowe dane przechodzą przez te same
+ * walidatory. Rzuca `ValidationError`.
+ */
+export function parseOrderInput(raw: unknown): OrderInput {
+  const b = asRecord(raw);
+  const f = parseOrderFields(b);
+  const createContractor = parseBool(b.createContractor, "createContractor") ?? false;
+  const createObject = parseBool(b.createObject, "createObject") ?? false;
+
+  // Kontrahent istniejący: NIP i nazwa płatnika przepisują się z kartoteki
+  // (createOrderFromInput), więc tu wymagamy ich tylko przy zakładaniu nowego.
+  const payerContractorId = parseId(b.payerContractorId, "Kontrahent") ?? undefined;
+  const fromCatalog = !createContractor && payerContractorId !== undefined;
+  const payerNip = fromCatalog ? f.payerNip ?? "" : requireString(f.payerNip, "NIP płatnika", 20);
+  const payerName = fromCatalog ? f.payerName ?? "" : requireString(f.payerName, "Nazwa płatnika");
+
+  return {
+    requesterName: requireString(f.requesterName, "Osoba zlecająca"),
+    requesterPhone: requireString(f.requesterPhone, "Telefon zlecającego", STR.PHONE),
+    requesterEmail: requireString(f.requesterEmail, "E-mail zlecającego", STR.EMAIL),
+    payerName,
+    payerNip,
+    payerInvoiceEmail: f.payerInvoiceEmail ?? undefined,
+    payerContractorId,
+    objectName: requireString(f.objectName, "Nazwa obiektu"),
+    objectKind: f.objectKind ?? undefined,
+    objectAddress: f.objectAddress ?? undefined,
+    objectCity: f.objectCity ?? undefined,
+    objectLocationUrl: f.objectLocationUrl ?? undefined,
+    objectId: parseId(b.objectId, "Obiekt") ?? undefined,
+    contactPerson: requireString(f.contactPerson, "Osoba kontaktowa"),
+    contactPhone: requireString(f.contactPhone, "Telefon kontaktowy", STR.PHONE),
+    contactEmail: f.contactEmail ?? undefined,
+    isCameraInstallation: f.isCameraInstallation,
+    cameraCount: f.cameraCount ?? undefined,
+    megaphoneCount: f.megaphoneCount ?? undefined,
+    vtoolsOfferNumber: f.vtoolsOfferNumber ?? undefined,
+    internetIncluded: f.internetIncluded,
+    interventionGroup: f.interventionGroup,
+    videoReception: f.videoReception,
+    monthlyAmount: f.monthlyAmount ?? undefined,
+    contractLengthMonths: f.contractLengthMonths ?? undefined,
+    rentalAmount: f.rentalAmount ?? undefined,
+    rentalLengthMonths: f.rentalLengthMonths ?? undefined,
+    invoiceIssuer: f.invoiceIssuer ?? undefined,
+    status: f.status,
+    serviceStartDate: f.serviceStartDate ?? undefined,
+    installationStartDate: f.installationStartDate ?? undefined,
+    notes: f.notes ?? undefined,
+    createContractor,
+    createObject,
+    contractorAddress: parseString(b.contractorAddress, { label: "Adres kontrahenta", max: STR.ADDRESS }) ?? undefined,
+    contractorCity: parseString(b.contractorCity, { label: "Miejscowość kontrahenta", max: STR.SHORT }) ?? undefined,
+    contractorPostalCode: parseString(b.contractorPostalCode, { label: "Kod pocztowy", max: 12 }) ?? undefined,
+    contractorPhone: parsePhone(b.contractorPhone, "Telefon kontrahenta") ?? undefined,
+    contractorEmail: parseEmail(b.contractorEmail, "E-mail kontrahenta") ?? undefined,
+    contractorContactPerson: parseString(b.contractorContactPerson, { label: "Osoba kontaktowa kontrahenta", max: STR.NAME }) ?? undefined,
+    objectType: parseEnum(b.objectType, OBJECT_TYPES, "Typ obiektu"),
+    objectHasCameras: parseBool(b.objectHasCameras, "Kamery"),
+    objectCameraCount: parseNumber(b.objectCameraCount, { label: "Liczba kamer obiektu", integer: true, max: 10_000 }),
+    objectHasSswin: parseBool(b.objectHasSswin, "SSWiN"),
+    objectHasVideoreception: parseBool(b.objectHasVideoreception, "Wideorecepcja obiektu"),
+    objectHasOfi: parseBool(b.objectHasOfi, "OFI"),
+    objectInstallationType: parseEnum(b.objectInstallationType, INSTALLATION_TYPES, "Typ instalacji"),
+  };
+}
+
+/**
+ * Łatka `PUT /orders/:id`: jawna lista pól (bez `id`, `orderNumber`, `createdAt`,
+ * flag tworzenia). Klucze obce muszą istnieć. Puste body → 400.
+ */
+export function parseOrderPatch(raw: unknown) {
+  const b = asRecord(raw);
+  rejectReadonlyFields(b, ["orderNumber"]);
+  const f = parseOrderFields(b);
+  // Pola NOT NULL nie mogą zostać wyczyszczone jawnym `null`.
+  for (const [key, label] of [
+    ["requesterName", "Osoba zlecająca"],
+    ["requesterPhone", "Telefon zlecającego"],
+    ["requesterEmail", "E-mail zlecającego"],
+    ["payerName", "Nazwa płatnika"],
+    ["payerNip", "NIP płatnika"],
+    ["objectName", "Nazwa obiektu"],
+    ["contactPerson", "Osoba kontaktowa"],
+    ["contactPhone", "Telefon kontaktowy"],
+  ] as const) {
+    if (f[key] === null) throw new ValidationError(`Pole „${label}” nie może być puste`);
+  }
+  if (f.payerNip) {
+    const nip = normalizeNIP(f.payerNip);
+    if (!validateNIP(nip)) throw new ValidationError("Nieprawidłowy NIP (błędna suma kontrolna)");
+    f.payerNip = nip;
+  }
+  const patch = compact({
+    ...f,
+    payerContractorId: parseFk(b.payerContractorId, "contractors", "Kontrahent"),
+    objectId: parseFk(b.objectId, "objects", "Obiekt"),
+  });
+  if (Object.keys(patch).length === 0) throw new ValidationError("Brak pól do zmiany");
+  return patch;
+}
+
+/** Status z `PATCH /orders/:id/status` — tylko wartości ze słownika. */
+export function parseOrderStatus(raw: unknown): OrderStatus {
+  return parseEnum(raw, ORDER_STATUSES, "Status", { required: true }) as OrderStatus;
 }
 
 type CreatedOrder = Awaited<ReturnType<typeof fetchOrder>>;
@@ -47,12 +222,17 @@ export type CreateOrderResult =
  * response shape without leaking transaction details.
  */
 export async function createOrderFromInput(
-  body: OrderInput
+  body: OrderInput,
+  options: { source?: "internal" | "public" } = {}
 ): Promise<CreateOrderResult> {
-  // Validate NIP format
-  const normalizedNip = normalizeNIP(body.payerNip);
-  if (!validateNIP(normalizedNip)) {
-    return { ok: false, status: 400, error: "Invalid NIP format or checksum" };
+  const source = options.source ?? "internal";
+
+  // NIP z body sprawdzamy tylko wtedy, gdy ma zostać zapisany: przy wskazanym
+  // kontrahencie NIP i nazwa płatnika przepisują się z kartoteki (niżej), więc
+  // klient nie może złożyć zlecenia „na kontrahenta A z NIP-em firmy B".
+  let normalizedNip = normalizeNIP(body.payerNip ?? "");
+  if ((body.createContractor || !body.payerContractorId) && !validateNIP(normalizedNip)) {
+    return { ok: false, status: 400, error: "Nieprawidłowy NIP (błędna suma kontrolna)" };
   }
 
   // Validate that we have either contractorId or createContractor flag
@@ -146,9 +326,11 @@ export async function createOrderFromInput(
 
       // Verify contractor exists
       const checkContractorStmt = sqlite.prepare(
-        "SELECT id FROM contractors WHERE id = ? LIMIT 1"
+        "SELECT id, nip, name FROM contractors WHERE id = ? LIMIT 1"
       );
-      const contractor = checkContractorStmt.get(body.payerContractorId);
+      const contractor = checkContractorStmt.get(body.payerContractorId) as
+        | { id: number; nip: string; name: string }
+        | undefined;
 
       if (!contractor) {
         sqlite.exec("ROLLBACK");
@@ -160,6 +342,10 @@ export async function createOrderFromInput(
       }
 
       contractorId = body.payerContractorId;
+      // Migawka płatnika na zleceniu = dane WYBRANEGO kontrahenta, nie to, co
+      // przyszło w body — inaczej zlecenie nosiło NIP innej firmy niż jego FK.
+      normalizedNip = contractor.nip;
+      if (!body.payerName) body.payerName = contractor.name;
     }
 
     // Step 2: Handle object (create new or use existing)
@@ -225,10 +411,14 @@ export async function createOrderFromInput(
         VALUES (?, ?, ?, ?, datetime('now'))
       `);
 
+      // Opis zdradza pochodzenie: obiekt z anonimowego formularza ZDW czeka na
+      // weryfikację (status `pending`, dział techniczny) i handlowiec ma to widzieć.
       insertHistoryStmt.run(
         objectId,
         "created",
-        "Utworzono z zlecenia montażu",
+        source === "public"
+          ? "Utworzono z publicznego formularza ZDW (do weryfikacji)"
+          : "Utworzono z zlecenia montażu",
         objectData
       );
     } else {

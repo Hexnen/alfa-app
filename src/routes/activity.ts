@@ -1,6 +1,11 @@
 /**
  * Globalny dziennik aktywności (activity_log) — odczyt.
- * Montowane pod /activity, dostępne dla każdego zalogowanego (poza API_TAB_MAP).
+ * Montowane pod /activity. Uprawnienia:
+ *  - /activity/object/:id → wpis w API_TAB_MAP (zakładka `objects`): wpisy
+ *    streszczają zmiany obiektu i jego wydarzenia, więc widzi je ten, kto
+ *    widzi obiekty;
+ *  - /activity/recent → własna bramka niżej (technical/kalendarz), bo globalny
+ *    feed to głównie tytuły i terminy wydarzeń kalendarza.
  * Wpisy dotyczące kalendarza dostają dołączony skrót wydarzenia (`event`).
  */
 import { Hono } from "hono";

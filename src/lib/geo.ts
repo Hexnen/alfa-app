@@ -25,6 +25,8 @@ import { getCompanyConfig, officeAddressLine, type KmSource } from "./company-co
 
 export const GEO_CACHE_TTL_DAYS = 90;
 export const NOMINATIM_SEARCH_URL = "https://nominatim.openstreetmap.org/search";
+/** Reverse (współrzędne → jednostka administracyjna) — ta sama kolejka i User-Agent. */
+export const NOMINATIM_REVERSE_URL = "https://nominatim.openstreetmap.org/reverse";
 export const OSRM_ROUTE_URL = "https://router.project-osrm.org/route/v1/driving";
 /** Table API — macierz n×n jednym zapytaniem (planer trasy). */
 export const OSRM_TABLE_URL = "https://router.project-osrm.org/table/v1/driving";
@@ -112,15 +114,29 @@ export function routeCacheKey(from: { lat: number; lng: number }, to: { lat: num
   return `route:${p(from)}|${p(to)}`;
 }
 
-/** Odczyt z cache'u z respektowaniem TTL. Uszkodzony JSON traktujemy jak brak wpisu. */
-export function geoCacheGet<T>(key: string, dbx: DbOrTx = db): T | null {
+/** Domyślne TTL cache'u w minutach (90 dni) — obowiązuje, gdy wołający nie poda własnego. */
+export const GEO_CACHE_TTL_MINUTES = GEO_CACHE_TTL_DAYS * 24 * 60;
+
+/**
+ * Odczyt z cache'u z respektowaniem TTL. Uszkodzony JSON traktujemy jak brak wpisu.
+ *
+ * `ttlMinutes` pozwala współdzielić tę samą tabelę danym o zupełnie innej „świeżości”
+ * (prognoza pogody starzeje się w godzinę, ostrzeżenia IMGW w kwadrans) — pominięty
+ * oznacza dotychczasowe 90 dni, więc istniejące wywołania zachowują się bez zmian.
+ */
+export function geoCacheGet<T>(
+  key: string,
+  dbx: DbOrTx = db,
+  ttlMinutes: number = GEO_CACHE_TTL_MINUTES
+): T | null {
+  const minutes = Number.isFinite(ttlMinutes) && ttlMinutes > 0 ? Math.round(ttlMinutes) : GEO_CACHE_TTL_MINUTES;
   const row = dbx
     .select({ value: schema.geoCache.value })
     .from(schema.geoCache)
     .where(
       and(
         eq(schema.geoCache.key, key),
-        sql`${schema.geoCache.createdAt} > datetime('now', ${`-${GEO_CACHE_TTL_DAYS} days`})`
+        sql`${schema.geoCache.createdAt} > datetime('now', ${`-${minutes} minutes`})`
       )
     )
     .get();
@@ -191,18 +207,29 @@ function throttled<T>(fn: () => Promise<T>): Promise<T> {
   return run;
 }
 
-/** GET z timeoutem; każdy błąd (sieć, timeout, HTTP, JSON) wraca jako `{ error }`. */
-async function getJson(url: string, what: string): Promise<GeoOutcome<{ json: unknown }>> {
+/**
+ * GET z timeoutem; każdy błąd (sieć, timeout, HTTP, JSON) wraca jako `{ error }`.
+ *
+ * `throttle: false` omija kolejkę 1 req/s — TYLKO dla API bez takiego limitu w ToS
+ * (Open-Meteo, IMGW). Wszystko, co idzie do Nominatim albo OSRM, musi zostać w kolejce.
+ * Wstrzyknięty `setGeoFetch` i `GEO_OFFLINE=1` obowiązują w obu trybach, więc testy
+ * i tryb offline działają tak samo dla pogody jak dla geokodera.
+ */
+export async function geoGetJson(
+  url: string,
+  what: string,
+  opts: { throttle?: boolean } = {}
+): Promise<GeoOutcome<{ json: unknown }>> {
   if (!geoNetworkEnabled()) {
     return { error: `${what}: tryb offline (GEO_OFFLINE=1) — brak wpisu w cache` };
   }
+  const call = () =>
+    fetchImpl(url, {
+      headers: { Accept: "application/json", "User-Agent": GEO_USER_AGENT },
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
   try {
-    const res = await throttled(() =>
-      fetchImpl(url, {
-        headers: { Accept: "application/json", "User-Agent": GEO_USER_AGENT },
-        signal: AbortSignal.timeout(TIMEOUT_MS),
-      })
-    );
+    const res = opts.throttle === false ? await call() : await throttled(call);
     if (!res.ok) return { error: `${what}: odpowiedź ${res.status}` };
     return { json: (await res.json()) as unknown };
   } catch (err) {
@@ -211,6 +238,8 @@ async function getJson(url: string, what: string): Promise<GeoOutcome<{ json: un
     return { error: `${what}: ${timedOut ? `brak odpowiedzi w ${TIMEOUT_MS / 1000} s` : "brak połączenia"}` };
   }
 }
+
+const getJson = geoGetJson;
 
 // ---------------------------------------------------------------------------
 // Geokodowanie

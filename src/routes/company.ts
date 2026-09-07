@@ -6,9 +6,15 @@
  * kalendarza — dystansu i czasu dojazdu, więc wystawiamy je osobno: geografia bez żadnych
  * danych kosztowych (stawki i kwoty zostają w panelu admina).
  *
- * UWAGA przy zmianach uprawnień: `/company` celowo NIE ma wpisu w `API_TAB_MAP`
- * (src/middleware/auth.ts) — dodanie go odcięłoby technikom zarówno dojazd w kalendarzu,
- * jak i znacznik biura na mapie realizacji.
+ * Uprawnienia (src/middleware/auth.ts): `/company/office` celowo NIE ma wpisu w
+ * `API_TAB_MAP` — znacznik biura potrzebuje każda mapa (realizacje, kalendarz).
+ * `/company/travel` ma wpis `technical/kalendarz`: dojazd wołają wyłącznie dialog
+ * i dymki kalendarza, a odpowiedź zawiera współrzędne obiektów.
+ *
+ * GET /travel czyta WYŁĄCZNIE z cache'u i niczego nie zapisuje. Doliczanie brakujących
+ * tras (zapis do `geo_cache` i `objects.latitude/longitude`) siedzi w POST /travel/warm,
+ * który front woła po dostaniu `pending: true`. Wcześniej GET robił to sam w tle —
+ * odczyt z efektem ubocznym w bazie, dostępny każdemu zalogowanemu.
  */
 import { Hono } from "hono";
 import { eq, inArray } from "drizzle-orm";
@@ -134,8 +140,9 @@ async function travelFor(
  *
  * Odpowiada z cache'u (bez ruchu sieciowego), żeby nie wieszać UI na throttlowanych
  * zapytaniach do Nominatim/OSRM: przy braku wpisu zwraca przybliżenie linią prostą
- * z `pending: true` i dolicza trasę w tle. Poza 400/404 zawsze 200 — brak adresu czy
- * brak sieci wraca jako `data.error`, bo formularz kalendarza ma działać dalej.
+ * z `pending: true` — front dolicza trasę przez POST /travel/warm. Poza 400/404 zawsze
+ * 200 — brak adresu czy brak sieci wraca jako `data.error`, bo formularz kalendarza ma
+ * działać dalej.
  */
 app.get("/travel", async (c) => {
   const raw = c.req.query("objectIds");
@@ -143,14 +150,7 @@ app.get("/travel", async (c) => {
 
   // --- Tryb zbiorczy ---
   if (raw !== undefined) {
-    const ids = [
-      ...new Set(
-        raw
-          .split(",")
-          .map((v) => Number(v.trim()))
-          .filter((v) => Number.isInteger(v) && v > 0)
-      ),
-    ];
+    const ids = parseIdList(raw.split(","));
     if (ids.length === 0) {
       return c.json<ApiResponse<null>>({ success: false, error: "Pusta lista obiektów (objectIds)" }, 400);
     }
@@ -161,17 +161,8 @@ app.get("/travel", async (c) => {
       );
     }
 
-    const known = new Set(
-      db
-        .select({ id: schema.objects.id })
-        .from(schema.objects)
-        .where(inArray(schema.objects.id, ids))
-        .all()
-        .map((r) => r.id)
-    );
-
+    const known = knownObjectIds(ids);
     const out: CompanyTravel[] = [];
-    let warmed = 0;
     for (const id of ids) {
       if (!known.has(id)) {
         out.push({
@@ -188,13 +179,8 @@ app.get("/travel", async (c) => {
         });
         continue;
       }
-      const { data, wantsWarm } = await travelFor(id, source);
-      if (wantsWarm && warmed < WARM_PER_BATCH) {
-        warmTravel(id);
-        warmed++;
-      }
-      // Poza limitem doliczania `pending` nadal jest prawdą — klient wróci po to przy
-      // kolejnym odświeżeniu widoku, a my nie zapychamy kolejki geokodera na raz.
+      // `pending: true` mówi klientowi, żeby dograł trasę przez POST /travel/warm.
+      const { data } = await travelFor(id, source);
       out.push(data);
     }
     return c.json<ApiResponse<CompanyTravel[]>>({ success: true, data: out });
@@ -213,9 +199,68 @@ app.get("/travel", async (c) => {
     .get();
   if (!object) return c.json<ApiResponse<null>>({ success: false, error: "Nie znaleziono obiektu" }, 404);
 
-  const { data, wantsWarm } = await travelFor(objectId, source);
-  if (wantsWarm) warmTravel(objectId);
+  const { data } = await travelFor(objectId, source);
   return c.json<ApiResponse<CompanyTravel>>({ success: true, data });
 });
+
+/**
+ * POST /travel/warm — dolicza w tle brakujące trasy dla obiektów z `pending: true`.
+ * Body: `{ objectIds: number[] }` (max TRAVEL_BATCH_LIMIT). Odpowiada od razu
+ * `{ queued }` — ile tras faktycznie trafiło do kolejki; klient odpytuje GET /travel
+ * ponownie za chwilę. To jedyne miejsce w /company, które pisze do bazy (geo_cache,
+ * współrzędne obiektu), dlatego jest POST-em; strażnik zakładek traktuje go jak odczyt
+ * (wystarczy `technical/kalendarz: view`), bo to obliczenie dla dymków, nie edycja.
+ */
+app.post("/travel/warm", async (c) => {
+  const body = (await c.req.json().catch(() => null)) as { objectIds?: unknown } | null;
+  const rawIds = Array.isArray(body?.objectIds) ? body!.objectIds : [];
+  const ids = parseIdList(rawIds);
+  if (ids.length === 0) {
+    return c.json<ApiResponse<null>>({ success: false, error: "Pusta lista obiektów (objectIds)" }, 400);
+  }
+  if (ids.length > TRAVEL_BATCH_LIMIT) {
+    return c.json<ApiResponse<null>>(
+      { success: false, error: `Za dużo obiektów naraz (limit ${TRAVEL_BATCH_LIMIT})` },
+      400
+    );
+  }
+  const source = getCompanyConfig().values.kmSource;
+  const known = knownObjectIds(ids);
+  let queued = 0;
+  for (const id of ids) {
+    if (!known.has(id) || queued >= WARM_PER_BATCH) continue;
+    // Doliczamy tylko to, czego w cache'u faktycznie brakuje — inaczej klient mógłby
+    // wymuszać geokodowanie w kółko dla obiektów, które już mają trasę.
+    const { wantsWarm } = await travelFor(id, source);
+    if (!wantsWarm) continue;
+    warmTravel(id);
+    queued++;
+  }
+  // Poza limitem doliczania `pending` nadal jest prawdą — klient wróci po to przy
+  // kolejnym odświeżeniu widoku, a my nie zapychamy kolejki geokodera na raz.
+  return c.json<ApiResponse<{ queued: number }>>({ success: true, data: { queued } });
+});
+
+/** Unikalne, dodatnie całkowite id z listy (stringi z query albo liczby z body). */
+function parseIdList(raw: unknown[]): number[] {
+  return [
+    ...new Set(
+      raw
+        .map((v) => (typeof v === "string" ? Number(v.trim()) : Number(v)))
+        .filter((v) => Number.isInteger(v) && v > 0)
+    ),
+  ];
+}
+
+function knownObjectIds(ids: number[]): Set<number> {
+  return new Set(
+    db
+      .select({ id: schema.objects.id })
+      .from(schema.objects)
+      .where(inArray(schema.objects.id, ids))
+      .all()
+      .map((r) => r.id)
+  );
+}
 
 export default app;

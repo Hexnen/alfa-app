@@ -55,10 +55,30 @@ export function getUserId(c: Context): number {
 // Mapowanie prefiksu API → podzakładki, które go używają. Kolejność ma
 // znaczenie: dłuższe/bardziej szczegółowe prefiksy przed ogólnymi
 // (np. "/cma/mail" przed "/cma"). Ścieżki nieobjęte tą listą (np. /stats,
-// /history) są dostępne dla każdego zalogowanego użytkownika.
-const API_TAB_MAP: { prefix: string; tabs: string[] }[] = [
+// /history/recent, /company/office) są dostępne dla każdego zalogowanego
+// użytkownika — każda z nich sama pilnuje, co pokazuje (patrz komentarze
+// przy trasach).
+//
+// `writeTabs` (opcjonalne): gdy API dzieli kilka zakładek, bo inne moduły
+// czytają z niego słownik (spółki w formularzu obiektu, handlowcy w formularzu
+// kontrahenta), ODCZYT wolno z każdej wypisanej zakładki, ale ZAPIS wyłącznie
+// z tych w `writeTabs`. Bez tego maxLevel() z „objects: edit" dawał prawo
+// edycji spółek i handlowców komuś, kto ma edytować tylko obiekty.
+const API_TAB_MAP: { prefix: string; tabs: string[]; writeTabs?: string[] }[] = [
   { prefix: "/contractors", tabs: ["contractors"] },
   { prefix: "/objects", tabs: ["objects"] },
+  // Historia zmian obiektu (stare/nowe wartości pól, w tym kwoty umów) — to
+  // rekordy obiektów i kontrahentów, więc widzi ją ten, kto widzi obiekty.
+  // /history/recent zostaje poza mapą (Dashboard) i sam zwraca pustą listę
+  // bez tych uprawnień — 403 wywalałoby cały Dashboard w Promise.all.
+  { prefix: "/history/object", tabs: ["objects", "contractors"] },
+  // Dziennik aktywności obiektu — jak wyżej; globalny /activity/recent ma
+  // własną bramkę (technical/kalendarz) w src/routes/activity.ts.
+  { prefix: "/activity/object", tabs: ["objects"] },
+  // Dojazd biuro → obiekt wołają tylko dialog i dymki kalendarza
+  // (frontend/src/lib/travel.ts, Calendar.tsx). /company/office (znacznik
+  // biura na mapie realizacji) zostaje otwarte dla zalogowanych.
+  { prefix: "/company/travel", tabs: ["technical/kalendarz"] },
   { prefix: "/contracts", tabs: ["contracts"] },
   { prefix: "/orders", tabs: ["orders"] },
   // Analityka — TRZY OSOBNE wpisy, a nie jeden { prefix: "/analytics", tabs: [wszystkie trzy] }.
@@ -103,12 +123,16 @@ const API_TAB_MAP: { prefix: string; tabs: string[] }[] = [
   // kosztowe (redactCosts w src/routes/offers.ts).
   { prefix: "/offers", tabs: ["technical/oferty"] },
   { prefix: "/technicians", tabs: ["technical/technicy", "technical/kalendarz"] },
-  // Handlowcy: własna zakładka, ale listę czytają też formularze kontrahenta i obiektu.
-  { prefix: "/salespeople", tabs: ["handlowcy", "contractors", "objects"] },
-  // Spółki: własna zakładka; listę czyta też formularz obiektu i kadry.
+  // Handlowcy: własna zakładka, ale listę czytają też formularze kontrahenta
+  // i obiektu. Zapis (stawki, prowizje, przypisania) — tylko z „handlowcy".
+  { prefix: "/salespeople", tabs: ["handlowcy", "contractors", "objects"], writeTabs: ["handlowcy"] },
   // Spółki: własna zakładka; słownik czytają też formularz obiektu i kadry
-  // (umowa/biuro wybierają spółkę z listy).
-  { prefix: "/companies", tabs: ["spolki", "objects", "kadry/wynagrodzenia", "kadry/pracownicy"] },
+  // (umowa/biuro wybierają spółkę z listy). Zapis — tylko z „spolki".
+  {
+    prefix: "/companies",
+    tabs: ["spolki", "objects", "kadry/wynagrodzenia", "kadry/pracownicy"],
+    writeTabs: ["spolki"],
+  },
   // Import raportu obiektów nadpisuje CAŁY rejestr — zostaje wyłącznie przy
   // dziale technicznym. MUSI stać PRZED szerszym "/monitored-objects", bo
   // find() bierze pierwsze dopasowanie.
@@ -144,15 +168,24 @@ export async function tabPermissionGuard(c: Context, next: Next) {
 
   const level = maxLevel(user, match.tabs);
   // Zapis własnych preferencji (zestawy filtrów kalendarza, token ICS) to nie
-  // edycja danych modułu — wystarczy poziom "view".
+  // edycja danych modułu — wystarczy poziom "view". Tak samo dogrzanie cache'u
+  // dojazdów (POST /company/travel/warm): to obliczenie dla dymków kalendarza,
+  // które czytelnik i tak widzi, a nie edycja czyichś danych.
   const isOwnPreference =
-    path.startsWith("/calendar/filter-sets") || path.startsWith("/calendar/feed-token");
+    path.startsWith("/calendar/filter-sets") ||
+    path.startsWith("/calendar/feed-token") ||
+    path === "/company/travel/warm";
   const isWrite = !isOwnPreference && !READ_METHODS.has(c.req.method.toUpperCase());
   if (level === "none") {
     return c.json({ success: false, error: "Brak dostępu do tej sekcji" }, 403);
   }
-  if (isWrite && level !== "edit") {
-    return c.json({ success: false, error: "Brak uprawnień do edycji (tryb tylko do odczytu)" }, 403);
+  if (isWrite) {
+    // Zapis liczy się wyłącznie z zakładek `writeTabs` (gdy są) — poziom
+    // z pozostałych zakładek daje tylko odczyt słownika.
+    const writeLevel = match.writeTabs ? maxLevel(user, match.writeTabs) : level;
+    if (writeLevel !== "edit") {
+      return c.json({ success: false, error: "Brak uprawnień do edycji (tryb tylko do odczytu)" }, 403);
+    }
   }
   return next();
 }

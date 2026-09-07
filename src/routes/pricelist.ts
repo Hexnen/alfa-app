@@ -4,8 +4,19 @@ import { and, eq, asc, inArray, ne, sql } from "drizzle-orm";
 import type { ApiResponse } from "../types/index.js";
 import { PRICE_ITEM_KINDS } from "../db/schema.js";
 import type { NewPriceItem, PriceItemKind, PriceListGroup } from "../db/schema.js";
+import { parseMoney } from "../lib/money.js";
 
 const app = new Hono();
+
+// Typ transakcji drizzle/better-sqlite3 — helpery współdzielone między db i tx.
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+type DbOrTx = typeof db | Tx;
+
+// better-sqlite3 jest synchroniczny — callback db.transaction MUSI być
+// synchroniczny (żadnych await w środku). Operacje wieloetapowe (zdjęcie flagi
+// z poprzedniego głównego + nadanie nowemu, przeniesienie pozycji + DELETE,
+// duplikat nagłówka + pozycji) idą w JEDNEJ transakcji — przerwanie w połowie
+// zostawiało dwa cenniki główne albo cennik-sierotę bez pozycji.
 
 // ---------------------------------------------------------------------------
 // Cenniki (grupy) — /api/pricelist/lists
@@ -17,28 +28,31 @@ const app = new Hono();
  * wybieramy najstarszy cennik (a jak nie ma żadnego — tworzymy podstawowy),
  * żeby zgodność wsteczna `GET /pricelist` nigdy nie wywróciła się na null.
  */
-async function ensureDefaultListId(): Promise<number> {
-  const found = await db
+function ensureDefaultListIdSync(dbx: DbOrTx): number {
+  const found = dbx
     .select()
     .from(schema.priceLists)
     .where(eq(schema.priceLists.isDefault, true))
-    .limit(1);
-  if (found.length > 0) return found[0].id;
+    .limit(1)
+    .get();
+  if (found) return found.id;
 
-  const any = await db
+  const any = dbx
     .select()
     .from(schema.priceLists)
     .orderBy(asc(schema.priceLists.position), asc(schema.priceLists.id))
-    .limit(1);
-  if (any.length > 0) {
-    await db
+    .limit(1)
+    .get();
+  if (any) {
+    dbx
       .update(schema.priceLists)
       .set({ isDefault: true })
-      .where(eq(schema.priceLists.id, any[0].id));
-    return any[0].id;
+      .where(eq(schema.priceLists.id, any.id))
+      .run();
+    return any.id;
   }
 
-  const created = await db
+  const created = dbx
     .insert(schema.priceLists)
     .values({
       name: "Cennik podstawowy",
@@ -46,8 +60,13 @@ async function ensureDefaultListId(): Promise<number> {
       isDefault: true,
       position: 1,
     })
-    .returning();
-  return created[0].id;
+    .returning()
+    .get();
+  return created.id;
+}
+
+async function ensureDefaultListId(): Promise<number> {
+  return ensureDefaultListIdSync(db);
 }
 
 function parseListBody(body: Record<string, unknown>): {
@@ -132,39 +151,45 @@ app.post("/lists", async (c) => {
     return c.json<ApiResponse<null>>({ success: false, error }, 400);
   }
 
-  await ensureDefaultListId();
-
-  if (data.position === undefined) {
-    const rows = await db.select().from(schema.priceLists);
-    data.position = rows.length + 1;
-  }
-
   try {
-    const result = await db
-      .insert(schema.priceLists)
-      .values({
-        name: data.name,
-        description: data.description,
-        active: data.active,
-        position: data.position,
-        isDefault: false,
-      })
-      .returning();
+    const created = db.transaction((tx) => {
+      ensureDefaultListIdSync(tx);
 
-    // Opcjonalne ustawienie od razu jako główny.
-    if (body.isDefault) {
-      await db
-        .update(schema.priceLists)
-        .set({ isDefault: false })
-        .where(ne(schema.priceLists.id, result[0].id));
-      await db
-        .update(schema.priceLists)
-        .set({ isDefault: true, active: true })
-        .where(eq(schema.priceLists.id, result[0].id));
-      result[0].isDefault = true;
-    }
+      if (data.position === undefined) {
+        const rows = tx.select({ id: schema.priceLists.id }).from(schema.priceLists).all();
+        data.position = rows.length + 1;
+      }
 
-    return c.json({ success: true, data: result[0], message: "Cennik utworzony" }, 201);
+      const row = tx
+        .insert(schema.priceLists)
+        .values({
+          name: data.name,
+          description: data.description,
+          active: data.active,
+          position: data.position,
+          isDefault: false,
+        })
+        .returning()
+        .get();
+
+      // Opcjonalne ustawienie od razu jako główny — zdjęcie flagi z poprzednika
+      // i nadanie nowej w tej samej transakcji (nigdy dwa główne naraz).
+      if (body.isDefault) {
+        tx.update(schema.priceLists)
+          .set({ isDefault: false })
+          .where(ne(schema.priceLists.id, row.id))
+          .run();
+        tx.update(schema.priceLists)
+          .set({ isDefault: true, active: true })
+          .where(eq(schema.priceLists.id, row.id))
+          .run();
+        row.isDefault = true;
+        row.active = true;
+      }
+      return row;
+    });
+
+    return c.json({ success: true, data: created, message: "Cennik utworzony" }, 201);
   } catch (err) {
     if (isUniqueViolation(err)) {
       return c.json<ApiResponse<null>>(
@@ -247,20 +272,24 @@ app.post("/lists/:id/default", async (c) => {
     );
   }
 
-  await db
-    .update(schema.priceLists)
-    .set({ isDefault: false, updatedAt: new Date().toISOString() })
-    .where(ne(schema.priceLists.id, id));
-  // Cennik główny musi być aktywny — inaczej nie byłoby z czego prefillować wycen.
-  const result = await db
-    .update(schema.priceLists)
-    .set({ isDefault: true, active: true, updatedAt: new Date().toISOString() })
-    .where(eq(schema.priceLists.id, id))
-    .returning();
+  const result = db.transaction((tx) => {
+    const now = new Date().toISOString();
+    tx.update(schema.priceLists)
+      .set({ isDefault: false, updatedAt: now })
+      .where(ne(schema.priceLists.id, id))
+      .run();
+    // Cennik główny musi być aktywny — inaczej nie byłoby z czego prefillować wycen.
+    return tx
+      .update(schema.priceLists)
+      .set({ isDefault: true, active: true, updatedAt: now })
+      .where(eq(schema.priceLists.id, id))
+      .returning()
+      .get();
+  });
 
   return c.json({
     success: true,
-    data: result[0],
+    data: result,
     message: "Ustawiono jako cennik główny",
   });
 });
@@ -292,59 +321,64 @@ app.post("/lists/:id/duplicate", async (c) => {
     );
   }
 
-  const taken = new Set(
-    (await db.select({ name: schema.priceLists.name }).from(schema.priceLists)).map(
-      (r) => r.name
-    )
-  );
-  let name = rawName || `${source[0].name} (kopia)`;
-  if (taken.has(name)) {
-    const base = (rawName || `${source[0].name} (kopia)`).slice(0, 70);
-    let n = 2;
-    while (taken.has(`${base} ${n}`)) n++;
-    name = `${base} ${n}`;
-  }
+  // Nagłówek + pozycje w jednej transakcji: przerwanie po INSERT nagłówka
+  // zostawiało pusty cennik-sierotę o nazwie „(kopia)".
+  const { created, count } = db.transaction((tx) => {
+    const all = tx.select({ name: schema.priceLists.name }).from(schema.priceLists).all();
+    const taken = new Set(all.map((r) => r.name));
+    let name = rawName || `${source[0].name} (kopia)`;
+    if (taken.has(name)) {
+      const base = (rawName || `${source[0].name} (kopia)`).slice(0, 70);
+      let n = 2;
+      while (taken.has(`${base} ${n}`)) n++;
+      name = `${base} ${n}`;
+    }
 
-  const all = await db.select().from(schema.priceLists);
-  const created = await db
-    .insert(schema.priceLists)
-    .values({
-      name,
-      description:
-        typeof body.description === "string"
-          ? (body.description as string).trim()
-          : source[0].description,
-      active: true,
-      isDefault: false,
-      position: all.length + 1,
-    })
-    .returning();
+    const row = tx
+      .insert(schema.priceLists)
+      .values({
+        name,
+        description:
+          typeof body.description === "string"
+            ? (body.description as string).trim()
+            : source[0].description,
+        active: true,
+        isDefault: false,
+        position: all.length + 1,
+      })
+      .returning()
+      .get();
 
-  const items = await db
-    .select()
-    .from(schema.priceList)
-    .where(eq(schema.priceList.priceListId, id))
-    .orderBy(asc(schema.priceList.position), asc(schema.priceList.id));
+    const items = tx
+      .select()
+      .from(schema.priceList)
+      .where(eq(schema.priceList.priceListId, id))
+      .orderBy(asc(schema.priceList.position), asc(schema.priceList.id))
+      .all();
 
-  if (items.length > 0) {
-    await db.insert(schema.priceList).values(
-      items.map((i) => ({
-        priceListId: created[0].id,
-        name: i.name,
-        unit: i.unit,
-        kind: i.kind,
-        price: i.price,
-        position: i.position,
-        active: i.active,
-      }))
-    );
-  }
+    if (items.length > 0) {
+      tx.insert(schema.priceList)
+        .values(
+          items.map((i) => ({
+            priceListId: row.id,
+            name: i.name,
+            unit: i.unit,
+            kind: i.kind,
+            price: i.price,
+            position: i.position,
+            active: i.active,
+          }))
+        )
+        .run();
+    }
+    return { created: row, count: items.length };
+  });
 
   return c.json(
     {
       success: true,
-      data: { ...created[0], itemCount: items.length, technicianCount: 0 },
-      message: `Skopiowano cennik (${items.length} poz.)`,
+      data: { ...created, itemCount: count, technicianCount: 0 },
+      message: `Skopiowano cennik (${count} poz.)`,
     },
     201
   );
@@ -400,21 +434,25 @@ app.delete("/lists/:id", async (c) => {
     );
   }
 
-  if (items.length > 0) {
-    const defaultId = await ensureDefaultListId();
-    await db
-      .update(schema.priceList)
-      .set({ priceListId: defaultId, updatedAt: new Date().toISOString() })
-      .where(eq(schema.priceList.priceListId, id));
-  }
-  if (techs.length > 0) {
-    await db
-      .update(schema.technicians)
-      .set({ priceListId: null, updatedAt: new Date().toISOString() })
-      .where(eq(schema.technicians.priceListId, id));
-  }
-
-  await db.delete(schema.priceLists).where(eq(schema.priceLists.id, id));
+  // Przeniesienie pozycji i techników + DELETE w jednej transakcji — inaczej
+  // przerwanie w połowie zostawiało pozycje już w cenniku głównym, a kasowany
+  // cennik wciąż na liście (albo odwrotnie: techników bez cennika).
+  db.transaction((tx) => {
+    if (items.length > 0) {
+      const defaultId = ensureDefaultListIdSync(tx);
+      tx.update(schema.priceList)
+        .set({ priceListId: defaultId, updatedAt: new Date().toISOString() })
+        .where(eq(schema.priceList.priceListId, id))
+        .run();
+    }
+    if (techs.length > 0) {
+      tx.update(schema.technicians)
+        .set({ priceListId: null, updatedAt: new Date().toISOString() })
+        .where(eq(schema.technicians.priceListId, id))
+        .run();
+    }
+    tx.delete(schema.priceLists).where(eq(schema.priceLists.id, id)).run();
+  });
 
   return c.json<ApiResponse<null>>({
     success: true,
@@ -551,26 +589,31 @@ app.post("/copy", async (c) => {
     );
   }
 
-  const target = await db
-    .select()
-    .from(schema.priceList)
-    .where(eq(schema.priceList.priceListId, toListId));
-  let next = target.reduce((m, i) => Math.max(m, i.position), 0);
-
-  const inserted = await db
-    .insert(schema.priceList)
-    .values(
-      items.map((i) => ({
-        priceListId: toListId,
-        name: i.name,
-        unit: i.unit,
-        kind: i.kind,
-        price: i.price,
-        position: ++next,
-        active: i.active,
-      }))
-    )
-    .returning();
+  // Odczyt ostatniej pozycji i INSERT w jednej transakcji — dwa równoległe
+  // kopiowania do tego samego cennika nie mogą dostać tych samych numerów pozycji.
+  const inserted = db.transaction((tx) => {
+    const target = tx
+      .select({ position: schema.priceList.position })
+      .from(schema.priceList)
+      .where(eq(schema.priceList.priceListId, toListId))
+      .all();
+    let next = target.reduce((m, i) => Math.max(m, i.position), 0);
+    return tx
+      .insert(schema.priceList)
+      .values(
+        items.map((i) => ({
+          priceListId: toListId,
+          name: i.name,
+          unit: i.unit,
+          kind: i.kind,
+          price: i.price,
+          position: ++next,
+          active: i.active,
+        }))
+      )
+      .returning()
+      .all();
+  });
 
   return c.json(
     {
@@ -614,11 +657,11 @@ function parseBody(body: Record<string, unknown>): {
     kind = body.kind as PriceItemKind;
   }
 
-  const priceRaw =
-    typeof body.price === "string"
-      ? parseFloat(body.price.replace(",", "."))
-      : Number(body.price);
-  const price = Number.isFinite(priceRaw) ? priceRaw : 0;
+  // Wspólny parser kwot: „1 234,56" to błąd (nie 1 zł jak przy parseFloat),
+  // ujemna cena to błąd, puste pole = 0 (pozycja bez ceny do uzupełnienia).
+  const parsedPrice = parseMoney(body.price, "Cena");
+  if (parsedPrice.error) return { error: parsedPrice.error };
+  const price = parsedPrice.value ?? 0;
   const position = Number.isFinite(Number(body.position))
     ? Number(body.position)
     : 0;

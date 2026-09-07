@@ -1,14 +1,38 @@
+/**
+ * Historia zmian obiektów (object_history) — odczyt.
+ *
+ * Uprawnienia: /history/object/:id jest w API_TAB_MAP (objects | contractors),
+ * bo wpisy niosą stare i nowe wartości pól obiektu (kwoty abonamentu, dane
+ * kontrahenta). /history/recent woła Dashboard, który ma każdy zalogowany —
+ * dlatego zamiast 403 zwraca PUSTĄ listę użytkownikowi bez wglądu w obiekty
+ * (Dashboard ładuje statystyki i historię jednym Promise.all i 403 zabijałoby
+ * mu oba).
+ */
 import { Hono } from "hono";
 import { db, schema } from "../db/index.js";
 import { eq, desc, sql } from "drizzle-orm";
+import { getUser } from "../middleware/auth.js";
+import { maxLevel } from "../lib/auth/permissions.js";
 
 const app = new Hono();
+
+/** Zakładki, z których wolno czytać historię obiektów (jak wpis w API_TAB_MAP). */
+const HISTORY_TABS = ["objects", "contractors"];
+
+/** Sufit na `limit`/`pageSize` — bez niego `?limit=100000` zrzucał całą tabelę jednym żądaniem. */
+const MAX_PAGE = 500;
+
+function clampInt(raw: string | undefined, def: number, max: number): number {
+  const n = raw ? Number(raw) : def;
+  if (!Number.isInteger(n) || n < 1) return def;
+  return Math.min(n, max);
+}
 
 // Get history for an object
 app.get("/object/:objectId", async (c) => {
   const objectId = parseInt(c.req.param("objectId"));
-  const page = parseInt(c.req.query("page") || "1");
-  const pageSize = parseInt(c.req.query("pageSize") || "50");
+  const page = clampInt(c.req.query("page"), 1, Number.MAX_SAFE_INTEGER);
+  const pageSize = clampInt(c.req.query("pageSize"), 50, MAX_PAGE);
   const offset = (page - 1) * pageSize;
 
   const history = await db
@@ -37,7 +61,10 @@ app.get("/object/:objectId", async (c) => {
 
 // Get recent history across all objects
 app.get("/recent", async (c) => {
-  const limit = parseInt(c.req.query("limit") || "20");
+  if (maxLevel(getUser(c), HISTORY_TABS) === "none") {
+    return c.json({ success: true, data: [] });
+  }
+  const limit = clampInt(c.req.query("limit"), 20, MAX_PAGE);
 
   const history = await db
     .select({

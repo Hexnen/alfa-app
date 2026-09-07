@@ -1,20 +1,56 @@
 import { Hono } from "hono";
 import { db, schema } from "../db/index.js";
 import { eq, and, like, or, sql, desc } from "drizzle-orm";
+import type { SQL } from "drizzle-orm";
 import type { OrderInput, ApiResponse } from "../types/index.js";
-import { createOrderFromInput } from "../services/orders.js";
+import {
+  createOrderFromInput,
+  ORDER_STATUSES,
+  parseOrderInput,
+  parseOrderPatch,
+  parseOrderStatus,
+} from "../services/orders.js";
+import { isValidationError } from "../lib/validate.js";
 
 const app = new Hono();
+
+/** Body żądania → 400 z komunikatem, gdy JSON jest niepoprawny albo nie jest obiektem. */
+async function readJson(c: { req: { json(): Promise<unknown> } }): Promise<unknown> {
+  try {
+    return await c.req.json();
+  } catch {
+    return undefined;
+  }
+}
 
 // Get all orders with optional search (with joined contractor and object data)
 app.get("/", async (c) => {
   const search = c.req.query("search");
-  const status = c.req.query("status");
-  const page = parseInt(c.req.query("page") || "1");
-  const pageSize = parseInt(c.req.query("pageSize") || "20");
+  const statusRaw = c.req.query("status");
+  const page = Math.max(1, parseInt(c.req.query("page") || "1") || 1);
+  const pageSize = Math.min(200, Math.max(1, parseInt(c.req.query("pageSize") || "20") || 20));
   const offset = (page - 1) * pageSize;
 
-  let query = db
+  // Warunki zbieramy do tablicy i składamy jednym `and(...)`: drugie `.where()`
+  // w drizzle NADPISUJE pierwsze, więc `search+status` filtrowało tylko po statusie.
+  const conditions: SQL[] = [];
+  if (search) {
+    conditions.push(
+      or(
+        like(schema.orders.orderNumber, `%${search}%`),
+        like(schema.orders.requesterName, `%${search}%`),
+        like(schema.orders.payerName, `%${search}%`),
+        like(schema.orders.objectName, `%${search}%`)
+      )!
+    );
+  }
+  // Nieznany status nie nakłada filtru (jak nieznany klucz sortowania w /objects).
+  if (statusRaw && (ORDER_STATUSES as readonly string[]).includes(statusRaw)) {
+    conditions.push(eq(schema.orders.status, statusRaw as (typeof ORDER_STATUSES)[number]));
+  }
+  const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+
+  const results = await db
     .select({
       order: schema.orders,
       contractor: schema.contractors,
@@ -22,40 +58,17 @@ app.get("/", async (c) => {
     })
     .from(schema.orders)
     .leftJoin(schema.contractors, eq(schema.orders.payerContractorId, schema.contractors.id))
-    .leftJoin(schema.objects, eq(schema.orders.objectId, schema.objects.id));
+    .leftJoin(schema.objects, eq(schema.orders.objectId, schema.objects.id))
+    .where(whereClause)
+    .orderBy(desc(schema.orders.createdAt))
+    .limit(pageSize)
+    .offset(offset);
 
-  if (search) {
-    query = query.where(
-      or(
-        like(schema.orders.orderNumber, `%${search}%`),
-        like(schema.orders.requesterName, `%${search}%`),
-        like(schema.orders.payerName, `%${search}%`),
-        like(schema.orders.objectName, `%${search}%`)
-      )
-    ) as typeof query;
-  }
-
-  if (status) {
-    query = query.where(eq(schema.orders.status, status as "new" | "in_progress" | "completed" | "cancelled")) as typeof query;
-  }
-
-  const results = await query.orderBy(desc(schema.orders.createdAt)).limit(pageSize).offset(offset);
-
-  let countQuery = db.select({ count: sql<number>`count(*)` }).from(schema.orders);
-  if (search) {
-    countQuery = countQuery.where(
-      or(
-        like(schema.orders.orderNumber, `%${search}%`),
-        like(schema.orders.requesterName, `%${search}%`),
-        like(schema.orders.payerName, `%${search}%`),
-        like(schema.orders.objectName, `%${search}%`)
-      )
-    ) as typeof countQuery;
-  }
-  if (status) {
-    countQuery = countQuery.where(eq(schema.orders.status, status as "new" | "in_progress" | "completed" | "cancelled")) as typeof countQuery;
-  }
-  const countResult = await countQuery;
+  // `total` z TYM SAMYM where — inaczej paginacja po filtrze pokazuje złą liczbę stron.
+  const countResult = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(schema.orders)
+    .where(whereClause);
   const total = countResult[0].count;
 
   // Map results to include current contractor/object names
@@ -108,7 +121,16 @@ app.get("/:id", async (c) => {
 
 // Create order with optional contractor and object creation (ATOMIC TRANSACTION)
 app.post("/", async (c) => {
-  const body = await c.req.json<OrderInput>();
+  // Ten sam walidator, co publiczny formularz ZDW: typy, długości, enumy.
+  let body: OrderInput;
+  try {
+    body = parseOrderInput(await readJson(c));
+  } catch (err) {
+    if (isValidationError(err)) {
+      return c.json<ApiResponse<null>>({ success: false, error: err.message }, 400);
+    }
+    throw err;
+  }
 
   try {
     const result = await createOrderFromInput(body);
@@ -146,9 +168,11 @@ app.post("/", async (c) => {
 // Update order
 app.put("/:id", async (c) => {
   const id = parseInt(c.req.param("id"));
-  const body = await c.req.json<
-    Partial<OrderInput> & { expectedUpdatedAt?: string }
-  >();
+  const raw = await readJson(c);
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return c.json<ApiResponse<null>>({ success: false, error: "Nieprawidłowe dane" }, 400);
+  }
+  const { expectedUpdatedAt, ...rest } = raw as Record<string, unknown>;
 
   // Check if order exists
   const existing = await db
@@ -169,9 +193,7 @@ app.put("/:id", async (c) => {
   // A missing token is rejected (428) instead of degrading to eq(id) — that
   // degrade path let two concurrent editors silently overwrite each other
   // (last-writer-wins), which is exactly the race this guard exists to close.
-  const { expectedUpdatedAt, ...fields } = body;
-
-  if (!expectedUpdatedAt) {
+  if (typeof expectedUpdatedAt !== "string" || !expectedUpdatedAt) {
     return c.json<ApiResponse<null>>(
       {
         success: false,
@@ -179,6 +201,20 @@ app.put("/:id", async (c) => {
       },
       428
     );
+  }
+
+  // Jawna lista pól + walidacja typów/enumów/FK — spread body do `.set()` pozwalał
+  // nadpisać `id`, `orderNumber`, `createdAt` i wpisać dowolny tekst w `status`.
+  // Flagi tworzenia (`createContractor`, `createObject`, `contractor*`, `object*`)
+  // z formularza edycji są ignorowane — PUT nie zakłada nowych kartotek.
+  let fields: ReturnType<typeof parseOrderPatch>;
+  try {
+    fields = parseOrderPatch(rest);
+  } catch (err) {
+    if (isValidationError(err)) {
+      return c.json<ApiResponse<null>>({ success: false, error: err.message }, 400);
+    }
+    throw err;
   }
 
   const result = await db
@@ -241,10 +277,11 @@ app.delete("/:id", async (c) => {
 // Update order status
 app.patch("/:id/status", async (c) => {
   const id = parseInt(c.req.param("id"));
-  const { status, expectedUpdatedAt } = await c.req.json<{
-    status: string;
-    expectedUpdatedAt?: string;
-  }>();
+  const raw = await readJson(c);
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return c.json<ApiResponse<null>>({ success: false, error: "Nieprawidłowe dane" }, 400);
+  }
+  const { status: statusRaw, expectedUpdatedAt } = raw as Record<string, unknown>;
 
   const existing = await db
     .select()
@@ -259,10 +296,21 @@ app.patch("/:id/status", async (c) => {
     );
   }
 
+  // Status tylko ze słownika — kolumna ma enum w schema.ts, ale SQLite go nie egzekwuje.
+  let status: ReturnType<typeof parseOrderStatus>;
+  try {
+    status = parseOrderStatus(statusRaw);
+  } catch (err) {
+    if (isValidationError(err)) {
+      return c.json<ApiResponse<null>>({ success: false, error: err.message }, 400);
+    }
+    throw err;
+  }
+
   // Optimistic concurrency guard (see PUT /:id) — the client MUST send the
   // updatedAt it read; a missing token is rejected (428) instead of degrading
   // to eq(id), so the last-writer-wins path cannot be reached.
-  if (!expectedUpdatedAt) {
+  if (typeof expectedUpdatedAt !== "string" || !expectedUpdatedAt) {
     return c.json<ApiResponse<null>>(
       {
         success: false,
@@ -275,7 +323,7 @@ app.patch("/:id/status", async (c) => {
   const result = await db
     .update(schema.orders)
     .set({
-      status: status as "new" | "in_progress" | "completed" | "cancelled",
+      status,
       updatedAt: new Date().toISOString(),
     })
     .where(

@@ -26,6 +26,7 @@ import {
   type ServiceSystem,
 } from "../db/schema.js";
 import { marginOf } from "../lib/margin.js";
+import { parseMoney } from "../lib/money.js";
 
 const app = new Hono();
 
@@ -33,13 +34,11 @@ function str(v: unknown): string {
   return typeof v === "string" ? v.trim() : "";
 }
 
-/** Kwota netto ≥ 0; przecinek dziesiętny dozwolony. Pusto = 0. */
+/** Kwota netto ≥ 0 (wspólny parser src/lib/money.ts). Pusto = 0. */
 function money(v: unknown, label: string): { value?: number; error?: string } {
-  if (v === undefined || v === null || v === "") return { value: 0 };
-  const n = typeof v === "string" ? parseFloat(v.replace(",", ".")) : Number(v);
-  if (!Number.isFinite(n) || n < 0)
-    return { error: `${label} musi być liczbą nieujemną` };
-  return { value: Math.round(n * 100) / 100 };
+  const r = parseMoney(v, label);
+  if (r.error) return { error: r.error };
+  return { value: r.value ?? 0 };
 }
 
 function parseBody(body: Record<string, unknown>): {

@@ -15,7 +15,7 @@ import { db } from "../src/db/index.js";
 import { users } from "../src/db/schema.js";
 import { hashPassword } from "../src/lib/auth/passwords.js";
 
-export function ensureMasterAdmin() {
+export async function ensureMasterAdmin(): Promise<void> {
   const login = (process.env.ADMIN_LOGIN || "msajdak").trim().toLowerCase();
   const password = process.env.ADMIN_PASSWORD || "";
 
@@ -24,7 +24,10 @@ export function ensureMasterAdmin() {
     return;
   }
 
-  const passwordHash = hashPassword(password);
+  // hashPassword jest asynchroniczne (scrypt w puli wątków) — start serwera
+  // czeka na wynik (`await` w src/index.ts), więc konto jest gotowe przed
+  // pierwszym żądaniem.
+  const passwordHash = await hashPassword(password);
   const existing = db.select().from(users).where(eq(users.email, login)).get();
 
   if (existing) {
@@ -45,5 +48,5 @@ export function ensureMasterAdmin() {
 
 // Run directly: `tsx scripts/bootstrap-admin.ts`
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  ensureMasterAdmin();
+  await ensureMasterAdmin();
 }

@@ -1,20 +1,131 @@
 import { Hono } from "hono";
 import { db, schema } from "../db/index.js";
-import { eq, like, sql } from "drizzle-orm";
-import type { ContractInput, ApiResponse, ContractStatus } from "../types/index.js";
+import { eq, like, sql, and, ne } from "drizzle-orm";
+import type { SQL } from "drizzle-orm";
+import type { ApiResponse, ContractStatus } from "../types/index.js";
+import {
+  asRecord,
+  compact,
+  isValidationError,
+  parseDate,
+  parseEnum,
+  parseFk,
+  parseNumber,
+  parseString,
+  rejectReadonlyFields,
+  STR,
+  ValidationError,
+} from "../lib/validate.js";
 
 const app = new Hono();
+
+const CONTRACT_STATUSES = ["draft", "active", "expired", "terminated"] as const;
+
+/** Typ transakcji drizzle/better-sqlite3 — helpery działają i na `db`, i na `tx`. */
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+/**
+ * Pola umowy z body — jawna lista, każde przez walidator. `undefined` = nie
+ * ruszaj (PUT). Rzuca `ValidationError`.
+ */
+function parseContractFields(raw: unknown) {
+  const b = asRecord(raw);
+  rejectReadonlyFields(b);
+  return {
+    objectId: parseFk(b.objectId, "objects", "Obiekt", { nullable: false }),
+    contractNumber: parseString(b.contractNumber, { label: "Numer umowy", max: STR.SHORT }),
+    startDate: parseDate(b.startDate, "Data rozpoczęcia"),
+    endDate: parseDate(b.endDate, "Data zakończenia"),
+    value: parseNumber(b.value, { label: "Wartość umowy", max: 1_000_000_000 }),
+    filePath: parseString(b.filePath, { label: "Plik umowy", max: STR.URL }),
+    status: parseEnum(b.status, CONTRACT_STATUSES, "Status"),
+  };
+}
+
+/** `endDate` nie może wypadać przed `startDate`. */
+function assertDateOrder(startDate: string, endDate: string | null | undefined): void {
+  if (endDate && endDate < startDate) {
+    throw new ValidationError("Data zakończenia nie może być wcześniejsza niż data rozpoczęcia");
+  }
+}
+
+/** Czy inny wiersz ma już ten numer umowy (numer identyfikuje dokument — musi być unikalny). */
+function numberTaken(tx: Tx | typeof db, contractNumber: string, exceptId?: number): boolean {
+  const conditions: SQL[] = [eq(schema.contracts.contractNumber, contractNumber)];
+  if (exceptId !== undefined) conditions.push(ne(schema.contracts.id, exceptId));
+  return (
+    tx
+      .select({ id: schema.contracts.id })
+      .from(schema.contracts)
+      .where(and(...conditions))
+      .get() !== undefined
+  );
+}
+
+/**
+ * Umowy tego samego obiektu, których okres zachodzi na podany (bez umów
+ * rozwiązanych/wygasłych i bez samej edytowanej). Nakładanie się NIE blokuje
+ * zapisu — bywa celowe (aneks, umowa przejściowa) — wraca jako `warnings`.
+ */
+function overlapWarnings(
+  tx: Tx | typeof db,
+  objectId: number,
+  startDate: string,
+  endDate: string | null,
+  exceptId?: number
+): string[] {
+  const rows = tx
+    .select({
+      id: schema.contracts.id,
+      contractNumber: schema.contracts.contractNumber,
+      startDate: schema.contracts.startDate,
+      endDate: schema.contracts.endDate,
+      status: schema.contracts.status,
+    })
+    .from(schema.contracts)
+    .where(eq(schema.contracts.objectId, objectId))
+    .all();
+  const warnings: string[] = [];
+  for (const r of rows) {
+    if (r.id === exceptId) continue;
+    if (r.status === "expired" || r.status === "terminated") continue;
+    // Okresy otwarte (bez daty końca) trwają „do odwołania".
+    const aEnd = endDate ?? "9999-12-31";
+    const bEnd = r.endDate ?? "9999-12-31";
+    if (startDate <= bEnd && r.startDate <= aEnd) {
+      warnings.push(
+        `Okres nakłada się na umowę ${r.contractNumber} (${r.startDate} – ${r.endDate ?? "bez końca"})`
+      );
+    }
+  }
+  return warnings;
+}
 
 // Get all contracts
 app.get("/", async (c) => {
   const search = c.req.query("search");
   const status = c.req.query("status");
   const objectId = c.req.query("objectId");
-  const page = parseInt(c.req.query("page") || "1");
-  const pageSize = parseInt(c.req.query("pageSize") || "20");
+  const page = Math.max(1, parseInt(c.req.query("page") || "1") || 1);
+  const pageSize = Math.min(200, Math.max(1, parseInt(c.req.query("pageSize") || "20") || 20));
   const offset = (page - 1) * pageSize;
 
-  let query = db
+  // Warunki do tablicy i jedno `and(...)`: kolejne `.where()` w drizzle nadpisuje
+  // poprzednie, więc `search+status` filtrowało wyłącznie po ostatnim.
+  const conditions: SQL[] = [];
+  if (search) {
+    conditions.push(like(schema.contracts.contractNumber, `%${search}%`));
+  }
+  if (status && (CONTRACT_STATUSES as readonly string[]).includes(status)) {
+    conditions.push(eq(schema.contracts.status, status as ContractStatus));
+  }
+  if (objectId) {
+    const oid = parseInt(objectId);
+    if (Number.isInteger(oid)) conditions.push(eq(schema.contracts.objectId, oid));
+  }
+  const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+
+  const contracts = await db
     .select({
       contract: schema.contracts,
       object: schema.objects,
@@ -25,31 +136,16 @@ app.get("/", async (c) => {
     .leftJoin(
       schema.contractors,
       eq(schema.objects.contractorId, schema.contractors.id)
-    );
+    )
+    .where(whereClause)
+    .limit(pageSize)
+    .offset(offset);
 
-  if (search) {
-    query = query.where(
-      like(schema.contracts.contractNumber, `%${search}%`)
-    ) as typeof query;
-  }
-
-  if (status) {
-    query = query.where(
-      eq(schema.contracts.status, status as ContractStatus)
-    ) as typeof query;
-  }
-
-  if (objectId) {
-    query = query.where(
-      eq(schema.contracts.objectId, parseInt(objectId))
-    ) as typeof query;
-  }
-
-  const contracts = await query.limit(pageSize).offset(offset);
-
+  // `total` z TYM SAMYM where — liczyło wszystkie umowy w bazie niezależnie od filtrów.
   const countResult = await db
     .select({ count: sql<number>`count(*)` })
-    .from(schema.contracts);
+    .from(schema.contracts)
+    .where(whereClause);
   const total = countResult[0].count;
 
   return c.json({
@@ -104,56 +200,74 @@ app.get("/:id", async (c) => {
 
 // Create contract
 app.post("/", async (c) => {
-  const body = await c.req.json<ContractInput>();
-
-  // Verify object exists
-  const object = await db
-    .select()
-    .from(schema.objects)
-    .where(eq(schema.objects.id, body.objectId))
-    .limit(1);
-
-  if (object.length === 0) {
-    return c.json<ApiResponse<null>>(
-      { success: false, error: "Object not found" },
-      400
-    );
+  let f: ReturnType<typeof parseContractFields>;
+  let objectId: number;
+  let contractNumber: string;
+  let startDate: string;
+  try {
+    f = parseContractFields(await c.req.json().catch(() => undefined));
+    if (f.objectId == null) throw new ValidationError("Pole „Obiekt” jest wymagane");
+    if (!f.contractNumber) throw new ValidationError("Pole „Numer umowy” jest wymagane");
+    if (!f.startDate) throw new ValidationError("Pole „Data rozpoczęcia” jest wymagane");
+    assertDateOrder(f.startDate, f.endDate);
+    objectId = f.objectId;
+    contractNumber = f.contractNumber;
+    startDate = f.startDate;
+  } catch (err) {
+    if (isValidationError(err)) {
+      return c.json<ApiResponse<null>>({ success: false, error: err.message }, 400);
+    }
+    throw err;
   }
 
   // Wstawienie kontraktu i wpisu do objectHistory w jednej synchronicznej
   // transakcji — obie operacje zatwierdzają się razem (brak kontraktu bez
   // wpisu w historii, nawet przy błędzie/przeplocie między żądaniami).
-  const result = db.transaction((tx) => {
+  // Kontrola unikalności numeru też w środku — dwa równoległe POST-y z tym
+  // samym numerem nie przecisną się między SELECT-em a INSERT-em.
+  const outcome = db.transaction((tx) => {
+    if (numberTaken(tx, contractNumber)) return { status: 409 as const };
+
+    const warnings = overlapWarnings(tx, objectId, startDate, f.endDate ?? null);
+
     const inserted = tx
       .insert(schema.contracts)
       .values({
-        objectId: body.objectId,
-        contractNumber: body.contractNumber,
-        startDate: body.startDate,
-        endDate: body.endDate,
-        value: body.value,
-        filePath: body.filePath,
-        status: body.status || "draft",
+        objectId,
+        contractNumber,
+        startDate,
+        endDate: f.endDate ?? null,
+        value: f.value ?? null,
+        filePath: f.filePath ?? null,
+        status: f.status ?? "draft",
       })
       .returning()
       .all();
 
     tx.insert(schema.objectHistory)
       .values({
-        objectId: body.objectId,
+        objectId,
         action: "contract_created",
-        description: `Contract ${body.contractNumber} created`,
+        description: `Contract ${contractNumber} created`,
         newValue: JSON.stringify(inserted[0]),
       })
       .run();
 
-    return inserted[0];
+    return { status: 201 as const, data: inserted[0], warnings };
   });
 
-  return c.json<ApiResponse<typeof result>>(
+  if (outcome.status === 409) {
+    return c.json<ApiResponse<null>>(
+      { success: false, error: `Umowa o numerze „${contractNumber}” już istnieje` },
+      409
+    );
+  }
+
+  return c.json(
     {
       success: true,
-      data: result,
+      data: outcome.data,
+      warnings: outcome.warnings,
       message: "Contract created successfully",
     },
     201
@@ -163,7 +277,21 @@ app.post("/", async (c) => {
 // Update contract
 app.put("/:id", async (c) => {
   const id = parseInt(c.req.param("id"));
-  const body = await c.req.json<Partial<ContractInput>>();
+  let f: ReturnType<typeof parseContractFields>;
+  try {
+    f = parseContractFields(await c.req.json().catch(() => undefined));
+    // Pola NOT NULL nie mogą zostać wyczyszczone jawnym `null`.
+    if (f.contractNumber === null) throw new ValidationError("Pole „Numer umowy” nie może być puste");
+    if (f.startDate === null) throw new ValidationError("Pole „Data rozpoczęcia” nie może być pusta");
+    if (f.status === undefined && "status" in asRecord(await c.req.json().catch(() => ({})))) {
+      throw new ValidationError("Pole „Status” nie może być puste");
+    }
+  } catch (err) {
+    if (isValidationError(err)) {
+      return c.json<ApiResponse<null>>({ success: false, error: err.message }, 400);
+    }
+    throw err;
+  }
 
   // Read-modify-write + wpis do historii w jednej synchronicznej transakcji:
   // `existing` czytany jest wewnątrz transakcji, więc równoległe edycje tego
@@ -179,9 +307,40 @@ app.put("/:id", async (c) => {
     if (existingRows.length === 0) return { status: 404 as const };
     const existing = existingRows[0];
 
+    // Reguły między polami sprawdzamy na stanie PO scaleniu — inaczej samo
+    // przesunięcie daty końca przed istniejący start przechodziłoby bez słowa.
+    const merged = {
+      objectId: f.objectId ?? existing.objectId,
+      contractNumber: f.contractNumber ?? existing.contractNumber,
+      startDate: f.startDate ?? existing.startDate,
+      endDate: f.endDate === undefined ? existing.endDate : f.endDate,
+    };
+    if (merged.endDate && merged.endDate < merged.startDate) {
+      return {
+        status: 400 as const,
+        error: "Data zakończenia nie może być wcześniejsza niż data rozpoczęcia",
+      };
+    }
+    if (merged.contractNumber !== existing.contractNumber && numberTaken(tx, merged.contractNumber, id)) {
+      return { status: 409 as const, error: `Umowa o numerze „${merged.contractNumber}” już istnieje` };
+    }
+
+    const patch = compact({
+      objectId: f.objectId ?? undefined,
+      contractNumber: f.contractNumber ?? undefined,
+      startDate: f.startDate ?? undefined,
+      endDate: f.endDate,
+      value: f.value,
+      filePath: f.filePath,
+      status: f.status,
+    });
+    if (Object.keys(patch).length === 0) {
+      return { status: 400 as const, error: "Brak pól do zmiany" };
+    }
+
     const updated = tx
       .update(schema.contracts)
-      .set(body)
+      .set(patch)
       .where(eq(schema.contracts.id, id))
       .returning()
       .all();
@@ -196,7 +355,8 @@ app.put("/:id", async (c) => {
       })
       .run();
 
-    return { status: 200 as const, data: updated[0] };
+    const warnings = overlapWarnings(tx, merged.objectId, merged.startDate, merged.endDate, id);
+    return { status: 200 as const, data: updated[0], warnings };
   });
 
   if (outcome.status === 404) {
@@ -205,10 +365,14 @@ app.put("/:id", async (c) => {
       404
     );
   }
+  if (outcome.status === 400 || outcome.status === 409) {
+    return c.json<ApiResponse<null>>({ success: false, error: outcome.error }, outcome.status);
+  }
 
-  return c.json<ApiResponse<typeof outcome.data>>({
+  return c.json({
     success: true,
     data: outcome.data,
+    warnings: outcome.warnings,
     message: "Contract updated successfully",
   });
 });
