@@ -9,8 +9,8 @@ import { Link } from "react-router-dom";
 import { ArrowDown, ArrowUp, ChevronsUpDown, Coins, Info } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
-import { EmptyState } from "@/components/analytics";
-import type { PersonnelInfo } from "@/lib/api";
+import { EmptyState, SERVICE_LABELS } from "@/components/analytics";
+import type { AnalyticsService, PersonnelInfo } from "@/lib/api";
 import { cmaNote, personnelNote, type LoadState } from "./shared";
 
 /**
@@ -100,13 +100,32 @@ export function NoCostEmpty({ what }: { what: string }) {
  *     mnożnik przelicza z netto, choć składki liczy się od brutto, więc to
  *     przybliżenie. Kto tego nie wie, weźmie mnożnik za kwotę z listy płac.
  */
-export function PersonnelFootnote({ personnel }: { personnel: PersonnelInfo }) {
+export function PersonnelFootnote({
+  personnel,
+  service,
+}: {
+  personnel: PersonnelInfo;
+  service: AnalyticsService;
+}) {
   const mapped = personnel.mappedObjects > 0;
-  const cma = cmaNote(personnel);
+  // W przekroju „OFI" udział w puli CMA w kosztach NIE SIEDZI, więc przypis o
+  // podziale puli byłby opisem liczby, której na ekranie nie ma.
+  const cma = service === "ofi" ? null : cmaNote(personnel);
   const missingCameras = personnel.cma.objectsMissingCameraCount;
 
   return (
     <div className="space-y-1 px-1">
+      {service !== "all" && (
+        <p className="text-xs text-muted-foreground">
+          Widok zawężony do linii <strong>{SERVICE_LABELS[service]}</strong>
+          {service === "ofi"
+            ? " (obiekty z ochroną fizyczną). Koszt osobowy to wyłącznie wypłaty za godziny przepracowane na obiekcie — udział w puli centrum monitorowania należy do ZDV."
+            : " (obiekty z kamerami, SSWiN-em albo wideorecepcją). Koszt osobowy to wyłącznie udział w puli centrum monitorowania — wypłaty wartowników należą do OFI."}{" "}
+          Przychód i koszt pozostały zostają w całości: kartoteka trzyma jedną
+          kwotę na obiekt, więc obiekt z obiema usługami liczy się po obu
+          stronach i sumy „ZDV” + „OFI” nie dodają się do całości firmy.
+        </p>
+      )}
       {mapped ? (
         <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
           <Info className="mt-0.5 h-3 w-3 shrink-0" />

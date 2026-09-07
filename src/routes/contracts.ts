@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { db, schema } from "../db/index.js";
-import { eq, like, sql, and, ne } from "drizzle-orm";
+import { eq, like, or, sql, and, ne, asc, desc } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import type { ApiResponse, ContractStatus } from "../types/index.js";
 import {
@@ -101,11 +101,68 @@ function overlapWarnings(
   return warnings;
 }
 
+/**
+ * Sortowanie listy umów. `status` układamy CASE-em, bo alfabetyczne sortowanie
+ * wartości z bazy ("draft", "expired"…) nie ma dla użytkownika sensu — status ma
+ * naturalną kolejność życia dokumentu (szkic → aktywna → wygasła → rozwiązana).
+ *
+ * Kontrahent nie jest atrybutem umowy, tylko jej OBIEKTU — sortujemy więc po nazwie
+ * kontrahenta z dołączonej tabeli, dokładnie tak, jak lista go pokazuje.
+ *
+ * `value` i `end` bywają puste (wartości nikt nie wpisał, umowa jest bezterminowa) —
+ * puste zawsze lądują na końcu, niezależnie od kierunku (patrz NULLS_LAST niżej).
+ */
+const SORT_COLUMNS = {
+  number: sql`lower(${schema.contracts.contractNumber})`,
+  object: sql`lower(coalesce(${schema.objects.name}, ''))`,
+  contractor: sql`lower(coalesce(${schema.contractors.name}, ''))`,
+  start: sql`${schema.contracts.startDate}`,
+  end: sql`${schema.contracts.endDate}`,
+  value: sql`${schema.contracts.value}`,
+  status: sql`case ${schema.contracts.status} when 'draft' then 0 when 'active' then 1 when 'expired' then 2 when 'terminated' then 3 else 4 end`,
+  created: sql`${schema.contracts.createdAt}`,
+} as const;
+
+export type ContractSortKey = keyof typeof SORT_COLUMNS;
+
+function isSortKey(v: string): v is ContractSortKey {
+  return Object.prototype.hasOwnProperty.call(SORT_COLUMNS, v);
+}
+
+/** Liczba z query stringa; puste/śmieci → undefined (filtr się nie nakłada). */
+function numberParam(raw: string | undefined): number | undefined {
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const n = Number(raw.replace(",", "."));
+  return Number.isFinite(n) ? n : undefined;
+}
+
+/** Data „YYYY-MM-DD" z query stringa; cokolwiek innego → undefined (filtr się nie nakłada). */
+function dateParam(raw: string | undefined): string | undefined {
+  if (raw === undefined || !/^\d{4}-\d{2}-\d{2}$/.test(raw.trim())) return undefined;
+  return raw.trim();
+}
+
 // Get all contracts
 app.get("/", async (c) => {
   const search = c.req.query("search");
   const status = c.req.query("status");
   const objectId = c.req.query("objectId");
+  // Kontrahent umowy = kontrahent jej obiektu (umowa nie ma własnego pola).
+  const contractorId = c.req.query("contractorId");
+  const minValue = numberParam(c.req.query("minValue"));
+  const maxValue = numberParam(c.req.query("maxValue"));
+  // "1" = tylko umowy z wpisaną wartością, "0" = tylko bez; brak parametru = wszystkie.
+  const hasValue = c.req.query("hasValue");
+  // Zakres obowiązywania: umowy, których OKRES ZACHODZI na podany przedział
+  // (`activeFrom` – `activeTo`). Jeden przedział zamiast dwóch osobnych filtrów na
+  // datę początku i końca: „obowiązujące w dniu X" to po prostu from = to = X, a
+  // „kończące się do X" wychodzi z samego `activeTo`. Umowa bez daty końca trwa
+  // do odwołania, więc zawsze zachodzi na koniec przedziału.
+  const activeFrom = dateParam(c.req.query("activeFrom"));
+  const activeTo = dateParam(c.req.query("activeTo"));
+  const sortRaw = c.req.query("sort") || "number";
+  const sort: ContractSortKey = isSortKey(sortRaw) ? sortRaw : "number";
+  const dir = c.req.query("dir") === "desc" ? "desc" : "asc";
   const page = Math.max(1, parseInt(c.req.query("page") || "1") || 1);
   const pageSize = Math.min(200, Math.max(1, parseInt(c.req.query("pageSize") || "20") || 20));
   const offset = (page - 1) * pageSize;
@@ -114,7 +171,15 @@ app.get("/", async (c) => {
   // poprzednie, więc `search+status` filtrowało wyłącznie po ostatnim.
   const conditions: SQL[] = [];
   if (search) {
-    conditions.push(like(schema.contracts.contractNumber, `%${search}%`));
+    conditions.push(
+      or(
+        // identity-ok: to SZUKAJKA użytkownika (filtr listy), a nie złączenie —
+        // wynik trafia na ekran, nigdy do powiązania dokumentu z obiektem.
+        like(schema.contracts.contractNumber, `%${search}%`), // identity-ok
+        like(schema.objects.name, `%${search}%`),
+        like(schema.contractors.name, `%${search}%`)
+      )!
+    );
   }
   if (status && (CONTRACT_STATUSES as readonly string[]).includes(status)) {
     conditions.push(eq(schema.contracts.status, status as ContractStatus));
@@ -123,7 +188,53 @@ app.get("/", async (c) => {
     const oid = parseInt(objectId);
     if (Number.isInteger(oid)) conditions.push(eq(schema.contracts.objectId, oid));
   }
+  if (contractorId) {
+    const cid = parseInt(contractorId);
+    if (Number.isInteger(cid)) conditions.push(eq(schema.objects.contractorId, cid));
+  }
+
+  // Wartość umowy: widełki i „ma / nie ma wpisanej kwoty". Pusta wartość to NIE zero —
+  // umowa bez kwoty nie może wpadać w widełki „do 10 000 zł" (ta sama zasada, co przy
+  // kosztach na liście obiektów).
+  if (minValue !== undefined) {
+    conditions.push(sql`${schema.contracts.value} is not null and ${schema.contracts.value} >= ${minValue}`);
+  }
+  if (maxValue !== undefined) {
+    conditions.push(sql`${schema.contracts.value} is not null and ${schema.contracts.value} <= ${maxValue}`);
+  }
+  if (hasValue === "1") {
+    conditions.push(sql`${schema.contracts.value} is not null`);
+  } else if (hasValue === "0") {
+    conditions.push(sql`${schema.contracts.value} is null`);
+  }
+
+  // Okresy otwarte (bez daty końca) traktujemy jak trwające „do odwołania" — tak samo
+  // jak ostrzeżenia o nakładaniu się umów wyżej w tym pliku.
+  if (activeFrom !== undefined) {
+    conditions.push(
+      sql`(${schema.contracts.endDate} is null or ${schema.contracts.endDate} >= ${activeFrom})`
+    );
+  }
+  if (activeTo !== undefined) {
+    conditions.push(sql`${schema.contracts.startDate} <= ${activeTo}`);
+  }
   const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+
+  // Puste kwoty i bezterminowe umowy na koniec listy w OBU kierunkach — inaczej
+  // sortowanie rosnąco po wartości albo po dacie zakończenia zaczynałoby się od
+  // pozycji, o których nic nie wiadomo.
+  const NULLS_LAST: Partial<Record<ContractSortKey, SQL>> = {
+    value: sql`case when ${schema.contracts.value} is null then 1 else 0 end`,
+    end: sql`case when ${schema.contracts.endDate} is null then 1 else 0 end`,
+  };
+  const column = SORT_COLUMNS[sort];
+  const direction = dir === "desc" ? desc : asc;
+  // Tie-break po numerze umowy (jest unikalny), żeby kolejność była powtarzalna
+  // między stronami paginacji.
+  const numberTieBreak = asc(sql`lower(${schema.contracts.contractNumber})`);
+  const orderBy = NULLS_LAST[sort]
+    ? [NULLS_LAST[sort]!, direction(column), numberTieBreak]
+    : [direction(column), numberTieBreak];
 
   const contracts = await db
     .select({
@@ -138,15 +249,29 @@ app.get("/", async (c) => {
       eq(schema.objects.contractorId, schema.contractors.id)
     )
     .where(whereClause)
+    .orderBy(...orderBy)
     .limit(pageSize)
     .offset(offset);
 
-  // `total` z TYM SAMYM where — liczyło wszystkie umowy w bazie niezależnie od filtrów.
-  const countResult = await db
-    .select({ count: sql<number>`count(*)` })
+  // `total` i sumy z TYM SAMYM where I TYMI SAMYMI złączeniami — filtry sięgają teraz
+  // obiektu i kontrahenta, więc licznik bez joinów wywracałby się na nieznanej kolumnie,
+  // a paginacja pokazywałaby złą liczbę stron.
+  const summaryRows = await db
+    .select({
+      count: sql<number>`count(*)`,
+      sum: sql<number | null>`sum(${schema.contracts.value})`,
+      // Ile umów ma UZUPEŁNIONĄ wartość — bez tego suma udaje pełną, choć liczy się
+      // z części dokumentów (ta sama zasada, co przy kosztach obiektów).
+      withValue: sql<number>`sum(case when ${schema.contracts.value} is not null then 1 else 0 end)`,
+    })
     .from(schema.contracts)
+    .leftJoin(schema.objects, eq(schema.contracts.objectId, schema.objects.id))
+    .leftJoin(
+      schema.contractors,
+      eq(schema.objects.contractorId, schema.contractors.id)
+    )
     .where(whereClause);
-  const total = countResult[0].count;
+  const total = summaryRows[0].count;
 
   return c.json({
     success: true,
@@ -159,6 +284,10 @@ app.get("/", async (c) => {
     page,
     pageSize,
     totalPages: Math.ceil(total / pageSize),
+    sort,
+    dir,
+    totalValue: summaryRows[0].sum ?? 0,
+    withValue: summaryRows[0].withValue ?? 0,
   });
 });
 

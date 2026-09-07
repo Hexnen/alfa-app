@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { db, schema } from "../db/index.js";
 import { eq, like, or, and, sql, desc, asc } from "drizzle-orm";
+import type { SQL } from "drizzle-orm";
 import type { ContractorInput, ApiResponse } from "../types/index.js";
 import { normalizeNIP, validateNIP } from "../utils/nip.js";
 
@@ -50,6 +51,41 @@ app.get("/by-nip/:nip", async (c) => {
 });
 
 /**
+ * Sortowanie listy kontrahentów. Klucze `objects`, `value`, `cost` i `profit` liczą
+ * się po GROUP BY — SQLite dopuszcza funkcje agregujące w ORDER BY grupowanego
+ * zapytania, więc nie trzeba powtarzać ich jako aliasu ani opakowywać w podzapytanie.
+ *
+ * Nazwy kolumn w agregatach piszemy DOSŁOWNIE (`objects.monthly_value`), bo coalesce
+ * z dwóch kolumn tej samej tabeli i tak nie skorzysta z aliasu drizzle — a zapis
+ * kwalifikowany jest jednoznaczny (ten sam wzorzec co w routes/objects.ts).
+ */
+const SORT_COLUMNS = {
+  name: sql`lower(${schema.contractors.name})`,
+  city: sql`lower(coalesce(${schema.contractors.city}, ''))`,
+  // Kontrahenci bez opiekuna zawsze na końcu alfabetu (tak jak na liście obiektów).
+  salesperson: sql`lower(coalesce(${schema.salespeople.lastName}, 'zzzz'))`,
+  objects: sql`count(${schema.objects.id})`,
+  // Przychód miesięczny portfela = abonament + dzierżawa sprzętu ze wszystkich obiektów.
+  value: sql`coalesce(sum(coalesce(objects.monthly_value, 0) + coalesce(objects.monthly_rental, 0)), 0)`,
+  cost: sql`coalesce(sum(objects.monthly_cost), 0)`,
+  profit: sql`coalesce(sum(coalesce(objects.monthly_value, 0) + coalesce(objects.monthly_rental, 0)), 0) - coalesce(sum(objects.monthly_cost), 0)`,
+  created: sql`${schema.contractors.createdAt}`,
+} as const;
+
+export type ContractorSortKey = keyof typeof SORT_COLUMNS;
+
+function isSortKey(v: string): v is ContractorSortKey {
+  return Object.prototype.hasOwnProperty.call(SORT_COLUMNS, v);
+}
+
+/** Liczba z query stringa; puste/śmieci → undefined (filtr się nie nakłada). */
+function numberParam(raw: string | undefined): number | undefined {
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const n = Number(raw.replace(",", "."));
+  return Number.isFinite(n) ? n : undefined;
+}
+
+/**
  * Lista kontrahentów z podsumowaniem ich obiektów (liczba, ile aktywnych, suma abonamentów).
  * Agregaty liczy baza jednym LEFT JOIN-em — front pokazuje je przy każdym kontrahencie,
  * a w widoku rozwiniętym dociąga jeszcze same obiekty (GET /objects).
@@ -64,6 +100,16 @@ app.get("/", async (c) => {
   const activeParam = c.req.query("active");
   const salespersonParam = c.req.query("salespersonId");
   const companyParam = c.req.query("companyId");
+  // Widełki sumy abonamentów całego portfela kontrahenta.
+  const minValue = numberParam(c.req.query("minValue"));
+  const maxValue = numberParam(c.req.query("maxValue"));
+  // "1" = tylko kontrahenci z abonamentem, "0" = tylko bez; brak parametru = wszyscy.
+  const hasValue = c.req.query("hasValue");
+  // "1" = ma choć jeden obiekt z uzupełnionym kosztem, "0" = nie ma żadnego.
+  const hasCost = c.req.query("hasCost");
+  const sortRaw = c.req.query("sort") || "name";
+  const sort: ContractorSortKey = isSortKey(sortRaw) ? sortRaw : "name";
+  const dir = c.req.query("dir") === "desc" ? "desc" : "asc";
   const searchClause = search
     ? or(
         like(schema.contractors.name, `%${search}%`),
@@ -94,8 +140,74 @@ app.get("/", async (c) => {
       : companyParam
         ? sql`exists (select 1 from objects o_company where o_company.contractor_id = contractors.id and o_company.company_id = ${parseInt(companyParam)})`
         : undefined;
-  const parts = [searchClause, activeClause, salespersonClause, companyClause].filter(Boolean);
+  // Kwoty filtrujemy po SUMIE portfela kontrahenta, a nie po dołączonych wierszach.
+  // Podzapytanie skorelowane (ten sam wzorzec, co filtr spółki wyżej) trzyma filtr
+  // w WHERE, więc jeden `whereClause` obsługuje listę, licznik `total`, sumy i liczniki
+  // zakładek naraz. Przez HAVING trzeba by powtórzyć grupowanie w każdej z tych czterech
+  // kwerend i pilnować, żeby się nie rozjechały — a rozjazd widać od razu w paginacji.
+  const portfolioValueSql = sql`(select coalesce(sum(coalesce(o_value.monthly_value, 0) + coalesce(o_value.monthly_rental, 0)), 0) from objects o_value where o_value.contractor_id = contractors.id)`;
+  // Kontrahent bez ANI JEDNEJ wpisanej kwoty nie wpada w widełki — brak wartości to nie
+  // jest zero, więc „do 500 zł" nie może łapać portfela, któremu nikt nic nie wycenił
+  // (ta sama zasada, co na liście obiektów).
+  const hasAnyRevenueSql = sql`exists (select 1 from objects o_value where o_value.contractor_id = contractors.id and (o_value.monthly_value is not null or o_value.monthly_rental is not null))`;
+  const minValueClause =
+    minValue !== undefined
+      ? sql`${hasAnyRevenueSql} and ${portfolioValueSql} >= ${minValue}`
+      : undefined;
+  const maxValueClause =
+    maxValue !== undefined
+      ? sql`${hasAnyRevenueSql} and ${portfolioValueSql} <= ${maxValue}`
+      : undefined;
+  const hasValueClause =
+    hasValue === "1"
+      ? sql`${portfolioValueSql} > 0`
+      : hasValue === "0"
+        ? sql`${portfolioValueSql} = 0`
+        : undefined;
+  // Koszt: „z uzupełnionym" = kontrahent ma CHOĆ JEDEN obiekt z wpisanym kosztem,
+  // „bez" = nie ma żadnego takiego obiektu. Liczy się IS NOT NULL, a nie suma — koszt
+  // 0 zł jest uzupełnioną informacją, a NULL znaczy „nikt jeszcze nie wpisał" i nie może
+  // udawać stuprocentowej marży (jak na liście obiektów). Kontrahent z częściowo
+  // uzupełnionymi kosztami wpada więc do „z uzupełnionym" — bo jakiś koszt już zna.
+  const hasCostClause =
+    hasCost === "1"
+      ? sql`exists (select 1 from objects o_cost where o_cost.contractor_id = contractors.id and o_cost.monthly_cost is not null)`
+      : hasCost === "0"
+        ? sql`not exists (select 1 from objects o_cost where o_cost.contractor_id = contractors.id and o_cost.monthly_cost is not null)`
+        : undefined;
+
+  // Warunki BEZ zakładki — z nich liczymy liczniki obu zakładek, żeby pokazywały, ile
+  // jest pozycji przy aktualnych filtrach, a nie ile jest w ogóle (wzorzec `baseClause`
+  // z listy obiektów).
+  const baseParts = [
+    searchClause,
+    salespersonClause,
+    companyClause,
+    minValueClause,
+    maxValueClause,
+    hasValueClause,
+    hasCostClause,
+  ].filter(Boolean);
+  const baseClause = baseParts.length > 1 ? and(...baseParts) : baseParts[0];
+  const parts = activeClause ? [...baseParts, activeClause] : baseParts;
   const whereClause = parts.length > 1 ? and(...parts) : parts[0];
+
+  // Puste kwoty na koniec listy w OBU kierunkach — inaczej sortowanie rosnąco po wartości,
+  // koszcie czy zysku zaczynałoby się od kontrahentów, którym nikt jeszcze nic nie wpisał.
+  // Agregat daje im 0 (coalesce), więc „puste" rozpoznajemy osobno: po tym, czy jest choć
+  // jeden obiekt z uzupełnioną kwotą. Kontrahent bez obiektów też jest „pusty".
+  const NULLS_LAST: Partial<Record<ContractorSortKey, SQL>> = {
+    value: sql`case when sum(case when objects.monthly_value is not null or objects.monthly_rental is not null then 1 else 0 end) = 0 then 1 else 0 end`,
+    cost: sql`case when sum(case when objects.monthly_cost is not null then 1 else 0 end) = 0 then 1 else 0 end`,
+    profit: sql`case when sum(case when objects.monthly_value is not null or objects.monthly_rental is not null or objects.monthly_cost is not null then 1 else 0 end) = 0 then 1 else 0 end`,
+  };
+  const column = SORT_COLUMNS[sort];
+  const direction = dir === "desc" ? desc : asc;
+  // Tie-break po nazwie, żeby kolejność była powtarzalna między stronami paginacji.
+  const nameTieBreak = asc(sql`lower(${schema.contractors.name})`);
+  const orderBy = NULLS_LAST[sort]
+    ? [NULLS_LAST[sort]!, direction(column), nameTieBreak]
+    : [direction(column), nameTieBreak];
 
   const rows = await db
     .select({
@@ -117,7 +229,7 @@ app.get("/", async (c) => {
     .leftJoin(schema.salespeople, eq(schema.salespeople.id, schema.contractors.salespersonId))
     .where(whereClause)
     .groupBy(schema.contractors.id)
-    .orderBy(asc(sql`lower(${schema.contractors.name})`))
+    .orderBy(...orderBy)
     .limit(pageSize)
     .offset(offset);
 
@@ -140,15 +252,17 @@ app.get("/", async (c) => {
     .leftJoin(schema.objects, eq(schema.objects.contractorId, schema.contractors.id))
     .where(whereClause);
 
-  // Liczniki obu zakładek liczymy z samą szukajką — mają pokazywać, ile jest
-  // aktualnych i archiwalnych przy bieżącym wyszukiwaniu.
+  // Liczniki obu zakładek liczymy ze WSZYSTKICH filtrów poza samą zakładką — mają
+  // pokazywać, ile jest aktualnych i archiwalnych przy bieżącym zawężeniu listy.
+  // Wcześniej brały pod uwagę wyłącznie szukajkę, więc po wybraniu handlowca albo
+  // widełek kwot suma z zakładek nie zgadzała się z `total`.
   const tabsResult = await db
     .select({
       active: sql<number>`sum(case when ${schema.contractors.active} then 1 else 0 end)`,
       archived: sql<number>`sum(case when ${schema.contractors.active} then 0 else 1 end)`,
     })
     .from(schema.contractors)
-    .where(searchClause);
+    .where(baseClause);
 
   return c.json({
     success: true,
@@ -165,6 +279,8 @@ app.get("/", async (c) => {
     page,
     pageSize,
     totalPages: Math.ceil(total / pageSize),
+    sort,
+    dir,
     totalObjects: totalsResult[0].objects ?? 0,
     totalMonthlyValue: totalsResult[0].value ?? 0,
     totalMonthlyCost: totalsResult[0].monthlyCost ?? 0,
@@ -172,6 +288,28 @@ app.get("/", async (c) => {
     activeCount: tabsResult[0].active ?? 0,
     archivedCount: tabsResult[0].archived ?? 0,
   });
+});
+
+/**
+ * Kartoteka kontrahentów w formie listy wyboru — bez paginacji i bez agregatów
+ * po obiektach. Listy rozwijane (filtr na /objects, formularz obiektu) muszą
+ * pokazywać KOMPLET kontrahentów, a `GET /` z `pageSize=500` gubił ogon
+ * kartoteki (624 pozycje) i liczył przy okazji sumy, których select nie używa.
+ * MUSI stać PRZED `GET /:id`, inaczej trasa parametryczna przechwyci tę nazwę
+ * (ten sam wzorzec co `/monitored-objects/object-catalog`).
+ */
+app.get("/catalog", async (c) => {
+  const rows = await db
+    .select({
+      id: schema.contractors.id,
+      name: schema.contractors.name,
+      nip: schema.contractors.nip,
+      active: schema.contractors.active,
+    })
+    .from(schema.contractors)
+    .orderBy(asc(sql`lower(${schema.contractors.name})`));
+
+  return c.json({ success: true, data: rows });
 });
 
 // Get contractor by ID

@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { db, schema } from "../db/index.js";
 import { eq, like, or, and, sql, desc, asc, isNull } from "drizzle-orm";
+import type { SQL } from "drizzle-orm";
 import type { ApiResponse } from "../types/index.js";
 import Database from "better-sqlite3";
 import { CmaParseError } from "../utils/cma-xls.js";
@@ -77,37 +78,123 @@ app.post("/reports/import", async (c) => {
   );
 });
 
+/**
+ * Sortowanie listy raportów CMA. Daty trzymamy jako tekst „YYYY-MM-DD HH:MM:SS",
+ * więc porządek leksykalny jest jednocześnie chronologiczny — nie trzeba niczego rzutować.
+ * Tytuł i nazwę pliku porównujemy po `lower()`, żeby wielkość liter nie rozbijała alfabetu
+ * (ten sam wzorzec, co SORT_COLUMNS w routes/contractors.ts i routes/contracts.ts).
+ */
+const REPORT_SORT_COLUMNS = {
+  title: sql`lower(${schema.cmaReports.title})`,
+  fileName: sql`lower(${schema.cmaReports.fileName})`,
+  dateFrom: sql`${schema.cmaReports.dateFrom}`,
+  dateTo: sql`${schema.cmaReports.dateTo}`,
+  entryCount: sql`${schema.cmaReports.entryCount}`,
+  importedAt: sql`${schema.cmaReports.importedAt}`,
+} as const;
+
+export type CmaReportSortKey = keyof typeof REPORT_SORT_COLUMNS;
+
+function isReportSortKey(v: string): v is CmaReportSortKey {
+  return Object.prototype.hasOwnProperty.call(REPORT_SORT_COLUMNS, v);
+}
+
+/** Liczba z query stringa; puste/śmieci → undefined (filtr się nie nakłada). */
+function numberParam(raw: string | undefined): number | undefined {
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const n = Number(raw.replace(",", "."));
+  return Number.isFinite(n) ? n : undefined;
+}
+
+/** Data „YYYY-MM-DD" z query stringa; cokolwiek innego → undefined (filtr się nie nakłada). */
+function dateParam(raw: string | undefined): string | undefined {
+  if (raw === undefined || !/^\d{4}-\d{2}-\d{2}$/.test(raw.trim())) return undefined;
+  return raw.trim();
+}
+
 // List reports (paginated, newest imports first)
 app.get("/reports", async (c) => {
   const search = c.req.query("search");
-  const page = parseInt(c.req.query("page") || "1");
-  const pageSize = parseInt(c.req.query("pageSize") || "20");
+  const page = Math.max(1, parseInt(c.req.query("page") || "1") || 1);
+  const pageSize = Math.min(200, Math.max(1, parseInt(c.req.query("pageSize") || "20") || 20));
   const offset = (page - 1) * pageSize;
+  // Zakres dat raportu, nie importu: „obejmuje przedział od–do".
+  const dateFrom = dateParam(c.req.query("dateFrom"));
+  const dateTo = dateParam(c.req.query("dateTo"));
+  // Widełki liczby zdarzeń w raporcie.
+  const minEntries = numberParam(c.req.query("minEntries"));
+  const maxEntries = numberParam(c.req.query("maxEntries"));
+  const sortRaw = c.req.query("sort") || "importedAt";
+  const sort: CmaReportSortKey = isReportSortKey(sortRaw) ? sortRaw : "importedAt";
+  // Domyślnie NAJNOWSZE importy na górze — dlatego tu (w odróżnieniu od list
+  // alfabetycznych) brak parametru znaczy „desc", a nie „asc".
+  const dir = c.req.query("dir") === "asc" ? "asc" : "desc";
 
-  const searchCondition = search
-    ? or(
+  // Warunki do tablicy i jedno `and(...)`: kolejne `.where()` w drizzle nadpisuje
+  // poprzednie, więc szukajka razem z widełkami filtrowałaby tylko po ostatnim.
+  const conditions: SQL[] = [];
+  if (search) {
+    conditions.push(
+      or(
         like(schema.cmaReports.fileName, `%${search}%`),
         like(schema.cmaReports.title, `%${search}%`)
-      )
-    : undefined;
-
-  let query = db.select().from(schema.cmaReports);
-  if (searchCondition) {
-    query = query.where(searchCondition) as typeof query;
+      )!
+    );
   }
+  // Raport ZACHODZI na podany przedział (ten sam wzorzec, co okres umowy w
+  // routes/contracts.ts): ten sam dzień w obu polach = „raport obejmujący dzień X",
+  // samo drugie pole = „zaczęte do dnia X". Daty raportu niosą też godzinę, więc
+  // porównujemy same dni (`substr(...,1,10)`) — inaczej raport z 08:00 wypadałby
+  // z filtru ustawionego na jego własny dzień. Brak daty w raporcie (plik bez
+  // nagłówka) traktujemy jak okres otwarty, żeby taki raport nie znikał z listy.
+  if (dateFrom !== undefined) {
+    conditions.push(
+      sql`(${schema.cmaReports.dateTo} is null or substr(${schema.cmaReports.dateTo}, 1, 10) >= ${dateFrom})`
+    );
+  }
+  if (dateTo !== undefined) {
+    conditions.push(
+      sql`(${schema.cmaReports.dateFrom} is null or substr(${schema.cmaReports.dateFrom}, 1, 10) <= ${dateTo})`
+    );
+  }
+  // `entryCount` jest NOT NULL z domyślnym 0, więc widełki nie potrzebują bramki na puste.
+  if (minEntries !== undefined) {
+    conditions.push(sql`${schema.cmaReports.entryCount} >= ${minEntries}`);
+  }
+  if (maxEntries !== undefined) {
+    conditions.push(sql`${schema.cmaReports.entryCount} <= ${maxEntries}`);
+  }
+  const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
 
-  const results = await query
-    .orderBy(desc(schema.cmaReports.importedAt), desc(schema.cmaReports.id))
+  // Raporty bez zakresu dat na koniec listy w OBU kierunkach — inaczej sortowanie
+  // rosnąco po dacie zaczynałoby się od pozycji, o których nic nie wiadomo.
+  const NULLS_LAST: Partial<Record<CmaReportSortKey, SQL>> = {
+    dateFrom: sql`case when ${schema.cmaReports.dateFrom} is null then 1 else 0 end`,
+    dateTo: sql`case when ${schema.cmaReports.dateTo} is null then 1 else 0 end`,
+  };
+  const column = REPORT_SORT_COLUMNS[sort];
+  const direction = dir === "desc" ? desc : asc;
+  // Tie-break po id malejąco: id rośnie z każdym importem, więc przy równym kluczu
+  // (np. dwa raporty wgrane w tej samej sekundzie) na górze jest ten nowszy —
+  // dokładnie tak, jak lista zachowywała się przed dodaniem sortowania.
+  const idTieBreak = desc(schema.cmaReports.id);
+  const orderBy = NULLS_LAST[sort]
+    ? [NULLS_LAST[sort]!, direction(column), idTieBreak]
+    : [direction(column), idTieBreak];
+
+  const results = await db
+    .select()
+    .from(schema.cmaReports)
+    .where(whereClause)
+    .orderBy(...orderBy)
     .limit(pageSize)
     .offset(offset);
 
-  let countQuery = db
+  // Licznik MUSI respektować TE SAME filtry — inaczej paginacja pokazuje złe „total".
+  const countResult = await db
     .select({ count: sql<number>`count(*)` })
-    .from(schema.cmaReports);
-  if (searchCondition) {
-    countQuery = countQuery.where(searchCondition) as typeof countQuery;
-  }
-  const countResult = await countQuery;
+    .from(schema.cmaReports)
+    .where(whereClause);
   const total = countResult[0].count;
 
   return c.json({
@@ -117,6 +204,8 @@ app.get("/reports", async (c) => {
     page,
     pageSize,
     totalPages: Math.ceil(total / pageSize),
+    sort,
+    dir,
   });
 });
 
@@ -207,6 +296,46 @@ app.get("/reports/:id", async (c) => {
   });
 });
 
+/**
+ * Sortowanie listy zdarzeń w raporcie. Czasy trzymamy jako tekst „YYYY-MM-DD HH:MM:SS”,
+ * więc porządek leksykalny jest jednocześnie chronologiczny. Teksty porównujemy po
+ * `lower()`, żeby wielkość liter nie rozbijała alfabetu (ten sam wzorzec, co
+ * REPORT_SORT_COLUMNS wyżej i SORT_COLUMNS w routes/contractors.ts).
+ */
+const ENTRY_SORT_COLUMNS = {
+  generatedAt: sql`${schema.cmaReportEntries.generatedAt}`,
+  objectName: sql`lower(${schema.cmaReportEntries.objectName})`,
+  patrolName: sql`lower(${schema.cmaReportEntries.patrolName})`,
+  endType: sql`lower(${schema.cmaReportEntries.endType})`,
+  userName: sql`lower(${schema.cmaReportEntries.userName})`,
+  videoChannel: sql`lower(${schema.cmaReportEntries.videoChannel})`,
+  // Czas obchodu: wpis niesie start i koniec obchodu, z którego pochodzi zdarzenie.
+  startedAt: sql`${schema.cmaReportEntries.startedAt}`,
+  endedAt: sql`${schema.cmaReportEntries.endedAt}`,
+} as const;
+
+export type CmaEntrySortKey = keyof typeof ENTRY_SORT_COLUMNS;
+
+function isEntrySortKey(v: string): v is CmaEntrySortKey {
+  return Object.prototype.hasOwnProperty.call(ENTRY_SORT_COLUMNS, v);
+}
+
+/**
+ * Puste wartości (NULL albo pusty tekst — XLS daje raz jedno, raz drugie) na koniec
+ * listy w OBU kierunkach: sortowanie rosnąco po operatorze nie może zaczynać się od
+ * kilku tysięcy zdarzeń zamkniętych automatycznie.
+ */
+function blankLast(column: SQL): SQL {
+  return sql`case when ${column} is null or ${column} = '' then 1 else 0 end`;
+}
+
+/** Filtr „konkretna wartość albo puste" — puste (NULL/'') pod umownym „__none__". */
+function blankOrEqual(column: SQL, value: string): SQL {
+  return value === "__none__"
+    ? sql`(${column} is null or ${column} = '')`
+    : sql`${column} = ${value}`;
+}
+
 // List report entries (paginated, with filters)
 app.get("/reports/:id/entries", async (c) => {
   const id = parseInt(c.req.param("id"));
@@ -233,11 +362,28 @@ app.get("/reports/:id/entries", async (c) => {
   const search = c.req.query("search");
   const objectName = c.req.query("objectName");
   const endType = c.req.query("endType");
-  const page = parseInt(c.req.query("page") || "1");
-  const pageSize = parseInt(c.req.query("pageSize") || "50");
+  const userName = c.req.query("userName");
+  const videoChannel = c.req.query("videoChannel");
+  // „Kto zamknął zdarzenie": operator = wpis ma nazwisko w user_name (to samo
+  // kryterium, co licznik `operatorHandled` w GET /reports/:id), auto = nie ma.
+  const handledRaw = c.req.query("handled");
+  const handled =
+    handledRaw === "operator" || handledRaw === "auto" ? handledRaw : undefined;
+  const page = Math.max(1, parseInt(c.req.query("page") || "1") || 1);
+  const pageSize = Math.min(
+    500,
+    Math.max(1, parseInt(c.req.query("pageSize") || "50") || 50)
+  );
   const offset = (page - 1) * pageSize;
+  const sortRaw = c.req.query("sort") || "generatedAt";
+  const sort: CmaEntrySortKey = isEntrySortKey(sortRaw)
+    ? sortRaw
+    : "generatedAt";
+  // Domyślnie chronologicznie — dokładnie tak, jak lista wyglądała przed dodaniem
+  // sortowania (ORDER BY generated_at ASC, id ASC).
+  const dir = c.req.query("dir") === "desc" ? "desc" : "asc";
 
-  const conditions = [eq(schema.cmaReportEntries.reportId, id)];
+  const conditions: SQL[] = [eq(schema.cmaReportEntries.reportId, id)];
 
   if (search) {
     conditions.push(
@@ -264,24 +410,76 @@ app.get("/reports/:id/entries", async (c) => {
     );
   }
 
-  const whereClause = and(...conditions);
+  if (userName) {
+    conditions.push(
+      blankOrEqual(sql`${schema.cmaReportEntries.userName}`, userName)
+    );
+  }
+
+  // Filtr kanału nakładamy osobno, bo lista kanałów do selecta (`channels` niżej)
+  // liczy się z pominięciem właśnie tego warunku — inaczej po wybraniu kanału
+  // select zostawałby z jedną pozycją i nie dało się go zmienić.
+  const channelCondition = videoChannel
+    ? blankOrEqual(sql`${schema.cmaReportEntries.videoChannel}`, videoChannel)
+    : undefined;
+
+  if (handled) {
+    conditions.push(
+      handled === "operator"
+        ? sql`(${schema.cmaReportEntries.userName} is not null and ${schema.cmaReportEntries.userName} <> '')`
+        : sql`(${schema.cmaReportEntries.userName} is null or ${schema.cmaReportEntries.userName} = '')`
+    );
+  }
+
+  const whereClause = and(
+    ...conditions,
+    ...(channelCondition ? [channelCondition] : [])
+  );
+
+  const NULLS_LAST: Partial<Record<CmaEntrySortKey, SQL>> = {
+    generatedAt: blankLast(sql`${schema.cmaReportEntries.generatedAt}`),
+    patrolName: blankLast(sql`${schema.cmaReportEntries.patrolName}`),
+    endType: blankLast(sql`${schema.cmaReportEntries.endType}`),
+    userName: blankLast(sql`${schema.cmaReportEntries.userName}`),
+    videoChannel: blankLast(sql`${schema.cmaReportEntries.videoChannel}`),
+    startedAt: blankLast(sql`${schema.cmaReportEntries.startedAt}`),
+    endedAt: blankLast(sql`${schema.cmaReportEntries.endedAt}`),
+  };
+  const column = ENTRY_SORT_COLUMNS[sort];
+  const direction = dir === "desc" ? desc : asc;
+  // Tie-break po id rosnąco: id rośnie w kolejności wierszy z pliku, więc zdarzenia
+  // o tym samym kluczu (np. ta sama sekunda) trzymają kolejność z raportu i strony
+  // paginacji się nie przeplatają.
+  const idTieBreak = asc(schema.cmaReportEntries.id);
+  const orderBy = NULLS_LAST[sort]
+    ? [NULLS_LAST[sort]!, direction(column), idTieBreak]
+    : [direction(column), idTieBreak];
 
   const results = await db
     .select()
     .from(schema.cmaReportEntries)
     .where(whereClause)
-    .orderBy(
-      asc(schema.cmaReportEntries.generatedAt),
-      asc(schema.cmaReportEntries.id)
-    )
+    .orderBy(...orderBy)
     .limit(pageSize)
     .offset(offset);
 
+  // Licznik MUSI respektować TE SAME filtry — inaczej paginacja pokazuje złe „total".
   const countResult = await db
     .select({ count: sql<number>`count(*)` })
     .from(schema.cmaReportEntries)
     .where(whereClause);
   const total = countResult[0].count;
+
+  // Wartości do selecta kanałów: kanałów w raporcie są setki, więc lista zawęża się
+  // razem z pozostałymi filtrami (np. po wybraniu obiektu zostają jego kanały).
+  const channelRows = await db
+    .selectDistinct({ videoChannel: schema.cmaReportEntries.videoChannel })
+    .from(schema.cmaReportEntries)
+    .where(and(...conditions))
+    .orderBy(asc(sql`lower(${schema.cmaReportEntries.videoChannel})`));
+  const channels = channelRows
+    .map((row) => row.videoChannel)
+    .filter((value): value is string => value !== null && value !== "");
 
   return c.json({
     success: true,
@@ -290,6 +488,9 @@ app.get("/reports/:id/entries", async (c) => {
     page,
     pageSize,
     totalPages: Math.ceil(total / pageSize),
+    sort,
+    dir,
+    channels,
   });
 });
 

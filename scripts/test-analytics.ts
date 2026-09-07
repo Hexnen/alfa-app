@@ -820,6 +820,198 @@ async function main() {
   restoreCmaPools();
   clearPersonnelCostCache();
 
+  /* --- Przekrój usługowy: service=zdv | ofi | all --------------------------
+   * Firma sprzedaje dwie różne rzeczy — zdalny dozór (kamery/SSWiN/wideorecepcja,
+   * obsługiwany z centrum) i ochronę fizyczną (ludzie na obiekcie). Parametr
+   * `service` zawęża CAŁĄ analitykę do jednej z nich PRZED agregacją.
+   *
+   * Dwie rzeczy, które muszą być tu przybite gwoździami:
+   *  1. przekrój NIE JEST ROZŁĄCZNY — obiekt z OFI i kamerami wchodzi do obu,
+   *     więc „zdv" + „ofi" ma być WIĘKSZE niż „all", a nie równe;
+   *  2. koszt osobowy zmienia SKŁAD, nie tylko zbiór wierszy: w „ofi" liczą się
+   *     wyłącznie godziny na obiekcie, w „zdv" wyłącznie udział w puli CMA.
+   */
+  const [c6] = db
+    .insert(schema.contractors)
+    .values({ name: `${PREFIX}Kontrahent6`, nip: `${PREFIX}6` })
+    .returning()
+    .all();
+  // Mieszany: ochrona fizyczna PLUS kamera, z przychodem i wpisanym kosztem
+  // pozostałym — na nim widać, że obie strony liczą go w całości.
+  const oMix = obj({
+    name: `${PREFIX}MIESZANY`,
+    contractorId: c6.id,
+    monthlyValue: 5000,
+    monthlyCost: 400,
+    hasOfi: true,
+    hasCameras: true,
+    cameraCount: 1,
+  });
+  // Czysty OFI — nie ma prawa pojawić się w przekroju „zdv".
+  obj({
+    name: `${PREFIX}TYLKOOFI`,
+    contractorId: c6.id,
+    monthlyValue: 1200,
+    monthlyCost: 100,
+    hasOfi: true,
+  });
+  const [hroMix] = db
+    .insert(schema.hrObjects)
+    .values({ name: `${PREFIX}POSTERUNEK_MIX`, objectId: oMix.id })
+    .returning()
+    .all();
+  singlePosition("MixOfi", 1000, { objectId: hroMix.id }); // 1 000 zł wprost na oMix
+  clearPersonnelCostCache();
+
+  // `limit` z zapasem: bilanse niżej liczymy z WIERSZY, więc nie mogą być przycięte.
+  const serviceView = (s: string) =>
+    call(`/obiekty?scope=all&costWindow=1&limit=5000&service=${s}`);
+  const vAll = await serviceView("all");
+  const vZdv = await serviceView("zdv");
+  const vOfi = await serviceView("ofi");
+  const row = (v: any, n: string) => v.rows.find((r: any) => r.name === `${PREFIX}${n}`);
+  const isZdv = (r: any) => r.services.cameras || r.services.sswin || r.services.videoreception;
+
+  ok("service jest echem w odpowiedzi (kontrakt dla UI)",
+    vAll.service === "all" && vZdv.service === "zdv" && vOfi.service === "ofi",
+    { all: vAll.service, zdv: vZdv.service, ofi: vOfi.service });
+
+  // (a) zbiór wierszy
+  ok("service=ofi zwraca WYŁĄCZNIE obiekty z ochroną fizyczną",
+    vOfi.rows.length > 0 && vOfi.rows.every((r: any) => r.services.ofi === true),
+    vOfi.rows.filter((r: any) => !r.services.ofi).slice(0, 3));
+  ok("service=zdv zwraca WYŁĄCZNIE obiekty z kamerami / SSWiN-em / wideorecepcją",
+    vZdv.rows.length > 0 && vZdv.rows.every(isZdv),
+    vZdv.rows.filter((r: any) => !isZdv(r)).slice(0, 3));
+  ok("Czysty OFI jest w „ofi” i NIE MA go w „zdv”",
+    !!row(vOfi, "TYLKOOFI") && !row(vZdv, "TYLKOOFI"), {
+      ofi: !!row(vOfi, "TYLKOOFI"),
+      zdv: !!row(vZdv, "TYLKOOFI"),
+    });
+  ok("Obiekt mieszany (OFI + kamera) jest w OBU przekrojach",
+    !!row(vOfi, "MIESZANY") && !!row(vZdv, "MIESZANY"));
+  ok("Obiekt bez ani jednej usługi (O1) nie wchodzi do żadnego przekroju",
+    !row(vOfi, "O1") && !row(vZdv, "O1") && !!row(vAll, "O1"));
+  /*
+   * Bilans liczby obiektów. NIE porównujemy z „all": w kartotece są obiekty bez
+   * ANI JEDNEJ usługi (stare wpisy, wersje robocze) i te nie należą do żadnej
+   * linii, więc zdv + ofi bywa MNIEJSZE niż all. Prawdziwa reguła jest taka:
+   * suma obu przekrojów = obiekty z jakąkolwiek usługą PLUS te policzone dwa
+   * razy, czyli mieszane.
+   */
+  const withAnyService = vAll.rows.filter((r: any) => r.services.ofi || isZdv(r)).length;
+  const mixedCount = vAll.rows.filter((r: any) => r.services.ofi && isZdv(r)).length;
+  ok("zdv + ofi = obiekty z usługami + mieszane (te liczą się dwa razy)",
+    mixedCount > 0 &&
+      vZdv.totals.objects + vOfi.totals.objects === withAnyService + mixedCount,
+    {
+      zdv: vZdv.totals.objects,
+      ofi: vOfi.totals.objects,
+      withAnyService,
+      mixedCount,
+    });
+
+  // (b) przychód: podwójne liczenie mieszanych jest CELOWE
+  ok("Przychód zdv + ofi ≥ przychód all (mieszane po obu stronach)",
+    vZdv.totals.revenue + vOfi.totals.revenue >= vAll.totals.revenue - 0.001,
+    { zdv: vZdv.totals.revenue, ofi: vOfi.totals.revenue, all: vAll.totals.revenue });
+  /*
+   * Nadwyżka nie bierze się znikąd: to DOKŁADNIE przychód obiektów mieszanych
+   * (policzonych po obu stronach) minus przychód obiektów bez żadnej usługi
+   * (nie policzonych po żadnej). Zapisane wprost, żeby nikt nie „naprawił" tej
+   * nierówności, myląc ją z błędem sumowania.
+   */
+  const mixedRevenue = vAll.rows
+    .filter((r: any) => r.services.ofi && isZdv(r))
+    .reduce((s: number, r: any) => s + r.revenue, 0);
+  const noServiceRevenue = vAll.rows
+    .filter((r: any) => !r.services.ofi && !isZdv(r))
+    .reduce((s: number, r: any) => s + r.revenue, 0);
+  ok("Nadwyżka „zdv + ofi” nad „all” = przychód mieszanych − przychód bezusługowych",
+    mixedRevenue > 0 &&
+      near(
+        vZdv.totals.revenue + vOfi.totals.revenue - vAll.totals.revenue,
+        mixedRevenue - noServiceRevenue,
+        0.011
+      ),
+    {
+      diff: vZdv.totals.revenue + vOfi.totals.revenue - vAll.totals.revenue,
+      mixedRevenue,
+      noServiceRevenue,
+    });
+  ok("Przychód i koszt pozostały obiektu mieszanego są w KAŻDYM przekroju te same",
+    row(vAll, "MIESZANY")?.revenue === 5000 &&
+      row(vZdv, "MIESZANY")?.revenue === 5000 &&
+      row(vOfi, "MIESZANY")?.revenue === 5000 &&
+      row(vZdv, "MIESZANY")?.otherCost === 400 &&
+      row(vOfi, "MIESZANY")?.otherCost === 400,
+    { zdv: row(vZdv, "MIESZANY"), ofi: row(vOfi, "MIESZANY") });
+
+  // (c) koszt osobowy zmienia SKŁAD, nie tylko zbiór
+  const mixAll = row(vAll, "MIESZANY");
+  const mixZdv = row(vZdv, "MIESZANY");
+  const mixOfi = row(vOfi, "MIESZANY");
+  ok("all: obie ścieżki naraz (godziny na obiekcie + udział w puli CMA)",
+    near(mixAll?.personnelDirectCost, 1000) &&
+      mixAll?.personnelCmaCost > 0 &&
+      near(mixAll?.personnelCost, mixAll.personnelDirectCost + mixAll.personnelCmaCost, 0.011),
+    mixAll);
+  ok("ofi: koszt osobowy = SAME godziny na obiekcie, bez udziału w CMA",
+    near(mixOfi?.personnelCost, 1000) &&
+      near(mixOfi?.personnelDirectCost, 1000) &&
+      mixOfi?.personnelCmaCost === 0,
+    mixOfi);
+  ok("zdv: koszt osobowy = SAM udział w puli CMA, bez pensji wartowników",
+    mixZdv?.personnelDirectCost === 0 &&
+      near(mixZdv?.personnelCmaCost, mixAll.personnelCmaCost, 0.011) &&
+      near(mixZdv?.personnelCost, mixAll.personnelCmaCost, 0.011),
+    mixZdv);
+  ok("zdv + ofi składają się z powrotem na koszt osobowy z „all”",
+    near(mixZdv.personnelCost + mixOfi.personnelCost, mixAll.personnelCost, 0.011),
+    { zdv: mixZdv.personnelCost, ofi: mixOfi.personnelCost, all: mixAll.personnelCost });
+  ok("Zysk przekroju liczy się z jego własnego kosztu",
+    near(mixOfi?.profit, 5000 - 1000 - 400) &&
+      near(mixZdv?.profit, 5000 - mixAll.personnelCmaCost - 400, 0.011),
+    { ofi: mixOfi?.profit, zdv: mixZdv?.profit });
+
+  // (d) `hasCost` liczy się na nowo: godziny wartowników nie czynią kosztu
+  //     obiektu ZNANYM w przekroju dozoru (OFICMA nie ma wpisanego monthly_cost).
+  ok("all: OFICMA ma koszt ZNANY (są godziny na obiekcie)",
+    row(vAll, "OFICMA")?.hasCost === true, row(vAll, "OFICMA"));
+  ok("zdv: ten sam obiekt ma koszt NIEZNANY — jego godziny należą do OFI",
+    row(vZdv, "OFICMA")?.hasCost === false && row(vZdv, "OFICMA")?.margin === null,
+    row(vZdv, "OFICMA"));
+
+  // (e) nieznana wartość parametru = domyślne „all" (tak samo jak `scope`)
+  const bogus = await serviceView("kamery-i-psy");
+  ok("Nieznany service wraca do domyślnego „all”, a nie wywala zapytania",
+    bogus.service === "all" &&
+      bogus.rows.length === vAll.rows.length &&
+      near(bogus.totals.revenue, vAll.totals.revenue),
+    { service: bogus.service, rows: bogus.rows.length });
+
+  // (f) filtr działa PRZED agregacją, więc dotyczy też dwóch pozostałych widoków
+  const kOfi = await call(`/kontrahenci?scope=all&costWindow=1&service=ofi`);
+  const kAll = await call(`/kontrahenci?scope=all&costWindow=1`);
+  ok("kontrahenci: przekroj zawęża też ten widok (te same sumy, co w obiektach)",
+    kOfi.service === "ofi" && near(kOfi.totals.revenue, vOfi.totals.revenue, 0.011),
+    { kontrahenci: kOfi.totals.revenue, obiekty: vOfi.totals.revenue });
+  ok("kontrahenci: klient bez obiektów w przekroju wypada z rankingu",
+    !!kOfi.rows.find((r: any) => r.name === `${PREFIX}Kontrahent6`) &&
+      !kOfi.rows.find((r: any) => r.name === `${PREFIX}Kontrahent1`) &&
+      !!kAll.rows.find((r: any) => r.name === `${PREFIX}Kontrahent1`),
+    kOfi.rows.map((r: any) => r.name));
+  ok("kontrahenci: licznik „bez obiektów” rośnie o tych spoza przekroju",
+    kOfi.contractorsWithoutObjects > kAll.contractorsWithoutObjects,
+    { ofi: kOfi.contractorsWithoutObjects, all: kAll.contractorsWithoutObjects });
+
+  const hOfi = await call(`/handlowcy?scope=all&costWindow=1&service=ofi`);
+  ok("handlowcy: portfele liczone z przefiltrowanych obiektów",
+    hOfi.service === "ofi" &&
+      near(hOfi.totals.revenue, vOfi.totals.revenue, 0.011) &&
+      near(hOfi.totals.cost, vOfi.totals.cost, 0.011),
+    { handlowcy: hOfi.totals.revenue, obiekty: vOfi.totals.revenue });
+
   /* --- Składki pracodawcy -------------------------------------------------
    * Od tego miejsca narzuty są RÓŻNE (MK), więc każda kwota kosztu osobowego to
    * już „wypłata netto × narzut formy zatrudnienia".

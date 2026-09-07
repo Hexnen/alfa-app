@@ -52,14 +52,25 @@ import {
   Building2,
   User,
   ExternalLink,
+  ArrowDown,
+  ArrowUp,
+  ChevronsUpDown,
+  X,
 } from "lucide-react";
-import type { Order, OrderInput } from "@/lib/api";
+import type {
+  ContractorCatalogEntry,
+  Order,
+  OrderInput,
+  OrderSortKey,
+} from "@/lib/api";
 import {
   getOrders,
+  getContractorCatalog,
   createOrder,
   updateOrder,
   deleteOrder,
 } from "@/lib/api";
+import { cn } from "@/lib/utils";
 import { usePerms } from "@/auth/permissions";
 import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
 
@@ -71,6 +82,19 @@ const orderStatuses = [
   { value: "cancelled", label: "Anulowane", color: "bg-red-500" },
 ];
 
+/** Filtr zakresu prac: wszystkie / tylko montaże kamer / tylko pozostałe. */
+type CameraMode = "all" | "with" | "without";
+
+/** Domyślny kierunek sortowania kolumny — daty ludzie czytają od najnowszych. */
+const DEFAULT_DIR: Record<OrderSortKey, "asc" | "desc"> = {
+  number: "asc",
+  status: "asc",
+  requester: "asc",
+  object: "asc",
+  payer: "asc",
+  created: "desc",
+};
+
 export function Orders() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -81,17 +105,86 @@ export function Orders() {
     : "lista";
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
+
+  // Filtry tekstowe trzymamy osobno od tych wysyłanych do API — wpisywanie w pole
+  // nie może strzelać żądaniem na każdą literę (debounce niżej).
+  const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
+  const [fromInput, setFromInput] = useState("");
+  const [toInput, setToInput] = useState("");
+  const [created, setCreated] = useState<{ from?: string; to?: string }>({});
+
   const [statusFilter, setStatusFilter] = useState("all");
+  const [payerFilter, setPayerFilter] = useState<number | "none" | undefined>(undefined);
+  const [cameraMode, setCameraMode] = useState<CameraMode>("all");
+  const [contractors, setContractors] = useState<ContractorCatalogEntry[]>([]);
+
+  const [sort, setSort] = useState<OrderSortKey>("created");
+  const [dir, setDir] = useState<"asc" | "desc">("desc");
+
   const [page, setPage] = useState(1);
   const [pageSize] = useState(10);
   const [total, setTotal] = useState(0);
   const [totalPages, setTotalPages] = useState(0);
+  /** Rozkład statusów CAŁEGO wyniku filtrowania (bez filtra statusu) — kafelki nad listą. */
+  const [statusCounts, setStatusCounts] = useState({
+    total: 0,
+    new: 0,
+    in_progress: 0,
+    completed: 0,
+  });
 
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [editingOrder, setEditingOrder] = useState<Order | null>(null);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [orderToDelete, setOrderToDelete] = useState<Order | null>(null);
+
+  // Debounce pól tekstowych (szukajka i zakres dat — pole typu `date` wysyła zmiany
+  // już w trakcie wpisywania roku).
+  useEffect(() => {
+    const t = setTimeout(() => setSearch(searchInput.trim()), 300);
+    return () => clearTimeout(t);
+  }, [searchInput]);
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      // Backend przyjmuje wyłącznie pełne „YYYY-MM-DD" — niedokończona data
+      // po prostu nie nakłada filtru.
+      const day = (v: string) => (/^\d{4}-\d{2}-\d{2}$/.test(v) ? v : undefined);
+      setCreated({ from: day(fromInput), to: day(toInput) });
+    }, 300);
+    return () => clearTimeout(t);
+  }, [fromInput, toInput]);
+
+  useEffect(() => {
+    // Komplet kartoteki, a nie pierwsza strona — filtr płatnika musi pokazywać
+    // wszystkich kontrahentów (ta sama lista, co select na liście obiektów).
+    getContractorCatalog()
+      .then((res) => setContractors(res.data ?? []))
+      .catch(() => setContractors([]));
+  }, []);
+
+  /**
+   * Każda zmiana filtra albo sortowania wraca na pierwszą stronę — inaczej po
+   * zawężeniu listy użytkownik ląduje na nieistniejącej stronie. Przestawiamy
+   * w trakcie renderu (a nie w efekcie), żeby nie poszło zbędne żądanie o starą
+   * stronę z nowym filtrem.
+   */
+  const filtersKey = [
+    search,
+    statusFilter,
+    payerFilter ?? "",
+    cameraMode,
+    created.from ?? "",
+    created.to ?? "",
+    sort,
+    dir,
+  ].join("|");
+  const [prevFiltersKey, setPrevFiltersKey] = useState(filtersKey);
+  if (prevFiltersKey !== filtersKey) {
+    setPrevFiltersKey(filtersKey);
+    setPage(1);
+  }
 
   const fetchOrders = useCallback(async () => {
     setLoading(true);
@@ -99,22 +192,101 @@ export function Orders() {
       const response = await getOrders({
         search: search || undefined,
         status: statusFilter !== "all" ? statusFilter : undefined,
+        payerContractorId: payerFilter,
+        camera: cameraMode === "with" ? "1" : cameraMode === "without" ? "0" : undefined,
+        createdFrom: created.from,
+        createdTo: created.to,
+        sort,
+        dir,
         page,
         pageSize,
       });
       setOrders(response.data);
       setTotal(response.total);
       setTotalPages(response.totalPages);
+      setStatusCounts({
+        total: response.statusTotal ?? 0,
+        new: response.statusCounts?.new ?? 0,
+        in_progress: response.statusCounts?.in_progress ?? 0,
+        completed: response.statusCounts?.completed ?? 0,
+      });
     } catch (error) {
       console.error("Error fetching orders:", error);
     } finally {
       setLoading(false);
     }
-  }, [search, statusFilter, page, pageSize]);
+  }, [
+    search,
+    statusFilter,
+    payerFilter,
+    cameraMode,
+    created.from,
+    created.to,
+    sort,
+    dir,
+    page,
+    pageSize,
+  ]);
 
   useEffect(() => {
     fetchOrders();
   }, [fetchOrders]);
+
+  /** Klik w nagłówek: ta sama kolumna odwraca kierunek, nowa startuje od swojego domyślnego. */
+  const toggleSort = (key: OrderSortKey) => {
+    if (sort === key) {
+      setDir((d) => (d === "asc" ? "desc" : "asc"));
+      return;
+    }
+    setSort(key);
+    setDir(DEFAULT_DIR[key]);
+  };
+
+  const filtersActive =
+    search !== "" ||
+    statusFilter !== "all" ||
+    payerFilter !== undefined ||
+    cameraMode !== "all" ||
+    fromInput !== "" ||
+    toInput !== "";
+
+  const clearFilters = () => {
+    setSearchInput("");
+    setStatusFilter("all");
+    setPayerFilter(undefined);
+    setCameraMode("all");
+    setFromInput("");
+    setToInput("");
+  };
+
+  /** Nagłówek klikalny — strzałka pokazuje kolumnę i kierunek sortowania. */
+  const SortHeader = ({
+    label,
+    sortKey,
+  }: {
+    label: string;
+    sortKey: OrderSortKey;
+  }) => {
+    const active = sort === sortKey;
+    const Icon = !active ? ChevronsUpDown : dir === "asc" ? ArrowUp : ArrowDown;
+    return (
+      <TableHead className="font-semibold">
+        <button
+          type="button"
+          data-testid={`zlecenia-sort-${sortKey}`}
+          onClick={() => toggleSort(sortKey)}
+          aria-label={`Sortuj po: ${label}`}
+          className={cn(
+            "inline-flex items-center gap-1 rounded px-1 -mx-1 transition-colors hover:text-slate-900",
+            active ? "text-slate-900" : "text-slate-500"
+          )}
+        >
+          {label}
+          <Icon className={cn("h-3.5 w-3.5", !active && "opacity-40")} />
+        </button>
+      </TableHead>
+    );
+  };
 
   const handleCreateOrder = async (data: OrderInput) => {
     if (!editable) return;
@@ -195,52 +367,56 @@ export function Orders() {
       ) : (
         <div className="space-y-4">
           {/* Stats Cards */}
+      {/* Kafelki liczą CAŁY wynik filtrowania (bez filtra statusu), a nie wczytaną
+          stronę — wcześniej „Nowe: 3" znaczyło „3 na tej stronie z 10". */}
       <div className="grid grid-cols-4 gap-4">
         <Card>
           <CardContent className="p-4">
             <p className="text-sm font-medium text-slate-500">Wszystkie zlecenia</p>
-            <div className="text-2xl font-bold text-slate-900">{total}</div>
+            <div className="text-2xl font-bold text-slate-900" data-testid="zlecenia-count-all">
+              {statusCounts.total}
+            </div>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-4">
             <p className="text-sm font-medium text-slate-500">Nowe</p>
-            <div className="text-2xl font-bold text-blue-600">
-              {orders.filter((o) => o.status === "new").length}
+            <div className="text-2xl font-bold text-blue-600" data-testid="zlecenia-count-new">
+              {statusCounts.new}
             </div>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-4">
             <p className="text-sm font-medium text-slate-500">W trakcie</p>
-            <div className="text-2xl font-bold text-yellow-600">
-              {orders.filter((o) => o.status === "in_progress").length}
+            <div className="text-2xl font-bold text-yellow-600" data-testid="zlecenia-count-in-progress">
+              {statusCounts.in_progress}
             </div>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-4">
             <p className="text-sm font-medium text-slate-500">Zakończone</p>
-            <div className="text-2xl font-bold text-green-600">
-              {orders.filter((o) => o.status === "completed").length}
+            <div className="text-2xl font-bold text-green-600" data-testid="zlecenia-count-completed">
+              {statusCounts.completed}
             </div>
           </CardContent>
         </Card>
       </div>
 
       {/* Filters */}
-      <div className="flex flex-wrap items-center gap-4 p-4 bg-white rounded-lg border border-slate-200">
-        <div className="relative flex-1 max-w-md">
+      <div className="flex flex-wrap items-center gap-2 p-4 bg-white rounded-lg border border-slate-200">
+        <div className="relative flex-1 min-w-[200px] max-w-md">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
           <Input
             placeholder="Szukaj zleceń..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
             className="pl-10"
           />
         </div>
         <Select value={statusFilter} onValueChange={setStatusFilter}>
-          <SelectTrigger className="w-40">
+          <SelectTrigger className="w-40" data-testid="zlecenia-filter-status">
             <SelectValue placeholder="Status" />
           </SelectTrigger>
           <SelectContent>
@@ -251,6 +427,77 @@ export function Orders() {
             ))}
           </SelectContent>
         </Select>
+
+        {/* Płatnik z kartoteki; „Spoza kartoteki" to zlecenia, których płatnika nikt
+            jeszcze nie powiązał z kontrahentem (zostaje sama migawka z formularza). */}
+        <Select
+          value={payerFilter === undefined ? "all" : String(payerFilter)}
+          onValueChange={(v) =>
+            setPayerFilter(v === "all" ? undefined : v === "none" ? "none" : parseInt(v))
+          }
+        >
+          <SelectTrigger className="w-[220px]" data-testid="zlecenia-filter-payer">
+            <SelectValue placeholder="Płatnik" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">Wszyscy płatnicy</SelectItem>
+            <SelectItem value="none">Spoza kartoteki</SelectItem>
+            {contractors.map((co) => (
+              <SelectItem key={co.id} value={String(co.id)}>
+                {co.name}
+                {!co.active ? " (archiwalny)" : ""}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+
+        <Select value={cameraMode} onValueChange={(v) => setCameraMode(v as CameraMode)}>
+          <SelectTrigger className="w-[200px]" data-testid="zlecenia-filter-camera">
+            <SelectValue placeholder="Zakres" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">Zakres: wszystkie</SelectItem>
+            <SelectItem value="with">Tylko montaż kamer</SelectItem>
+            <SelectItem value="without">Bez montażu kamer</SelectItem>
+          </SelectContent>
+        </Select>
+
+        <div className="flex items-center gap-1 text-sm text-slate-500">
+          <span>Przyjęte od</span>
+          <Input
+            type="date"
+            className="w-[150px]"
+            data-testid="zlecenia-filter-created-from"
+            value={fromInput}
+            onChange={(e) => setFromInput(e.target.value)}
+          />
+          <span>do</span>
+          <Input
+            type="date"
+            className="w-[150px]"
+            data-testid="zlecenia-filter-created-to"
+            value={toInput}
+            onChange={(e) => setToInput(e.target.value)}
+          />
+        </div>
+
+        {filtersActive && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={clearFilters}
+            data-testid="zlecenia-filters-clear"
+          >
+            <X className="h-4 w-4 mr-1" />
+            Wyczyść filtry
+          </Button>
+        )}
+
+        {/* Liczba pozycji PO wszystkich filtrach (kafelki wyżej ignorują status). */}
+        <span className="text-sm text-slate-500" data-testid="zlecenia-summary">
+          {total} {total === 1 ? "zlecenie" : "zleceń"} dla wybranych filtrów
+        </span>
+
         {editable && (
           <Button
             onClick={() => setIsFormOpen(true)}
@@ -267,13 +514,15 @@ export function Orders() {
         <Table>
           <TableHeader>
             <TableRow className="bg-slate-50">
-              <TableHead className="font-semibold">Numer</TableHead>
-              <TableHead className="font-semibold">Status</TableHead>
-              <TableHead className="font-semibold">Zlecający</TableHead>
-              <TableHead className="font-semibold">Obiekt</TableHead>
-              <TableHead className="font-semibold">Płatnik</TableHead>
+              <SortHeader label="Numer" sortKey="number" />
+              <SortHeader label="Status" sortKey="status" />
+              <SortHeader label="Zlecający" sortKey="requester" />
+              <SortHeader label="Obiekt" sortKey="object" />
+              <SortHeader label="Płatnik" sortKey="payer" />
+              {/* „Techniczne" to zbiór znaczników (kamery, megafony), a nie jedna
+                  wartość — nie ma po czym sortować, więc nagłówek zostaje zwykły. */}
               <TableHead className="font-semibold">Techniczne</TableHead>
-              <TableHead className="font-semibold">Data</TableHead>
+              <SortHeader label="Data" sortKey="created" />
               <TableHead className="text-right font-semibold">Akcje</TableHead>
             </TableRow>
           </TableHeader>
@@ -287,7 +536,9 @@ export function Orders() {
             ) : orders.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={8} className="text-center py-8 text-slate-500">
-                  Brak zleceń. Utwórz pierwsze zlecenie używając przycisku wyżej.
+                  {filtersActive
+                    ? "Brak zleceń dla wybranych filtrów"
+                    : "Brak zleceń. Utwórz pierwsze zlecenie używając przycisku wyżej."}
                 </TableCell>
               </TableRow>
             ) : (

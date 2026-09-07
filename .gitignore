@@ -53,3 +53,7 @@ data/snapshots/
 
 # załączniki notatek kalendarza (pliki użytkowników)
 data/attachments/
+
+# Backupy bazy i dane źródłowe kartoteki (XLSX, wyciągi) — nigdy do repo
+data/backups/
+obiekty/

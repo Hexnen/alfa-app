@@ -2,7 +2,22 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { Building2, Link2Off, RefreshCw, Search } from "lucide-react";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  ArrowDown,
+  ArrowUp,
+  Building2,
+  ChevronsUpDown,
+  RefreshCw,
+  Search,
+  X,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
   monitoredObjectsApi,
@@ -79,13 +94,54 @@ function summarizeDevices(devices: string | null): DeviceSummary {
 const TABLE_SELECT_CLS =
   "h-8 w-full min-w-56 rounded-md border border-input bg-background px-2 py-1 text-xs";
 
-type SortKey = "devices" | "name" | "city";
+/** Kolumny, po których da się sortować rejestr. */
+type SortKey = "name" | "externalId" | "city" | "street" | "devices" | "mapping";
 
-const SORT_OPTIONS: { key: SortKey; label: string }[] = [
-  { key: "devices", label: "wg liczby urządzeń" },
-  { key: "name", label: "wg nazwy" },
-  { key: "city", label: "wg miasta" },
-];
+/**
+ * Domyślny kierunek sortowania kolumny — liczniki ludzie czytają od największej
+ * wartości, teksty alfabetycznie (jak w kartotece obiektów i w spółkach).
+ * Numer w systemie to identyfikator, a nie licznik, więc idzie rosnąco.
+ */
+const DEFAULT_DIR: Record<SortKey, "asc" | "desc"> = {
+  name: "asc",
+  externalId: "asc",
+  city: "asc",
+  street: "asc",
+  devices: "desc",
+  mapping: "asc",
+};
+
+/** Filtr mapowania — zastąpił checkbox „tylko niezmapowane”. */
+type MappingFilter = "all" | "unmapped" | "mapped";
+
+/** Filtr składu urządzeń: obiekt ma kamery / ma alarmy. */
+type DeviceMode = "all" | "cameras" | "alarms";
+
+/** Filtr aktywności pozycji rejestru (API zwraca też pozycje wycofane). */
+type ActiveFilter = "all" | "active" | "inactive";
+
+/** Liczba z pola tekstowego — śmieci traktujemy jak brak filtra. */
+function parseCount(raw: string): number | undefined {
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+/**
+ * Sprzęt końcowy obiektu = kamery + alarmy. „Inne” to kanały transmisji
+ * i powiadomień, więc nie wchodzą ani do sortowania, ani do widełek —
+ * inaczej obiekt z pięcioma SMS-ami wyglądałby na większy od tego z kamerą.
+ */
+function deviceCount(d: DeviceSummary | undefined): number {
+  return (d?.cameras ?? 0) + (d?.alarms ?? 0);
+}
+
+/** Wartości `serviceTypes` przychodzą jako lista po średniku. */
+function serviceList(value: string | null): string[] {
+  return (value ?? "")
+    .split(";")
+    .map((v) => v.trim())
+    .filter(Boolean);
+}
 
 export function CmaObjects() {
   const { canEdit } = usePerms();
@@ -97,9 +153,19 @@ export function CmaObjects() {
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState<number | null>(null);
 
+  // Filtry i sortowanie liczymy po stronie klienta — rejestr ściągamy w całości
+  // (jedna strona na 1000 pozycji), więc nie ma żądania do odciążenia i widełki
+  // idą bez debounce'u: lista przelicza się w tym samym renderze co wpisana cyfra.
   const [search, setSearch] = useState("");
-  const [onlyUnmapped, setOnlyUnmapped] = useState(false);
+  const [mappingFilter, setMappingFilter] = useState<MappingFilter>("all");
+  const [serviceFilter, setServiceFilter] = useState("all");
+  const [deviceMode, setDeviceMode] = useState<DeviceMode>("all");
+  const [categoryFilter, setCategoryFilter] = useState("all");
+  const [activeFilter, setActiveFilter] = useState<ActiveFilter>("all");
+  const [minDevices, setMinDevices] = useState("");
+  const [maxDevices, setMaxDevices] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("devices");
+  const [dir, setDir] = useState<"asc" | "desc">(DEFAULT_DIR.devices);
   /**
    * Wiersz, którego lista wyboru jest właśnie dotykana. Kartoteka ma 120
    * pozycji, a rejestr 416 wierszy — pełne opcje we wszystkich selectach to
@@ -152,10 +218,54 @@ export function CmaObjects() {
     };
   }, [rows]);
 
+  /**
+   * Listy wyboru budujemy z danych, a nie ze słownika — rejestr CMA ma własne
+   * nazewnictwo usług i kategorii, którego nie ma po czym odtworzyć na froncie.
+   * Puste listy nie dostają selecta w ogóle (dziś `category` jest pusta we
+   * wszystkich 416 pozycjach — martwy filtr tylko zaśmiecałby pasek).
+   */
+  const serviceOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const r of rows) for (const s of serviceList(r.serviceTypes)) set.add(s);
+    return [...set].sort((a, b) => a.localeCompare(b, "pl"));
+  }, [rows]);
+
+  const categoryOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const r of rows) {
+      const v = (r.category ?? "").trim();
+      if (v) set.add(v);
+    }
+    return [...set].sort((a, b) => a.localeCompare(b, "pl"));
+  }, [rows]);
+
+  /** Filtr aktywności ma sens tylko wtedy, gdy w rejestrze są pozycje wycofane. */
+  const hasInactive = useMemo(() => rows.some((r) => !r.active), [rows]);
+
   const visible = useMemo(() => {
     const q = search.trim().toLowerCase();
+    const min = parseCount(minDevices);
+    const max = parseCount(maxDevices);
+
     const filtered = rows.filter((r) => {
-      if (onlyUnmapped && r.objectId != null) return false;
+      if (mappingFilter === "unmapped" && r.objectId != null) return false;
+      if (mappingFilter === "mapped" && r.objectId == null) return false;
+      // Usługi nie są rozłączne (jedna pozycja bywa i monitoringiem, i OFI),
+      // więc filtr wybiera pozycje MAJĄCE daną usługę — jak w kartotece obiektów.
+      if (serviceFilter !== "all" && !serviceList(r.serviceTypes).includes(serviceFilter)) {
+        return false;
+      }
+      if (categoryFilter !== "all" && (r.category ?? "").trim() !== categoryFilter) {
+        return false;
+      }
+      if (activeFilter === "active" && !r.active) return false;
+      if (activeFilter === "inactive" && r.active) return false;
+      const d = devicesById.get(r.id);
+      if (deviceMode === "cameras" && !(d?.cameras ?? 0)) return false;
+      if (deviceMode === "alarms" && !(d?.alarms ?? 0)) return false;
+      const count = deviceCount(d);
+      if (min !== undefined && count < min) return false;
+      if (max !== undefined && count > max) return false;
       if (!q) return true;
       // Szukamy po tym, czym człowiek rozpoznaje obiekt w drugim rejestrze:
       // nazwa bywa inna, ale adres albo numer w systemie zwykle się zgadza.
@@ -163,21 +273,124 @@ export function CmaObjects() {
         .filter(Boolean)
         .some((v) => (v as string).toLowerCase().includes(q));
     });
+
+    const mul = dir === "asc" ? 1 : -1;
     const byName = (a: MonitoredObject, b: MonitoredObject) =>
       a.name.localeCompare(b.name, "pl");
-    return [...filtered].sort((a, b) => {
-      if (sortKey === "name") return byName(a, b);
-      if (sortKey === "city")
-        return (a.city ?? "").localeCompare(b.city ?? "", "pl") || byName(a, b);
-      // Domyślnie od najbogatszych w sprzęt: im więcej urządzeń, tym większy
-      // obiekt i tym więcej traci się na braku powiązania z kartoteką.
-      const da = devicesById.get(a.id);
-      const dbv = devicesById.get(b.id);
-      const sa = (da?.cameras ?? 0) + (da?.alarms ?? 0);
-      const sb = (dbv?.cameras ?? 0) + (dbv?.alarms ?? 0);
-      return sb - sa || byName(a, b);
-    });
-  }, [rows, search, onlyUnmapped, sortKey, devicesById]);
+    const text = (r: MonitoredObject) =>
+      (sortKey === "name"
+        ? r.name
+        : sortKey === "city"
+          ? r.city
+          : sortKey === "street"
+            ? r.street
+            : r.object
+              ? catalogLabel(r.object)
+              : "") ?? "";
+
+    // Puste miasta, ulice i pozycje bez mapowania lądują na końcu w OBU
+    // kierunkach (NULLS LAST) — inaczej „sortuj po ulicy” zaczynałoby się od
+    // wierszy bez adresu. Tak samo brak urządzeń: kolumna pokazuje tam kreskę,
+    // więc zero to brak informacji, a nie najmniejsza wartość.
+    const compare = (a: MonitoredObject, b: MonitoredObject): number => {
+      if (sortKey === "externalId") return (a.externalId - b.externalId) * mul;
+      if (sortKey === "devices") {
+        const av = deviceCount(devicesById.get(a.id));
+        const bv = deviceCount(devicesById.get(b.id));
+        if (!av || !bv) {
+          if (!av && !bv) return 0;
+          return av ? -1 : 1;
+        }
+        return (av - bv) * mul;
+      }
+      const as = text(a).trim();
+      const bs = text(b).trim();
+      if (!as || !bs) {
+        if (!as && !bs) return 0;
+        return as ? -1 : 1;
+      }
+      return as.localeCompare(bs, "pl") * mul;
+    };
+
+    return [...filtered].sort((a, b) => compare(a, b) || byName(a, b));
+  }, [
+    rows,
+    search,
+    mappingFilter,
+    serviceFilter,
+    categoryFilter,
+    activeFilter,
+    deviceMode,
+    minDevices,
+    maxDevices,
+    sortKey,
+    dir,
+    devicesById,
+  ]);
+
+  /** Klik w nagłówek: ta sama kolumna odwraca kierunek, nowa startuje od swojego domyślnego. */
+  const toggleSort = (key: SortKey) => {
+    if (sortKey === key) {
+      setDir((d) => (d === "asc" ? "desc" : "asc"));
+      return;
+    }
+    setSortKey(key);
+    setDir(DEFAULT_DIR[key]);
+  };
+
+  const filtersActive =
+    search !== "" ||
+    mappingFilter !== "all" ||
+    serviceFilter !== "all" ||
+    categoryFilter !== "all" ||
+    activeFilter !== "all" ||
+    deviceMode !== "all" ||
+    minDevices !== "" ||
+    maxDevices !== "";
+
+  const clearFilters = () => {
+    setSearch("");
+    setMappingFilter("all");
+    setServiceFilter("all");
+    setCategoryFilter("all");
+    setActiveFilter("all");
+    setDeviceMode("all");
+    setMinDevices("");
+    setMaxDevices("");
+  };
+
+  /** Nagłówek klikalny — strzałka pokazuje kolumnę i kierunek sortowania. */
+  const SortHeader = ({
+    label,
+    sortKey: key,
+    title,
+    className,
+  }: {
+    label: string;
+    sortKey: SortKey;
+    title?: string;
+    className?: string;
+  }) => {
+    const activeCol = sortKey === key;
+    const Icon = !activeCol ? ChevronsUpDown : dir === "asc" ? ArrowUp : ArrowDown;
+    return (
+      <th className={cn("px-3 py-2 text-left font-medium", className)} title={title}>
+        <button
+          type="button"
+          data-testid={`cma-obiekty-sort-${key}`}
+          onClick={() => toggleSort(key)}
+          aria-label={`Sortuj po: ${label}`}
+          className={cn(
+            "inline-flex items-center gap-1 rounded px-1 -mx-1 uppercase transition-colors hover:text-foreground",
+            activeCol && "text-foreground"
+          )}
+        >
+          {label}
+          <Icon className={cn("h-3.5 w-3.5", !activeCol && "opacity-40")} />
+        </button>
+      </th>
+    );
+  };
 
   const handleMapping = async (row: MonitoredObject, objectId: number | null) => {
     if (!editable) return;
@@ -250,6 +463,9 @@ export function CmaObjects() {
         </CardContent>
       </Card>
 
+      {/* Pierwsza linia filtrów: szukajka i przynależność pozycji. Sortowanie
+          siedzi w nagłówkach tabeli (jak w kartotece obiektów), więc nie ma tu
+          już osobnej listy „wg czego sortować”. */}
       <div className="flex flex-wrap items-center gap-3">
         <div className="relative min-w-64 flex-1 max-w-md">
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
@@ -260,30 +476,120 @@ export function CmaObjects() {
             placeholder="Szukaj po nazwie, mieście, adresie lub numerze…"
           />
         </div>
-        <label className="flex items-center gap-2 text-sm">
-          <input
-            type="checkbox"
-            className="h-4 w-4 rounded border-input"
-            checked={onlyUnmapped}
-            onChange={(e) => setOnlyUnmapped(e.target.checked)}
-          />
-          <Link2Off className="h-4 w-4 text-muted-foreground" />
-          Tylko niezmapowane
-        </label>
-        <select
-          className="h-9 rounded-md border border-input bg-background px-2 text-sm"
-          value={sortKey}
-          aria-label="Sortowanie listy"
-          onChange={(e) => setSortKey(e.target.value as SortKey)}
+
+        <Select
+          value={mappingFilter}
+          onValueChange={(v) => setMappingFilter(v as MappingFilter)}
         >
-          {SORT_OPTIONS.map((o) => (
-            <option key={o.key} value={o.key}>
-              {o.label}
-            </option>
-          ))}
-        </select>
+          <SelectTrigger className="w-[200px]" data-testid="cma-obiekty-filter-mapping">
+            <SelectValue placeholder="Mapowanie" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">Mapowanie: wszystkie</SelectItem>
+            <SelectItem value="unmapped">Tylko niezmapowane</SelectItem>
+            <SelectItem value="mapped">Tylko zmapowane</SelectItem>
+          </SelectContent>
+        </Select>
+
+        {serviceOptions.length > 0 && (
+          <Select value={serviceFilter} onValueChange={setServiceFilter}>
+            <SelectTrigger className="w-[200px]" data-testid="cma-obiekty-filter-service">
+              <SelectValue placeholder="Usługa" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">Wszystkie usługi</SelectItem>
+              {serviceOptions.map((s) => (
+                <SelectItem key={s} value={s}>
+                  {s}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
+
+        <Select value={deviceMode} onValueChange={(v) => setDeviceMode(v as DeviceMode)}>
+          <SelectTrigger className="w-[200px]" data-testid="cma-obiekty-filter-devices">
+            <SelectValue placeholder="Urządzenia" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">Urządzenia: wszystkie</SelectItem>
+            <SelectItem value="cameras">Tylko z kamerami</SelectItem>
+            <SelectItem value="alarms">Tylko z alarmami</SelectItem>
+          </SelectContent>
+        </Select>
+
+        {categoryOptions.length > 0 && (
+          <Select value={categoryFilter} onValueChange={setCategoryFilter}>
+            <SelectTrigger className="w-[190px]" data-testid="cma-obiekty-filter-category">
+              <SelectValue placeholder="Kategoria" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">Wszystkie kategorie</SelectItem>
+              {categoryOptions.map((c) => (
+                <SelectItem key={c} value={c}>
+                  {c}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
+
+        {hasInactive && (
+          <Select
+            value={activeFilter}
+            onValueChange={(v) => setActiveFilter(v as ActiveFilter)}
+          >
+            <SelectTrigger className="w-[190px]" data-testid="cma-obiekty-filter-active">
+              <SelectValue placeholder="Status pozycji" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">Wszystkie pozycje</SelectItem>
+              <SelectItem value="active">Tylko aktualne</SelectItem>
+              <SelectItem value="inactive">Tylko wycofane</SelectItem>
+            </SelectContent>
+          </Select>
+        )}
+      </div>
+
+      {/* Druga linia: widełki liczby urządzeń (kamery + alarmy) i licznik po filtrach. */}
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="flex items-center gap-1 text-sm text-muted-foreground">
+          <span>Urządzeń od</span>
+          <Input
+            type="number"
+            min="0"
+            step="1"
+            inputMode="numeric"
+            className="w-24 tabular-nums"
+            data-testid="cma-obiekty-filter-min"
+            value={minDevices}
+            onChange={(e) => setMinDevices(e.target.value)}
+          />
+          <span>do</span>
+          <Input
+            type="number"
+            min="0"
+            step="1"
+            inputMode="numeric"
+            className="w-24 tabular-nums"
+            data-testid="cma-obiekty-filter-max"
+            value={maxDevices}
+            onChange={(e) => setMaxDevices(e.target.value)}
+          />
+        </div>
+        {filtersActive && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={clearFilters}
+            data-testid="cma-obiekty-filters-clear"
+          >
+            <X className="mr-1 h-4 w-4" />
+            Wyczyść filtry
+          </Button>
+        )}
         <span className="text-sm text-muted-foreground">
-          {visible.length} z {rows.length}
+          {visible.length} z {rows.length} pozycji rejestru
         </span>
       </div>
 
@@ -293,26 +599,34 @@ export function CmaObjects() {
             <table className="w-full text-sm">
               <thead className="border-b bg-muted/50 text-xs uppercase tracking-wide text-muted-foreground">
                 <tr>
-                  <th className="px-3 py-2 text-left font-medium">
-                    Obiekt w monitoringu
-                  </th>
-                  <th className="px-3 py-2 text-left font-medium">Miasto</th>
-                  <th className="px-3 py-2 text-left font-medium">Ulica</th>
-                  <th
-                    className="px-3 py-2 text-left font-medium"
-                    title="Liczba urządzeń wg producenta z kolumny devices: kamery (Dahua, Hikvision, ONVIF), alarmy (Satel, EBS), pozostałe to nadajniki i kanały powiadomień"
-                  >
-                    Urządzenia
-                  </th>
+                  {/* Numer w systemie dostał własną kolumnę, bo jest osobnym
+                      kryterium sortowania — pod nazwą nie dałoby się go kliknąć. */}
+                  <SortHeader
+                    label="Nr"
+                    sortKey="externalId"
+                    title="Numer pozycji w systemie monitoringu"
+                  />
+                  <SortHeader label="Obiekt w monitoringu" sortKey="name" />
+                  <SortHeader label="Miasto" sortKey="city" />
+                  <SortHeader label="Ulica" sortKey="street" />
+                  <SortHeader
+                    label="Urządzenia"
+                    sortKey="devices"
+                    title="Liczba urządzeń wg producenta z kolumny devices: kamery (Dahua, Hikvision, ONVIF), alarmy (Satel, EBS), pozostałe to nadajniki i kanały powiadomień. Sortowanie i widełki liczą sam sprzęt końcowy: kamery + alarmy"
+                  />
+                  {/* Usługi to zbiór wartości, a nie jedna — nie ma po czym
+                      sortować, więc nagłówek zostaje zwykły. */}
                   <th
                     className="px-3 py-2 text-left font-medium"
                     title="Rodzaj usługi z rejestru — wypełniony tylko w części pozycji"
                   >
                     Usługi
                   </th>
-                  <th className="px-3 py-2 text-left font-medium">
-                    Obiekt w kartotece
-                  </th>
+                  <SortHeader
+                    label="Obiekt w kartotece"
+                    sortKey="mapping"
+                    title="Sortowanie po nazwie obiektu z kartoteki; pozycje niezmapowane zawsze na końcu"
+                  />
                 </tr>
               </thead>
               <tbody>
@@ -326,11 +640,16 @@ export function CmaObjects() {
                         saving === r.id && "opacity-60",
                       )}
                     >
+                      <td className="px-3 py-2 text-xs text-muted-foreground tabular-nums">
+                        {r.externalId}
+                      </td>
                       <td className="px-3 py-2">
                         <div className="font-medium">{r.name}</div>
-                        <div className="text-xs text-muted-foreground">
-                          nr {r.externalId}
-                        </div>
+                        {!r.active && (
+                          <div className="text-xs text-muted-foreground">
+                            pozycja wycofana z rejestru
+                          </div>
+                        )}
                       </td>
                       <td className="px-3 py-2">{r.city || "—"}</td>
                       <td className="px-3 py-2 text-xs">{r.street || "—"}</td>
@@ -411,18 +730,20 @@ export function CmaObjects() {
                 {!loading && visible.length === 0 && (
                   <tr>
                     <td
-                      colSpan={6}
+                      colSpan={7}
                       className="px-3 py-10 text-center text-sm text-muted-foreground"
                     >
                       <Building2 className="mx-auto mb-2 h-6 w-6 opacity-50" />
-                      Brak pozycji spełniających filtry
+                      {filtersActive
+                        ? "Brak obiektów dla wybranych filtrów"
+                        : "Brak pozycji w rejestrze monitoringu"}
                     </td>
                   </tr>
                 )}
                 {loading && (
                   <tr>
                     <td
-                      colSpan={6}
+                      colSpan={7}
                       className="px-3 py-10 text-center text-sm text-muted-foreground"
                     >
                       Ładowanie…

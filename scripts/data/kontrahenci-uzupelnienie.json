@@ -1,0 +1,732 @@
+[
+  {
+    "nip": "5261003187",
+    "name": "BUDIMEX SPÓŁKA AKCYJNA",
+    "matchCma": [
+      287858
+    ],
+    "matchNames": [
+      "BUDIMEX"
+    ],
+    "address": "Siedmiogrodzka 9",
+    "postalCode": "01-204",
+    "city": "Warszawa",
+    "source": "https://rejestr.io/krs/1764/budimex",
+    "mfFound": true,
+    "confidence": "high"
+  },
+  {
+    "nip": "5260204995",
+    "name": "MOSTOSTAL WARSZAWA SPÓŁKA AKCYJNA",
+    "matchCma": [
+      297832
+    ],
+    "matchNames": [
+      "MOSTOSTAL WARSZAWA S.A."
+    ],
+    "address": "Konstruktorska 12a",
+    "postalCode": "02-673",
+    "city": "Warszawa",
+    "source": "https://rejestr.io/krs/8820/mostostal-warszawa",
+    "mfFound": true,
+    "confidence": "high"
+  },
+  {
+    "nip": "9542381960",
+    "name": "PKP CARGO SPÓŁKA AKCYJNA W RESTRUKTURYZACJI",
+    "matchCma": [
+      417822
+    ],
+    "matchNames": [
+      "PKP CARGO S.A."
+    ],
+    "address": "Grójecka 17",
+    "postalCode": "02-021",
+    "city": "Warszawa",
+    "source": "https://rejestr.io/krs/27702/pkp-cargo",
+    "mfFound": true,
+    "confidence": "high"
+  },
+  {
+    "nip": "9720959445",
+    "name": "TORPOL SPÓŁKA AKCYJNA",
+    "matchCma": [],
+    "matchNames": [
+      "TORPOL SPÓŁKA AKCYJNA"
+    ],
+    "address": "Św. Michała 43",
+    "postalCode": "61-119",
+    "city": "Poznań",
+    "source": "https://rejestr.io/krs/407013/torpol",
+    "mfFound": true,
+    "confidence": "high"
+  },
+  {
+    "nip": "5262542704",
+    "name": "PGE ENERGETYKA KOLEJOWA SPÓŁKA AKCYJNA",
+    "matchCma": [
+      345430
+    ],
+    "matchNames": [
+      "PKP ENERGETYKA"
+    ],
+    "address": "Hoża 63/67",
+    "postalCode": "00-681",
+    "city": "Warszawa",
+    "source": "https://rejestr.io/krs/322634/pkp-energetyka",
+    "mfFound": true,
+    "confidence": "medium",
+    "note": "PKP Energetyka S.A. przemianowana w 2023 na PGE Energetyka Kolejowa S.A. (ten sam KRS 0000322634). Rekord CMA 345430 jest szczątkowy (bez adresu) — sprawdź, czy to realny obiekt."
+  },
+  {
+    "nip": "1180901661",
+    "name": "VOESTALPINE HIGH PERFORMANCE METALS POLSKA SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "matchCma": [
+      301762,
+      301764
+    ],
+    "matchNames": [
+      "Voestalpine Metals Polska Sp. z o.o."
+    ],
+    "address": "Kolejowa 291",
+    "postalCode": "05-092",
+    "city": "Dziekanów Polski",
+    "source": "https://rejestr.io/krs/71549/voestalpine-high-performance-metals-polska",
+    "mfFound": true,
+    "confidence": "high",
+    "note": "Adres siedziby = adres obiektu CMA 301762 (Kolejowa 291, Dziekanów Polski). Obiekt 301764 (Mysłowice, Karola Miarki 36) to drugi posterunek tego samego klienta."
+  },
+  {
+    "nip": "5262729762",
+    "name": "BRITISH AUTOMOTIVE POLSKA SPÓŁKA AKCYJNA W UPADŁOŚCI",
+    "matchCma": [
+      227280,
+      271256,
+      282224
+    ],
+    "matchNames": [
+      "BRITISH AUTOMOTIVE POLSKA (salon Land Rover/Jaguar Waszyngtona 50)",
+      "BRITISH AUTOMOTIVE POLSKA (salon Land Rover/Jaguar Wawelska 3D)",
+      "BRITISH AUTOMOTIVE POLSKA (salon Land Rover/Jaguar Łódź)"
+    ],
+    "address": "Czubatki 9",
+    "postalCode": "02-082",
+    "city": "Warszawa",
+    "source": "https://rejestr.io/krs/574729/british-automotive-polska",
+    "mfFound": true,
+    "confidence": "medium",
+    "note": "Adres siedziby (Czubatki 9) zgadza się z dopiskiem '(CZUBATKI)' przy obiekcie 271256 Wawelska 3D. Importer Jaguar Land Rover w PL — salony Waszyngtona 50, Wawelska 3D i Łódź przypisane do tej samej spółki; spółka w upadłości."
+  },
+  {
+    "nip": "1181706849",
+    "name": "TOTALBUD PROSTA SPÓŁKA AKCYJNA",
+    "matchCma": [
+      323335,
+      323488
+    ],
+    "matchNames": [
+      "TOTALBUD"
+    ],
+    "address": "Karczunkowska 46",
+    "postalCode": "02-871",
+    "city": "Warszawa",
+    "source": "https://aleo.com/int/company/totalbud-spolka-akcyjna",
+    "mfFound": true,
+    "confidence": "medium",
+    "note": "Ten sam REGON 015593497 co dawnego TOTALBUD S.A. (KRS 0000736963) — przekształcenie w prostą spółkę akcyjną."
+  },
+  {
+    "nip": "5270011401",
+    "name": "PRZEDSIĘBIORSTWO TYNKBUD-1 SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "matchCma": [
+      331936
+    ],
+    "matchNames": [
+      "TYNKBUD"
+    ],
+    "address": "Batalionu AK \"Włochy\" 14",
+    "postalCode": "02-482",
+    "city": "Warszawa",
+    "source": "https://rejestr.io/krs/16216",
+    "mfFound": true,
+    "confidence": "medium",
+    "note": "Jedyny warszawski wykonawca/deweloper o nazwie TYNKBUD; obiekt 331936 to budowa przy Tużyckiej 31."
+  },
+  {
+    "nip": "5223028707",
+    "name": "MAL-BUD-1 SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ SPÓŁKA KOMANDYTOWA",
+    "matchCma": [
+      324263
+    ],
+    "matchNames": [
+      "MALBUD-1 (budowa Symbio City, Ostrobramska 76)"
+    ],
+    "address": "Obozowa 57",
+    "postalCode": "01-161",
+    "city": "Warszawa",
+    "source": "https://rejestr.io/krs/556536/mal-bud-1",
+    "mfFound": true,
+    "confidence": "medium",
+    "note": "Spółka operacyjna grupy MAL-BUD-1 (malbud1.pl), warszawski generalny wykonawca. Istnieje też komplementariusz MAL-BUD-1 sp. z o.o. — jeśli faktury wystawiał on, podmiana NIP-u."
+  },
+  {
+    "nip": "5322078329",
+    "name": "MILO - DEVELOPMENT SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "matchCma": [
+      287816
+    ],
+    "matchNames": [
+      "MILO DEVELOPMENT (osiedle Distalis, Józefów)"
+    ],
+    "address": "Józefa Ignacego Kraszewskiego 83/5",
+    "postalCode": "05-400",
+    "city": "Otwock",
+    "source": "https://rejestr.io/krs/738032/milo-development",
+    "mfFound": true,
+    "confidence": "medium",
+    "note": "Deweloper z Otwocka/Józefowa; status VAT wg MF: Niezarejestrowany (spółka w restrukturyzacji)."
+  },
+  {
+    "nip": "7122631001",
+    "name": "MULTI FRIGO SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "matchCma": [
+      352698
+    ],
+    "matchNames": [
+      "MULTIFRIGO (Lublin, Bursaki 18)"
+    ],
+    "address": "Bursaki 18",
+    "postalCode": "20-150",
+    "city": "Lublin",
+    "source": "https://rejestr.io/krs/5652/multi-frigo",
+    "mfFound": true,
+    "confidence": "high",
+    "note": "Adres siedziby identyczny z adresem obiektu CMA (Bursaki 18, Lublin)."
+  },
+  {
+    "nip": "5252806308",
+    "name": "APARTUS PROPERTIES SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "matchCma": [
+      326602
+    ],
+    "matchNames": [
+      "Apartus Properties"
+    ],
+    "address": "Juliusza Słowackiego 5/13/142",
+    "postalCode": "01-592",
+    "city": "Warszawa",
+    "source": "https://rynekpierwotny.pl/oferty/apartus-properties-sp-z-oo/apartamenty-polnocna-lublin-13337/",
+    "mfFound": true,
+    "confidence": "high",
+    "note": "Deweloper inwestycji 'Apartamenty Północna' przy ul. Północnej 22 w Lublinie = obiekt CMA 326602."
+  },
+  {
+    "nip": "8210006125",
+    "name": "DROSED SPÓŁKA AKCYJNA",
+    "matchCma": [
+      158056,
+      203553
+    ],
+    "matchNames": [
+      "DROSED"
+    ],
+    "address": "Sokołowska 154",
+    "postalCode": "08-110",
+    "city": "Siedlce",
+    "source": "https://rejestr.io/krs/54754/drosed",
+    "mfFound": true,
+    "confidence": "high",
+    "note": "Adres siedziby = adres obiektu CMA 158056 (Sokołowska 154, Siedlce). 203553 'Drosed Maszynownia' to fragment tego samego zakładu."
+  },
+  {
+    "nip": "5222906927",
+    "name": "DEX 44 SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "matchCma": [
+      211009,
+      211014,
+      211004
+    ],
+    "matchNames": [
+      "DEX 44"
+    ],
+    "address": "Gen. Tadeusza Pełczyńskiego 14a/90",
+    "postalCode": "01-471",
+    "city": "Warszawa",
+    "source": "https://rejestr.io/krs/320132/dex-44",
+    "mfFound": true,
+    "confidence": "high",
+    "note": "Zarządca nieruchomości; potwierdzenie pośrednie — WM Żeromskiego 1 (Słodowiec City, CMA 269483) prowadzi stronę dex44.pl/slodowieccity."
+  },
+  {
+    "nip": "5252638354",
+    "name": "NOWY ŚWIAT MSZCZONOVE SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "matchCma": [
+      371875
+    ],
+    "matchNames": [
+      "IDM SA (Nordic Blue)"
+    ],
+    "address": "Nowy Świat 11/31",
+    "postalCode": "96-300",
+    "city": "Żyrardów",
+    "source": "https://www.krs-online.com.pl/firma/5780626-nordic-blue-sp-z-o-o",
+    "mfFound": true,
+    "confidence": "medium",
+    "note": "Dawniej NORDIC BLUE SP. Z O.O. (KRS 0000589256, REGON 363129439); inwestycja 'MszczoNove' przy ul. Ługowej w Mszczonowie = obiekt CMA 371875. Nazwa 'IDM SA' z rejestru CMA nie została potwierdzona w żadnym rejestrze."
+  },
+  {
+    "nip": "1133030986",
+    "name": "MAAM SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "matchCma": [
+      283810
+    ],
+    "matchNames": [
+      "URMedical Center (Marcin Radko)"
+    ],
+    "address": "Ząbkowska 14/U1",
+    "postalCode": "03-735",
+    "city": "Warszawa",
+    "source": "https://urmed.pl/kontakt/",
+    "mfFound": true,
+    "confidence": "medium",
+    "note": "NIP podany na stronie URMED Medical Center (urmed.pl); w wykazie MF widnieje jako MAAM sp. z o.o. pod tym samym adresem Ząbkowska 14/U1 = adres obiektu CMA."
+  },
+  {
+    "nip": "8221997326",
+    "name": "\"DIREX\" SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "matchCma": [
+      272110
+    ],
+    "matchNames": [
+      "Direx"
+    ],
+    "address": "Trakt Brzeski 152",
+    "postalCode": "05-070",
+    "city": "Sulejówek",
+    "source": "https://rejestr.io/krs/6230/direx",
+    "mfFound": true,
+    "confidence": "high",
+    "note": "Adres siedziby = adres obiektu CMA 272110 (Trakt Brzeski 152, Sulejówek)."
+  },
+  {
+    "nip": "5222966131",
+    "name": "WSPÓLNOTA MIESZKANIOWA \"WOLA TOWER\" UL. RADZIWIE 7",
+    "matchCma": [
+      211540,
+      211539
+    ],
+    "matchNames": [
+      "Wola Tower (Radziwie 7)"
+    ],
+    "address": "Radziwie 7",
+    "postalCode": "01-164",
+    "city": "Warszawa",
+    "source": "https://www.owg.pl/op-inne/wspolnota_mieszkaniowa_wola_tower_ul_radziwie_7_w_warszawie_9,222,1426912,142691221",
+    "mfFound": true,
+    "confidence": "high",
+    "note": "Potwierdzone w wykazie VAT MF (status Czynny). Dwa rekordy CMA = dwa posterunki w tym samym budynku."
+  },
+  {
+    "nip": "7010717200",
+    "name": "WSPÓLNOTA MIESZKANIOWA BOBROWIECKA 10, 10B",
+    "matchCma": [
+      209678
+    ],
+    "matchNames": [
+      "WSPÓLNOTA MIESZKANIOWA BOBROWIECKA 10"
+    ],
+    "address": "Bobrowiecka 10",
+    "postalCode": "00-728",
+    "city": "Warszawa",
+    "source": "https://www.owg.pl/op-inne/wspolnota_mieszkaniowa_bobrowiecka_10_10b_9,222,3680652,368065218",
+    "mfFound": false,
+    "confidence": "high",
+    "note": "Dwa źródła: OWG (REGON 368065218) i firma.egospodarka.pl. Uwaga: recenzent CMA pisał o wspólnotach 'Bobrowiecka 10' i '10A' — zarejestrowana jest jedna wspólnota 'Bobrowiecka 10, 10B'."
+  },
+  {
+    "nip": "9512499243",
+    "name": "WSPÓLNOTA MIESZKANIOWA \"LEKKA 1\"",
+    "matchCma": [
+      220733
+    ],
+    "matchNames": [
+      "WSPÓLNOTA MIESZKANIOWA LEKKA 1"
+    ],
+    "address": "Lekka 1",
+    "postalCode": "01-910",
+    "city": "Warszawa",
+    "source": "https://www.owg.pl/op-inne/wspolnota_mieszkaniowa_lekka_1_9,222,3855242,385524259",
+    "mfFound": false,
+    "confidence": "high",
+    "note": "Dwa źródła: OWG (REGON 385524259) i firma.egospodarka.pl. Adres korespondencyjny zarządcy 02-955."
+  },
+  {
+    "nip": "7010339353",
+    "name": "WSPÓLNOTA MIESZKANIOWA WARSZAWA UL. OBORNICKA 29",
+    "matchCma": [
+      105532
+    ],
+    "matchNames": [
+      "WSPÓLNOTA MIESZKANIOWA WARSZAWA UL. OBORNICKA 29"
+    ],
+    "address": "Obornicka 29",
+    "postalCode": "02-953",
+    "city": "Warszawa",
+    "source": "https://www.firma.egospodarka.pl/raporty-o-firmach/szukaj?c=Wsp%C3%B3lnota+Mieszkaniowa+Obornicka&g=Warszawa",
+    "mfFound": false,
+    "confidence": "high",
+    "note": "REGON 146059402 zgodny z kartą OWG tej wspólnoty. UWAGA: streszczenie wyszukiwarki podawało wcześniej NIP 7010046065 — to NIP wydawcy serwisu (WeNet Group S.A.), nie wspólnoty."
+  },
+  {
+    "nip": "5213220484",
+    "name": "WSPÓLNOTA MIESZKANIOWA \"ORZYCKA\"",
+    "matchCma": [
+      105468
+    ],
+    "matchNames": [
+      "WSPÓLNOTA MIESZKANIOWA \"ORZYCKA\" (Orzycka 6)",
+      "WSPÓLNOTA MIESZKANIOWA ORZYCKA"
+    ],
+    "address": "Orzycka 6",
+    "postalCode": "02-695",
+    "city": "Warszawa",
+    "source": "https://www.owg.pl/op-inne/wspolnota_mieszkaniowa_orzycka_9,222,0152684,015268461",
+    "mfFound": false,
+    "confidence": "high",
+    "note": "Dwa źródła: OWG (REGON 015268461) i firma.egospodarka.pl; adres Orzycka 6 = obiekt CMA 105468."
+  },
+  {
+    "nip": "9512439896",
+    "name": "WSPÓLNOTA MIESZKANIOWA ALEKSANDRA GIEYSZTORA NR 6 W WARSZAWIE",
+    "matchCma": [
+      179781
+    ],
+    "matchNames": [
+      "WSPÓLNOTA MIESZKANIOWA ALEKSANDRA GIEYSZTORA 6",
+      "WSPÓLNOTA MIESZKANIOWA ALEKSANDRA GIEYSZTORA"
+    ],
+    "address": "Aleksandra Gieysztora 6",
+    "postalCode": "02-972",
+    "city": "Warszawa",
+    "source": "https://www.owg.pl/op-inne/wspolnota_mieszkaniowa_aleksandra_gieysztora_nr_6_w_warszawie_9,222,3675027,367502734",
+    "mfFound": false,
+    "confidence": "high",
+    "note": "Dwa źródła: OWG (REGON 367502734) i firma.egospodarka.pl. Adres korespondencyjny zarządcy: Sarmacka 28B lok. 4U."
+  },
+  {
+    "nip": "5213402096",
+    "name": "WSPÓLNOTA MIESZKANIOWA \"PUŁAWSKA 233\"",
+    "matchCma": [
+      105524
+    ],
+    "matchNames": [
+      "WSPÓLNOTA MIESZKANIOWA \"PUŁAWSKA 233\"",
+      "WSPÓLNOTA MIESZKANIOWA PUŁAWSKA 233"
+    ],
+    "address": "Puławska 233",
+    "postalCode": "02-715",
+    "city": "Warszawa",
+    "source": "https://www.firma.egospodarka.pl/raporty-o-firmach/szukaj?c=Wsp%C3%B3lnota+Mieszkaniowa+Pu%C5%82awska&g=Warszawa",
+    "mfFound": false,
+    "confidence": "medium",
+    "note": "Jedno pewne źródło (firma.egospodarka.pl, REGON 140636643); istnienie wspólnoty pod tym adresem potwierdza Panorama Firm, ale bez NIP-u. Największy posterunek OFI — warto potwierdzić NIP na fakturze."
+  },
+  {
+    "nip": "5272709005",
+    "name": "WSPÓLNOTA MIESZKANIOWA \"DOBRA WOLA\" UL. JANA KAZIMIERZA 7, 9, 11",
+    "matchCma": [
+      388866
+    ],
+    "matchNames": [
+      "WSPÓLNOTA MIESZKANIOWA DOBRA WOLA (Jana Kazimierza 7,9,11)",
+      "WSPÓLNOTA MIESZKANIOWA DOBRA WOLA"
+    ],
+    "address": "Jana Kazimierza 7",
+    "postalCode": "01-248",
+    "city": "Warszawa",
+    "source": "https://www.firma.egospodarka.pl/raporty-o-firmach/firma,19670410,wspolnota-mieszkaniowa-dobra-wola-ul-jana-kazimierza-7-9-11.html",
+    "mfFound": false,
+    "confidence": "high",
+    "note": "Dwa źródła: firma.egospodarka.pl i OWG (REGON 147083905); adres = obiekt CMA 388866."
+  },
+  {
+    "nip": "7010233436",
+    "name": "WSPÓLNOTA MIESZKANIOWA GRÓJECKA 214",
+    "matchCma": [
+      225777
+    ],
+    "matchNames": [
+      "WSPÓLNOTA MIESZKANIOWA GRÓJECKA 214"
+    ],
+    "address": "Grójecka 214",
+    "postalCode": "02-390",
+    "city": "Warszawa",
+    "source": "https://www.owg.pl/op-inne/wspolnota_mieszkaniowa_grojecka_214_9,222,1422553,142255342",
+    "mfFound": false,
+    "confidence": "high",
+    "note": "Dwa źródła: OWG (REGON 142255342) i firma.egospodarka.pl."
+  },
+  {
+    "nip": "5272946722",
+    "name": "WSPÓLNOTA MIESZKANIOWA BURAKOWSKA 16B",
+    "matchCma": [
+      358396
+    ],
+    "matchNames": [
+      "WSPÓLNOTA MIESZKANIOWA BURAKOWSKA 16B"
+    ],
+    "address": "Burakowska 16B",
+    "postalCode": "01-066",
+    "city": "Warszawa",
+    "source": "https://www.firma.egospodarka.pl/raporty-o-firmach/szukaj?c=Wsp%C3%B3lnota+Mieszkaniowa+Burakowska&g=Warszawa",
+    "mfFound": false,
+    "confidence": "high",
+    "note": "REGON 387786791. Adres korespondencyjny w rejestrze różni się od adresu nieruchomości (Burakowska 16B)."
+  },
+  {
+    "nip": "7010957536",
+    "name": "WSPÓLNOTA MIESZKANIOWA \"EDEN WŁODARZEWSKA\" PRZY UL. WŁODARZEWSKIEJ 76J",
+    "matchCma": [
+      239840
+    ],
+    "matchNames": [
+      "WSPÓLNOTA MIESZKANIOWA \"EDEN WŁODARZEWSKA\" PRZY UL. WŁODARZEWSKIEJ 76J",
+      "WSPÓLNOTA MIESZKANIOWA \"EDEN WŁODARZEWSKA\""
+    ],
+    "address": "Włodarzewska 76J",
+    "postalCode": "02-393",
+    "city": "Warszawa",
+    "source": "https://www.firma.egospodarka.pl/raporty-o-firmach/szukaj?c=Wsp%C3%B3lnota+Mieszkaniowa+Eden&g=Warszawa",
+    "mfFound": false,
+    "confidence": "high",
+    "note": "REGON 384893368; nazwa i adres dokładnie jak obiekt CMA 239840. Siostrzana wspólnota 'EDEN WŁODARZEWSKA' 76F,G,H ma inny NIP (7010957542) — nie mylić."
+  },
+  {
+    "nip": "5222937885",
+    "name": "WSPÓLNOTA MIESZKANIOWA OSIEDLE PRZY PROMENADZIE II UL. NOWAKA JEZIORAŃSKIEGO 9",
+    "matchCma": [
+      283510,
+      284492
+    ],
+    "matchNames": [
+      "WSPÓLNOTA MIESZKANIOWA OSIEDLE PRZY PROMENADZIE (Nowaka-Jeziorańskiego 9)",
+      "WSPÓLNOTA MIESZKANIOWA OSIEDLE PRZY PROMENADZIE II",
+      "WSPÓLNOTA MIESZKANIOWA OSIEDLE PRZY PROMENADZIE I"
+    ],
+    "address": "Jana Nowaka-Jeziorańskiego 9",
+    "postalCode": "03-984",
+    "city": "Warszawa",
+    "source": "https://www.owg.pl/op-inne/wspolnota_mieszkaniowa_osiedle_przy_promenadzie_ii_ul_nowaka_jezioranskiego_9_9,222,1421383,142138398",
+    "mfFound": false,
+    "confidence": "high",
+    "note": "Dwa źródła: OWG (REGON 142138398) i firma.egospodarka.pl. Oba rekordy CMA (283510 dyżurka, 284492 obchodowy) to ta sama wspólnota — brak odrębnej 'PRZY PROMENADZIE I' pod tym adresem."
+  },
+  {
+    "nip": "5213343732",
+    "name": "WSPÓLNOTA MIESZKANIOWA \"SADYBA PARK\" PLAC REMBOWSKIEGO 9, 9A, 9B, 9C",
+    "matchCma": [
+      134048
+    ],
+    "matchNames": [
+      "WSPÓLNOTA MIESZKANIOWA SADYBA PARK (plac Rembowskiego 9)",
+      "WSPÓLNOTA MIESZKANIOWA SADYBA PARK"
+    ],
+    "address": "plac Rembowskiego 9",
+    "postalCode": "00-793",
+    "city": "Warszawa",
+    "source": "https://www.owg.pl/op-inne/wspolnota_mieszkaniowa_sadyba_park_plac_rembowskiego_9_9a_9b_9c_9,222,1401145,140114525",
+    "mfFound": false,
+    "confidence": "high",
+    "note": "Dwa źródła: OWG (REGON 140114525) i firma.egospodarka.pl."
+  },
+  {
+    "nip": "5222707263",
+    "name": "WSPÓLNOTA MIESZKANIOWA SKOROSZEWSKA 1A",
+    "matchCma": [
+      146456
+    ],
+    "matchNames": [
+      "WSPÓLNOTA MIESZKANIOWA SKOROSZEWSKA 1A"
+    ],
+    "address": "Skoroszewska 1A",
+    "postalCode": "02-495",
+    "city": "Warszawa",
+    "source": "https://www.firma.egospodarka.pl/raporty-o-firmach/szukaj?c=Wsp%C3%B3lnota+Mieszkaniowa+Skoroszewska&g=Warszawa",
+    "mfFound": false,
+    "confidence": "high",
+    "note": "REGON 015611462; nazwa i adres dokładnie jak obiekt CMA 146456 (sąsiednie wspólnoty Skoroszewska 1 i 1B mają inne NIP-y)."
+  },
+  {
+    "nip": "5252289735",
+    "name": "WSPÓLNOTA MIESZKANIOWA STAWKI 3 A",
+    "matchCma": [
+      141306
+    ],
+    "matchNames": [
+      "WSPÓLNOTA MIESZKANIOWA STAWKI 3A"
+    ],
+    "address": "Stawki 3A",
+    "postalCode": "00-193",
+    "city": "Warszawa",
+    "source": "https://www.firma.egospodarka.pl/raporty-o-firmach/szukaj?c=Wsp%C3%B3lnota+Mieszkaniowa+Stawki&g=Warszawa",
+    "mfFound": false,
+    "confidence": "high",
+    "note": "REGON 015559394; odrębna od 'WM nieruchomości przy ul. Stawki 3' (NIP 5252386177)."
+  },
+  {
+    "nip": "1132633004",
+    "name": "SPÓŁDZIELNIA MIESZKANIOWA \"WILGA 2000\"",
+    "matchCma": [
+      105496
+    ],
+    "matchNames": [
+      "SPÓŁDZIELNIA MIESZKANIOWA \"WILGA 2000\""
+    ],
+    "address": "Szkoły Orląt 4/uż.5",
+    "postalCode": "03-984",
+    "city": "Warszawa",
+    "source": "https://rejestr.io/krs/263785",
+    "mfFound": true,
+    "confidence": "high",
+    "note": "Potwierdzone w wykazie VAT MF (KRS 0000263785, status Czynny); adres = obiekt CMA 105496."
+  },
+  {
+    "nip": "5223164327",
+    "name": "WSPÓLNOTA MIESZKANIOWA PRZY UL. BIAŁEGO DĘBU 8, 10, 12",
+    "matchCma": [
+      272261
+    ],
+    "matchNames": [
+      "WSPÓLNOTY MIESZKANIOWE OSIEDLA KRÓLIKARNIA (Białego Dębu / Ukryty Raj)",
+      "WSPÓLNOTA MIESZKANIOWA PRZY UL. BIAŁEGO DĘBU"
+    ],
+    "address": "Białego Dębu 8, 10, 12",
+    "postalCode": "02-757",
+    "city": "Warszawa",
+    "source": "https://www.firma.egospodarka.pl/raporty-o-firmach/szukaj?c=Wsp%C3%B3lnota+Mieszkaniowa&g=Warszawa+Bia%C5%82ego+D%C4%99bu",
+    "mfFound": false,
+    "confidence": "medium",
+    "note": "REGON 383866286. Obiekt CMA 272261 'WM Królikarnia' obejmuje KILKA wspólnot (Białego Dębu, Ukryty Raj, Wyciszona, Srebrnych Świerków); przypisano największego płatnika (wpływ maj 2026 8 741 zł do GUARD). Wspólnoty DARWEN, TOTTON, TRURO nie zostały odnalezione w rejestrach."
+  },
+  {
+    "nip": "5213837368",
+    "name": "WSPÓLNOTA MIESZKANIOWA \"ARKADIA\" PRZY UL. UKRYTY RAJ 1 I UL. ZAPACHU BZU 3 W WARSZAWIE",
+    "matchCma": [
+      406502
+    ],
+    "matchNames": [
+      "WSPÓLNOTA MIESZKANIOWA NOVA KRÓLIKARNIA (Ukryty Raj 1)"
+    ],
+    "address": "Ukryty Raj 1",
+    "postalCode": "02-757",
+    "city": "Warszawa",
+    "source": "https://www.firma.egospodarka.pl/raporty-o-firmach/szukaj?c=Wsp%C3%B3lnota+Mieszkaniowa&g=Warszawa+Ukryty+Raj",
+    "mfFound": false,
+    "confidence": "medium",
+    "note": "REGON 380838770; jedyna wspólnota zarejestrowana pod adresem Ukryty Raj 1 = obiekt CMA 406502. Obiekt opisany jako budowa/przedszkole — płatnikiem może być wykonawca, nie wspólnota."
+  },
+  {
+    "nip": "5213637505",
+    "name": "WSPÓLNOTA MIESZKANIOWA \"BARTYCKA RESIDENCE III\" PRZY UL. BLUSZCZAŃSKA 32, 34, 36, 38, 40",
+    "matchCma": [
+      385017
+    ],
+    "matchNames": [
+      "WSPÓLNOTA MIESZKANIOWA BARTYCKA RESIDENCE III",
+      "WSPÓLNOTA MIESZKANIOWA \"BARTYCKA RESIDENCE III\""
+    ],
+    "address": "Bluszczańska 32, 34, 36, 38, 40",
+    "postalCode": "00-712",
+    "city": "Warszawa",
+    "source": "https://www.firma.egospodarka.pl/raporty-o-firmach/szukaj?c=Wsp%C3%B3lnota+Mieszkaniowa+Bartycka+Residence&g=Warszawa",
+    "mfFound": false,
+    "confidence": "high",
+    "note": "REGON 146316081; nazwa i adres (Bluszczańska 32-40) dokładnie jak obiekt CMA 385017. Odrębny podmiot od dewelopera APM BARTYCKA RESIDENCE III sp. z o.o. (5342504611)."
+  },
+  {
+    "nip": "5242685576",
+    "name": "WSPÓLNOTA MIESZKANIOWA REGATY I/II PRZY UL. ŻEGLUGI WIŚLANEJ 8, 8A, 8B, 10, 10A, 10B, 14",
+    "matchCma": [
+      396303
+    ],
+    "matchNames": [
+      "WSPÓLNOTA MIESZKANIOWA OSIEDLE REGATY"
+    ],
+    "address": "Żeglugi Wiślanej 8",
+    "postalCode": "03-043",
+    "city": "Warszawa",
+    "source": "https://www.firma.egospodarka.pl/raporty-o-firmach/szukaj?c=Wsp%C3%B3lnota+Mieszkaniowa&g=Warszawa+%C5%BBeglugi+Wi%C5%9Blanej",
+    "mfFound": true,
+    "confidence": "high",
+    "note": "Potwierdzone w wykazie VAT MF (status Zwolniony). Obiekt CMA 396303 'Osiedle Regaty' Żeglugi Wiślanej 8/10/12 — pokrywa się z Regaty I/II (8 i 10); Regaty III/IV (5242695770) i V/VI (5252532213) to inne wspólnoty."
+  },
+  {
+    "nip": "1182124813",
+    "name": "WSPÓLNOTA MIESZKANIOWA ŻEROMSKIEGO 1",
+    "matchCma": [
+      269483
+    ],
+    "matchNames": [
+      "WSPÓLNOTA MIESZKANIOWA SŁODOWIEC CITY (Żeromskiego 1)"
+    ],
+    "address": "Stefana Żeromskiego 1",
+    "postalCode": "01-887",
+    "city": "Warszawa",
+    "source": "https://www.bisnode.pl/firma/?id=15084113&nazwa=WSPOLNOTA_MIESZKANIOWA_ZEROMSKIEGO_1",
+    "mfFound": false,
+    "confidence": "medium",
+    "note": "REGON 364576614; wspólnota prowadzi stronę dex44.pl/slodowieccity i adres e-mail slodowiec@dex44.pl — to potwierdza tożsamość z obiektem 'WM SŁODOWIEC CITY' (Żeromskiego 1). Jedno źródło z NIP-em (Bisnode)."
+  },
+  {
+    "nip": "5250011881",
+    "name": "SPÓŁDZIELNIA MIESZKANIOWA \"NA SKRAJU\"",
+    "matchCma": [
+      344651
+    ],
+    "matchNames": [
+      "SPÓŁDZIELNIA MIESZKANIOWA \"NA SKRAJU\" (Szolc-Rogozińskiego 15)"
+    ],
+    "address": "Stanisława Kulczyńskiego 14",
+    "postalCode": "02-777",
+    "city": "Warszawa",
+    "source": "https://rejestr.io/krs/5774/spoldzielnia-mieszkaniowa-na-skraju",
+    "mfFound": true,
+    "confidence": "high",
+    "note": "Potwierdzone w wykazie VAT MF (KRS 0000005774, status Czynny). Obiekt CMA 344651 przy Szolc-Rogozińskiego 15 leży w zasobach tej spółdzielni (Ursynów)."
+  },
+  {
+    "nip": "5263921906",
+    "name": "ALPHA POLISH LOGISTICS PROPCO SOCIÉTÉ Á RESPONSABILITÉ LIMITÉE",
+    "matchCma": [
+      402737,
+      383285
+    ],
+    "matchNames": [
+      "Alpha Polish Logistics Propco S.a r.l."
+    ],
+    "address": "Avenue Pasteur 14",
+    "postalCode": "2310",
+    "city": "Luksemburg",
+    "source": "https://wl-api.mf.gov.pl/api/search/nip/5263921906",
+    "mfFound": true,
+    "confidence": "high",
+    "note": "Podmiot luksemburski z polskim NIP-em, w wykazie MF jako VAT czynny. Wcześniej odrzucony w kontrahenci-odrzuceni.json jako zagraniczny (sourceId 780, alias 'Alpha Polish Logistics Propco S.a r.l. 7R'). Adres z wykazu MF (MF nie rozdziela kodu i miasta)."
+  },
+  {
+    "nip": "5263374083",
+    "name": "PAREF EVO. SOCIÉTÉ CIVILE DE PLACEMENT IMMOBILIER A CAPITAL VARIABLE",
+    "matchCma": [
+      384023
+    ],
+    "matchNames": [
+      "PAREF EVO. SOCIÉTÉ CIVILE DE PLACEMENT IMMOBILIER A CAPITAL VARIABLE"
+    ],
+    "address": "Boulevard Haussmann 153",
+    "postalCode": "75008",
+    "city": "Paryż",
+    "source": "https://wl-api.mf.gov.pl/api/search/nip/5263374083",
+    "mfFound": true,
+    "confidence": "high",
+    "note": "Podmiot francuski z polskim NIP-em, w wykazie MF jako VAT czynny. Wcześniej odrzucony jako zagraniczny (kontrahenci-odrzuceni.json sourceId 459 'RACŁAWICKA' i 632 'BNP RACŁAWICKA'). Adres z wykazu MF."
+  }
+]

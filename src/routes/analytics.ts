@@ -108,6 +108,35 @@ const SCOPE_SQL: Record<AnalyticsScope, SQL> = {
 };
 
 /**
+ * Przekrój usługowy — DRUGI, niezależny od zakresu filtr całej analityki.
+ *
+ *   zdv = zdalny dozór wizyjny: kamery, SSWiN, wideorecepcja (obsługa w CMA)
+ *   ofi = ochrona fizyczna: ludzie stojący na obiekcie
+ *   all = obie linie razem, czyli to samo, co przed wprowadzeniem parametru
+ *
+ * PODZIAŁ NIE JEST ROZŁĄCZNY — dokładnie tak samo, jak przekrój po usługach
+ * (`bucketizeServices`): obiekt z OFI I kamerami wchodzi do OBU przekrojów w
+ * całości, więc przychód z „zdv" plus przychód z „ofi" jest WIĘKSZY niż „all".
+ * To celowe: pytanie brzmi „ile ważą u nas obiekty dozorowane", a nie „jak
+ * podzielić firmę na dwie rozłączne połowy" — do tego drugiego trzeba by
+ * wymyślić regułę dzielenia jednej faktury abonamentowej między dwie linie,
+ * której w danych nie ma.
+ */
+export type AnalyticsService = "zdv" | "ofi" | "all";
+
+/** Domyślnie „all" — i nieznana wartość też, tak samo jak w `parseScope`. */
+function parseService(raw: string | undefined): AnalyticsService {
+  return raw === "zdv" ? "zdv" : raw === "ofi" ? "ofi" : "all";
+}
+
+/** Ten sam warunek dosłownie — do podzapytań skorelowanych (patrz `SCOPE_SQL`). */
+const SERVICE_SQL: Record<AnalyticsService, SQL> = {
+  zdv: sql`(objects.has_cameras = 1 or objects.has_sswin = 1 or objects.has_videoreception = 1)`,
+  ofi: sql`objects.has_ofi = 1`,
+  all: sql`1 = 1`,
+};
+
+/**
  * Reguła „czyj to obiekt”: własny handlowiec obiektu, a gdy go nie ma — opiekun
  * kontrahenta. JEDNA definicja na cały plik, żeby nie rozjechała się z filtrem listy
  * obiektów (src/routes/objects.ts:150-161) ani z tym, co widzi użytkownik w tabeli.
@@ -254,6 +283,12 @@ interface ObjectRow {
   setupCost: number;
   payback: number | null;
   hasCost: boolean;
+  /**
+   * Czy `monthly_cost` jest WPISANY (a nie tylko wyliczony na zero) — pole
+   * wewnętrzne, poza JSON-em. Potrzebne przy przekroju usługowym: `otherCost`
+   * gubi różnicę NULL vs 0, a bez niej nie da się policzyć `hasCost` na nowo.
+   */
+  otherCostKnown: boolean;
 }
 
 /**
@@ -392,8 +427,62 @@ async function loadObjectRows(
       setupCost,
       payback: paybackOf(setupCost, profit),
       hasCost,
+      otherCostKnown: r.monthlyCost !== null,
     };
   });
+}
+
+/** Czy obiekt należy do danej linii usługowej. */
+function matchesService(s: ObjectServicesInfo, service: AnalyticsService): boolean {
+  if (service === "all") return true;
+  if (service === "ofi") return s.ofi;
+  return s.cameras || s.sswin || s.videoreception;
+}
+
+/**
+ * Zawężenie całej analityki do jednej linii usługowej — filtr PLUS przeliczenie
+ * kosztu osobowego, bo w przekroju liczy się tylko ta jego część, która do linii
+ * naprawdę należy:
+ *
+ *   ofi → koszt godzin przepracowanych NA TYM obiekcie (`personnelDirectCost`);
+ *         udział w puli centrum monitorowania jest kosztem dozoru, nie warty,
+ *   zdv → udział w puli CMA (`personnelCmaCost`); pensje wartowników z tego
+ *         samego obiektu nie mają z dozorem nic wspólnego,
+ *   all → obie ścieżki razem, czyli dzisiejsza definicja bez zmian.
+ *
+ * Przychód i koszt pozostały (`monthly_cost`) zostają w CAŁOŚCI po obu stronach —
+ * kartoteka trzyma jedną kwotę abonamentu i jedną kwotę kosztu na obiekt, bez
+ * rozbicia na linie. Zmyślony klucz podziału (po jednostkach? po godzinach?)
+ * byłby liczbą, której nikt nie umie obronić przed zarządem.
+ *
+ * `hasCost` liczy się na nowo z tych samych składników co zawsze (wpisany koszt
+ * albo godziny na obiekcie), więc w przekroju „zdv" mieszany obiekt bez wpisanego
+ * `monthly_cost` znów ma koszt NIEZNANY — jego godziny należą do drugiej linii.
+ */
+function applyServiceView(rows: ObjectRow[], service: AnalyticsService): ObjectRow[] {
+  if (service === "all") return rows;
+  const out: ObjectRow[] = [];
+  for (const r of rows) {
+    if (!matchesService(r.services, service)) continue;
+    const personnelDirectCost = service === "ofi" ? r.personnelDirectCost : 0;
+    const personnelCmaCost = service === "zdv" ? r.personnelCmaCost : 0;
+    const personnelCost = personnelDirectCost + personnelCmaCost;
+    const cost = personnelCost + r.otherCost;
+    const profit = r.revenue - cost;
+    const hasCost = r.otherCostKnown || personnelDirectCost > 0;
+    out.push({
+      ...r,
+      personnelCost,
+      personnelDirectCost,
+      personnelCmaCost,
+      cost,
+      profit,
+      margin: marginOf(r.revenue, profit, hasCost ? 1 : 0),
+      payback: paybackOf(r.setupCost, profit),
+      hasCost,
+    });
+  }
+  return out;
 }
 
 /**
@@ -463,18 +552,30 @@ async function baseline(c: {
   req: { query: (k: string) => string | undefined };
 }) {
   const scope = parseScope(c.req.query("scope"));
+  const service = parseService(c.req.query("service"));
   const limit = parseLimit(c.req.query("limit"));
   const costWindow = parseCostWindow(c.req.query("costWindow"));
   const personnel = computeObjectPersonnelCost(costWindow);
-  const rows = await loadObjectRows(scope, personnel);
-  return { scope, limit, costWindow, personnel, rows, totals: loadTotals(rows, costWindow, personnel) };
+  // Filtr usługowy działa PRZED jakąkolwiek agregacją: kontrahenci, handlowcy,
+  // przekroje i podsumowania mają liczyć się z tego samego, zawężonego zbioru
+  // obiektów — inaczej kafelki mówiłyby o firmie, a tabela o jednej linii.
+  const rows = applyServiceView(await loadObjectRows(scope, personnel), service);
+  return {
+    scope,
+    service,
+    limit,
+    costWindow,
+    personnel,
+    rows,
+    totals: loadTotals(rows, costWindow, personnel),
+  };
 }
 
 /* ------------------------------------------------------------------ */
 /* GET /kontrahenci — ranking klientów wg zysku                        */
 /* ------------------------------------------------------------------ */
 app.get("/kontrahenci", async (c) => {
-  const { scope, limit, costWindow, personnel, rows, totals } = await baseline(c);
+  const { scope, service, limit, costWindow, personnel, rows, totals } = await baseline(c);
 
   // Rolka po kontrahencie z tych samych wierszy obiektów — kontrahent bez obiektów
   // w zakresie nie ma o czym opowiadać i po prostu się tu nie pojawia (dopchnąłby
@@ -572,15 +673,17 @@ app.get("/kontrahenci", async (c) => {
     )
     .slice(0, limit);
 
-  // Ilu klientów wypadło z zestawienia, bo nie ma obiektów w tym zakresie —
-  // liczymy osobno i bez limitu, żeby licznik nie zależał od przycięcia rankingu.
+  // Ilu klientów wypadło z zestawienia, bo nie ma obiektów w tym zakresie ANI
+  // w tym przekroju usługowym — liczymy osobno i bez limitu, żeby licznik nie
+  // zależał od przycięcia rankingu.
   const withoutRows = await db
     .select({ count: sql<number>`count(*)` })
     .from(schema.contractors)
     .where(
       sql`not exists (
         select 1 from objects
-        where objects.contractor_id = contractors.id and ${SCOPE_SQL[scope]}
+        where objects.contractor_id = contractors.id
+          and ${SCOPE_SQL[scope]} and ${SERVICE_SQL[service]}
       )`
     );
 
@@ -588,6 +691,7 @@ app.get("/kontrahenci", async (c) => {
     success: true,
     data: {
       scope,
+      service,
       costWindow,
       generatedAt: new Date().toISOString(),
       totals,
@@ -725,7 +829,7 @@ function marginBucketKey(margin: number | null, hasCost: boolean): string {
 }
 
 app.get("/obiekty", async (c) => {
-  const { scope, limit, costWindow, personnel, rows, totals } = await baseline(c);
+  const { scope, service, limit, costWindow, personnel, rows, totals } = await baseline(c);
 
   // Sortowanie po zysku dzieje się w JS, a nie w SQL: zysk zawiera teraz koszt
   // osobowy, którego baza nie zna, więc ORDER BY po `monthly_cost` układałby
@@ -789,6 +893,7 @@ app.get("/obiekty", async (c) => {
     success: true,
     data: {
       scope,
+      service,
       costWindow,
       generatedAt: new Date().toISOString(),
       totals,
@@ -807,7 +912,7 @@ app.get("/obiekty", async (c) => {
 /* GET /handlowcy — rentowność portfela per opiekun                    */
 /* ------------------------------------------------------------------ */
 app.get("/handlowcy", async (c) => {
-  const { scope, limit, costWindow, personnel, rows, totals } = await baseline(c);
+  const { scope, service, limit, costWindow, personnel, rows, totals } = await baseline(c);
 
   // Rolka portfela po EFEKTYWNYM opiekunie; klucz `null` to portfel niczyj.
   interface Portfolio {
@@ -959,6 +1064,7 @@ app.get("/handlowcy", async (c) => {
     success: true,
     data: {
       scope,
+      service,
       costWindow,
       generatedAt: new Date().toISOString(),
       totals: {

@@ -26,7 +26,9 @@ import {
 } from "@/components/ui/table";
 import {
   AlertCircle,
+  ArrowDown,
   ArrowLeft,
+  ArrowUp,
   BarChart3,
   Building2,
   Calendar,
@@ -34,6 +36,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  ChevronsUpDown,
   Clock,
   FileSpreadsheet,
   FilterX,
@@ -47,8 +50,10 @@ import { cn } from "@/lib/utils";
 import {
   cmaApi,
   cmaMailApi,
+  type CmaCameraIssueObject,
   type CmaCameraIssues,
   type CmaReport,
+  type CmaEntrySortKey,
   type CmaReportEntry,
   type CmaReportStats,
 } from "@/lib/api";
@@ -56,6 +61,22 @@ import { usePerms } from "@/auth/permissions";
 import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
 
 const ENTRIES_PAGE_SIZE = 50;
+
+/**
+ * Domyślny kierunek sortowania kolumny listy zdarzeń. Zdarzenia raportu czyta się
+ * chronologicznie („co się działo tej doby"), więc czasy startują rosnąco — tak samo,
+ * jak lista wyglądała przed dodaniem sortowania; teksty alfabetycznie.
+ */
+const ENTRY_DEFAULT_DIR: Record<CmaEntrySortKey, "asc" | "desc"> = {
+  generatedAt: "asc",
+  objectName: "asc",
+  patrolName: "asc",
+  endType: "asc",
+  userName: "asc",
+  videoChannel: "asc",
+  startedAt: "asc",
+  endedAt: "asc",
+};
 const END_TYPES_VISIBLE = 8;
 const AUTO_END_LABEL = "Zakończone automatycznie";
 
@@ -87,6 +108,53 @@ function polishPlural(n: number, one: string, few: string, many: string) {
 
 const DEFAULT_ISSUE_CLASSIFICATION = "Brak obrazu";
 const ISSUES_VIEW_PARAM = "brak-obrazu";
+
+/** Kolumny, po których da się sortować listę „Problemy z kamerami”. */
+type IssueSortKey =
+  | "objectName"
+  | "totalCount"
+  | "cameras"
+  | "firstAt"
+  | "lastAt";
+
+/**
+ * Domyślny kierunek sortowania kolumny — liczniki od największej wartości,
+ * nazwy alfabetycznie, daty tak, jak się o nie pyta: „od kiedy to trwa”
+ * (najstarsze pierwsze) i „co się działo ostatnio” (najnowsze pierwsze).
+ */
+const ISSUE_DEFAULT_DIR: Record<IssueSortKey, "asc" | "desc"> = {
+  objectName: "asc",
+  totalCount: "desc",
+  cameras: "desc",
+  firstAt: "asc",
+  lastAt: "desc",
+};
+
+/** Liczba z pola tekstowego — śmieci traktujemy jak brak filtra. */
+function parseCount(raw: string): number | undefined {
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+/**
+ * Daty obiektu = skrajne daty jego kamer. Format „YYYY-MM-DD HH:MM:SS”
+ * porównuje się leksykalnie, więc nie ma po co budować obiektów Date.
+ */
+function issueFirstAt(obj: CmaCameraIssueObject): string | null {
+  let min: string | null = null;
+  for (const c of obj.cameras) {
+    if (c.firstAt && (min === null || c.firstAt < min)) min = c.firstAt;
+  }
+  return min;
+}
+
+function issueLastAt(obj: CmaCameraIssueObject): string | null {
+  let max: string | null = null;
+  for (const c of obj.cameras) {
+    if (c.lastAt && (max === null || c.lastAt > max)) max = c.lastAt;
+  }
+  return max;
+}
 
 // Range "pierwsze HH:MM – ostatnie HH:MM" (with dates when spanning days)
 function formatIssueTimeRange(
@@ -218,6 +286,17 @@ export function CmaReportDetails() {
   const [search, setSearch] = useState("");
   const [objectFilter, setObjectFilter] = useState("all");
   const [endTypeFilter, setEndTypeFilter] = useState("all");
+  const [userFilter, setUserFilter] = useState("all");
+  const [channelFilter, setChannelFilter] = useState("all");
+  // „Kto zamknął zdarzenie": all | operator (jest nazwisko) | auto (brak nazwiska).
+  const [handledFilter, setHandledFilter] = useState("all");
+  // Kanałów w raporcie są setki, więc opcje selecta bierzemy z backendu — zawężone
+  // tymi samymi filtrami, co lista (statystyki raportu ich nie mają).
+  const [channelOptions, setChannelOptions] = useState<string[]>([]);
+  const [entrySort, setEntrySort] = useState<CmaEntrySortKey>("generatedAt");
+  const [entryDir, setEntryDir] = useState<"asc" | "desc">(
+    ENTRY_DEFAULT_DIR.generatedAt
+  );
 
   const [showAllEndTypes, setShowAllEndTypes] = useState(false);
 
@@ -250,6 +329,38 @@ export function CmaReportDetails() {
   const [noImageObjectCount, setNoImageObjectCount] = useState<number | null>(
     null
   );
+
+  // Filtry i sortowanie listy problemów — liczone po stronie klienta na tym,
+  // co przyszło z API dla wybranej klasyfikacji (bez debounce'u: nie ma
+  // żądania do odciążenia). NIE dotykają `issuesData`: wysyłka e-mailem idzie
+  // przez backend z samą klasyfikacją, więc serwis dostaje pełne zestawienie
+  // niezależnie od tego, co użytkownik sobie tutaj zawęził.
+  const [issueSearch, setIssueSearch] = useState("");
+  const [issueMinCount, setIssueMinCount] = useState("");
+  const [issueMaxCount, setIssueMaxCount] = useState("");
+  const [issueSort, setIssueSort] = useState<IssueSortKey>("totalCount");
+  const [issueDir, setIssueDir] = useState<"asc" | "desc">(
+    ISSUE_DEFAULT_DIR.totalCount
+  );
+
+  /** Klik w nagłówek: ta sama kolumna odwraca kierunek, nowa startuje od swojego domyślnego. */
+  const toggleIssueSort = (key: IssueSortKey) => {
+    if (issueSort === key) {
+      setIssueDir((d) => (d === "asc" ? "desc" : "asc"));
+      return;
+    }
+    setIssueSort(key);
+    setIssueDir(ISSUE_DEFAULT_DIR[key]);
+  };
+
+  const issueFiltersActive =
+    issueSearch !== "" || issueMinCount !== "" || issueMaxCount !== "";
+
+  const clearIssueFilters = () => {
+    setIssueSearch("");
+    setIssueMinCount("");
+    setIssueMaxCount("");
+  };
 
   // Sending the issue list via e-mail
   const [issuesSending, setIssuesSending] = useState(false);
@@ -325,14 +436,33 @@ export function CmaReportDetails() {
       .finally(() => setLoading(false));
   }, [reportId]);
 
-  // Debounced search
+  // Szukajka z debounce'em — wpisywanie nie może strzelać żądaniem na każdą literę.
   useEffect(() => {
-    const timer = setTimeout(() => {
-      setSearch(searchInput);
-      setPage(1);
-    }, 400);
+    const timer = setTimeout(() => setSearch(searchInput.trim()), 300);
     return () => clearTimeout(timer);
   }, [searchInput]);
+
+  /**
+   * Każda zmiana filtra albo sortowania wraca na pierwszą stronę — inaczej po
+   * zawężeniu listy użytkownik ląduje na nieistniejącej stronie. Przestawiamy
+   * w trakcie renderu (a nie w efekcie), żeby nie poszło zbędne żądanie o starą
+   * stronę z nowym filtrem.
+   */
+  const filtersKey = [
+    search,
+    objectFilter,
+    endTypeFilter,
+    userFilter,
+    channelFilter,
+    handledFilter,
+    entrySort,
+    entryDir,
+  ].join("|");
+  const [prevFiltersKey, setPrevFiltersKey] = useState(filtersKey);
+  if (prevFiltersKey !== filtersKey) {
+    setPrevFiltersKey(filtersKey);
+    setPage(1);
+  }
 
   const fetchEntries = useCallback(async () => {
     if (!reportId) return;
@@ -344,31 +474,74 @@ export function CmaReportDetails() {
         search: search || undefined,
         objectName: objectFilter !== "all" ? objectFilter : undefined,
         endType: endTypeFilter !== "all" ? endTypeFilter : undefined,
+        userName: userFilter !== "all" ? userFilter : undefined,
+        videoChannel: channelFilter !== "all" ? channelFilter : undefined,
+        handled:
+          handledFilter === "operator" || handledFilter === "auto"
+            ? handledFilter
+            : undefined,
+        sort: entrySort,
+        dir: entryDir,
       });
       setEntries(response.data);
       setEntriesTotal(response.total);
       setEntriesTotalPages(response.totalPages);
+      // Wybrany kanał zostaje na liście, nawet gdy reszta filtrów go wycięła —
+      // inaczej select pokazywałby pustkę i nie dało się go cofnąć.
+      setChannelOptions(
+        channelFilter !== "all" && !response.channels.includes(channelFilter)
+          ? [channelFilter, ...response.channels]
+          : response.channels
+      );
       setExpandedId(null);
     } catch (error) {
       console.error("Error fetching CMA report entries:", error);
     } finally {
       setEntriesLoading(false);
     }
-  }, [reportId, page, search, objectFilter, endTypeFilter]);
+  }, [
+    reportId,
+    page,
+    search,
+    objectFilter,
+    endTypeFilter,
+    userFilter,
+    channelFilter,
+    handledFilter,
+    entrySort,
+    entryDir,
+  ]);
 
   useEffect(() => {
     fetchEntries();
   }, [fetchEntries]);
 
   const hasActiveFilters =
-    searchInput !== "" || objectFilter !== "all" || endTypeFilter !== "all";
+    searchInput !== "" ||
+    objectFilter !== "all" ||
+    endTypeFilter !== "all" ||
+    userFilter !== "all" ||
+    channelFilter !== "all" ||
+    handledFilter !== "all";
 
   const clearFilters = () => {
     setSearchInput("");
     setSearch("");
     setObjectFilter("all");
     setEndTypeFilter("all");
-    setPage(1);
+    setUserFilter("all");
+    setChannelFilter("all");
+    setHandledFilter("all");
+  };
+
+  /** Klik w nagłówek: ta sama kolumna odwraca kierunek, nowa startuje od swojego domyślnego. */
+  const toggleEntrySort = (key: CmaEntrySortKey) => {
+    if (entrySort === key) {
+      setEntryDir((d) => (d === "asc" ? "desc" : "asc"));
+      return;
+    }
+    setEntrySort(key);
+    setEntryDir(ENTRY_DEFAULT_DIR[key]);
   };
 
   if (loading) {
@@ -397,11 +570,147 @@ export function CmaReportDetails() {
   const hiddenEndTypesCount = sortedEndTypes.length - END_TYPES_VISIBLE;
   const topObjects = stats ? stats.byObject.slice(0, 10) : [];
 
-  const issueObjects = issuesData?.issues ?? [];
+  // Filtry i sortowanie robimy na kopii listy — `issuesData` zostaje nietknięte,
+  // bo to ono jest podstawą wysyłki e-mailem (a właściwie: backend liczy ją
+  // jeszcze raz z samej klasyfikacji, więc filtry ekranu nic w mailu nie zmienią).
+  const issueTerm = issueSearch.trim().toLowerCase();
+  const issueMin = parseCount(issueMinCount);
+  const issueMax = parseCount(issueMaxCount);
+  const issueMul = issueDir === "asc" ? 1 : -1;
+
+  const issueObjects = (issuesData?.issues ?? [])
+    .filter((obj) => {
+      if (issueMin !== undefined && obj.totalCount < issueMin) return false;
+      if (issueMax !== undefined && obj.totalCount > issueMax) return false;
+      if (
+        issueTerm &&
+        ![obj.objectName, obj.address]
+          .filter(Boolean)
+          .some((v) => (v as string).toLowerCase().includes(issueTerm))
+      ) {
+        return false;
+      }
+      return true;
+    })
+    .sort((a, b) => {
+      const compare = (): number => {
+        if (issueSort === "objectName") {
+          return a.objectName.localeCompare(b.objectName, "pl") * issueMul;
+        }
+        if (issueSort === "firstAt" || issueSort === "lastAt") {
+          const pick = (o: CmaCameraIssueObject) =>
+            issueSort === "firstAt" ? issueFirstAt(o) : issueLastAt(o);
+          const av = pick(a);
+          const bv = pick(b);
+          // Obiekty bez dat lądują na końcu w OBU kierunkach (NULLS LAST) —
+          // inaczej „sortuj po najwcześniejszym” zaczynałoby się od pustych.
+          if (!av || !bv) {
+            if (!av && !bv) return 0;
+            return av ? -1 : 1;
+          }
+          return av < bv ? -1 * issueMul : av > bv ? issueMul : 0;
+        }
+        const value = (o: CmaCameraIssueObject) =>
+          issueSort === "totalCount" ? o.totalCount : o.cameras.length;
+        return (value(a) - value(b)) * issueMul;
+      };
+      return compare() || a.objectName.localeCompare(b.objectName, "pl");
+    });
+
   const issueEventTotal = issueObjects.reduce((sum, o) => sum + o.totalCount, 0);
   const issueCameraTotal = issueObjects.reduce(
     (sum, o) => sum + o.cameras.length,
     0
+  );
+
+  /**
+   * Nagłówek klikalny — lista problemów to karty, a nie tabela, więc nagłówki
+   * siedzą w pasku nad nią; strzałka pokazuje kolumnę i kierunek sortowania.
+   */
+  const IssueSortHeader = ({
+    label,
+    sortKey,
+    title,
+  }: {
+    label: string;
+    sortKey: IssueSortKey;
+    title?: string;
+  }) => {
+    const activeCol = issueSort === sortKey;
+    const Icon = !activeCol
+      ? ChevronsUpDown
+      : issueDir === "asc"
+        ? ArrowUp
+        : ArrowDown;
+    return (
+      <button
+        type="button"
+        data-testid={`cma-problemy-sort-${sortKey}`}
+        onClick={() => toggleIssueSort(sortKey)}
+        aria-label={`Sortuj po: ${label}`}
+        title={title}
+        className={cn(
+          "inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs uppercase tracking-wide transition-colors hover:text-slate-900",
+          activeCol ? "text-slate-900" : "text-slate-500"
+        )}
+      >
+        {label}
+        <Icon className={cn("h-3.5 w-3.5", !activeCol && "opacity-40")} />
+      </button>
+    );
+  };
+
+  /**
+   * Przycisk sortowania listy zdarzeń. Osobno od nagłówka, bo dwie kolumny niosą po
+   * dwie sortowalne wartości (czas zdarzenia + czas obchodu, obchód + kanał wideo).
+   */
+  const EntrySortButton = ({
+    label,
+    sortKey,
+    title,
+    className,
+  }: {
+    label: string;
+    sortKey: CmaEntrySortKey;
+    title?: string;
+    className?: string;
+  }) => {
+    const activeCol = entrySort === sortKey;
+    const Icon = !activeCol
+      ? ChevronsUpDown
+      : entryDir === "asc"
+        ? ArrowUp
+        : ArrowDown;
+    return (
+      <button
+        type="button"
+        data-testid={`cma-zdarzenia-sort-${sortKey}`}
+        onClick={() => toggleEntrySort(sortKey)}
+        aria-label={`Sortuj po: ${label}`}
+        title={title}
+        className={cn(
+          "inline-flex items-center gap-1 rounded px-1 -mx-1 transition-colors hover:text-slate-900",
+          activeCol ? "text-slate-900" : "text-slate-500",
+          className
+        )}
+      >
+        {label}
+        <Icon className={cn("h-3.5 w-3.5", !activeCol && "opacity-40")} />
+      </button>
+    );
+  };
+
+  /** Nagłówek kolumny z jednym kluczem sortowania. */
+  const EntrySortHeader = ({
+    label,
+    sortKey,
+  }: {
+    label: string;
+    sortKey: CmaEntrySortKey;
+  }) => (
+    <TableHead className="font-semibold">
+      <EntrySortButton label={label} sortKey={sortKey} />
+    </TableHead>
   );
 
   return (
@@ -613,19 +922,17 @@ export function CmaReportDetails() {
               <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
               <Input
                 placeholder="Szukaj w zdarzeniach..."
+                data-testid="cma-zdarzenia-filter-search"
                 value={searchInput}
                 onChange={(e) => setSearchInput(e.target.value)}
                 className="pl-10"
               />
             </div>
-            <Select
-              value={objectFilter}
-              onValueChange={(value) => {
-                setObjectFilter(value);
-                setPage(1);
-              }}
-            >
-              <SelectTrigger className="w-64">
+            <Select value={objectFilter} onValueChange={setObjectFilter}>
+              <SelectTrigger
+                className="w-64"
+                data-testid="cma-zdarzenia-filter-object"
+              >
                 <SelectValue placeholder="Obiekt" />
               </SelectTrigger>
               <SelectContent>
@@ -637,14 +944,11 @@ export function CmaReportDetails() {
                 ))}
               </SelectContent>
             </Select>
-            <Select
-              value={endTypeFilter}
-              onValueChange={(value) => {
-                setEndTypeFilter(value);
-                setPage(1);
-              }}
-            >
-              <SelectTrigger className="w-72">
+            <Select value={endTypeFilter} onValueChange={setEndTypeFilter}>
+              <SelectTrigger
+                className="w-72"
+                data-testid="cma-zdarzenia-filter-endtype"
+              >
                 <SelectValue placeholder="Rodzaj zakończenia" />
               </SelectTrigger>
               <SelectContent>
@@ -661,8 +965,64 @@ export function CmaReportDetails() {
                   ))}
               </SelectContent>
             </Select>
+            {/* Operatorów w raporcie jest kilku — listę mamy w statystykach raportu. */}
+            <Select value={userFilter} onValueChange={setUserFilter}>
+              <SelectTrigger
+                className="w-56"
+                data-testid="cma-zdarzenia-filter-user"
+              >
+                <SelectValue placeholder="Operator" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Wszyscy operatorzy</SelectItem>
+                {stats?.byUser.map((item) => (
+                  <SelectItem key={item.userName} value={item.userName}>
+                    {item.userName} ({item.count})
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {/* Kanały bierzemy z odpowiedzi listy — zawężają się razem z resztą filtrów. */}
+            <Select value={channelFilter} onValueChange={setChannelFilter}>
+              <SelectTrigger
+                className="w-56"
+                data-testid="cma-zdarzenia-filter-channel"
+              >
+                <SelectValue placeholder="Kanał wideo" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Wszystkie kanały</SelectItem>
+                {channelOptions.map((channel) => (
+                  <SelectItem key={channel} value={channel}>
+                    {channel}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Select value={handledFilter} onValueChange={setHandledFilter}>
+              <SelectTrigger
+                className="w-56"
+                data-testid="cma-zdarzenia-filter-handled"
+              >
+                <SelectValue placeholder="Obsługa" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Obsłużone i automatyczne</SelectItem>
+                <SelectItem value="operator">
+                  Tylko obsłużone przez operatora
+                </SelectItem>
+                <SelectItem value="auto">
+                  Tylko zakończone automatycznie
+                </SelectItem>
+              </SelectContent>
+            </Select>
             {hasActiveFilters && (
-              <Button variant="ghost" size="sm" onClick={clearFilters}>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={clearFilters}
+                data-testid="cma-zdarzenia-filters-clear"
+              >
                 <FilterX className="mr-2 h-4 w-4" />
                 Wyczyść filtry
               </Button>
@@ -675,15 +1035,38 @@ export function CmaReportDetails() {
               <TableHeader>
                 <TableRow className="bg-slate-50">
                   <TableHead className="w-8" />
-                  <TableHead className="font-semibold">Czas</TableHead>
-                  <TableHead className="font-semibold">Obiekt</TableHead>
                   <TableHead className="font-semibold">
-                    Wideo-obchód / zdarzenie
+                    <div className="flex items-center gap-3">
+                      <EntrySortButton label="Czas" sortKey="generatedAt" />
+                      {/* Wpis niesie też czas obchodu (widoczny po rozwinięciu wiersza). */}
+                      <EntrySortButton
+                        label="obchód"
+                        sortKey="startedAt"
+                        title="Sortuj po czasie rozpoczęcia obchodu"
+                        className="text-xs font-normal"
+                      />
+                    </div>
                   </TableHead>
+                  <EntrySortHeader label="Obiekt" sortKey="objectName" />
                   <TableHead className="font-semibold">
-                    Rodzaj zakończenia
+                    <div className="flex items-center gap-3">
+                      <EntrySortButton
+                        label="Wideo-obchód / zdarzenie"
+                        sortKey="patrolName"
+                      />
+                      <EntrySortButton
+                        label="kanał"
+                        sortKey="videoChannel"
+                        title="Sortuj po kanale wideo"
+                        className="text-xs font-normal"
+                      />
+                    </div>
                   </TableHead>
-                  <TableHead className="font-semibold">Operator</TableHead>
+                  <EntrySortHeader
+                    label="Rodzaj zakończenia"
+                    sortKey="endType"
+                  />
+                  <EntrySortHeader label="Operator" sortKey="userName" />
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -702,7 +1085,9 @@ export function CmaReportDetails() {
                       colSpan={6}
                       className="py-8 text-center text-slate-500"
                     >
-                      Brak zdarzeń spełniających wybrane kryteria.
+                      {hasActiveFilters
+                        ? "Brak zdarzeń dla wybranych filtrów"
+                        : "Brak zdarzeń w raporcie."}
                     </TableCell>
                   </TableRow>
                 ) : (
@@ -857,6 +1242,9 @@ export function CmaReportDetails() {
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="flex flex-wrap items-center gap-3">
+              {/* Klasyfikacja nie jest filtrem ekranu, tylko zakresem danych:
+                  zmiana wysyła nowe żądanie i decyduje, co pójdzie e-mailem.
+                  Dlatego „Wyczyść filtry” jej nie rusza. */}
               <Select
                 value={issueClassification}
                 onValueChange={(value) => {
@@ -865,7 +1253,10 @@ export function CmaReportDetails() {
                   setIssuesSendError(null);
                 }}
               >
-                <SelectTrigger className="w-72">
+                <SelectTrigger
+                  className="w-72"
+                  data-testid="cma-problemy-filter-classification"
+                >
                   <SelectValue placeholder="Klasyfikacja" />
                 </SelectTrigger>
                 <SelectContent>
@@ -907,6 +1298,53 @@ export function CmaReportDetails() {
                   )}
                 </Button>
               )}
+              <div className="relative w-full max-w-xs">
+                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                <Input
+                  placeholder="Szukaj po nazwie lub adresie..."
+                  value={issueSearch}
+                  onChange={(e) => setIssueSearch(e.target.value)}
+                  className="pl-10"
+                  data-testid="cma-problemy-filter-search"
+                />
+              </div>
+              <div className="flex items-center gap-1 text-sm text-slate-500">
+                <span>Zdarzeń od</span>
+                <Input
+                  type="number"
+                  min="0"
+                  step="1"
+                  inputMode="numeric"
+                  className="w-24 tabular-nums"
+                  data-testid="cma-problemy-filter-min"
+                  value={issueMinCount}
+                  onChange={(e) => setIssueMinCount(e.target.value)}
+                />
+                <span>do</span>
+                <Input
+                  type="number"
+                  min="0"
+                  step="1"
+                  inputMode="numeric"
+                  className="w-24 tabular-nums"
+                  data-testid="cma-problemy-filter-max"
+                  value={issueMaxCount}
+                  onChange={(e) => setIssueMaxCount(e.target.value)}
+                />
+              </div>
+              {issueFiltersActive && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={clearIssueFilters}
+                  data-testid="cma-problemy-filters-clear"
+                >
+                  <FilterX className="mr-1 h-4 w-4" />
+                  Wyczyść filtry
+                </Button>
+              )}
+              {/* Licznik pokazuje to, co widać po filtrach — a nie całe
+                  zestawienie, które i tak w całości idzie e-mailem. */}
               {!issuesLoading && !issuesError && issuesData && (
                 <span className="text-sm text-slate-500">
                   {issueObjects.length.toLocaleString("pl-PL")}{" "}
@@ -952,10 +1390,29 @@ export function CmaReportDetails() {
               </div>
             ) : issueObjects.length === 0 ? (
               <div className="py-8 text-center text-slate-500">
-                Brak zdarzeń tej klasyfikacji w raporcie.
+                {issueFiltersActive
+                  ? "Brak obiektów dla wybranych filtrów"
+                  : "Brak zdarzeń tej klasyfikacji w raporcie."}
               </div>
             ) : (
               <div className="space-y-3">
+                {/* Nagłówki sortowania — lista jest kartami, więc pasek
+                    zastępuje wiersz nagłówkowy tabeli. */}
+                <div className="flex flex-wrap items-center gap-1 border-b border-slate-200 pb-2">
+                  <IssueSortHeader label="Obiekt" sortKey="objectName" />
+                  <IssueSortHeader label="Zdarzenia" sortKey="totalCount" />
+                  <IssueSortHeader label="Kamery" sortKey="cameras" />
+                  <IssueSortHeader
+                    label="Pierwsze zdarzenie"
+                    sortKey="firstAt"
+                    title="Najwcześniejsze zdarzenie spośród kamer obiektu"
+                  />
+                  <IssueSortHeader
+                    label="Ostatnie zdarzenie"
+                    sortKey="lastAt"
+                    title="Najpóźniejsze zdarzenie spośród kamer obiektu"
+                  />
+                </div>
                 {issueObjects.map((obj) => (
                   <div
                     key={obj.objectName}
@@ -971,16 +1428,35 @@ export function CmaReportDetails() {
                             {obj.address}
                           </div>
                         )}
+                        {/* Zakres dat obiektu — kryterium sortowania musi być
+                            widoczne bez wczytywania się w listę kamer. */}
+                        <div className="text-xs text-slate-500">
+                          {formatIssueTimeRange(
+                            issueFirstAt(obj),
+                            issueLastAt(obj)
+                          )}
+                        </div>
                       </div>
-                      <Badge className="border-transparent bg-indigo-600 text-white hover:bg-indigo-600">
-                        {obj.totalCount.toLocaleString("pl-PL")}{" "}
-                        {polishPlural(
-                          obj.totalCount,
-                          "zdarzenie",
-                          "zdarzenia",
-                          "zdarzeń"
-                        )}
-                      </Badge>
+                      <span className="flex flex-wrap items-center gap-2">
+                        <Badge variant="outline">
+                          {obj.cameras.length.toLocaleString("pl-PL")}{" "}
+                          {polishPlural(
+                            obj.cameras.length,
+                            "kamera",
+                            "kamery",
+                            "kamer"
+                          )}
+                        </Badge>
+                        <Badge className="border-transparent bg-indigo-600 text-white hover:bg-indigo-600">
+                          {obj.totalCount.toLocaleString("pl-PL")}{" "}
+                          {polishPlural(
+                            obj.totalCount,
+                            "zdarzenie",
+                            "zdarzenia",
+                            "zdarzeń"
+                          )}
+                        </Badge>
+                      </span>
                     </div>
                     <div className="mt-3 space-y-2">
                       {obj.cameras.map((camera) => (

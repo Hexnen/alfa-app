@@ -24,11 +24,13 @@ import {
   ArrowDown,
   ArrowUp,
   ChevronsUpDown,
+  ChevronLeft,
+  ChevronRight,
   X,
 } from "lucide-react";
 import {
   getObjects,
-  getContractors,
+  getContractorCatalog,
   getSalespeople,
   salespersonName,
   getCompanies,
@@ -37,7 +39,7 @@ import {
   createObject,
   updateObject,
   deleteObject,
-  type Contractor,
+  type ContractorCatalogEntry,
   type ObjectSortKey,
   type ObjectWithContractor,
   type ObjectInput,
@@ -89,6 +91,9 @@ const DEFAULT_DIR: Record<ObjectSortKey, "asc" | "desc"> = {
   created: "desc",
 };
 
+/** Kartoteka obiektów liczy setki pozycji — lista chodzi po stronach. */
+const PAGE_SIZE = 50;
+
 export function Objects() {
   const navigate = useNavigate();
   const { canEdit } = usePerms();
@@ -101,7 +106,7 @@ export function Objects() {
     cost: 0,
     withCost: 0,
   });
-  const [contractors, setContractors] = useState<Contractor[]>([]);
+  const [contractors, setContractors] = useState<ContractorCatalogEntry[]>([]);
   const [salespeople, setSalespeople] = useState<Salesperson[]>([]);
   const [companies, setCompanies] = useState<Company[]>([]);
   const [loading, setLoading] = useState(true);
@@ -133,6 +138,9 @@ export function Objects() {
   const [sort, setSort] = useState<ObjectSortKey>("name");
   const [dir, setDir] = useState<"asc" | "desc">("asc");
 
+  const [page, setPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+
   const [formOpen, setFormOpen] = useState(false);
   const [editingObject, setEditingObject] = useState<ObjectWithContractor | null>(
     null
@@ -161,8 +169,10 @@ export function Objects() {
   }, []);
 
   useEffect(() => {
-    getContractors({ pageSize: 500 })
-      .then((res) => setContractors(res.data))
+    // Komplet kartoteki, a nie pierwsza strona: przy `pageSize: 500` filtr gubił
+    // ogon listy (kartoteka ma 624 kontrahentów) i części klientów nie dało się wybrać.
+    getContractorCatalog()
+      .then((res) => setContractors(res.data ?? []))
       .catch(() => setContractors([]));
     getSalespeople()
       .then((res) => setSalespeople(res.data ?? []))
@@ -189,6 +199,34 @@ export function Objects() {
     return () => clearTimeout(t);
   }, [minInput, maxInput]);
 
+  /**
+   * Każda zmiana filtra, sortowania albo zakładki wraca na pierwszą stronę —
+   * inaczej po zawężeniu listy użytkownik ląduje na nieistniejącej stronie.
+   * Przestawiamy w trakcie renderu (a nie w efekcie), żeby nie poszło zbędne
+   * żądanie o starą stronę z nowym filtrem.
+   */
+  const filtersKey = [
+    search,
+    statusFilter,
+    departmentFilter,
+    serviceFilter,
+    contractorFilter ?? "",
+    salespersonFilter ?? "",
+    companyFilter ?? "",
+    scope,
+    range.min ?? "",
+    range.max ?? "",
+    valueMode,
+    costMode,
+    sort,
+    dir,
+  ].join("|");
+  const [prevFiltersKey, setPrevFiltersKey] = useState(filtersKey);
+  if (prevFiltersKey !== filtersKey) {
+    setPrevFiltersKey(filtersKey);
+    setPage(1);
+  }
+
   const loadObjects = useCallback(async () => {
     setLoading(true);
     try {
@@ -207,9 +245,11 @@ export function Objects() {
         hasCost: costMode === "with" ? "1" : costMode === "without" ? "0" : undefined,
         sort,
         dir,
-        pageSize: 200,
+        page,
+        pageSize: PAGE_SIZE,
       });
       setObjects(res.data);
+      setTotalPages(Math.max(1, res.totalPages ?? 1));
       setSummary({
         total: res.total,
         value: res.totalMonthlyValue ?? 0,
@@ -238,11 +278,13 @@ export function Objects() {
     costMode,
     sort,
     dir,
+    page,
   ]);
 
   useEffect(() => {
     loadObjects();
   }, [loadObjects]);
+
 
   /** Klik w nagłówek: ta sama kolumna odwraca kierunek, nowa startuje od swojego domyślnego. */
   const toggleSort = (key: ObjectSortKey) => {
@@ -408,6 +450,7 @@ export function Objects() {
             {contractors.map((c) => (
               <SelectItem key={c.id} value={String(c.id)}>
                 {c.name}
+                {!c.active ? " (archiwalny)" : ""}
               </SelectItem>
             ))}
           </SelectContent>
@@ -697,8 +740,14 @@ export function Objects() {
                           pod kwotą tylko wtedy, gdy dzierżawa faktycznie jest —
                           inaczej kolumna zaszumiłaby się przy wszystkich obiektach. */}
                       <td className="py-3 px-2 text-right tabular-nums">
-                        {formatCurrency(
-                          (obj.monthlyValue ?? 0) + (obj.monthlyRental ?? 0)
+                        {/* Brak abonamentu i dzierżawy = nieuzupełniony, nie 0 zł
+                            (po imporcie z CMA połowa obiektów nie ma ceny). */}
+                        {obj.monthlyValue === null && obj.monthlyRental === null ? (
+                          <span className="text-muted-foreground">—</span>
+                        ) : (
+                          formatCurrency(
+                            (obj.monthlyValue ?? 0) + (obj.monthlyRental ?? 0)
+                          )
                         )}
                         {obj.monthlyRental ? (
                           <div className="text-xs text-muted-foreground">
@@ -778,6 +827,30 @@ export function Objects() {
           )}
         </CardContent>
       </Card>
+
+      {totalPages > 1 && (
+        <div className="flex items-center justify-end gap-2" data-testid="objects-pagination">
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={page <= 1}
+            onClick={() => setPage((p) => Math.max(1, p - 1))}
+          >
+            <ChevronLeft className="h-4 w-4" /> Poprzednia
+          </Button>
+          <span className="text-sm text-muted-foreground">
+            Strona {page} z {totalPages}
+          </span>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={page >= totalPages}
+            onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+          >
+            Następna <ChevronRight className="h-4 w-4" />
+          </Button>
+        </div>
+      )}
 
       {/* Montujemy dopiero na otwarcie i z kluczem per obiekt — formularz czyta
           `object` tylko w inicjalizatorze stanu, więc trwale zamontowany

@@ -1,0 +1,2714 @@
+[
+  {
+    "sheet": "alfa group",
+    "row": 1,
+    "flag": "ZDV",
+    "client": "PS EKO-ENERGY SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 1224,
+    "brutto": 1505.52,
+    "decision": "nip",
+    "nip": "4990695798",
+    "noNipKey": null,
+    "contractorName": "PS EKO-ENERGY SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      409744,
+      421395,
+      421396
+    ],
+    "note": "Klient występuje 3× w arkuszach fakturowania: alfa group r1 {ZDV} 1224 zł; alfa group r6 {PODJAZDY} 600 zł; alfa group r48 {ZDV+WYNAJEM} 1650 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 2,
+    "flag": "ZDV",
+    "client": "FIRMA HANDLOWO USŁUGOWA BILANS SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 500,
+    "brutto": 615,
+    "decision": "nip",
+    "nip": "9542755662",
+    "noNipKey": null,
+    "contractorName": "FIRMA HANDLOWO USŁUGOWA BILANS SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [],
+    "note": "Brak obiektu w rejestrze CMA przypisanego do tego klienta — usługa fakturowana bez pozycji w rejestrze obiektów."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 3,
+    "flag": "ZDV",
+    "client": "SAFETOWER NOW-BUD WIEŻE",
+    "netto": 6187,
+    "brutto": 7610.01,
+    "decision": "nip",
+    "nip": "8971903051",
+    "noNipKey": null,
+    "contractorName": "NOW-BUD SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      377927,
+      376163,
+      377574,
+      418711,
+      406998,
+      376912,
+      402198,
+      391234,
+      384367,
+      401463,
+      402157,
+      380030,
+      377072,
+      377171,
+      384018,
+      409322,
+      407725,
+      405068,
+      380496,
+      380029,
+      376656,
+      401695,
+      388460,
+      409217,
+      407611,
+      376063,
+      376339,
+      421398,
+      397739,
+      407726,
+      420847,
+      421743,
+      377573
+    ],
+    "note": "Zbiorcza pozycja za WSZYSTKIE wieże SAFETOWER dzierżawione/obsługiwane przez NOW-BUD — recenzenci rejestru przypisali do tego klienta 33 obiekty CMA. Klient występuje 2× w „alfa group\" (r3 6187 zł i r105 3636,13 zł) — dwie transze tej samej usługi. Klient występuje 2× w arkuszach fakturowania: alfa group r3 {ZDV} 6187 zł; alfa group r105 {ZDV} 3636.13 zł — różne flagi to różne usługi/pozycje tego samego klienta."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 4,
+    "flag": "PODJAZDY",
+    "client": "\"CAN-DOM\" BIURO ZDV",
+    "netto": 65,
+    "brutto": 79.95,
+    "decision": "nip",
+    "nip": "4960065710",
+    "noNipKey": null,
+    "contractorName": "Sławomir Hryciuk \"CAN-DOM\"",
+    "confidence": "high",
+    "cmaExternalIds": [
+      370477
+    ],
+    "note": "Klient występuje 2× w arkuszach fakturowania: alfa group r4 {PODJAZDY} 65 zł; alfa group r98 {ZDV} 400 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 5,
+    "flag": "PODJAZDY",
+    "client": "MITCAR ZDV",
+    "netto": 50,
+    "brutto": 61.5,
+    "decision": "nip",
+    "nip": "9510043585",
+    "noNipKey": null,
+    "contractorName": "MITCAR D. I P. KRASNODĘBSKI SPÓŁKA JAWNA",
+    "confidence": "high",
+    "cmaExternalIds": [
+      418712,
+      212514
+    ],
+    "note": "Klient występuje 3× w arkuszach fakturowania: alfa group r5 {PODJAZDY} 50 zł; alfa group r71 {ZDV} 2800 zł; alfa group r76 {ZDV} 1200 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 6,
+    "flag": "PODJAZDY",
+    "client": "PS EKO-ENERGY SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 600,
+    "brutto": 738,
+    "decision": "nip",
+    "nip": "4990695798",
+    "noNipKey": null,
+    "contractorName": "PS EKO-ENERGY SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      409744,
+      421395,
+      421396
+    ],
+    "note": "Klient występuje 3× w arkuszach fakturowania: alfa group r1 {ZDV} 1224 zł; alfa group r6 {PODJAZDY} 600 zł; alfa group r48 {ZDV+WYNAJEM} 1650 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 7,
+    "flag": "PODJAZDY",
+    "client": "ASO AUTO RAWSKI TOMASZ",
+    "netto": 60,
+    "brutto": 73.8,
+    "decision": "nip",
+    "nip": "1250594886",
+    "noNipKey": null,
+    "contractorName": "A S O. AUTO RAWSKI TOMASZ",
+    "confidence": "high",
+    "cmaExternalIds": [],
+    "note": "Brak obiektu CMA przypisanego do tego podmiotu — recenzenci rejestru przypisali CMA 404001 „RAWSKI BMW BUDOWA RADZYMIŃSKA\" do RAWSKI sp. z o.o. (NIP 5322056233), innej spółki tej samej grupy. Klient występuje 2× w arkuszach fakturowania: alfa group r7 {PODJAZDY} 60 zł; alfa group r39 {ZDV} 1400 zł — różne flagi to różne usługi/pozycje tego samego klienta."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 8,
+    "flag": "PODJAZDY",
+    "client": "PRZEDSIĘBIORSTWO BUDOWLANE AMBIT SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 70,
+    "brutto": 86.1,
+    "decision": "nip",
+    "nip": "6971997080",
+    "noNipKey": null,
+    "contractorName": "PRZEDSIĘBIORSTWO BUDOWLANE AMBIT SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      390569
+    ],
+    "note": "Obiekty CMA dobrane po NIP kontrahenta (rejestr nie wskazywał wprost tego wiersza fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 9,
+    "flag": "PODJAZDY",
+    "client": "SANDEX PIASKARNIA ZDV",
+    "netto": 160,
+    "brutto": 196.8,
+    "decision": "nip",
+    "nip": "1182143940",
+    "noNipKey": null,
+    "contractorName": "SANDEX SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      369353
+    ],
+    "note": "Klient występuje 2× w arkuszach fakturowania: alfa group r9 {PODJAZDY} 160 zł; alfa group r97 {ZDV} 3450 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 10,
+    "flag": "PODJAZDY",
+    "client": "TREI REAL ESTATE POLAND SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 60,
+    "brutto": 73.8,
+    "decision": "nip",
+    "nip": "1070010300",
+    "noNipKey": null,
+    "contractorName": "TREI REAL ESTATE POLAND SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      376895
+    ],
+    "note": "Klient występuje 2× w arkuszach fakturowania: alfa group r10 {PODJAZDY} 60 zł; alfa group r32 {ZDV} 1600 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 11,
+    "flag": "PODJAZDY",
+    "client": "VICTORIA CONSTRUCTION  SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 50,
+    "brutto": 61.5,
+    "decision": "nip",
+    "nip": "5242913971",
+    "noNipKey": null,
+    "contractorName": "VICTORIA CONSTRUCTION SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      420805,
+      408062,
+      390273,
+      409110
+    ],
+    "note": "Klient występuje 6× w arkuszach fakturowania: alfa group r11 {PODJAZDY} 50 zł; alfa group r12 {PODJAZDY} 95 zł; alfa group r60 {ZDV} 4480 zł; alfa group r61 {ZDV} 4780 zł; alfa group r62 {ZDV} 7428 zł; alfa group r65 {ZDV} 3092 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 12,
+    "flag": "PODJAZDY",
+    "client": "VICTORIA CONSTRUCTION  SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 95,
+    "brutto": 116.85,
+    "decision": "nip",
+    "nip": "5242913971",
+    "noNipKey": null,
+    "contractorName": "VICTORIA CONSTRUCTION SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      420805,
+      408062,
+      390273,
+      409110
+    ],
+    "note": "Klient występuje 6× w arkuszach fakturowania: alfa group r11 {PODJAZDY} 50 zł; alfa group r12 {PODJAZDY} 95 zł; alfa group r60 {ZDV} 4480 zł; alfa group r61 {ZDV} 4780 zł; alfa group r62 {ZDV} 7428 zł; alfa group r65 {ZDV} 3092 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 13,
+    "flag": "MONTAŻ SERWIS",
+    "client": "STB BUDOWNICTWO SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 17169.56,
+    "brutto": 21118.56,
+    "decision": "nip",
+    "nip": "5252536688",
+    "noNipKey": null,
+    "contractorName": "STB BUDOWNICTWO SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      371536,
+      350868,
+      365253,
+      384966,
+      385172,
+      397813,
+      409647
+    ],
+    "note": "Klient występuje 3× w arkuszach fakturowania: alfa group r13 {MONTAŻ SERWIS} 17169.56 zł; alfa group r18 {ZDV} 2750 zł; alfa s r41 {ZDV} 1335 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA dobrane po NIP kontrahenta (rejestr nie wskazywał wprost tego wiersza fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 14,
+    "flag": "OFI",
+    "client": "OMIG SIELECKA OFI",
+    "netto": 9324,
+    "brutto": 11468.52,
+    "decision": "nip",
+    "nip": "5213753269",
+    "noNipKey": null,
+    "contractorName": "OMIG SIELECKA SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      359373
+    ],
+    "note": "Ochrona fizyczna (OFI) na obiekcie CMA 359373 „WM Sielecka 35 OMIG\". Uwaga: ten sam obiekt jest w rejestrze przypisany do WSPÓLNOTY MIESZKANIOWEJ KOLONIA SIELCE (NIP 5213915039), która płaci za ZDV (wiersz alfa group r95) — OFI fakturowane jest na OMIG SIELECKA sp. z o.o. Posterunek w kadrach: SIELECKA."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 15,
+    "flag": "ZDV",
+    "client": "BRITISH AUTO ZDUNEK GDAŃSK",
+    "netto": 2500,
+    "brutto": 3075,
+    "decision": "nip",
+    "nip": "5833199755",
+    "noNipKey": null,
+    "contractorName": "BRITISH AUTO ZDUNEK SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      226706
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 16,
+    "flag": "ZDV",
+    "client": "ANLOGISTYK ANNOPOL 22 ZDV",
+    "netto": 2680,
+    "brutto": 3296.4,
+    "decision": "nip",
+    "nip": "5213499322",
+    "noNipKey": null,
+    "contractorName": "ANLOGISTYK II SPÓŁKA AKCYJNA",
+    "confidence": "high",
+    "cmaExternalIds": [
+      269502
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 17,
+    "flag": "ZDV",
+    "client": "WMC SPV WMC SPV 14 ASILI GÓRKA 1,2",
+    "netto": 1000,
+    "brutto": 1230,
+    "decision": "nip",
+    "nip": "5273017870",
+    "noNipKey": null,
+    "contractorName": "WMC SPV 14 SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      401941,
+      401942
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 18,
+    "flag": "ZDV",
+    "client": "STB BUDOWNICTWO SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 2750,
+    "brutto": 3382.5,
+    "decision": "nip",
+    "nip": "5252536688",
+    "noNipKey": null,
+    "contractorName": "STB BUDOWNICTWO SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      371536,
+      350868,
+      365253,
+      384966,
+      385172,
+      397813,
+      409647
+    ],
+    "note": "Klient występuje 3× w arkuszach fakturowania: alfa group r13 {MONTAŻ SERWIS} 17169.56 zł; alfa group r18 {ZDV} 2750 zł; alfa s r41 {ZDV} 1335 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA dobrane po NIP kontrahenta (rejestr nie wskazywał wprost tego wiersza fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 19,
+    "flag": "ZDV",
+    "client": "Michał Lech Wiazowa",
+    "netto": 1,
+    "brutto": 1.23,
+    "decision": "noNip",
+    "nip": null,
+    "noNipKey": "noNip:680",
+    "contractorName": "Michał Lech",
+    "confidence": "high",
+    "cmaExternalIds": [
+      402840
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 20,
+    "flag": "OFI",
+    "client": "\"BONA-AGRA\"  OFI",
+    "netto": 28346.4,
+    "brutto": 34866.07,
+    "decision": "nip",
+    "nip": "1250033828",
+    "noNipKey": null,
+    "contractorName": "\"BONA-AGRA\" SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      141356
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 21,
+    "flag": "ZDV",
+    "client": "MALVELA SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 3000,
+    "brutto": 3690,
+    "decision": "nip",
+    "nip": "7011195979",
+    "noNipKey": null,
+    "contractorName": "MALVELA SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [],
+    "note": "Brak obiektu w rejestrze CMA przypisanego do tego klienta — usługa fakturowana bez pozycji w rejestrze obiektów."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 22,
+    "flag": "ZDV",
+    "client": "MEBLOLAND SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 2750,
+    "brutto": 3382.5,
+    "decision": "nip",
+    "nip": "6192021767",
+    "noNipKey": null,
+    "contractorName": "MEBLOLAND SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [],
+    "note": "Brak obiektu w rejestrze CMA przypisanego do tego klienta — usługa fakturowana bez pozycji w rejestrze obiektów."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 23,
+    "flag": "OFI",
+    "client": "LA Salle Odlewnicza OFI + ZDV",
+    "netto": 28495.2,
+    "brutto": 35049.1,
+    "decision": "nip",
+    "nip": "5263140681",
+    "noNipKey": null,
+    "contractorName": "LaSalle Investment Management Kapitalverwaltungsgesellschaft mbH B/O special fund LaSalle E-REGI Warsaw City North Viktualienmarkt 8/5.OG, 80331 Monachium, Republika Federalna Niemiec",
+    "confidence": "high",
+    "cmaExternalIds": [
+      120784
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 24,
+    "flag": "OFI",
+    "client": "WARSZAWA LOGISTICS Sokołów OFI + ZDV",
+    "netto": 32215.2,
+    "brutto": 39624.7,
+    "decision": "nip",
+    "nip": "7010521253",
+    "noNipKey": null,
+    "contractorName": "WARSZAWA LOGISTICS SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      179226
+    ],
+    "note": "Jedyny obiekt OFI+ZDW w Sokołowie to CMA 179226 „PANATTONI SUCHY LAS\" (adres ul. Sąsiedzka 3, 05-806 Sokołów — nazwa w CMA myląca). Recenzenci rejestru zostawili tam decision „new\" (PANATTONI); tutaj płatnikiem jest WARSZAWA LOGISTICS (alias „WARSZAWA LOGISTICS Sokołów OFI + ZDV\", wpływ 38 346 zł w maju 2026). Posterunek w kadrach: PANATONI SUCHY LAS."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 25,
+    "flag": "OFI",
+    "client": "SCARTON POLAND ATENDE OFI",
+    "netto": 28272,
+    "brutto": 34774.56,
+    "decision": "nip",
+    "nip": "1080003483",
+    "noNipKey": null,
+    "contractorName": "SCARTON POLAND I SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      221759
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 26,
+    "flag": "ZDV+WYNAJEM",
+    "client": "PBDiM Osówiec Szlachecki",
+    "netto": 3350,
+    "brutto": 4120.5,
+    "decision": "nip",
+    "nip": "8220010022",
+    "noNipKey": null,
+    "contractorName": "PRZEDSIĘBIORSTWO BUDOWY DRÓG I MOSTÓW SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ W RESTRUKTURYZACJI",
+    "confidence": "high",
+    "cmaExternalIds": [
+      373356
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 27,
+    "flag": "ZDV",
+    "client": "TOYOTA & LEXUS Transportowców 9, Kielce",
+    "netto": 2850,
+    "brutto": 3505.5,
+    "decision": "nip",
+    "nip": "9482398938",
+    "noNipKey": null,
+    "contractorName": "TOYOTA & LEXUS ROMANOWSKI SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      375981
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 28,
+    "flag": "ZDV",
+    "client": "A46 BRWINÓW ZDV",
+    "netto": 260,
+    "brutto": 319.8,
+    "decision": "nip",
+    "nip": "5223153128",
+    "noNipKey": null,
+    "contractorName": "A46 SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      180056
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 29,
+    "flag": "ZDV",
+    "client": "MAAM ZDV",
+    "netto": 110,
+    "brutto": 135.3,
+    "decision": "nip",
+    "nip": "1133030986",
+    "noNipKey": null,
+    "contractorName": "MAAM SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [],
+    "note": "Brak obiektu w rejestrze CMA przypisanego do tego klienta — usługa fakturowana bez pozycji w rejestrze obiektów."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 30,
+    "flag": "ZDV",
+    "client": "WM  UL.KAROLKOWA 28",
+    "netto": 9543.09,
+    "brutto": 11738,
+    "decision": "nip",
+    "nip": "5272912025",
+    "noNipKey": null,
+    "contractorName": "WSPÓLNOTA MIESZKANIOWA METROPOINT SOUTH",
+    "confidence": "high",
+    "cmaExternalIds": [
+      375479
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 31,
+    "flag": "ZDV",
+    "client": "PIIB  Kujawska ZDV",
+    "netto": 1240,
+    "brutto": 1525.2,
+    "decision": "nip",
+    "nip": "5252254990",
+    "noNipKey": null,
+    "contractorName": "POLSKA IZBA INŻYNIERÓW BUDOWNICTWA",
+    "confidence": "high",
+    "cmaExternalIds": [
+      179531
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 32,
+    "flag": "ZDV",
+    "client": "TREI REAL ESTATE POLAND SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 1600,
+    "brutto": 1968,
+    "decision": "nip",
+    "nip": "1070010300",
+    "noNipKey": null,
+    "contractorName": "TREI REAL ESTATE POLAND SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      376895
+    ],
+    "note": "Klient występuje 2× w arkuszach fakturowania: alfa group r10 {PODJAZDY} 60 zł; alfa group r32 {ZDV} 1600 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 33,
+    "flag": "ZDV",
+    "client": "PROJEKT A JÓZEFOSŁAW ZDV",
+    "netto": 290,
+    "brutto": 356.7,
+    "decision": "nip",
+    "nip": "7773347005",
+    "noNipKey": null,
+    "contractorName": "PROJEKT A SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      180521
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 34,
+    "flag": "ZDV",
+    "client": "SM \"ORLIK-JANTAR\" Salamandy",
+    "netto": 1510,
+    "brutto": 1857.3,
+    "decision": "nip",
+    "nip": "1132633010",
+    "noNipKey": null,
+    "contractorName": "SPÓŁDZIELNIA MIESZKANIOWA \"ORLIK-JANTAR\"",
+    "confidence": "high",
+    "cmaExternalIds": [
+      385232
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 35,
+    "flag": "ZDV",
+    "client": "SM \"ORLIK-JANTAR\" GUDERSKIEGO",
+    "netto": 2980,
+    "brutto": 3665.4,
+    "decision": "nip",
+    "nip": "1132633010",
+    "noNipKey": null,
+    "contractorName": "SPÓŁDZIELNIA MIESZKANIOWA \"ORLIK-JANTAR\"",
+    "confidence": "high",
+    "cmaExternalIds": [
+      385796
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 36,
+    "flag": "ZDV",
+    "client": "WILANOWSKA 103 ZDV",
+    "netto": 3400,
+    "brutto": 4182,
+    "decision": "nip",
+    "nip": "5213834996",
+    "noNipKey": null,
+    "contractorName": "WSPÓLNOTA MIESZKANIOWA WILANOWSKA 103 W WARSZAWIE",
+    "confidence": "high",
+    "cmaExternalIds": [
+      371806
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 37,
+    "flag": "ZDV",
+    "client": "WM VILLA SIENA BRANICKIEGO",
+    "netto": 3414.63,
+    "brutto": 4199.99,
+    "decision": "nip",
+    "nip": "9512363265",
+    "noNipKey": null,
+    "contractorName": "WSPÓLNOTA MIESZKANIOWA VILLA SIENA W WARSZAWIE UL. BRANICKIEGO 14",
+    "confidence": "high",
+    "cmaExternalIds": [
+      376453
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 38,
+    "flag": "ZDV",
+    "client": "SM \"ORLIK-JANTAR\"  Orlego Lotu",
+    "netto": 1810,
+    "brutto": 2226.3,
+    "decision": "nip",
+    "nip": "1132633010",
+    "noNipKey": null,
+    "contractorName": "SPÓŁDZIELNIA MIESZKANIOWA \"ORLIK-JANTAR\"",
+    "confidence": "high",
+    "cmaExternalIds": [
+      387460
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 39,
+    "flag": "ZDV",
+    "client": "ASO AUTO RAWSKI TOMASZ",
+    "netto": 1400,
+    "brutto": 1722,
+    "decision": "nip",
+    "nip": "1250594886",
+    "noNipKey": null,
+    "contractorName": "A S O. AUTO RAWSKI TOMASZ",
+    "confidence": "high",
+    "cmaExternalIds": [],
+    "note": "Jak wiersz alfa group r7 (podjazdy) — brak obiektu CMA przypisanego do ASO AUTO RAWSKI TOMASZ; CMA 404001 przypisano do RAWSKI sp. z o.o. Klient występuje 2× w arkuszach fakturowania: alfa group r7 {PODJAZDY} 60 zł; alfa group r39 {ZDV} 1400 zł — różne flagi to różne usługi/pozycje tego samego klienta."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 40,
+    "flag": "ZDV",
+    "client": "MELBUD SPÓŁKA AKCYJNA",
+    "netto": 2000,
+    "brutto": 2460,
+    "decision": "nip",
+    "nip": "8760205189",
+    "noNipKey": null,
+    "contractorName": "MELBUD SPÓŁKA AKCYJNA",
+    "confidence": "high",
+    "cmaExternalIds": [
+      390661,
+      380656
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 41,
+    "flag": "ZDV",
+    "client": "TOYOTA / LEXUS Zakopiańska 62a, Kraków",
+    "netto": 1400,
+    "brutto": 1722,
+    "decision": "nip",
+    "nip": "9482398938",
+    "noNipKey": null,
+    "contractorName": "TOYOTA & LEXUS ROMANOWSKI SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      380080
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 42,
+    "flag": "ZDV",
+    "client": "ASILI SP.Z O.O.",
+    "netto": 3875,
+    "brutto": 4766.25,
+    "decision": "nip",
+    "nip": "7252078330",
+    "noNipKey": null,
+    "contractorName": "\"ASILI\" SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      401491,
+      390639
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 43,
+    "flag": "ZDV",
+    "client": "SM \"ORLIK-JANTAR\" Awionetki",
+    "netto": 1780,
+    "brutto": 2189.4,
+    "decision": "nip",
+    "nip": "1132633010",
+    "noNipKey": null,
+    "contractorName": "SPÓŁDZIELNIA MIESZKANIOWA \"ORLIK-JANTAR\"",
+    "confidence": "high",
+    "cmaExternalIds": [
+      387459
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 44,
+    "flag": "ZDV",
+    "client": "ISPL MAGDALENA POPKO",
+    "netto": 100,
+    "brutto": 123,
+    "decision": "nip",
+    "nip": "6191800469",
+    "noNipKey": null,
+    "contractorName": "INDYWIDUALNA SPECJALISTYCZNA PRAKTYKA LEKARSKA MAGDALENA POPKO",
+    "confidence": "high",
+    "cmaExternalIds": [
+      403742
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 45,
+    "flag": "ZDV",
+    "client": "AGROBEX BUDOWA SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 1495,
+    "brutto": 1838.85,
+    "decision": "nip",
+    "nip": "7812020114",
+    "noNipKey": null,
+    "contractorName": "AGROBEX BUDOWA SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      396142
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 46,
+    "flag": "ZDV",
+    "client": "DUAL PLUS WOJCIECH DOŁOWY",
+    "netto": 3200,
+    "brutto": 3936,
+    "decision": "nip",
+    "nip": "5271616253",
+    "noNipKey": null,
+    "contractorName": "DUAL PLUS WOJCIECH DOŁOWY",
+    "confidence": "high",
+    "cmaExternalIds": [
+      396303
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 47,
+    "flag": "ZDV",
+    "client": "DUAL PLUS WOJCIECH DOŁOWY Trouw Nutrition Polska - Kutno",
+    "netto": 2700,
+    "brutto": 3321,
+    "decision": "nip",
+    "nip": "5271616253",
+    "noNipKey": null,
+    "contractorName": "DUAL PLUS WOJCIECH DOŁOWY",
+    "confidence": "high",
+    "cmaExternalIds": [
+      397108
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 48,
+    "flag": "ZDV+WYNAJEM",
+    "client": "PS EKO-ENERGY SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 1650,
+    "brutto": 2029.5,
+    "decision": "nip",
+    "nip": "4990695798",
+    "noNipKey": null,
+    "contractorName": "PS EKO-ENERGY SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      409744,
+      421395,
+      421396
+    ],
+    "note": "Klient występuje 3× w arkuszach fakturowania: alfa group r1 {ZDV} 1224 zł; alfa group r6 {PODJAZDY} 600 zł; alfa group r48 {ZDV+WYNAJEM} 1650 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 49,
+    "flag": "USŁUGI DODATKOWE/PODJAZDY",
+    "client": "SLESH NAJEM",
+    "netto": 500,
+    "brutto": 615,
+    "decision": "nip",
+    "nip": "7571073272",
+    "noNipKey": null,
+    "contractorName": "SLESH Sebastian Cybulski",
+    "confidence": "medium",
+    "cmaExternalIds": [],
+    "note": "Podmiot powiązany: SLESH Sebastian Cybulski (Dyrektor ds. Technicznych Alfa). Pozycja „NAJEM\", nie usługa ochrony — brak obiektu w CMA. Nie oznaczono jako „internal\", bo to odrębny podmiot zewnętrzny."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 50,
+    "flag": "ZDV",
+    "client": "TOYOTA & LEXUS Radom, Kielecka 68/70",
+    "netto": 3185,
+    "brutto": 3917.55,
+    "decision": "nip",
+    "nip": "9482398938",
+    "noNipKey": null,
+    "contractorName": "TOYOTA & LEXUS ROMANOWSKI SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      396289
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 51,
+    "flag": "ZDV",
+    "client": "TOYOTA RADOM UL.CZARNECKIEGO",
+    "netto": 1450,
+    "brutto": 1783.5,
+    "decision": "nip",
+    "nip": "9482398938",
+    "noNipKey": null,
+    "contractorName": "TOYOTA & LEXUS ROMANOWSKI SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      379228
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 52,
+    "flag": "ZDV",
+    "client": "DM BUILDING ZDV",
+    "netto": 50,
+    "brutto": 61.5,
+    "decision": "nip",
+    "nip": "5252701549",
+    "noNipKey": null,
+    "contractorName": "DM BUILDING SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      366627,
+      133184,
+      376088,
+      376762
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 53,
+    "flag": "ZDV",
+    "client": "GTE SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 1900,
+    "brutto": 2337,
+    "decision": "nip",
+    "nip": "8992912003",
+    "noNipKey": null,
+    "contractorName": "GTE SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      404838,
+      407336,
+      409405,
+      420900,
+      390284
+    ],
+    "note": "Klient występuje 3× w arkuszach fakturowania: alfa group r53 {ZDV} 1900 zł; alfa group r54 {ZDV} 1900 zł; alfa group r56 {ZDV} 7400 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 54,
+    "flag": "ZDV",
+    "client": "GTE SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 1900,
+    "brutto": 2337,
+    "decision": "nip",
+    "nip": "8992912003",
+    "noNipKey": null,
+    "contractorName": "GTE SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      404838,
+      407336,
+      409405,
+      420900,
+      390284
+    ],
+    "note": "Klient występuje 3× w arkuszach fakturowania: alfa group r53 {ZDV} 1900 zł; alfa group r54 {ZDV} 1900 zł; alfa group r56 {ZDV} 7400 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 55,
+    "flag": "ZDV",
+    "client": "RUSAK BUSINESS ZDV",
+    "netto": 50,
+    "brutto": 61.5,
+    "decision": "nip",
+    "nip": "1130080883",
+    "noNipKey": null,
+    "contractorName": "RUSAK BUSINESS SERVICES SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      142681
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 56,
+    "flag": "ZDV",
+    "client": "GTE SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 7400,
+    "brutto": 9102,
+    "decision": "nip",
+    "nip": "8992912003",
+    "noNipKey": null,
+    "contractorName": "GTE SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      404838,
+      407336,
+      409405,
+      420900,
+      390284
+    ],
+    "note": "Klient występuje 3× w arkuszach fakturowania: alfa group r53 {ZDV} 1900 zł; alfa group r54 {ZDV} 1900 zł; alfa group r56 {ZDV} 7400 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 57,
+    "flag": "ZDV",
+    "client": "STRATIFORME ZDV",
+    "netto": 2700,
+    "brutto": 3321,
+    "decision": "nip",
+    "nip": "5272315915",
+    "noNipKey": null,
+    "contractorName": "STRATIFORME POLSKA SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      178941
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 58,
+    "flag": "ZDV",
+    "client": "STACJA NAPRAW POWYPADKOWYCH MICHAŁ PAWLAK",
+    "netto": 1900,
+    "brutto": 2337,
+    "decision": "nip",
+    "nip": "1180090458",
+    "noNipKey": null,
+    "contractorName": "STACJA NAPRAW POWYPADKOWYCH MICHAŁ PAWLAK",
+    "confidence": "high",
+    "cmaExternalIds": [
+      404801
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 59,
+    "flag": "ZDV",
+    "client": "HOBUS SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 5000,
+    "brutto": 6150,
+    "decision": "nip",
+    "nip": "5213462106",
+    "noNipKey": null,
+    "contractorName": "HOBUS SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [],
+    "note": "Brak obiektu w rejestrze CMA przypisanego do tego klienta — usługa fakturowana bez pozycji w rejestrze obiektów."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 60,
+    "flag": "ZDV",
+    "client": "VICTORIA CONSTRUCTION  SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 4480,
+    "brutto": 5510.4,
+    "decision": "nip",
+    "nip": "5242913971",
+    "noNipKey": null,
+    "contractorName": "VICTORIA CONSTRUCTION SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      420805,
+      408062,
+      390273,
+      409110
+    ],
+    "note": "Klient występuje 6× w arkuszach fakturowania: alfa group r11 {PODJAZDY} 50 zł; alfa group r12 {PODJAZDY} 95 zł; alfa group r60 {ZDV} 4480 zł; alfa group r61 {ZDV} 4780 zł; alfa group r62 {ZDV} 7428 zł; alfa group r65 {ZDV} 3092 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 61,
+    "flag": "ZDV",
+    "client": "VICTORIA CONSTRUCTION  SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 4780,
+    "brutto": 5879.4,
+    "decision": "nip",
+    "nip": "5242913971",
+    "noNipKey": null,
+    "contractorName": "VICTORIA CONSTRUCTION SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      420805,
+      408062,
+      390273,
+      409110
+    ],
+    "note": "Klient występuje 6× w arkuszach fakturowania: alfa group r11 {PODJAZDY} 50 zł; alfa group r12 {PODJAZDY} 95 zł; alfa group r60 {ZDV} 4480 zł; alfa group r61 {ZDV} 4780 zł; alfa group r62 {ZDV} 7428 zł; alfa group r65 {ZDV} 3092 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 62,
+    "flag": "ZDV",
+    "client": "VICTORIA CONSTRUCTION  SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 7428,
+    "brutto": 9136.44,
+    "decision": "nip",
+    "nip": "5242913971",
+    "noNipKey": null,
+    "contractorName": "VICTORIA CONSTRUCTION SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      420805,
+      408062,
+      390273,
+      409110
+    ],
+    "note": "Klient występuje 6× w arkuszach fakturowania: alfa group r11 {PODJAZDY} 50 zł; alfa group r12 {PODJAZDY} 95 zł; alfa group r60 {ZDV} 4480 zł; alfa group r61 {ZDV} 4780 zł; alfa group r62 {ZDV} 7428 zł; alfa group r65 {ZDV} 3092 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 63,
+    "flag": "ZDV",
+    "client": "EKO PRIME INWESTYCJE SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 1990,
+    "brutto": 2447.7,
+    "decision": "nip",
+    "nip": "7732478147",
+    "noNipKey": null,
+    "contractorName": "EKO PRIME INWESTYCJE SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      418928
+    ],
+    "note": "Klient występuje 2× w arkuszach fakturowania: alfa group r63 {ZDV} 1990 zł; alfa group r104 {ZDV} 1990 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 64,
+    "flag": "ZDV",
+    "client": "\"OCMER\" SP. Z O.O.",
+    "netto": 2500,
+    "brutto": 3075,
+    "decision": "nip",
+    "nip": "7251008043",
+    "noNipKey": null,
+    "contractorName": "\"OCMER\" SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      418691
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 65,
+    "flag": "ZDV",
+    "client": "VICTORIA CONSTRUCTION  SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 3092,
+    "brutto": 3803.16,
+    "decision": "nip",
+    "nip": "5242913971",
+    "noNipKey": null,
+    "contractorName": "VICTORIA CONSTRUCTION SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      420805,
+      408062,
+      390273,
+      409110
+    ],
+    "note": "Klient występuje 6× w arkuszach fakturowania: alfa group r11 {PODJAZDY} 50 zł; alfa group r12 {PODJAZDY} 95 zł; alfa group r60 {ZDV} 4480 zł; alfa group r61 {ZDV} 4780 zł; alfa group r62 {ZDV} 7428 zł; alfa group r65 {ZDV} 3092 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 66,
+    "flag": "ZDV",
+    "client": "SPÓŁDZIELNIA BUDOWLANO-MIESZKANIOWA \"DEMBUD\"",
+    "netto": 2650,
+    "brutto": 3259.5,
+    "decision": "nip",
+    "nip": "5271045939",
+    "noNipKey": null,
+    "contractorName": "SPÓŁDZIELNIA BUDOWLANO-MIESZKANIOWA \"DEMBUD\"",
+    "confidence": "high",
+    "cmaExternalIds": [
+      384212,
+      407072
+    ],
+    "note": "Klient występuje 2× w arkuszach fakturowania: alfa group r66 {ZDV} 2650 zł; alfa s r31 {ZDV} 7740 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 67,
+    "flag": "ZDV",
+    "client": "DOBRY MAJSTER SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 50,
+    "brutto": 61.5,
+    "decision": "nip",
+    "nip": "5213867398",
+    "noNipKey": null,
+    "contractorName": "DOBRY MAJSTER SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      178226
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 68,
+    "flag": "ZDV",
+    "client": "TOR-KAR-SSON ZDV",
+    "netto": 700,
+    "brutto": 861,
+    "decision": "nip",
+    "nip": "5783101084",
+    "noNipKey": null,
+    "contractorName": "TOR-KAR-SSON SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ SPÓŁKA KOMANDYTOWA",
+    "confidence": "high",
+    "cmaExternalIds": [
+      194638
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 69,
+    "flag": "ZDV",
+    "client": "PIOTR MIŚKIEWICZ SANOFI",
+    "netto": 500,
+    "brutto": 615,
+    "decision": "nip",
+    "nip": "8130140525",
+    "noNipKey": null,
+    "contractorName": "SANOFI SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [],
+    "note": "Brak obiektu w rejestrze CMA przypisanego do tego klienta — usługa fakturowana bez pozycji w rejestrze obiektów."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 70,
+    "flag": "ZDV",
+    "client": "M.T.M. ZDV",
+    "netto": 1750,
+    "brutto": 2152.5,
+    "decision": "nip",
+    "nip": "5242820755",
+    "noNipKey": null,
+    "contractorName": "M.T.M. SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ SPÓŁKA KOMANDYTOWA",
+    "confidence": "high",
+    "cmaExternalIds": [
+      223281,
+      218464
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 71,
+    "flag": "ZDV",
+    "client": "MITCAR ZDV",
+    "netto": 2800,
+    "brutto": 3444,
+    "decision": "nip",
+    "nip": "9510043585",
+    "noNipKey": null,
+    "contractorName": "MITCAR D. I P. KRASNODĘBSKI SPÓŁKA JAWNA",
+    "confidence": "high",
+    "cmaExternalIds": [
+      418712,
+      212514
+    ],
+    "note": "Klient występuje 3× w arkuszach fakturowania: alfa group r5 {PODJAZDY} 50 zł; alfa group r71 {ZDV} 2800 zł; alfa group r76 {ZDV} 1200 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 72,
+    "flag": "ZDV",
+    "client": "FORPŁYT ZDV",
+    "netto": 2000,
+    "brutto": 2460,
+    "decision": "nip",
+    "nip": "5240103972",
+    "noNipKey": null,
+    "contractorName": "PRZEDSIĘBIORSTWO PRODUKCYJNO-USŁUGOWO-HANDLOWE \"FORPŁYT\" JAN ZADROŻNY, GRZEGORZ ZADROŻNY SPÓŁKA JAWNA",
+    "confidence": "high",
+    "cmaExternalIds": [
+      221749
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 73,
+    "flag": "ZDV",
+    "client": "DUSSMANN POLSKA SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 675.2,
+    "brutto": 830.5,
+    "decision": "nip",
+    "nip": "5260028535",
+    "noNipKey": null,
+    "contractorName": "DUSSMANN POLSKA SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      407231,
+      417689,
+      402640
+    ],
+    "note": "Klient występuje 3× w arkuszach fakturowania: alfa group r73 {ZDV} 675.2 zł; alfa group r74 {ZDV} 2200 zł; alfa group r75 {ZDV} 240 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 74,
+    "flag": "ZDV",
+    "client": "DUSSMANN POLSKA SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 2200,
+    "brutto": 2706,
+    "decision": "nip",
+    "nip": "5260028535",
+    "noNipKey": null,
+    "contractorName": "DUSSMANN POLSKA SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      407231,
+      417689,
+      402640
+    ],
+    "note": "Klient występuje 3× w arkuszach fakturowania: alfa group r73 {ZDV} 675.2 zł; alfa group r74 {ZDV} 2200 zł; alfa group r75 {ZDV} 240 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 75,
+    "flag": "ZDV",
+    "client": "DUSSMANN POLSKA SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 240,
+    "brutto": 295.2,
+    "decision": "nip",
+    "nip": "5260028535",
+    "noNipKey": null,
+    "contractorName": "DUSSMANN POLSKA SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      407231,
+      417689,
+      402640
+    ],
+    "note": "Klient występuje 3× w arkuszach fakturowania: alfa group r73 {ZDV} 675.2 zł; alfa group r74 {ZDV} 2200 zł; alfa group r75 {ZDV} 240 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 76,
+    "flag": "ZDV",
+    "client": "MITCAR ZDV",
+    "netto": 1200,
+    "brutto": 1476,
+    "decision": "nip",
+    "nip": "9510043585",
+    "noNipKey": null,
+    "contractorName": "MITCAR D. I P. KRASNODĘBSKI SPÓŁKA JAWNA",
+    "confidence": "high",
+    "cmaExternalIds": [
+      418712,
+      212514
+    ],
+    "note": "Klient występuje 3× w arkuszach fakturowania: alfa group r5 {PODJAZDY} 50 zł; alfa group r71 {ZDV} 2800 zł; alfa group r76 {ZDV} 1200 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 77,
+    "flag": "ZDV",
+    "client": "KOBRA CHABIN ZDV",
+    "netto": 2300,
+    "brutto": 2829,
+    "decision": "nip",
+    "nip": "7272797625",
+    "noNipKey": null,
+    "contractorName": "KOBRA SECURITY GROUP SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      227001
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 78,
+    "flag": "ZDV",
+    "client": "KOBRA ALEKSANDRÓW",
+    "netto": 480,
+    "brutto": 590.4,
+    "decision": "nip",
+    "nip": "7272797625",
+    "noNipKey": null,
+    "contractorName": "KOBRA SECURITY GROUP SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      388861
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 79,
+    "flag": "ZDV",
+    "client": "LYCOPHARM ZDV",
+    "netto": 2594,
+    "brutto": 3190.62,
+    "decision": "nip",
+    "nip": "7011012252",
+    "noNipKey": null,
+    "contractorName": "LYCOPHARM SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [],
+    "note": "Brak obiektu w rejestrze CMA przypisanego do tego klienta — usługa fakturowana bez pozycji w rejestrze obiektów."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 80,
+    "flag": "ZDV",
+    "client": "BETON TECHNIQ ZDV",
+    "netto": 500,
+    "brutto": 615,
+    "decision": "nip",
+    "nip": "5242848423",
+    "noNipKey": null,
+    "contractorName": "BETON TECHNIQ SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      362876
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 81,
+    "flag": "ZDV+WYNAJEM",
+    "client": "PBDiM CHMIELÓW ZDV",
+    "netto": 2135,
+    "brutto": 2626.05,
+    "decision": "nip",
+    "nip": "8220010022",
+    "noNipKey": null,
+    "contractorName": "PRZEDSIĘBIORSTWO BUDOWY DRÓG I MOSTÓW SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ W RESTRUKTURYZACJI",
+    "confidence": "high",
+    "cmaExternalIds": [
+      369575
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 82,
+    "flag": "ZDV+WYNAJEM",
+    "client": "Alpha Polish Logistics Propco S.a r.l. 7R",
+    "netto": 3730,
+    "brutto": 4587.9,
+    "decision": "nip",
+    "nip": "5263921906",
+    "noNipKey": null,
+    "contractorName": "Alpha Polish Logistics Propco S.a r.l.",
+    "confidence": "high",
+    "cmaExternalIds": [
+      383285
+    ],
+    "note": "Klient występuje 2× w arkuszach fakturowania: alfa group r82 {ZDV+WYNAJEM} 3730 zł; alfa group r83 {ZDV+WYNAJEM} 4092 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 83,
+    "flag": "ZDV+WYNAJEM",
+    "client": "Alpha Polish Logistics Propco S.a r.l. 7R",
+    "netto": 4092,
+    "brutto": 5033.16,
+    "decision": "nip",
+    "nip": "5263921906",
+    "noNipKey": null,
+    "contractorName": "Alpha Polish Logistics Propco S.a r.l.",
+    "confidence": "high",
+    "cmaExternalIds": [
+      383285
+    ],
+    "note": "Klient występuje 2× w arkuszach fakturowania: alfa group r82 {ZDV+WYNAJEM} 3730 zł; alfa group r83 {ZDV+WYNAJEM} 4092 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 84,
+    "flag": "ZDV",
+    "client": "PBDiM Lublin wytwórnia mas",
+    "netto": 2400,
+    "brutto": 2952,
+    "decision": "nip",
+    "nip": "8220010022",
+    "noNipKey": null,
+    "contractorName": "PRZEDSIĘBIORSTWO BUDOWY DRÓG I MOSTÓW SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ W RESTRUKTURYZACJI",
+    "confidence": "high",
+    "cmaExternalIds": [
+      407439
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 85,
+    "flag": "ZDV",
+    "client": "\"AUTO-BOSS ZDV",
+    "netto": 6850,
+    "brutto": 8425.5,
+    "decision": "nip",
+    "nip": "5472138990",
+    "noNipKey": null,
+    "contractorName": "\"AUTO-BOSS SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ SPÓŁKA KOMANDYTOWA\"",
+    "confidence": "high",
+    "cmaExternalIds": [
+      236795,
+      267430,
+      352708
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 86,
+    "flag": "ZDV",
+    "client": "UNIA Lipowa ZDV",
+    "netto": 3400,
+    "brutto": 4182,
+    "decision": "nip",
+    "nip": "5250001701",
+    "noNipKey": null,
+    "contractorName": "ZAKŁADY FARMACEUTYCZNE \"UNIA\" SPÓŁDZIELNIA PRACY",
+    "confidence": "high",
+    "cmaExternalIds": [
+      266362
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 87,
+    "flag": "ZDV",
+    "client": "TOLA ZDV",
+    "netto": 90,
+    "brutto": 110.7,
+    "decision": "nip",
+    "nip": "8381291411",
+    "noNipKey": null,
+    "contractorName": "Przedsiębiorstwo handlowo-usługowe \"Tola\" Dorota Marciniak",
+    "confidence": "high",
+    "cmaExternalIds": [
+      268114
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 88,
+    "flag": "ZDV",
+    "client": "\"MULTICONTRACT BRZEZINKA ZDV",
+    "netto": 90,
+    "brutto": 110.7,
+    "decision": "nip",
+    "nip": "5322047777",
+    "noNipKey": null,
+    "contractorName": "\"MULTICONTRACT\" SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      306924
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 89,
+    "flag": "ZDV",
+    "client": "MULTY HOME  SOBIENIE ZDV",
+    "netto": 90,
+    "brutto": 110.7,
+    "decision": "nip",
+    "nip": "7010682128",
+    "noNipKey": null,
+    "contractorName": "MULTY HOME EUROPE SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      306925
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 90,
+    "flag": "ZDV",
+    "client": "BWW Borcash ZDV",
+    "netto": 100,
+    "brutto": 123,
+    "decision": "nip",
+    "nip": "5511126816",
+    "noNipKey": null,
+    "contractorName": "BIURO WYMIANY WALUT \"BORCASH\" Janusz Gancarczyk",
+    "confidence": "high",
+    "cmaExternalIds": [
+      313141
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 91,
+    "flag": "ZDV",
+    "client": "ROBERT KRZEWSKI ZDV",
+    "netto": 100,
+    "brutto": 123,
+    "decision": "nip",
+    "nip": "5251019525",
+    "noNipKey": null,
+    "contractorName": "SKP ROBERT KRZEWSKI",
+    "confidence": "high",
+    "cmaExternalIds": [
+      339831
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 92,
+    "flag": "ZDV",
+    "client": "PRS WCHÓD ZDV",
+    "netto": 2200,
+    "brutto": 2706,
+    "decision": "nip",
+    "nip": "5731004475",
+    "noNipKey": null,
+    "contractorName": "PRZEDSIĘBIORSTWO ROBÓT SPECJALISTYCZNYCH \"WSCHÓD\" SPÓŁKA AKCYJNA",
+    "confidence": "high",
+    "cmaExternalIds": [
+      276981
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 93,
+    "flag": "ZDV",
+    "client": "VILLA ONYX MIĘDZYNARODOWA 50 ZDV",
+    "netto": 2130,
+    "brutto": 2619.9,
+    "decision": "nip",
+    "nip": "1132913459",
+    "noNipKey": null,
+    "contractorName": "WSPÓLNOTA MIESZKANIOWA VILLA ONYX UL.MIĘDZYNARODOWA 50",
+    "confidence": "high",
+    "cmaExternalIds": [
+      290038
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 94,
+    "flag": "ZDV",
+    "client": "TOYOTA Al. Pokoju Kraków",
+    "netto": 2500,
+    "brutto": 3075,
+    "decision": "nip",
+    "nip": "9482398938",
+    "noNipKey": null,
+    "contractorName": "TOYOTA & LEXUS ROMANOWSKI SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      349965
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 95,
+    "flag": "ZDV",
+    "client": "OMIG SIELECKA 35 ZDV",
+    "netto": 8330,
+    "brutto": 10245.9,
+    "decision": "nip",
+    "nip": "5213915039",
+    "noNipKey": null,
+    "contractorName": "WSPÓLNOTA MIESZKANIOWA KOLONIA SIELCE",
+    "confidence": "high",
+    "cmaExternalIds": [
+      359373
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 96,
+    "flag": "ZDV",
+    "client": "ASO TOYOTA & LEXUS KIELCE Radomska ZDV",
+    "netto": 3500,
+    "brutto": 4305,
+    "decision": "nip",
+    "nip": "9482398938",
+    "noNipKey": null,
+    "contractorName": "TOYOTA & LEXUS ROMANOWSKI SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      360318
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 97,
+    "flag": "ZDV",
+    "client": "SANDEX PIASKARNIA ZDV",
+    "netto": 3450,
+    "brutto": 4243.5,
+    "decision": "nip",
+    "nip": "1182143940",
+    "noNipKey": null,
+    "contractorName": "SANDEX SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      369353
+    ],
+    "note": "Klient występuje 2× w arkuszach fakturowania: alfa group r9 {PODJAZDY} 160 zł; alfa group r97 {ZDV} 3450 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 98,
+    "flag": "ZDV",
+    "client": "\"CAN-DOM\" BIURO ZDV",
+    "netto": 400,
+    "brutto": 492,
+    "decision": "nip",
+    "nip": "4960065710",
+    "noNipKey": null,
+    "contractorName": "Sławomir Hryciuk \"CAN-DOM\"",
+    "confidence": "high",
+    "cmaExternalIds": [
+      370477
+    ],
+    "note": "Klient występuje 2× w arkuszach fakturowania: alfa group r4 {PODJAZDY} 65 zł; alfa group r98 {ZDV} 400 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 99,
+    "flag": "ZDV",
+    "client": "SM \"KOŁO\" KSIĘCIA JANUSZA ZDV",
+    "netto": 4000,
+    "brutto": 4920,
+    "decision": "nip",
+    "nip": "5250011013",
+    "noNipKey": null,
+    "contractorName": "SPÓŁDZIELNIA MIESZKANIOWA \"KOŁO\"",
+    "confidence": "high",
+    "cmaExternalIds": [
+      370907
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 100,
+    "flag": "ZDV",
+    "client": "SINOTRANS AIR (SCM PAL)",
+    "netto": 700,
+    "brutto": 861,
+    "decision": "nip",
+    "nip": "7252315439",
+    "noNipKey": null,
+    "contractorName": "SINOTRANS AIR TRANSPORTATION GMBH SP. Z O.O.",
+    "confidence": "high",
+    "cmaExternalIds": [
+      341808
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 101,
+    "flag": "ZDV",
+    "client": "Kozłowski PŁOŃSK ZDV",
+    "netto": 800,
+    "brutto": 984,
+    "decision": "noNip",
+    "nip": null,
+    "noNipKey": "noNip:173",
+    "contractorName": "Przemysław Kozłowski",
+    "confidence": "high",
+    "cmaExternalIds": [
+      286446,
+      364534,
+      388756
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 102,
+    "flag": "ZDV",
+    "client": "CENTRUM MEDYCYNY PROFILAKTYCZNEJ SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 2550,
+    "brutto": 3136.5,
+    "decision": "nip",
+    "nip": "6772194473",
+    "noNipKey": null,
+    "contractorName": "CENTRUM MEDYCYNY PROFILAKTYCZNEJ SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      385403
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 103,
+    "flag": "ZDV",
+    "client": "AGENCJA OCHRONY GLOK",
+    "netto": 11571,
+    "brutto": 14232.33,
+    "decision": "nip",
+    "nip": "5212730415",
+    "noNipKey": null,
+    "contractorName": "AGENCJA OCHRONY \"GLOK\" MIROSŁAW MAŁCZYŃSKI",
+    "confidence": "high",
+    "cmaExternalIds": [
+      391074,
+      390909,
+      390832,
+      371690,
+      377169,
+      379274,
+      376606,
+      385776,
+      367956,
+      370513,
+      372500,
+      373771,
+      370418,
+      364458,
+      362641,
+      360219,
+      350597,
+      376930,
+      379807,
+      375072,
+      357452,
+      373796,
+      372029,
+      377473,
+      389101,
+      420922,
+      379972,
+      370422,
+      374795,
+      388235,
+      385545,
+      385631,
+      380476,
+      378338,
+      390095,
+      384131,
+      384038,
+      381297,
+      369405,
+      369369,
+      385544,
+      386037,
+      408543,
+      373592,
+      375991,
+      396281,
+      419005,
+      362677,
+      364573
+    ],
+    "note": "Zbiorcza pozycja dla agencji ochrony GLOK (podwykonawca/partner) — 49 obiektów CMA z aliasami „GLOK …\" przypisanych do tego NIP w rejestrze."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 104,
+    "flag": "ZDV",
+    "client": "EKO PRIME INWESTYCJE SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 1990,
+    "brutto": 2447.7,
+    "decision": "nip",
+    "nip": "7732478147",
+    "noNipKey": null,
+    "contractorName": "EKO PRIME INWESTYCJE SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      418928
+    ],
+    "note": "Klient występuje 2× w arkuszach fakturowania: alfa group r63 {ZDV} 1990 zł; alfa group r104 {ZDV} 1990 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa group",
+    "row": 105,
+    "flag": "ZDV",
+    "client": "SAFETOWER NOW-BUD WIEŻE",
+    "netto": 3636.13,
+    "brutto": 4472.44,
+    "decision": "nip",
+    "nip": "8971903051",
+    "noNipKey": null,
+    "contractorName": "NOW-BUD SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      377927,
+      376163,
+      377574,
+      418711,
+      406998,
+      376912,
+      402198,
+      391234,
+      384367,
+      401463,
+      402157,
+      380030,
+      377072,
+      377171,
+      384018,
+      409322,
+      407725,
+      405068,
+      380496,
+      380029,
+      376656,
+      401695,
+      388460,
+      409217,
+      407611,
+      376063,
+      376339,
+      421398,
+      397739,
+      407726,
+      420847,
+      421743,
+      377573
+    ],
+    "note": "Druga pozycja SAFETOWER NOW-BUD WIEŻE w „alfa group\" (por. r3). Ten sam zestaw 33 obiektów CMA. Klient występuje 2× w arkuszach fakturowania: alfa group r3 {ZDV} 6187 zł; alfa group r105 {ZDV} 3636.13 zł — różne flagi to różne usługi/pozycje tego samego klienta."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 1,
+    "flag": "USŁUGI DODATKOWE/ PODJAZDY",
+    "client": "ODYSSEY SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 240,
+    "brutto": 295.2,
+    "decision": "nip",
+    "nip": "1132709836",
+    "noNipKey": null,
+    "contractorName": "ODYSSEY SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      388982,
+      404458,
+      396221,
+      402765,
+      381742,
+      386884
+    ],
+    "note": "Klient występuje 2× w arkuszach fakturowania: alfa s r1 {USŁUGI DODATKOWE/ PODJAZDY} 240 zł; alfa s r7 {ZDV} 3900 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 2,
+    "flag": "USŁUGI DODATKOWE/ PODJAZDY",
+    "client": "CYGAN AUTO SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 180,
+    "brutto": 221.4,
+    "decision": "nip",
+    "nip": "1251649589",
+    "noNipKey": null,
+    "contractorName": "CYGAN SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ SPÓŁKA KOMANDYTOWA",
+    "confidence": "high",
+    "cmaExternalIds": [
+      408489,
+      364594,
+      301856,
+      407619,
+      304321,
+      304325
+    ],
+    "note": "Klient występuje 3× w arkuszach fakturowania: alfa s r2 {USŁUGI DODATKOWE/ PODJAZDY} 180 zł; alfa s r25 {ZDV} 1590 zł; alfa s r26 {ZDV} 12650 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 3,
+    "flag": "USŁUGI DODATKOWE/ PODJAZDY",
+    "client": "ZDUNEK PREMIUM SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 150,
+    "brutto": 184.5,
+    "decision": "nip",
+    "nip": "5833080333",
+    "noNipKey": null,
+    "contractorName": "ZDUNEK PREMIUM SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      402556,
+      402252,
+      402554
+    ],
+    "note": "Klient występuje 4× w arkuszach fakturowania: alfa s r3 {USŁUGI DODATKOWE/ PODJAZDY} 150 zł; alfa s r5 {USŁUGI DODATKOWE/ PODJAZDY} 255 zł; alfa s r23 {ZDV} 10123.6 zł; alfa s r40 {ZDV} 3500 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 4,
+    "flag": "USŁUGI DODATKOWE/ PODJAZDY",
+    "client": "PUH ZDUNEK Tadeusz Zdunek",
+    "netto": 280,
+    "brutto": 344.4,
+    "decision": "nip",
+    "nip": "5830205171",
+    "noNipKey": null,
+    "contractorName": "PUH ZDUNEK Tadeusz Zdunek",
+    "confidence": "high",
+    "cmaExternalIds": [],
+    "note": "Brak obiektu przypisanego w rejestrze do PUH ZDUNEK Tadeusz Zdunek. Adres kontrahenta (Miałki Szlak 35) pokrywa się z CMA 402249 „ZDUNEK GDAŃSK BLACHARNIA MIAŁKI SZLAK 35\", ale recenzenci rejestru przypisali ten obiekt do ZDUNEK sp. z o.o. sp.k. (5833320228) — do rozstrzygnięcia. Grupa Zdunek ma 8 podmiotów w KONTRAHENCI i 17 obiektów w CMA. Klient występuje 2× w arkuszach fakturowania: alfa s r4 {USŁUGI DODATKOWE/ PODJAZDY} 280 zł; alfa s r36 {ZDV} 5061.8 zł — różne flagi to różne usługi/pozycje tego samego klienta."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 5,
+    "flag": "USŁUGI DODATKOWE/ PODJAZDY",
+    "client": "ZDUNEK PREMIUM SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 255,
+    "brutto": 313.65,
+    "decision": "nip",
+    "nip": "5833080333",
+    "noNipKey": null,
+    "contractorName": "ZDUNEK PREMIUM SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      402556,
+      402252,
+      402554
+    ],
+    "note": "Klient występuje 4× w arkuszach fakturowania: alfa s r3 {USŁUGI DODATKOWE/ PODJAZDY} 150 zł; alfa s r5 {USŁUGI DODATKOWE/ PODJAZDY} 255 zł; alfa s r23 {ZDV} 10123.6 zł; alfa s r40 {ZDV} 3500 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 6,
+    "flag": "USŁUGI DODATKOWE/ PODJAZDY",
+    "client": "ZDUNEK SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ SPÓŁKA KOMANDYTOWA",
+    "netto": 570,
+    "brutto": 701.1,
+    "decision": "nip",
+    "nip": "5833320228",
+    "noNipKey": null,
+    "contractorName": "ZDUNEK SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ SPÓŁKA KOMANDYTOWA",
+    "confidence": "high",
+    "cmaExternalIds": [
+      402249,
+      380935,
+      402247,
+      402568
+    ],
+    "note": "Klient występuje 2× w arkuszach fakturowania: alfa s r6 {USŁUGI DODATKOWE/ PODJAZDY} 570 zł; alfa s r22 {ZDV} 2750 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 7,
+    "flag": "ZDV",
+    "client": "ODYSSEY SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 3900,
+    "brutto": 4797,
+    "decision": "nip",
+    "nip": "1132709836",
+    "noNipKey": null,
+    "contractorName": "ODYSSEY SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      388982,
+      404458,
+      396221,
+      402765,
+      381742,
+      386884
+    ],
+    "note": "Klient występuje 2× w arkuszach fakturowania: alfa s r1 {USŁUGI DODATKOWE/ PODJAZDY} 240 zł; alfa s r7 {ZDV} 3900 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 8,
+    "flag": "OFI",
+    "client": "MYRRA POWER SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 28718.4,
+    "brutto": 35323.63,
+    "decision": "nip",
+    "nip": "5272651547",
+    "noNipKey": null,
+    "contractorName": "MYRRA POWER SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      203263
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 9,
+    "flag": "ZDV",
+    "client": "PRZEDSIĘBIORSTWO USŁUGOWO-HANDLOWE \"ZDUNEK\" SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 10123.6,
+    "brutto": 12452.03,
+    "decision": "nip",
+    "nip": "5832582015",
+    "noNipKey": null,
+    "contractorName": "PRZEDSIĘBIORSTWO USŁUGOWO-HANDLOWE \"ZDUNEK\" SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      402250,
+      402557,
+      391375
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 10,
+    "flag": "ZDV",
+    "client": "ZDUNEK NIERUCHOMOŚCI SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 2300,
+    "brutto": 2829,
+    "decision": "nip",
+    "nip": "5833207035",
+    "noNipKey": null,
+    "contractorName": "ZDUNEK NIERUCHOMOŚCI SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [],
+    "note": "Brak obiektu przypisanego w rejestrze do ZDUNEK NIERUCHOMOŚCI. Kandydatami są trzy domy prywatne właścicieli przy ul. Zawodzie (CMA 407885/407886/407887), które recenzenci rejestru przypisali do ZDUNEK sp. z o.o. sp.k. — do rozstrzygnięcia."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 11,
+    "flag": "OFI",
+    "client": "\"PODKOWA\" SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 22475.6,
+    "brutto": 27644.99,
+    "decision": "nip",
+    "nip": "5270002566",
+    "noNipKey": null,
+    "contractorName": "\"PODKOWA\" SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      303321
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 12,
+    "flag": "OFI",
+    "client": "ZAKŁADY FARMACEUTYCZNE \"UNIA\" SPÓŁDZIELNIA PRACY",
+    "netto": 33100,
+    "brutto": 40713,
+    "decision": "nip",
+    "nip": "5250001701",
+    "noNipKey": null,
+    "contractorName": "ZAKŁADY FARMACEUTYCZNE \"UNIA\" SPÓŁDZIELNIA PRACY",
+    "confidence": "high",
+    "cmaExternalIds": [
+      341645
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 13,
+    "flag": "OFI",
+    "client": "HORIZONT ROLOS SP Z OO",
+    "netto": 23615.5,
+    "brutto": 29047.07,
+    "decision": "nip",
+    "nip": "7620003048",
+    "noNipKey": null,
+    "contractorName": "HORIZONT ROLOS SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      307235
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 14,
+    "flag": "ZDV",
+    "client": "PPBDiM Przemysłowa",
+    "netto": 2500,
+    "brutto": 3075,
+    "decision": "nip",
+    "nip": "8220010022",
+    "noNipKey": null,
+    "contractorName": "PRZEDSIĘBIORSTWO BUDOWY DRÓG I MOSTÓW SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ W RESTRUKTURYZACJI",
+    "confidence": "high",
+    "cmaExternalIds": [
+      179786
+    ],
+    "note": "Literówka w arkuszu („PPBDiM\"). Kontrahent ma alias „PBDiM Przemysłowa\" — to PRZEDSIĘBIORSTWO BUDOWY DRÓG I MOSTÓW sp. z o.o. w restrukturyzacji (NIP 8220010022), ten sam co wiersze alfa group r26/r81/r84."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 15,
+    "flag": "ZDV",
+    "client": "POINT OF VIEW SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOIŚCIĄ SPÓŁKA KOMANDYTOWO-AKCYJNA",
+    "netto": 5250,
+    "brutto": 6457.5,
+    "decision": "nip",
+    "nip": "1231282909",
+    "noNipKey": null,
+    "contractorName": "POINT OF VIEW SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOIŚCIĄ SPÓŁKA KOMANDYTOWO-AKCYJNA",
+    "confidence": "high",
+    "cmaExternalIds": [
+      380688
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 16,
+    "flag": "ZDV",
+    "client": "WSPÓLNOTA MIESZKANIOWA SARMACKA 21",
+    "netto": 3500,
+    "brutto": 4305,
+    "decision": "nip",
+    "nip": "9512328300",
+    "noNipKey": null,
+    "contractorName": "WSPÓLNOTA MIESZKANIOWA SARMACKA 21",
+    "confidence": "high",
+    "cmaExternalIds": [
+      374256
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 17,
+    "flag": "ZDV",
+    "client": "TORPOL SPÓŁKA AKCYJNA",
+    "netto": 3550,
+    "brutto": 4366.5,
+    "decision": "new",
+    "nip": null,
+    "noNipKey": null,
+    "contractorName": "TORPOL SPÓŁKA AKCYJNA",
+    "confidence": "medium",
+    "cmaExternalIds": [],
+    "note": "Brak w KONTRAHENCI.XLSX i brak obiektu w rejestrze CMA — proponowany nowy kontrahent (TORPOL S.A., wykonawca kolejowy). Klient występuje 2× w arkuszu „alfa s\" (r17 3550 zł i r35 1100 zł) — prawdopodobnie dwie budowy. Klient występuje 2× w arkuszach fakturowania: alfa s r17 {ZDV} 3550 zł; alfa s r35 {ZDV} 1100 zł — różne flagi to różne usługi/pozycje tego samego klienta."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 18,
+    "flag": "ZDV",
+    "client": "ZDUNEK KMJ SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 1900,
+    "brutto": 2337,
+    "decision": "nip",
+    "nip": "5833200122",
+    "noNipKey": null,
+    "contractorName": "ZDUNEK KMJ SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      380936
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 19,
+    "flag": "ZDV",
+    "client": "ZDUNEK MOBILITY SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 1900,
+    "brutto": 2337,
+    "decision": "nip",
+    "nip": "5833524445",
+    "noNipKey": null,
+    "contractorName": "ZDUNEK MOBILITY SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      386699,
+      385311
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 20,
+    "flag": "ZDV",
+    "client": "AGENCJA OCHRONY DES DOBROGOSZCZ SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 3430,
+    "brutto": 4218.9,
+    "decision": "nip",
+    "nip": "7743235299",
+    "noNipKey": null,
+    "contractorName": "AGENCJA OCHRONY DES DOBROGOSZCZ SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      372032,
+      401831
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 21,
+    "flag": "OFI",
+    "client": "NATURAGRA PASZE SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 47002.2,
+    "brutto": 57812.71,
+    "decision": "nip",
+    "nip": "8210006817",
+    "noNipKey": null,
+    "contractorName": "NATURAGRA PASZE SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      312368,
+      312036
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 22,
+    "flag": "ZDV",
+    "client": "ZDUNEK SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ SPÓŁKA KOMANDYTOWA",
+    "netto": 2750,
+    "brutto": 3382.5,
+    "decision": "nip",
+    "nip": "5833320228",
+    "noNipKey": null,
+    "contractorName": "ZDUNEK SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ SPÓŁKA KOMANDYTOWA",
+    "confidence": "high",
+    "cmaExternalIds": [
+      402249,
+      380935,
+      402247,
+      402568
+    ],
+    "note": "Klient występuje 2× w arkuszach fakturowania: alfa s r6 {USŁUGI DODATKOWE/ PODJAZDY} 570 zł; alfa s r22 {ZDV} 2750 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 23,
+    "flag": "ZDV",
+    "client": "ZDUNEK PREMIUM SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 10123.6,
+    "brutto": 12452.03,
+    "decision": "nip",
+    "nip": "5833080333",
+    "noNipKey": null,
+    "contractorName": "ZDUNEK PREMIUM SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      402556,
+      402252,
+      402554
+    ],
+    "note": "Klient występuje 4× w arkuszach fakturowania: alfa s r3 {USŁUGI DODATKOWE/ PODJAZDY} 150 zł; alfa s r5 {USŁUGI DODATKOWE/ PODJAZDY} 255 zł; alfa s r23 {ZDV} 10123.6 zł; alfa s r40 {ZDV} 3500 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 24,
+    "flag": "ZDV",
+    "client": "PAREF EVO. SOCIÉTÉ CIVILE DE PLACEMENT",
+    "netto": 3000,
+    "brutto": 3690,
+    "decision": "nip",
+    "nip": "5263374083",
+    "noNipKey": null,
+    "contractorName": "PAREF EVO. SOCIÉTÉ CIVILE DE PLACEMENT IMMOBILIER A CAPITAL VARIABLE",
+    "confidence": "high",
+    "cmaExternalIds": [
+      384023
+    ],
+    "note": "Kontrahent PAREF EVO. SOCIÉTÉ CIVILE DE PLACEMENT IMMOBILIER A CAPITAL VARIABLE (NIP 5263374083), alias „RACŁAWICKA\" — nazwa w arkuszu jest skrócona, stąd score 0.86, ale dopasowanie jest jednoznaczne."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 25,
+    "flag": "ZDV",
+    "client": "CYGAN AUTO SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 1590,
+    "brutto": 1955.7,
+    "decision": "nip",
+    "nip": "1251649589",
+    "noNipKey": null,
+    "contractorName": "CYGAN SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ SPÓŁKA KOMANDYTOWA",
+    "confidence": "high",
+    "cmaExternalIds": [
+      408489,
+      364594,
+      301856,
+      407619,
+      304321,
+      304325
+    ],
+    "note": "Klient występuje 3× w arkuszach fakturowania: alfa s r2 {USŁUGI DODATKOWE/ PODJAZDY} 180 zł; alfa s r25 {ZDV} 1590 zł; alfa s r26 {ZDV} 12650 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 26,
+    "flag": "ZDV",
+    "client": "CYGAN AUTO SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 12650,
+    "brutto": 15559.5,
+    "decision": "nip",
+    "nip": "1251649589",
+    "noNipKey": null,
+    "contractorName": "CYGAN SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ SPÓŁKA KOMANDYTOWA",
+    "confidence": "high",
+    "cmaExternalIds": [
+      408489,
+      364594,
+      301856,
+      407619,
+      304321,
+      304325
+    ],
+    "note": "Klient występuje 3× w arkuszach fakturowania: alfa s r2 {USŁUGI DODATKOWE/ PODJAZDY} 180 zł; alfa s r25 {ZDV} 1590 zł; alfa s r26 {ZDV} 12650 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 27,
+    "flag": "OFI",
+    "client": "BUKAT SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 27900,
+    "brutto": 34317,
+    "decision": "nip",
+    "nip": "1182242889",
+    "noNipKey": null,
+    "contractorName": "BUKAT SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      200343
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 28,
+    "flag": "ZDV",
+    "client": "LUBELSKIE ZAKŁADY REMONTOWE SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 1500,
+    "brutto": 1845,
+    "decision": "nip",
+    "nip": "9462638612",
+    "noNipKey": null,
+    "contractorName": "LUBELSKIE ZAKŁADY REMONTOWE SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      331506
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 29,
+    "flag": "ZDV",
+    "client": "WSPÓLNOTA MIESZKANIOWA ZIĘBY 40",
+    "netto": 4070,
+    "brutto": 5006.1,
+    "decision": "nip",
+    "nip": "9512011023",
+    "noNipKey": null,
+    "contractorName": "WSPÓLNOTA MIESZKANIOWA ZIĘBY 40",
+    "confidence": "high",
+    "cmaExternalIds": [
+      376967
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 30,
+    "flag": "ZDV",
+    "client": "SPÓŁDZIELNIA MIESZKANIOWA \"EPOKA\"",
+    "netto": 4150,
+    "brutto": 5104.5,
+    "decision": "nip",
+    "nip": "5250006408",
+    "noNipKey": null,
+    "contractorName": "SPÓŁDZIELNIA MIESZKANIOWA \"EPOKA\"",
+    "confidence": "high",
+    "cmaExternalIds": [
+      380629
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 31,
+    "flag": "ZDV",
+    "client": "SPÓŁDZIELNIA BUDOWLANO-MIESZKANIOWA \"DEMBUD\"",
+    "netto": 7740,
+    "brutto": 9520.2,
+    "decision": "nip",
+    "nip": "5271045939",
+    "noNipKey": null,
+    "contractorName": "SPÓŁDZIELNIA BUDOWLANO-MIESZKANIOWA \"DEMBUD\"",
+    "confidence": "high",
+    "cmaExternalIds": [
+      384212,
+      407072,
+      370750,
+      409646
+    ],
+    "note": "Klient występuje 2× w arkuszach fakturowania: alfa group r66 {ZDV} 2650 zł; alfa s r31 {ZDV} 7740 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA dobrane po NIP kontrahenta (rejestr nie wskazywał wprost tego wiersza fakturowania)."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 32,
+    "flag": "ZDV",
+    "client": "GALERIA IM.SLEŃDZIŃSKICH",
+    "netto": 5000,
+    "brutto": 6150,
+    "decision": "nip",
+    "nip": "5422541991",
+    "noNipKey": null,
+    "contractorName": "GALERIA IM.SLEŃDZIŃSKICH",
+    "confidence": "high",
+    "cmaExternalIds": [
+      306581,
+      306586,
+      306582,
+      306589
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 33,
+    "flag": "ZDV",
+    "client": "\"MULTI-DECOR\" SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 8150,
+    "brutto": 10024.5,
+    "decision": "nip",
+    "nip": "5321821387",
+    "noNipKey": null,
+    "contractorName": "\"MULTI-DECOR\" SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      221111
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 34,
+    "flag": "ZDV",
+    "client": "TOYOTA BIELANY SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 23450,
+    "brutto": 28843.5,
+    "decision": "nip",
+    "nip": "1181306676",
+    "noNipKey": null,
+    "contractorName": "TOYOTA BIELANY SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      252108,
+      252352,
+      388584,
+      307550,
+      373255,
+      338629,
+      370973
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 35,
+    "flag": "ZDV",
+    "client": "TORPOL SPÓŁKA AKCYJNA",
+    "netto": 1100,
+    "brutto": 1353,
+    "decision": "new",
+    "nip": null,
+    "noNipKey": null,
+    "contractorName": "TORPOL SPÓŁKA AKCYJNA",
+    "confidence": "medium",
+    "cmaExternalIds": [],
+    "note": "Druga pozycja TORPOL w arkuszu „alfa s\" (por. r17). Brak w KONTRAHENCI i w CMA — proponowany nowy kontrahent. Klient występuje 2× w arkuszach fakturowania: alfa s r17 {ZDV} 3550 zł; alfa s r35 {ZDV} 1100 zł — różne flagi to różne usługi/pozycje tego samego klienta."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 36,
+    "flag": "ZDV",
+    "client": "PUH ZDUNEK Tadeusz Zdunek",
+    "netto": 5061.8,
+    "brutto": 6226.01,
+    "decision": "nip",
+    "nip": "5830205171",
+    "noNipKey": null,
+    "contractorName": "PUH ZDUNEK Tadeusz Zdunek",
+    "confidence": "high",
+    "cmaExternalIds": [],
+    "note": "Jak wiersz alfa s r4 — brak obiektu przypisanego do PUH ZDUNEK Tadeusz Zdunek. Klient występuje 2× w arkuszach fakturowania: alfa s r4 {USŁUGI DODATKOWE/ PODJAZDY} 280 zł; alfa s r36 {ZDV} 5061.8 zł — różne flagi to różne usługi/pozycje tego samego klienta."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 37,
+    "flag": "ZDV",
+    "client": "CHRZANOWSCY DEVELOPMENT M. CHRZANOWSKA SPÓŁKA KOMANDYTOWA",
+    "netto": 2080,
+    "brutto": 2558.4,
+    "decision": "nip",
+    "nip": "7123315472",
+    "noNipKey": null,
+    "contractorName": "CHRZANOWSCY DEVELOPMENT M. CHRZANOWSKA SPÓŁKA KOMANDYTOWA",
+    "confidence": "high",
+    "cmaExternalIds": [
+      407113
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 38,
+    "flag": "OFI",
+    "client": "DORADZTWO FARMACEUTYCZNE",
+    "netto": 30640,
+    "brutto": 37687.2,
+    "decision": "nip",
+    "nip": "5251399054",
+    "noNipKey": null,
+    "contractorName": "DORADZTWO FARMACEUTYCZNE Igor KUCZYŃSKI",
+    "confidence": "high",
+    "cmaExternalIds": [
+      216774
+    ],
+    "note": "Nazwa w arkuszu skrócona do „DORADZTWO FARMACEUTYCZNE\"; kontrahent DORADZTWO FARMACEUTYCZNE Igor KUCZYŃSKI (NIP 5251399054, alias „DORADZTWO FARMACEUTYCZNE APTEKA\"). Obiekt CMA 216774 „Aptekarz Warszawski\" = posterunek kadrowy APTEKA."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 39,
+    "flag": "ZDV",
+    "client": "\"CHODZEŃ\" SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ SPÓŁKA KOMANDYTOWA",
+    "netto": 3200,
+    "brutto": 3936,
+    "decision": "nip",
+    "nip": "1230040386",
+    "noNipKey": null,
+    "contractorName": "\"CHODZEŃ\" SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ SPÓŁKA KOMANDYTOWA",
+    "confidence": "high",
+    "cmaExternalIds": [
+      401953
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 40,
+    "flag": "ZDV",
+    "client": "ZDUNEK PREMIUM SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 3500,
+    "brutto": 4305,
+    "decision": "nip",
+    "nip": "5833080333",
+    "noNipKey": null,
+    "contractorName": "ZDUNEK PREMIUM SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      402556,
+      402252,
+      402554
+    ],
+    "note": "Klient występuje 4× w arkuszach fakturowania: alfa s r3 {USŁUGI DODATKOWE/ PODJAZDY} 150 zł; alfa s r5 {USŁUGI DODATKOWE/ PODJAZDY} 255 zł; alfa s r23 {ZDV} 10123.6 zł; alfa s r40 {ZDV} 3500 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 41,
+    "flag": "ZDV",
+    "client": "STB BUDOWNICTWO SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "netto": 1335,
+    "brutto": 1642.05,
+    "decision": "nip",
+    "nip": "5252536688",
+    "noNipKey": null,
+    "contractorName": "STB BUDOWNICTWO SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+    "confidence": "high",
+    "cmaExternalIds": [
+      371536,
+      350868,
+      365253,
+      384966,
+      385172,
+      397813,
+      409647
+    ],
+    "note": "Klient występuje 3× w arkuszach fakturowania: alfa group r13 {MONTAŻ SERWIS} 17169.56 zł; alfa group r18 {ZDV} 2750 zł; alfa s r41 {ZDV} 1335 zł — różne flagi to różne usługi/pozycje tego samego klienta. Obiekty CMA dobrane po NIP kontrahenta (rejestr nie wskazywał wprost tego wiersza fakturowania)."
+  },
+  {
+    "sheet": "alfa s",
+    "row": 42,
+    "flag": "ZDV",
+    "client": "MOVIMENTO J.CHRZANOWSKA SPÓŁKA KOMANDYTOWA",
+    "netto": 1700,
+    "brutto": 2091,
+    "decision": "nip",
+    "nip": "7123324695",
+    "noNipKey": null,
+    "contractorName": "MOVIMENTO J.CHRZANOWSKA SPÓŁKA KOMANDYTOWA",
+    "confidence": "high",
+    "cmaExternalIds": [
+      376590
+    ],
+    "note": "Obiekty CMA ustalone przez recenzentów rejestru (pole invoiceClient w cma-*.json wskazuje dokładnie ten wiersz fakturowania)."
+  }
+]

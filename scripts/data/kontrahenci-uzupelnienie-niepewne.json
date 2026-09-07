@@ -1,0 +1,207 @@
+[
+  {
+    "matchNames": [
+      "WSPÓLNOTA MIESZKANIOWA BUKIETOWA 5 i 7"
+    ],
+    "matchCma": [
+      105396
+    ],
+    "candidates": [
+      {
+        "nip": "5213645901",
+        "name": "WSPÓLNOTA MIESZKANIOWA BUKIETOWA 5 W WARSZAWIE",
+        "regon": "146587207"
+      },
+      {
+        "nip": "5213645893",
+        "name": "WSPÓLNOTA MIESZKANIOWA BUKIETOWA 7 W WARSZAWIE",
+        "regon": "146587236"
+      }
+    ],
+    "source": "https://www.firma.egospodarka.pl/raporty-o-firmach/szukaj?c=Wsp%C3%B3lnota+Mieszkaniowa+Bukietowa&g=Warszawa",
+    "problem": "Obiekt CMA 105396 'WM Warszawa Bukietowa 5/7' obejmuje DWIE odrębnie zarejestrowane wspólnoty (Bukietowa 5 i Bukietowa 7), oba NIP-y przechodzą walidację. Nie wiadomo, która była płatnikiem (posterunek OFI zakończony 2025-02). Rozstrzygnie faktura."
+  },
+  {
+    "matchNames": [
+      "PANATTONI (Park Nadarzyn, Urzut)",
+      "PANATTONI (Suchy Las / Sokołów, Sąsiedzka 3)"
+    ],
+    "matchCma": [
+      301767,
+      179226
+    ],
+    "candidates": [
+      {
+        "nip": "5252437526",
+        "name": "PDE SHARED SERVICES SP. Z O.O. (d. PANATTONI DEVELOPMENT EUROPE)",
+        "krs": "0000310363"
+      },
+      {
+        "nip": null,
+        "name": "PANATTONI EUROPE SP. Z O.O., KRS 0000310547 — NIP niesprawdzony"
+      }
+    ],
+    "source": "https://rejestr.io/krs/310547/panattoni-europe",
+    "problem": "Panattoni to grupa dziesiątek spółek celowych (SPV) — każdy park magazynowy ma osobnego właściciela/najemcę. Ochrona fizyczna parku Nadarzyn/Urzut i Suchy Las mogła być zlecana przez dewelopera (Panattoni Europe), generalnego wykonawcę (Panattoni Construction Europe) albo SPV parku. Bez faktury nie da się wskazać podmiotu."
+  },
+  {
+    "matchNames": [
+      "Lycopene (Pobiedziska)"
+    ],
+    "matchCma": [
+      364450
+    ],
+    "candidates": [
+      {
+        "nip": "7811769809",
+        "name": "CINNA - PRODUKTY ZDROWIA SP. Z O.O., ul. Poznańska 88, 62-010 Pobiedziska",
+        "regon": "300080107"
+      },
+      {
+        "nip": "7011012252",
+        "name": "LYCOPENE HEALTH SP. Z O.O., Warszawa",
+        "krs": "0000884525"
+      }
+    ],
+    "source": "https://33908-pl.all.biz/",
+    "problem": "Pod adresem obiektu (Poznańska 88, Pobiedziska) zarejestrowana jest CINNA - Produkty Zdrowia (producent napojów LycoLife/likopen), natomiast spółka o nazwie 'Lycopene Health' ma siedzibę w Warszawie. Zakład w Pobiedziskach wiązany jest też z LycoPharm sp. z o.o. Adres pasuje do CINNA, nazwa do Lycopene Health — sprzeczne ślady, żadnego NIP-u nie potwierdziłem drugim źródłem."
+  },
+  {
+    "matchNames": [
+      "WSPÓLNOTA MIESZKANIOWA PRZY BORA-KOMOROWSKIEGO 39A \"HAVEN HOUSE\"",
+      "WSPÓLNOTA MIESZKANIOWA PRZY BORA-KOMOROWSKIEGO"
+    ],
+    "matchCma": [
+      291469,
+      105548
+    ],
+    "candidates": [],
+    "source": null,
+    "problem": "Brak w rejestrach: firma.egospodarka.pl i OWG nie mają wspólnoty przy Bora-Komorowskiego 39/39A ani nazwy 'Haven House' (są tylko Bora-Komorowskiego 18, 20, 52, 54, 56). Największy posterunek OFI po Puławskiej (wpływ maj 2026 27 360 zł do ALFA S) — NIP najprościej wziąć z faktury."
+  },
+  {
+    "matchNames": [
+      "WSPÓLNOTA MIESZKANIOWA WILANOWSKA 67"
+    ],
+    "matchCma": [
+      358891
+    ],
+    "candidates": [],
+    "source": null,
+    "problem": "Brak wspólnoty pod al. Wilanowską 67 w rejestrach (są 69-83, 111A, 113, 115, 208, 287, 368C). Możliwe, że posterunek obsługuje WM 'WILANOWSKA' nr 69-83 (NIP 5213535733) i numer 67 to adres portierni — niepotwierdzone."
+  },
+  {
+    "matchNames": [
+      "WSPÓLNOTA MIESZKANIOWA KŁOPOT 4A"
+    ],
+    "matchCma": [
+      202883
+    ],
+    "candidates": [
+      {
+        "nip": null,
+        "name": "Wspólnota Mieszkaniowa Kłopot 4a, adres korespondencyjny Płocka 9/11, 01-231 Warszawa (Panorama Firm — bez NIP-u)"
+      }
+    ],
+    "source": "https://panoramafirm.pl/mazowieckie,,warszawa,wola,p%C5%82ocka,9_11/wspolnota_mieszkaniowa_klopot_4a-zdznal_aswso.html",
+    "problem": "Podmiot istnieje (Panorama Firm), ale żadne z przeszukanych źródeł nie podaje jego NIP-u; karta w firma.egospodarka.pl dla 'KŁOPOT 4' jest bez NIP-u. Posterunek zakończony 2024-01."
+  },
+  {
+    "matchNames": [
+      "WSPÓLNOTA MIESZKANIOWA RZECZYPOSPOLITEJ 20"
+    ],
+    "matchCma": [
+      195435
+    ],
+    "candidates": [
+      {
+        "nip": null,
+        "name": "Wspólnota Mieszkaniowa przy al. Rzeczypospolitej 20 (Panorama Firm — bez NIP-u)"
+      }
+    ],
+    "source": "https://panoramafirm.pl/mazowieckie,,warszawa,aleja_rzeczypospolitej,20/wspolnota_mieszkaniowa_przy_al.rzeczypospolitej_20-bamlph_aswso.html",
+    "problem": "Podmiot istnieje, ale bez NIP-u w dostępnych katalogach (w rejestrach są Rzeczypospolitej 2/2A, 10, 17, 18, 23, 23A, 33, 33A/B — brak 20). Posterunek zakończony 2025-07."
+  },
+  {
+    "matchNames": [
+      "WSPÓLNOTA MIESZKANIOWA ZWYCIĘZCÓW 40"
+    ],
+    "matchCma": [
+      366104
+    ],
+    "candidates": [],
+    "source": null,
+    "problem": "Brak wspólnoty pod nr 40 w rejestrach (są 11, 20, 28, 39, 42, 43, 47, 51). Rekord CMA 366104 jest szczątkowy (bez ceny, dat i osób klienta) — prawdopodobnie obiekt niedoszły; recenzent sam sugerował, że może być wewnętrzny."
+  },
+  {
+    "matchNames": [
+      "WSPÓLNOTY MIESZKANIOWE OSIEDLA KRÓLIKARNIA (Białego Dębu / Ukryty Raj)"
+    ],
+    "matchCma": [
+      272261
+    ],
+    "candidates": [
+      {
+        "nip": "5223164327",
+        "name": "WSPÓLNOTA MIESZKANIOWA PRZY UL. BIAŁEGO DĘBU 8, 10, 12 (wpisana do kontrahenci-uzupelnienie.json)"
+      },
+      {
+        "nip": null,
+        "name": "WSPÓLNOTA MIESZKANIOWA DARWEN — nie znaleziona w rejestrach"
+      },
+      {
+        "nip": null,
+        "name": "WSPÓLNOTA MIESZKANIOWA TOTTON — nie znaleziona"
+      },
+      {
+        "nip": null,
+        "name": "WSPÓLNOTA MIESZKANIOWA TRURO — nie znaleziona"
+      },
+      {
+        "nip": "5223144589",
+        "name": "WSPÓLNOTA MIESZKANIOWA \"TRAS D\" PRZY UL. UKRYTY RAJ 3 — kandydat na \"UR\" z wiersza SK"
+      }
+    ],
+    "source": "https://www.firma.egospodarka.pl/raporty-o-firmach/szukaj?c=Wsp%C3%B3lnota+Mieszkaniowa&g=Warszawa+Ukryty+Raj",
+    "problem": "Jeden obiekt CMA (272261 'WM Królikarnia') = kilka odrębnych wspólnot (SK: 'KRÓLIKARNIA - BD, UR, TOTTON, TRURO, DARWEN'). Do uzupełnienia wpisano tylko Białego Dębu 8-12 jako największego płatnika; DARWEN, TOTTON i TRURO nie występują pod tymi nazwami w rejestrach (mogą być zarejestrowane pod adresami ulic Wyciszona / Srebrnych Świerków)."
+  },
+  {
+    "matchNames": [
+      "Kancelaria adwokacka Bartłomiej Witucki"
+    ],
+    "matchCma": [
+      177536
+    ],
+    "candidates": [],
+    "source": null,
+    "problem": "Kancelaria adwokacka przy Jagiellońskiej 22 — indywidualna praktyka adwokacka rozliczana z NIP-u osoby fizycznej; nie znaleziona w CEIDG/rejestrach z NIP-em. Abonament 50 zł/mies."
+  },
+  {
+    "matchNames": [
+      "Piotr Walerysiak \"IKEM\""
+    ],
+    "matchCma": [
+      194409
+    ],
+    "candidates": [],
+    "source": null,
+    "problem": "Nie znaleziono firmy 'IKEM' Piotra Walerysiaka w rejestrach; obiekt w Kamieniu k. Dmosina. Możliwa JDG — do sprawdzenia w CEIDG po imieniu i nazwisku (wyszukiwarka CEIDG nie była osiągalna bezpośrednio)."
+  },
+  {
+    "matchNames": [
+      "Sylwester Sypka",
+      "Tomasz Woźniak",
+      "Łukasz Wyszomirski",
+      "Paweł Miśkiewicz (Klaudyn, Czajkowskiego 5)"
+    ],
+    "matchCma": [
+      312362,
+      404886,
+      323576,
+      198585
+    ],
+    "candidates": [],
+    "source": null,
+    "problem": "Osoby fizyczne (obiekty prywatne: Mariew, Marynino, Waryńskiego 9/40, Klaudyn) — zgodnie z zakresem zadania pominięte; nie znaleziono dla nich JDG w CEIDG. Bez NIP-u nie mogą trafić do contractors."
+  }
+]

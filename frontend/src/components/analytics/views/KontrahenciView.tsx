@@ -15,6 +15,7 @@ import {
   type AnalyticsContractorRow,
   type AnalyticsContractorsData,
   type AnalyticsScope,
+  type AnalyticsService,
   type CostWindow,
 } from "@/lib/api";
 import {
@@ -33,6 +34,7 @@ import {
   monthsLabel,
   pct,
   plnFull,
+  serviceTag,
   type StackedRow,
 } from "@/components/analytics";
 import {
@@ -54,8 +56,11 @@ import {
 } from "./parts";
 
 /** Stabilna tożsamość dla efektu w `useAnalyticsResource`. */
-const load = (scope: AnalyticsScope, costWindow: CostWindow) =>
-  getAnalyticsContractors({ scope, costWindow });
+const load = (
+  scope: AnalyticsScope,
+  costWindow: CostWindow,
+  service: AnalyticsService
+) => getAnalyticsContractors({ scope, costWindow, service });
 
 type SortKey =
   | "name"
@@ -86,6 +91,7 @@ const DEFAULT_DIR: Record<SortKey, "asc" | "desc"> = {
 export function KontrahenciView({
   scope,
   costWindow,
+  service,
   search,
   reloadKey,
 }: AnalyticsViewProps) {
@@ -94,6 +100,7 @@ export function KontrahenciView({
     load,
     scope,
     costWindow,
+    service,
     reloadKey
   );
   const [sort, setSort] = useState<SortKey>("revenue");
@@ -277,13 +284,13 @@ export function KontrahenciView({
     <div className="space-y-3">
       <KpiRow>
         <KpiTile
-          label="Przychód mies."
+          label={`Przychód mies.${serviceTag(service)}`}
           value={plnFull(agg.revenue)}
           sub={`${rows.length} ${rows.length === 1 ? "kontrahent" : "kontrahentów"} · ${agg.objects} obiektów`}
           tip="Suma abonamentów miesięcznych obiektów przypisanych do kontrahentów"
         />
         <KpiTile
-          label="Koszt mies."
+          label={`Koszt mies.${serviceTag(service)}`}
           value={hasCostData ? plnFull(agg.cost) : DASH}
           // Rozbicie na osobowy i pozostały — bez niego nie widać, czy klienta
           // drogo kosztuje załoga, czy sprzęt.
@@ -296,7 +303,7 @@ export function KontrahenciView({
           coverage={coverageProps}
         />
         <KpiTile
-          label="Zysk mies."
+          label={`Zysk mies.${serviceTag(service)}`}
           value={hasCostData ? plnFull(agg.profit) : DASH}
           tone={!hasCostData ? "neutral" : agg.profit >= 0 ? "good" : "bad"}
           sub={hasCostData ? "przychód − koszt" : "uzupełnij koszty, żeby policzyć"}
@@ -309,7 +316,7 @@ export function KontrahenciView({
           coverage={coverageProps}
         />
         <KpiTile
-          label="Marża"
+          label={`Marża${serviceTag(service)}`}
           value={<MarginGauge value={hasCostData ? agg.margin : null} size="lg" />}
           sub={hasCostData ? "zysk / przychód" : "nieznana bez kosztów"}
           tip="Zysk podzielony przez przychód. Bez kosztów marża jest nieznana, a nie stuprocentowa."
@@ -335,7 +342,7 @@ export function KontrahenciView({
         />
       </KpiRow>
 
-      <PersonnelFootnote personnel={data.personnel} />
+      <PersonnelFootnote personnel={data.personnel} service={service} />
 
       <div className="grid gap-3 xl:grid-cols-2">
         <ChartCard

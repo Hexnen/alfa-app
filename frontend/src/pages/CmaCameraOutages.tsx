@@ -10,7 +10,16 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   AlertTriangle,
+  ArrowDown,
+  ArrowUp,
   Building2,
   CameraOff,
   CheckCircle2,
@@ -22,6 +31,7 @@ import {
   Plus,
   Search,
   TrendingUp,
+  X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -34,10 +44,81 @@ import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
 
 type OutageFilter = "all" | "new" | "allOut";
 
+/** Filtr „ma kamery, które wróciły” — obiekty z niepustą listą `resolved`. */
+type ResolvedFilter = "all" | "with" | "without";
+
+/** Kolumny, po których da się sortować listę obiektów. */
+type OutageSortKey =
+  | "objectName"
+  | "camerasOutCount"
+  | "delta"
+  | "totalKnownCameras"
+  | "share";
+
+/**
+ * Domyślny kierunek sortowania kolumny — liczniki i udziały ludzie czytają od
+ * największej wartości, nazwy alfabetycznie (jak w kartotece obiektów).
+ */
+const DEFAULT_DIR: Record<OutageSortKey, "asc" | "desc"> = {
+  objectName: "asc",
+  camerasOutCount: "desc",
+  delta: "desc",
+  totalKnownCameras: "desc",
+  share: "desc",
+};
+
+/**
+ * Nagłówki sortowania. Lista obiektów to karty, a nie tabela, więc nagłówki
+ * siedzą w pasku nad nią — trzymamy je w tablicy zamiast w komponencie
+ * budowanym w trakcie renderu (`react-hooks/static-components`).
+ */
+const SORT_HEADERS: { key: OutageSortKey; label: string; title?: string }[] = [
+  { key: "objectName", label: "Obiekt" },
+  { key: "camerasOutCount", label: "Kamery bez obrazu" },
+  {
+    key: "delta",
+    label: "Przyrost",
+    title:
+      "Nowe braki minus kamery, które wróciły, względem poprzedniego raportu",
+  },
+  {
+    key: "totalKnownCameras",
+    label: "Wszystkie kamery",
+    title: "Szacowana liczba kamer obiektu z historii zdarzeń",
+  },
+  {
+    key: "share",
+    label: "Udział",
+    title:
+      "Kamery bez obrazu jako procent kamer obiektu; obiekty bez znanej liczby kamer zawsze na końcu",
+  },
+];
+
+/** Liczba z pola tekstowego — śmieci traktujemy jak brak filtra. */
+function parseCount(raw: string): number | undefined {
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) ? n : undefined;
+}
+
 // Delta of outages vs the previous report: new cameras minus recovered ones
 function objectDelta(obj: CmaOutageObject): number {
   const newCount = obj.cameras.filter((cam) => cam.status === "new").length;
   return newCount - obj.resolved.length;
+}
+
+/**
+ * Udział kamer bez obrazu w kamerach obiektu. Obiekt bez znanej liczby kamer
+ * nie ma udziału (a nie „0%”) — takie pozycje sortowanie odkłada na koniec.
+ */
+function outageShare(obj: CmaOutageObject): number | null {
+  if (!obj.totalKnownCameras) return null;
+  return obj.camerasOutCount / obj.totalKnownCameras;
+}
+
+function sharePercentLabel(obj: CmaOutageObject): string {
+  const share = outageShare(obj);
+  if (share === null) return "-";
+  return `${(share * 100).toLocaleString("pl-PL", { maximumFractionDigits: 0 })}%`;
 }
 
 function nf(n: number): string {
@@ -268,6 +349,16 @@ function ObjectRow({
           </span>
         </span>
         <span className="flex shrink-0 items-center gap-2">
+          {/* Udział jest jednym z kryteriów sortowania, więc musi być widoczny
+              w wierszu, a nie tylko po rozwinięciu szczegółów. */}
+          {obj.totalKnownCameras > 0 && (
+            <span
+              className="text-xs text-slate-500 [font-variant-numeric:tabular-nums]"
+              title="Udział kamer bez obrazu w znanych kamerach obiektu"
+            >
+              {sharePercentLabel(obj)} z {nf(obj.totalKnownCameras)} kam.
+            </span>
+          )}
           {obj.allOut && (
             <Badge className="border-transparent bg-red-600 text-white hover:bg-red-600">
               <AlertTriangle className="mr-1 h-3 w-3" />
@@ -293,8 +384,15 @@ export function CmaCameraOutages() {
   const [data, setData] = useState<CmaCameraOutagesData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Filtry i sortowanie liczymy po stronie klienta — zestawienie przychodzi
+  // z API w całości, więc widełki idą bez debounce'u.
   const [filter, setFilter] = useState<OutageFilter>("all");
   const [search, setSearch] = useState("");
+  const [resolvedFilter, setResolvedFilter] = useState<ResolvedFilter>("all");
+  const [minOut, setMinOut] = useState("");
+  const [maxOut, setMaxOut] = useState("");
+  const [sort, setSort] = useState<OutageSortKey>("camerasOutCount");
+  const [dir, setDir] = useState<"asc" | "desc">(DEFAULT_DIR.camerasOutCount);
   // Objects with no current outages (only resolved ones) are hidden by default
   const [showResolved, setShowResolved] = useState(false);
   // Expansion state per object name; toggle-all fills/clears the whole set
@@ -327,15 +425,87 @@ export function CmaCameraOutages() {
   const filteredObjects = useMemo(() => {
     const objects = data?.objects ?? [];
     const term = search.trim().toLowerCase();
-    return objects.filter((obj) => {
+    const min = parseCount(minOut);
+    const max = parseCount(maxOut);
+
+    const list = objects.filter((obj) => {
       if (filter === "new" && !obj.cameras.some((c) => c.status === "new")) {
         return false;
       }
       if (filter === "allOut" && !obj.allOut) return false;
-      if (term && !obj.objectName.toLowerCase().includes(term)) return false;
+      if (resolvedFilter === "with" && obj.resolved.length === 0) return false;
+      if (resolvedFilter === "without" && obj.resolved.length > 0) return false;
+      if (min !== undefined && obj.camerasOutCount < min) return false;
+      if (max !== undefined && obj.camerasOutCount > max) return false;
+      // Adres bywa jedynym, po czym da się rozpoznać obiekt — w raportach CMA
+      // nazwy powtarzają się między lokalizacjami tego samego klienta.
+      if (
+        term &&
+        ![obj.objectName, obj.address]
+          .filter(Boolean)
+          .some((v) => (v as string).toLowerCase().includes(term))
+      ) {
+        return false;
+      }
       return true;
     });
-  }, [data, filter, search]);
+
+    const mul = dir === "asc" ? 1 : -1;
+    // Brak znanych kamer = brak udziału; takie obiekty lądują na końcu w OBU
+    // kierunkach (NULLS LAST), tak jak puste wartości w kartotece obiektów.
+    const compare = (a: CmaOutageObject, b: CmaOutageObject): number => {
+      if (sort === "objectName") {
+        return a.objectName.localeCompare(b.objectName, "pl") * mul;
+      }
+      if (sort === "share") {
+        const as = outageShare(a);
+        const bs = outageShare(b);
+        if (as === null || bs === null) {
+          if (as === null && bs === null) return 0;
+          return as !== null ? -1 : 1;
+        }
+        return (as - bs) * mul;
+      }
+      const value = (o: CmaOutageObject) =>
+        sort === "camerasOutCount"
+          ? o.camerasOutCount
+          : sort === "totalKnownCameras"
+            ? o.totalKnownCameras
+            : objectDelta(o);
+      return (value(a) - value(b)) * mul;
+    };
+
+    return [...list].sort(
+      (a, b) => compare(a, b) || a.objectName.localeCompare(b.objectName, "pl")
+    );
+  }, [data, filter, search, resolvedFilter, minOut, maxOut, sort, dir]);
+
+  /** Klik w nagłówek: ta sama kolumna odwraca kierunek, nowa startuje od swojego domyślnego. */
+  const toggleSort = (key: OutageSortKey) => {
+    if (sort === key) {
+      setDir((d) => (d === "asc" ? "desc" : "asc"));
+      return;
+    }
+    setSort(key);
+    setDir(DEFAULT_DIR[key]);
+  };
+
+  const filtersActive =
+    filter !== "all" ||
+    search !== "" ||
+    resolvedFilter !== "all" ||
+    minOut !== "" ||
+    maxOut !== "" ||
+    showResolved;
+
+  const clearFilters = () => {
+    setFilter("all");
+    setSearch("");
+    setResolvedFilter("all");
+    setMinOut("");
+    setMaxOut("");
+    setShowResolved(false);
+  };
 
   const activeObjects = filteredObjects.filter((o) => o.camerasOutCount > 0);
   const resolvedObjects = filteredObjects.filter(
@@ -547,58 +717,70 @@ export function CmaCameraOutages() {
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
-              {/* Filters */}
+              {/* Pierwsza linia filtrów: rodzaj braków, szukajka, obiekty bez braków. */}
               <div className="flex flex-wrap items-center gap-3">
-                <div className="flex items-center gap-2">
-                  <Button
-                    variant={filter === "all" ? "default" : "outline"}
-                    size="sm"
-                    onClick={() => setFilter("all")}
-                  >
-                    Wszystkie
-                  </Button>
-                  <Button
-                    variant={filter === "new" ? "default" : "outline"}
-                    size="sm"
-                    onClick={() => setFilter("new")}
-                  >
-                    Tylko nowe
-                  </Button>
-                  <Button
-                    variant={filter === "allOut" ? "default" : "outline"}
-                    size="sm"
-                    onClick={() => setFilter("allOut")}
-                  >
-                    Całkowite braki
-                  </Button>
-                </div>
                 <div className="relative w-full max-w-xs">
                   <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
                   <Input
-                    placeholder="Szukaj obiektu..."
+                    placeholder="Szukaj po nazwie lub adresie..."
                     value={search}
                     onChange={(e) => setSearch(e.target.value)}
                     className="pl-10"
+                    data-testid="cma-braki-filter-search"
                   />
                 </div>
-                <span className="text-sm text-slate-500">
-                  {nf(visibleObjects.length)}{" "}
-                  {polishPlural(
-                    visibleObjects.length,
-                    "obiekt",
-                    "obiekty",
-                    "obiektów"
-                  )}
-                </span>
-                <label className="flex cursor-pointer select-none items-center gap-1.5 text-sm text-slate-600">
-                  <input
-                    type="checkbox"
-                    checked={showResolved}
-                    onChange={(e) => setShowResolved(e.target.checked)}
-                    className="h-4 w-4 rounded border-slate-300 accent-indigo-600"
-                  />
-                  Pokaż obiekty bez braków ({nf(resolvedObjects.length)})
-                </label>
+
+                <Select
+                  value={filter}
+                  onValueChange={(v) => setFilter(v as OutageFilter)}
+                >
+                  <SelectTrigger className="w-[190px]" data-testid="cma-braki-filter-kind">
+                    <SelectValue placeholder="Rodzaj braków" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">Wszystkie braki</SelectItem>
+                    <SelectItem value="new">Tylko nowe</SelectItem>
+                    <SelectItem value="allOut">Całkowite braki</SelectItem>
+                  </SelectContent>
+                </Select>
+
+                <Select
+                  value={resolvedFilter}
+                  onValueChange={(v) => setResolvedFilter(v as ResolvedFilter)}
+                >
+                  <SelectTrigger
+                    className="w-[210px]"
+                    data-testid="cma-braki-filter-resolved"
+                  >
+                    <SelectValue placeholder="Kamery, które wróciły" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">Powroty: wszystkie</SelectItem>
+                    <SelectItem value="with">Tylko z powrotami kamer</SelectItem>
+                    <SelectItem value="without">Tylko bez powrotów</SelectItem>
+                  </SelectContent>
+                </Select>
+
+                {/* Obiekty, w których braki już ustąpiły, są domyślnie schowane —
+                    zostają na liście tylko na życzenie. */}
+                <Select
+                  value={showResolved ? "show" : "hide"}
+                  onValueChange={(v) => setShowResolved(v === "show")}
+                >
+                  <SelectTrigger
+                    className="w-[250px]"
+                    data-testid="cma-braki-filter-show-resolved"
+                  >
+                    <SelectValue placeholder="Obiekty bez braków" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="hide">Tylko obiekty z brakami</SelectItem>
+                    <SelectItem value="show">
+                      Z obiektami bez braków ({nf(resolvedObjects.length)})
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+
                 <Button
                   variant="outline"
                   size="sm"
@@ -620,6 +802,92 @@ export function CmaCameraOutages() {
                 </Button>
               </div>
 
+              {/* Druga linia: widełki liczby kamer bez obrazu i licznik po filtrach. */}
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="flex items-center gap-1 text-sm text-slate-500">
+                  <span>Kamer od</span>
+                  <Input
+                    type="number"
+                    min="0"
+                    step="1"
+                    inputMode="numeric"
+                    className="w-24 tabular-nums"
+                    data-testid="cma-braki-filter-min"
+                    value={minOut}
+                    onChange={(e) => setMinOut(e.target.value)}
+                  />
+                  <span>do</span>
+                  <Input
+                    type="number"
+                    min="0"
+                    step="1"
+                    inputMode="numeric"
+                    className="w-24 tabular-nums"
+                    data-testid="cma-braki-filter-max"
+                    value={maxOut}
+                    onChange={(e) => setMaxOut(e.target.value)}
+                  />
+                </div>
+                {filtersActive && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={clearFilters}
+                    data-testid="cma-braki-filters-clear"
+                  >
+                    <X className="mr-1 h-4 w-4" />
+                    Wyczyść filtry
+                  </Button>
+                )}
+                <span className="text-sm text-slate-500">
+                  {nf(visibleObjects.length)}{" "}
+                  {polishPlural(
+                    visibleObjects.length,
+                    "obiekt",
+                    "obiekty",
+                    "obiektów"
+                  )}
+                </span>
+              </div>
+
+              {/* Nagłówki sortowania — pasek zastępuje wiersz nagłówkowy tabeli;
+                  strzałka pokazuje kolumnę i kierunek. Przy pustej liście
+                  znika razem z nią, tak jak nagłówki tabeli w kartotece. */}
+              {visibleObjects.length > 0 && (
+                <div className="flex flex-wrap items-center gap-1 border-b border-slate-200 pb-2">
+                  {SORT_HEADERS.map((h) => {
+                    const activeCol = sort === h.key;
+                    const Icon = !activeCol
+                      ? ChevronsUpDown
+                      : dir === "asc"
+                        ? ArrowUp
+                        : ArrowDown;
+                    return (
+                      <button
+                        key={h.key}
+                        type="button"
+                        data-testid={`cma-braki-sort-${h.key}`}
+                        onClick={() => toggleSort(h.key)}
+                        aria-label={`Sortuj po: ${h.label}`}
+                        title={h.title}
+                        className={cn(
+                          "inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs uppercase tracking-wide transition-colors hover:text-slate-900",
+                          activeCol ? "text-slate-900" : "text-slate-500"
+                        )}
+                      >
+                        {h.label}
+                        <Icon
+                          className={cn(
+                            "h-3.5 w-3.5",
+                            !activeCol && "opacity-40"
+                          )}
+                        />
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
               {/* Empty state - no outages in the newest report */}
               {summary && summary.camerasOut === 0 && (
                 <div className="flex items-center justify-center gap-2 rounded-lg border border-green-200 bg-green-50 py-8 text-green-700">
@@ -633,7 +901,9 @@ export function CmaCameraOutages() {
               {visibleObjects.length === 0 ? (
                 summary && summary.camerasOut === 0 ? null : (
                   <div className="py-8 text-center text-slate-500">
-                    Brak obiektów spełniających wybrane kryteria.
+                    {filtersActive
+                      ? "Brak obiektów dla wybranych filtrów"
+                      : "Brak obiektów z brakami kamer."}
                   </div>
                 )
               ) : (

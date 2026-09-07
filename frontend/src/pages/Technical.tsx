@@ -1,7 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Navigate, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { RealizationForm } from "@/components/RealizationForm";
 import { AutoBadge, AutofillDialog } from "@/components/realization/AutofillDialog";
@@ -18,10 +26,13 @@ import { usePerms } from "@/auth/permissions";
 import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
 import {
   Plus,
+  ArrowDown,
+  ArrowUp,
   BadgeCheck,
   CalendarDays,
   ChevronLeft,
   ChevronRight,
+  ChevronsUpDown,
   FileCheck2,
   FilePlus,
   FileX,
@@ -29,6 +40,7 @@ import {
   Trash2,
   Printer,
   Wand2,
+  X,
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import {
@@ -112,6 +124,181 @@ const MONTH_NAMES = [
   "Listopad",
   "Grudzień",
 ];
+
+/*
+ * FILTRY I SORTOWANIE ZAKŁADEK REALIZACJE / PROTOKOŁY / WYCENY / TECHNICY
+ *
+ * Wszystko liczymy po stronie klienta: `getRealizations(rok, miesiąc)`,
+ * `getProtocols(rok, miesiąc)`, `getQuotes(rok)` i `getTechnicians()` zwracają
+ * całe listy (backend ich nie stronicuje), więc nie ma po co dokładać
+ * parametrów do API. Z tego samego
+ * powodu widełki kwot idą bez debounce'u: nie ma żądania do odciążenia, a
+ * lista przelicza się w tym samym renderze co wpisana cyfra.
+ */
+
+/** Wartość w selekcie oznaczająca „wiersze bez przypisania” (wykonawca, obiekt). */
+const NONE = "none";
+
+/** Kwota z pola tekstowego — przecinek jak kropka, śmieci traktujemy jak brak filtra. */
+function parseAmount(raw: string): number | undefined {
+  const n = parseFloat(raw.replace(",", "."));
+  return Number.isFinite(n) ? n : undefined;
+}
+
+/** Data z bazy na liczbę do porównań; brak lub śmieć = wartość pusta (NULLS LAST). */
+function parseDate(raw: string | null | undefined): number | null {
+  if (!raw) return null;
+  const t = Date.parse(raw);
+  return Number.isFinite(t) ? t : null;
+}
+
+/** Filtr wartości wyceny: wszystkie / tylko z kwotą / tylko zerowe. */
+type ValueMode = "all" | "with" | "without";
+
+/** Filtr świeżości zmiany — wartość to liczba dni wstecz albo „all”. */
+type FreshMode = "all" | "7" | "30" | "90";
+
+/** Kolumny, po których da się sortować listę realizacji (te, które są w tabeli). */
+type RealizationSortKey =
+  | "date"
+  | "site"
+  | "workType"
+  | "billing"
+  | "actualHours"
+  | "actualKm"
+  | "amountHours"
+  | "amountMaterial"
+  | "amountKm"
+  | "discount"
+  | "total"
+  | "invoiced"
+  | "caretaker";
+
+/**
+ * Domyślny kierunek kolumny: daty i kwoty malejąco (najnowsze / najdroższe u
+ * góry), teksty alfabetycznie, „Zafakt." malejąco — czyli TAK przed NIE.
+ */
+const REALIZATION_DEFAULT_DIR: Record<RealizationSortKey, "asc" | "desc"> = {
+  date: "desc",
+  site: "asc",
+  workType: "asc",
+  billing: "asc",
+  actualHours: "desc",
+  actualKm: "desc",
+  amountHours: "desc",
+  amountMaterial: "desc",
+  amountKm: "desc",
+  discount: "desc",
+  total: "desc",
+  invoiced: "desc",
+  caretaker: "asc",
+};
+
+/** Kolumny realizacji sortowane tekstem; reszta idzie przez porównanie liczb. */
+const REALIZATION_TEXT_SORT_KEYS = new Set<RealizationSortKey>([
+  "site",
+  "workType",
+  "billing",
+  "caretaker",
+]);
+
+/** Wymiar wyłączany przy liczeniu chipów — patrz `realizationView`. */
+type RealizationFacet = "workType" | "billing" | "protocol";
+
+/**
+ * Wykonawca tak, jak widzi go człowiek: kolumna „Wykonawca" pokazuje
+ * `contractor1 || caretaker`, więc filtr i sortowanie muszą patrzeć na to samo.
+ * Inaczej wiersz opisany samym opiekunem wpadałby do „Bez wykonawcy" mimo
+ * nazwiska widocznego w tabeli.
+ */
+function realizationContractor(r: Realization): string {
+  return (r.contractor1 || r.caretaker || "").trim();
+}
+
+/** Kolumny, po których da się sortować listę protokołów. */
+type ProtocolSortKey =
+  | "number"
+  | "date"
+  | "site"
+  | "workType"
+  | "contractor"
+  | "signature"
+  | "status";
+
+/**
+ * Domyślny kierunek sortowania kolumny — daty ludzie czytają od najnowszej,
+ * teksty alfabetycznie (jak w kartotece obiektów). Numer protokołu koduje rok
+ * i miesiąc, więc malejąco = najnowsze u góry.
+ */
+const PROTOCOL_DEFAULT_DIR: Record<ProtocolSortKey, "asc" | "desc"> = {
+  number: "desc",
+  date: "desc",
+  site: "asc",
+  workType: "asc",
+  contractor: "asc",
+  signature: "desc",
+  status: "asc",
+};
+
+/** Kolumny, po których da się sortować listę wycen. */
+type QuoteSortKey = "number" | "date" | "site" | "address" | "total";
+
+/** Kwoty i daty malejąco (najdroższe/najnowsze u góry), teksty alfabetycznie. */
+const QUOTE_DEFAULT_DIR: Record<QuoteSortKey, "asc" | "desc"> = {
+  number: "desc",
+  date: "desc",
+  site: "asc",
+  address: "asc",
+  total: "desc",
+};
+
+/** Kolumny, po których da się sortować listę techników. */
+type TechnicianSortKey =
+  | "firstName"
+  | "lastName"
+  | "type"
+  | "priceList"
+  | "hr"
+  | "phone"
+  | "email"
+  | "company"
+  | "nip";
+
+/** Kartoteka osób — same teksty, więc wszystkie kolumny startują alfabetycznie. */
+const TECHNICIAN_DEFAULT_DIR: Record<TechnicianSortKey, "asc" | "desc"> = {
+  firstName: "asc",
+  lastName: "asc",
+  type: "asc",
+  priceList: "asc",
+  hr: "asc",
+  phone: "asc",
+  email: "asc",
+  company: "asc",
+  nip: "asc",
+};
+
+/** Etykiety statusu protokołu — te same, co plakietki w tabeli. */
+const PROTOCOL_STATUS_LABEL: Record<Protocol["status"], string> = {
+  draft: "Szkic",
+  final: "Zatwierdzony",
+};
+
+/** Etykiety rodzaju technika — te same, co plakietki w tabeli. */
+const TECHNICIAN_TYPE_LABEL: Record<Technician["type"], string> = {
+  internal: "Wewnętrzny",
+  external: "Zewnętrzny",
+};
+
+/** Obiekt protokołu tak, jak pokazuje go tabela (adres montażu ma pierwszeństwo). */
+const protocolSite = (p: Protocol) => (p.installationAddress || p.site || "").trim();
+
+/**
+ * Protokół „do uzupełnienia” — szkic bez danych zleceniodawcy. Dokładnie ten
+ * warunek zapala plakietkę w kolumnie „Numer”, więc filtr i plakietka zawsze
+ * mówią to samo.
+ */
+const protocolNeedsPrefill = (p: Protocol) =>
+  p.status === "draft" && !(p.clientName || "").trim();
 
 /**
  * Ślad automatu dla POJEDYNCZEGO pola (kolumna `autofill` w kształcie mapy).
@@ -265,6 +452,37 @@ export function Technical() {
   const [workTypeFilter, setWorkTypeFilter] = useState<RealizationWorkType | "">("");
   /** Filtr kolumny Typ (płatny / gwarancyjny / darmowy); "" = bez filtra. */
   const [billingFilter, setBillingFilter] = useState<RealizationBilling | "">("");
+  // Reszta filtrów i sortowanie zakładki Realizacje (client-side, patrz
+  // komentarz przy REALIZATION_DEFAULT_DIR).
+  const [realSearch, setRealSearch] = useState("");
+  const [realInvoicedFilter, setRealInvoicedFilter] = useState("all");
+  const [realContractorFilter, setRealContractorFilter] = useState("all");
+  const [realSiteFilter, setRealSiteFilter] = useState("all");
+  const [realObjectFilter, setRealObjectFilter] = useState("all");
+  const [realValueMode, setRealValueMode] = useState<ValueMode>("all");
+  const [realMinInput, setRealMinInput] = useState("");
+  const [realMaxInput, setRealMaxInput] = useState("");
+  const [realSort, setRealSort] = useState<RealizationSortKey>("date");
+  const [realDir, setRealDir] = useState<"asc" | "desc">("desc");
+
+  /**
+   * Zdejmuje WSZYSTKIE filtry realizacji (także chipy rodzaju/typu/protokołu).
+   * Wysoko w pliku, bo korzysta z niej też deep-link `?realization=ID` —
+   * wskazany wiersz musi być widoczny, choćby filtry mówiły inaczej.
+   */
+  const clearRealFilters = useCallback(() => {
+    setRealSearch("");
+    setWorkTypeFilter("");
+    setBillingFilter("");
+    setProtoFilter("");
+    setRealInvoicedFilter("all");
+    setRealContractorFilter("all");
+    setRealSiteFilter("all");
+    setRealObjectFilter("all");
+    setRealValueMode("all");
+    setRealMinInput("");
+    setRealMaxInput("");
+  }, []);
   /** Id realizacji, dla której trwa tworzenie protokołu (spinner w wierszu). */
   const [creatingProtoFor, setCreatingProtoFor] = useState<number | null>(null);
   const [syncProtoOpen, setSyncProtoOpen] = useState(false);
@@ -283,6 +501,14 @@ export function Technical() {
   const [techFormOpen, setTechFormOpen] = useState(false);
   const [editingTech, setEditingTech] = useState<Technician | null>(null);
   const [techView, setTechView] = useState<"active" | "archived">("active");
+  // Filtry i sortowanie zakładki Technicy (client-side). Podział na aktywnych
+  // i archiwalnych zostaje na zakładkach — filtry działają wewnątrz obu.
+  const [techSearch, setTechSearch] = useState("");
+  const [techTypeFilter, setTechTypeFilter] = useState("all");
+  const [techPriceListFilter, setTechPriceListFilter] = useState("all");
+  const [techHrFilter, setTechHrFilter] = useState("all");
+  const [techSort, setTechSort] = useState<TechnicianSortKey>("lastName");
+  const [techDir, setTechDir] = useState<"asc" | "desc">("asc");
 
   /** Kartoteka kadrowa — lista wyboru „Pracownik w kadrach" w formularzu technika. */
   const [hrEmployees, setHrEmployees] = useState<HrEmployeeRef[]>([]);
@@ -295,10 +521,31 @@ export function Technical() {
   const [protocols, setProtocols] = useState<Protocol[]>([]);
   const [protoLoading, setProtoLoading] = useState(true);
   const [editingProto, setEditingProto] = useState<Protocol | null>(null);
+  // Filtry i sortowanie zakładki Protokoły (client-side, patrz komentarz przy
+  // PROTOCOL_DEFAULT_DIR).
+  const [protoSearch, setProtoSearch] = useState("");
+  const [protoStatusFilter, setProtoStatusFilter] = useState("all");
+  const [protoWorkTypeFilter, setProtoWorkTypeFilter] = useState("all");
+  const [protoSiteFilter, setProtoSiteFilter] = useState("all");
+  const [protoContractorFilter, setProtoContractorFilter] = useState("all");
+  const [protoSignFilter, setProtoSignFilter] = useState("all");
+  const [protoPrefillFilter, setProtoPrefillFilter] = useState("all");
+  const [protoSort, setProtoSort] = useState<ProtocolSortKey>("number");
+  const [protoDir, setProtoDir] = useState<"asc" | "desc">("desc");
 
   const [quotes, setQuotes] = useState<Quote[]>([]);
   const [quotesLoading, setQuotesLoading] = useState(true);
   const [editingQuote, setEditingQuote] = useState<Quote | null>(null);
+  // Filtry i sortowanie zakładki Wyceny (client-side).
+  const [quoteSearch, setQuoteSearch] = useState("");
+  const [quoteSiteFilter, setQuoteSiteFilter] = useState("all");
+  const [quoteSourceFilter, setQuoteSourceFilter] = useState("all");
+  const [quoteValueMode, setQuoteValueMode] = useState<ValueMode>("all");
+  const [quoteMinInput, setQuoteMinInput] = useState("");
+  const [quoteMaxInput, setQuoteMaxInput] = useState("");
+  const [quoteFreshMode, setQuoteFreshMode] = useState<FreshMode>("all");
+  const [quoteSort, setQuoteSort] = useState<QuoteSortKey>("number");
+  const [quoteDir, setQuoteDir] = useState<"asc" | "desc">("desc");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -388,9 +635,6 @@ export function Technical() {
     setTechFormOpen(true);
   };
 
-  const activeTechnicians = technicians.filter((t) => t.active);
-  const archivedTechnicians = technicians.filter((t) => !t.active);
-
   const renderTechTable = (list: Technician[], emptyText: string) => {
     if (techLoading) {
       return (
@@ -402,7 +646,7 @@ export function Technical() {
     if (list.length === 0) {
       return (
         <div className="py-10 text-center text-muted-foreground">
-          {emptyText}
+          {techFiltersActive ? "Brak techników dla wybranych filtrów" : emptyText}
         </div>
       );
     }
@@ -411,20 +655,19 @@ export function Technical() {
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b text-left text-xs uppercase tracking-wide text-muted-foreground">
-              <th className="px-3 py-2 font-medium">Imię</th>
-              <th className="px-3 py-2 font-medium">Nazwisko</th>
-              <th className="px-3 py-2 font-medium">Typ</th>
-              <th className="px-3 py-2 font-medium">Cennik</th>
-              <th
-                className="px-3 py-2 font-medium"
-                title="Powiązanie z kartoteką kadrową — czy technik jest na liście płac"
-              >
-                Kadry
-              </th>
-              <th className="px-3 py-2 font-medium">Telefon</th>
-              <th className="px-3 py-2 font-medium">E-mail</th>
-              <th className="px-3 py-2 font-medium">Firma</th>
-              <th className="px-3 py-2 font-medium">NIP</th>
+              <TechSortHeader label="Imię" sortKey="firstName" />
+              <TechSortHeader label="Nazwisko" sortKey="lastName" />
+              <TechSortHeader label="Typ" sortKey="type" />
+              <TechSortHeader label="Cennik" sortKey="priceList" />
+              <TechSortHeader
+                label="Kadry"
+                sortKey="hr"
+                title="Powiązanie z kartoteką kadrową — technicy spoza listy płac idą na koniec"
+              />
+              <TechSortHeader label="Telefon" sortKey="phone" />
+              <TechSortHeader label="E-mail" sortKey="email" />
+              <TechSortHeader label="Firma" sortKey="company" />
+              <TechSortHeader label="NIP" sortKey="nip" />
               <th className="px-3 py-2 font-medium">Notatka</th>
               <th className="px-3 py-2"></th>
             </tr>
@@ -558,6 +801,156 @@ export function Technical() {
     return priceLists.find((l) => l.id === id)?.name ?? "—";
   };
 
+  // --- Technicy: filtry + sortowanie (jeden przebieg, jak w kartotece obiektów) ---
+  const visibleTechnicians = useMemo(() => {
+    const q = techSearch.trim().toLowerCase();
+    const nameOfList = (id: number | null) =>
+      id ? (priceLists.find((l) => l.id === id)?.name ?? "—") : "Główny";
+
+    const list = technicians.filter((t) => {
+      if (
+        q &&
+        ![t.firstName, t.lastName, t.phone, t.email, t.company, t.nip, t.notes, t.employeeName]
+          .filter(Boolean)
+          .some((v) => String(v).toLowerCase().includes(q))
+      ) {
+        return false;
+      }
+      if (techTypeFilter !== "all" && t.type !== techTypeFilter) return false;
+      if (techPriceListFilter !== "all") {
+        // „main" = technik bez własnego cennika, czyli liczony z cennika głównego.
+        if (
+          techPriceListFilter === "main"
+            ? t.priceListId != null
+            : String(t.priceListId ?? "") !== techPriceListFilter
+        ) {
+          return false;
+        }
+      }
+      if (techHrFilter !== "all") {
+        const linked = t.employeeId != null;
+        if (techHrFilter === "linked" ? !linked : linked) return false;
+      }
+      return true;
+    });
+
+    const mul = techDir === "asc" ? 1 : -1;
+    const text = (t: Technician): string => {
+      switch (techSort) {
+        case "firstName":
+          return t.firstName ?? "";
+        case "type":
+          return TECHNICIAN_TYPE_LABEL[t.type] ?? "";
+        case "priceList":
+          return nameOfList(t.priceListId);
+        case "hr":
+          // Kolumna „Kadry" pokazuje nazwisko z listy płac; brak powiązania to
+          // kreska, czyli wartość pusta.
+          return t.employeeId ? (t.employeeName || "powiązany") : "";
+        case "phone":
+          return t.phone ?? "";
+        case "email":
+          return t.email ?? "";
+        case "company":
+          return t.company ?? "";
+        case "nip":
+          return t.nip ?? "";
+        default:
+          return t.lastName ?? "";
+      }
+    };
+
+    // Puste teksty lądują na końcu w OBU kierunkach (jak NULLS LAST w sortowaniu
+    // obiektów) — inaczej „sortuj po firmie" zaczynałoby się od techników
+    // wewnętrznych bez firmy. Remis rozstrzyga nazwisko i imię.
+    const compare = (a: Technician, b: Technician): number => {
+      const as = text(a).trim();
+      const bs = text(b).trim();
+      if (!as || !bs) {
+        if (!as && !bs) return 0;
+        return as ? -1 : 1;
+      }
+      return as.localeCompare(bs, "pl") * mul;
+    };
+    const fullName = (t: Technician) => `${t.lastName} ${t.firstName}`.trim();
+
+    return list.sort(
+      (a, b) => compare(a, b) || fullName(a).localeCompare(fullName(b), "pl")
+    );
+  }, [
+    technicians,
+    priceLists,
+    techSearch,
+    techTypeFilter,
+    techPriceListFilter,
+    techHrFilter,
+    techSort,
+    techDir,
+  ]);
+
+  // Liczniki na zakładkach biorą się z tej samej listy, co tabela, więc
+  // „Aktywni (3)" zawsze zgadza się z tym, co widać pod spodem.
+  const activeTechnicians = visibleTechnicians.filter((t) => t.active);
+  const archivedTechnicians = visibleTechnicians.filter((t) => !t.active);
+
+  /** Klik w nagłówek: ta sama kolumna odwraca kierunek, nowa startuje od swojego domyślnego. */
+  const toggleTechSort = (key: TechnicianSortKey) => {
+    if (techSort === key) {
+      setTechDir((d) => (d === "asc" ? "desc" : "asc"));
+      return;
+    }
+    setTechSort(key);
+    setTechDir(TECHNICIAN_DEFAULT_DIR[key]);
+  };
+
+  const techFiltersActive =
+    techSearch !== "" ||
+    techTypeFilter !== "all" ||
+    techPriceListFilter !== "all" ||
+    techHrFilter !== "all";
+
+  const clearTechFilters = () => {
+    setTechSearch("");
+    setTechTypeFilter("all");
+    setTechPriceListFilter("all");
+    setTechHrFilter("all");
+  };
+
+  /** Nagłówek klikalny — strzałka pokazuje kolumnę i kierunek sortowania. */
+  const TechSortHeader = ({
+    label,
+    sortKey,
+    align = "left",
+    title,
+  }: {
+    label: string;
+    sortKey: TechnicianSortKey;
+    align?: "left" | "right";
+    title?: string;
+  }) => {
+    const activeCol = techSort === sortKey;
+    const Icon = !activeCol ? ChevronsUpDown : techDir === "asc" ? ArrowUp : ArrowDown;
+    return (
+      <th className={cn("px-3 py-2 font-medium", align === "right" ? "text-right" : "text-left")}>
+        <button
+          type="button"
+          data-testid={`technicy-sort-${sortKey}`}
+          onClick={() => toggleTechSort(sortKey)}
+          aria-label={`Sortuj po: ${label}`}
+          title={title}
+          className={cn(
+            "inline-flex items-center gap-1 rounded px-1 -mx-1 transition-colors hover:text-foreground",
+            align === "right" && "flex-row-reverse",
+            activeCol ? "text-foreground" : "text-muted-foreground"
+          )}
+        >
+          {label}
+          <Icon className={cn("h-3.5 w-3.5", !activeCol && "opacity-40")} />
+        </button>
+      </th>
+    );
+  };
+
   // --- Protokoły (generowane automatycznie z realizacji) ---
   const loadProtocols = useCallback(async () => {
     setProtoLoading(true);
@@ -577,6 +970,196 @@ export function Technical() {
   useEffect(() => {
     loadProtocols();
   }, [loadProtocols]);
+
+  /**
+   * Obiekty i wykonawcy do selectów budujemy Z DANYCH, a nie ze słownika:
+   * protokół trzyma migawkę nazwy z dnia prac, więc tylko lista miesiąca wie,
+   * po czym faktycznie da się odfiltrować.
+   */
+  const protocolSites = useMemo(
+    () =>
+      Array.from(new Set(protocols.map(protocolSite).filter(Boolean))).sort((a, b) =>
+        a.localeCompare(b, "pl")
+      ),
+    [protocols]
+  );
+
+  const protocolContractors = useMemo(
+    () =>
+      Array.from(
+        new Set(protocols.map((p) => (p.contractor || "").trim()).filter(Boolean))
+      ).sort((a, b) => a.localeCompare(b, "pl")),
+    [protocols]
+  );
+
+  /** Jeden przebieg: filtry + sortowanie protokołów. */
+  const visibleProtocols = useMemo(() => {
+    const q = protoSearch.trim().toLowerCase();
+
+    const list = protocols.filter((p) => {
+      if (
+        q &&
+        ![p.number, p.site, p.installationAddress, p.clientName, p.contractor, p.salesperson]
+          .filter(Boolean)
+          .some((v) => String(v).toLowerCase().includes(q))
+      ) {
+        return false;
+      }
+      if (protoStatusFilter !== "all" && p.status !== protoStatusFilter) return false;
+      if (protoWorkTypeFilter !== "all" && p.workType !== protoWorkTypeFilter) return false;
+      if (protoSiteFilter !== "all") {
+        const site = protocolSite(p);
+        if (protoSiteFilter === NONE ? site !== "" : site !== protoSiteFilter) return false;
+      }
+      if (protoContractorFilter !== "all") {
+        const contractor = (p.contractor || "").trim();
+        if (
+          protoContractorFilter === NONE
+            ? contractor !== ""
+            : contractor !== protoContractorFilter
+        ) {
+          return false;
+        }
+      }
+      if (protoSignFilter !== "all") {
+        const signed = !!p.signaturePng;
+        if (protoSignFilter === "signed" ? !signed : signed) return false;
+      }
+      if (protoPrefillFilter !== "all") {
+        const todo = protocolNeedsPrefill(p);
+        if (protoPrefillFilter === "todo" ? !todo : todo) return false;
+      }
+      return true;
+    });
+
+    const mul = protoDir === "asc" ? 1 : -1;
+    const text = (p: Protocol): string => {
+      switch (protoSort) {
+        case "number":
+          return p.number ?? "";
+        case "site":
+          return protocolSite(p);
+        case "workType":
+          return (
+            REALIZATION_WORK_TYPE_META[p.workType] ?? REALIZATION_WORK_TYPE_META.inne
+          ).label;
+        case "contractor":
+          return p.contractor ?? "";
+        default:
+          return PROTOCOL_STATUS_LABEL[p.status] ?? "";
+      }
+    };
+    /** Liczba do sortowania; `null` = w tabeli jest kreska, czyli wartość pusta. */
+    const number = (p: Protocol): number | null => {
+      if (protoSort === "date") return parseDate(p.workDate);
+      // „Podpis": kolumna pokazuje kreskę, dopóki nikt nie podpisał. Starszy
+      // podpis bywa bez znacznika czasu — wtedy bierzemy datę zmiany, żeby
+      // podpisany protokół nie wylądował wśród niepodpisanych.
+      if (!p.signaturePng) return null;
+      return parseDate(p.signedAt) ?? parseDate(p.updatedAt);
+    };
+
+    const numeric = protoSort === "date" || protoSort === "signature";
+
+    // Puste teksty i brak daty lądują na końcu w OBU kierunkach (jak NULLS LAST
+    // w sortowaniu obiektów) — inaczej „sortuj po wykonawcy" zaczynałoby się od
+    // protokołów bez wpisanego wykonawcy. Remis rozstrzyga numer.
+    const compare = (a: Protocol, b: Protocol): number => {
+      if (numeric) {
+        const av = number(a);
+        const bv = number(b);
+        if (av === null || bv === null) {
+          if (av === null && bv === null) return 0;
+          return av !== null ? -1 : 1;
+        }
+        return (av - bv) * mul;
+      }
+      const as = text(a).trim();
+      const bs = text(b).trim();
+      if (!as || !bs) {
+        if (!as && !bs) return 0;
+        return as ? -1 : 1;
+      }
+      return as.localeCompare(bs, "pl") * mul;
+    };
+
+    return list.sort((a, b) => compare(a, b) || a.number.localeCompare(b.number, "pl"));
+  }, [
+    protocols,
+    protoSearch,
+    protoStatusFilter,
+    protoWorkTypeFilter,
+    protoSiteFilter,
+    protoContractorFilter,
+    protoSignFilter,
+    protoPrefillFilter,
+    protoSort,
+    protoDir,
+  ]);
+
+  /** Klik w nagłówek: ta sama kolumna odwraca kierunek, nowa startuje od swojego domyślnego. */
+  const toggleProtoSort = (key: ProtocolSortKey) => {
+    if (protoSort === key) {
+      setProtoDir((d) => (d === "asc" ? "desc" : "asc"));
+      return;
+    }
+    setProtoSort(key);
+    setProtoDir(PROTOCOL_DEFAULT_DIR[key]);
+  };
+
+  const protoFiltersActive =
+    protoSearch !== "" ||
+    protoStatusFilter !== "all" ||
+    protoWorkTypeFilter !== "all" ||
+    protoSiteFilter !== "all" ||
+    protoContractorFilter !== "all" ||
+    protoSignFilter !== "all" ||
+    protoPrefillFilter !== "all";
+
+  const clearProtoFilters = () => {
+    setProtoSearch("");
+    setProtoStatusFilter("all");
+    setProtoWorkTypeFilter("all");
+    setProtoSiteFilter("all");
+    setProtoContractorFilter("all");
+    setProtoSignFilter("all");
+    setProtoPrefillFilter("all");
+  };
+
+  /** Nagłówek klikalny — strzałka pokazuje kolumnę i kierunek sortowania. */
+  const ProtoSortHeader = ({
+    label,
+    sortKey,
+    align = "left",
+    title,
+  }: {
+    label: string;
+    sortKey: ProtocolSortKey;
+    align?: "left" | "right";
+    title?: string;
+  }) => {
+    const activeCol = protoSort === sortKey;
+    const Icon = !activeCol ? ChevronsUpDown : protoDir === "asc" ? ArrowUp : ArrowDown;
+    return (
+      <th className={cn("px-3 py-2 font-medium", align === "right" ? "text-right" : "text-left")}>
+        <button
+          type="button"
+          data-testid={`protokoly-sort-${sortKey}`}
+          onClick={() => toggleProtoSort(sortKey)}
+          aria-label={`Sortuj po: ${label}`}
+          title={title}
+          className={cn(
+            "inline-flex items-center gap-1 rounded px-1 -mx-1 transition-colors hover:text-foreground",
+            align === "right" && "flex-row-reverse",
+            activeCol ? "text-foreground" : "text-muted-foreground"
+          )}
+        >
+          {label}
+          <Icon className={cn("h-3.5 w-3.5", !activeCol && "opacity-40")} />
+        </button>
+      </th>
+    );
+  };
 
   // Deep-link `?protocol=ID` (np. z kalendarza): otwórz formularz protokołu i przewiń do wiersza.
   const deepLinkBusy = useRef(false);
@@ -651,6 +1234,9 @@ export function Technical() {
     next.delete("date");
     setSearchParams(next, { replace: true });
     if (!row) return;
+    // Wiersz z deep-linka ma być WIDOCZNY — bez tego podświetlenie i przewijanie
+    // trafiałyby w wiersz odfiltrowany przez ustawienia zakładki.
+    clearRealFilters();
     setHighlightRow(id);
     setEditing(row);
     setFormOpen(true);
@@ -660,7 +1246,17 @@ export function Technical() {
         ?.scrollIntoView({ block: "center", behavior: "smooth" });
     }, 0);
     window.setTimeout(() => setHighlightRow((cur) => (cur === id ? null : cur)), 6000);
-  }, [searchParams, setSearchParams, tab, navigate, loading, rows, year, month]);
+  }, [
+    searchParams,
+    setSearchParams,
+    tab,
+    navigate,
+    loading,
+    rows,
+    year,
+    month,
+    clearRealFilters,
+  ]);
 
   // --- Wyceny ---
   const loadQuotes = useCallback(async () => {
@@ -678,6 +1274,176 @@ export function Technical() {
   useEffect(() => {
     loadQuotes();
   }, [loadQuotes]);
+
+  /** Obiekty do selecta budujemy z danych — wycena trzyma wpisaną nazwę, nie klucz obcy. */
+  const quoteSites = useMemo(
+    () =>
+      Array.from(new Set(quotes.map((q) => (q.site || "").trim()).filter(Boolean))).sort(
+        (a, b) => a.localeCompare(b, "pl")
+      ),
+    [quotes]
+  );
+
+  /** Jeden przebieg: filtry + sortowanie wycen. */
+  const visibleQuotes = useMemo(() => {
+    const needle = quoteSearch.trim().toLowerCase();
+    const min = parseAmount(quoteMinInput);
+    const max = parseAmount(quoteMaxInput);
+    // Granica świeżości liczona raz na przebieg — „ostatnie 30 dni" od teraz.
+    const freshAfter =
+      quoteFreshMode === "all"
+        ? null
+        : Date.now() - parseInt(quoteFreshMode, 10) * 24 * 3600_000;
+
+    const list = quotes.filter((qt) => {
+      if (
+        needle &&
+        ![qt.number, qt.site, qt.address]
+          .filter(Boolean)
+          .some((v) => String(v).toLowerCase().includes(needle))
+      ) {
+        return false;
+      }
+      if (quoteSiteFilter !== "all") {
+        const site = (qt.site || "").trim();
+        if (quoteSiteFilter === NONE ? site !== "" : site !== quoteSiteFilter) return false;
+      }
+      if (quoteSourceFilter !== "all") {
+        const fromRealization = qt.realizationId != null;
+        if (quoteSourceFilter === "realization" ? !fromRealization : fromRealization) {
+          return false;
+        }
+      }
+      // Wycena na 0 zł = dokument z pozycjami cennika, w którym nikt jeszcze nie
+      // wpisał ilości — filtr „tylko puste" służy właśnie do ich wyłapania.
+      const total = qt.total ?? 0;
+      if (quoteValueMode === "with" && total <= 0) return false;
+      if (quoteValueMode === "without" && total > 0) return false;
+      if (min !== undefined && total < min) return false;
+      if (max !== undefined && total > max) return false;
+      if (freshAfter !== null) {
+        const changed = parseDate(qt.updatedAt) ?? parseDate(qt.createdAt);
+        if (changed === null || changed < freshAfter) return false;
+      }
+      return true;
+    });
+
+    const mul = quoteDir === "asc" ? 1 : -1;
+    const text = (qt: Quote): string => {
+      switch (quoteSort) {
+        case "site":
+          return qt.site ?? "";
+        case "address":
+          return qt.address ?? "";
+        default:
+          return qt.number ?? "";
+      }
+    };
+    /** Liczba do sortowania; `null` = w tabeli jest kreska, czyli wartość pusta. */
+    const number = (qt: Quote): number | null =>
+      quoteSort === "date" ? parseDate(qt.date) : (qt.total ?? null);
+
+    const numeric = quoteSort === "date" || quoteSort === "total";
+
+    // Puste teksty i brak daty lądują na końcu w OBU kierunkach (jak NULLS LAST
+    // w sortowaniu obiektów) — inaczej „sortuj po adresie" zaczynałoby się od
+    // wycen bez adresu. Remis rozstrzyga numer.
+    const compare = (a: Quote, b: Quote): number => {
+      if (numeric) {
+        const av = number(a);
+        const bv = number(b);
+        if (av === null || bv === null) {
+          if (av === null && bv === null) return 0;
+          return av !== null ? -1 : 1;
+        }
+        return (av - bv) * mul;
+      }
+      const as = text(a).trim();
+      const bs = text(b).trim();
+      if (!as || !bs) {
+        if (!as && !bs) return 0;
+        return as ? -1 : 1;
+      }
+      return as.localeCompare(bs, "pl") * mul;
+    };
+
+    return list.sort((a, b) => compare(a, b) || a.number.localeCompare(b.number, "pl"));
+  }, [
+    quotes,
+    quoteSearch,
+    quoteSiteFilter,
+    quoteSourceFilter,
+    quoteValueMode,
+    quoteMinInput,
+    quoteMaxInput,
+    quoteFreshMode,
+    quoteSort,
+    quoteDir,
+  ]);
+
+  /** Klik w nagłówek: ta sama kolumna odwraca kierunek, nowa startuje od swojego domyślnego. */
+  const toggleQuoteSort = (key: QuoteSortKey) => {
+    if (quoteSort === key) {
+      setQuoteDir((d) => (d === "asc" ? "desc" : "asc"));
+      return;
+    }
+    setQuoteSort(key);
+    setQuoteDir(QUOTE_DEFAULT_DIR[key]);
+  };
+
+  const quoteFiltersActive =
+    quoteSearch !== "" ||
+    quoteSiteFilter !== "all" ||
+    quoteSourceFilter !== "all" ||
+    quoteValueMode !== "all" ||
+    quoteMinInput !== "" ||
+    quoteMaxInput !== "" ||
+    quoteFreshMode !== "all";
+
+  const clearQuoteFilters = () => {
+    setQuoteSearch("");
+    setQuoteSiteFilter("all");
+    setQuoteSourceFilter("all");
+    setQuoteValueMode("all");
+    setQuoteMinInput("");
+    setQuoteMaxInput("");
+    setQuoteFreshMode("all");
+  };
+
+  /** Nagłówek klikalny — strzałka pokazuje kolumnę i kierunek sortowania. */
+  const QuoteSortHeader = ({
+    label,
+    sortKey,
+    align = "left",
+    title,
+  }: {
+    label: string;
+    sortKey: QuoteSortKey;
+    align?: "left" | "right";
+    title?: string;
+  }) => {
+    const activeCol = quoteSort === sortKey;
+    const Icon = !activeCol ? ChevronsUpDown : quoteDir === "asc" ? ArrowUp : ArrowDown;
+    return (
+      <th className={cn("px-3 py-2 font-medium", align === "right" ? "text-right" : "text-left")}>
+        <button
+          type="button"
+          data-testid={`wyceny-sort-${sortKey}`}
+          onClick={() => toggleQuoteSort(sortKey)}
+          aria-label={`Sortuj po: ${label}`}
+          title={title}
+          className={cn(
+            "inline-flex items-center gap-1 rounded px-1 -mx-1 transition-colors hover:text-foreground",
+            align === "right" && "flex-row-reverse",
+            activeCol ? "text-foreground" : "text-muted-foreground"
+          )}
+        >
+          {label}
+          <Icon className={cn("h-3.5 w-3.5", !activeCol && "opacity-40")} />
+        </button>
+      </th>
+    );
+  };
 
   /**
    * Deep-link `?quote=ID` (z kalendarza — wycena wydarzenia): przełącz na zakładkę
@@ -949,23 +1715,278 @@ export function Technical() {
     }
   };
 
-  const missingProtocolCount = rows.filter((r) => !r.protocol).length;
-  const withProtocolCount = rows.length - missingProtocolCount;
-  /** Liczniki chipów rodzaju/typu — po pozostałych filtrach, żeby zgadzały się z tabelą. */
-  const countBy = <K extends string>(pick: (r: Realization) => K) => {
-    const out = {} as Record<K, number>;
-    for (const r of rows) out[pick(r)] = (out[pick(r)] ?? 0) + 1;
-    return out;
-  };
-  const workTypeCounts = countBy((r) => r.workType);
-  const billingCounts = countBy((r) => r.billing);
+  /**
+   * Ile realizacji w CAŁYM miesiącu nie ma protokołu. Filtry tabeli tego nie
+   * ruszają, bo pigułka i „Utwórz brakujące" opisują akcję `syncProtocols()`,
+   * która działa globalnie (także poza bieżącym miesiącem).
+   */
+  const monthMissingProtocolCount = rows.filter((r) => !r.protocol).length;
 
-  const visibleRows = rows.filter(
-    (r) =>
-      (protoFilter === "with" ? !!r.protocol : protoFilter === "without" ? !r.protocol : true) &&
-      (workTypeFilter === "" || r.workType === workTypeFilter) &&
-      (billingFilter === "" || r.billing === billingFilter)
+  /** Obiekty do selecta budujemy z danych — realizacja trzyma migawkę nazwy, nie klucz obcy. */
+  const realizationSites = useMemo(
+    () =>
+      Array.from(new Set(rows.map((r) => (r.site || "").trim()).filter(Boolean))).sort(
+        (a, b) => a.localeCompare(b, "pl")
+      ),
+    [rows]
   );
+
+  /** Wykonawcy do selecta — z listy miesiąca, po tym samym wzorze co kolumna. */
+  const realizationContractors = useMemo(
+    () =>
+      Array.from(new Set(rows.map(realizationContractor).filter(Boolean))).sort((a, b) =>
+        a.localeCompare(b, "pl")
+      ),
+    [rows]
+  );
+
+  /**
+   * Jeden przebieg: filtry, sortowanie, liczniki chipów i sumy stopki.
+   *
+   * Liczniki chipów liczymy fasetowo — każdy wymiar dostaje listę
+   * przefiltrowaną WSZYSTKIM POZA nim samym, więc liczba na chipie mówi, ile
+   * wierszy zobaczysz po jego kliknięciu (bez tego „Bez protokołu" pokazywałby
+   * 0 zaraz po wybraniu „Z protokołem").
+   */
+  const realizationView = useMemo(() => {
+    const needle = realSearch.trim().toLowerCase();
+    const min = parseAmount(realMinInput);
+    const max = parseAmount(realMaxInput);
+
+    const matches = (r: Realization, skip?: RealizationFacet): boolean => {
+      if (
+        needle &&
+        ![r.site, r.contractor1, r.contractor2, r.caretaker, r.note]
+          .filter(Boolean)
+          .some((v) => String(v).toLowerCase().includes(needle))
+      ) {
+        return false;
+      }
+      if (skip !== "workType" && workTypeFilter !== "" && r.workType !== workTypeFilter) {
+        return false;
+      }
+      if (skip !== "billing" && billingFilter !== "" && r.billing !== billingFilter) {
+        return false;
+      }
+      if (skip !== "protocol" && protoFilter !== "") {
+        if (protoFilter === "with" ? !r.protocol : !!r.protocol) return false;
+      }
+      if (realInvoicedFilter !== "all") {
+        if (realInvoicedFilter === "yes" ? !r.invoiced : r.invoiced) return false;
+      }
+      if (realContractorFilter !== "all") {
+        const who = realizationContractor(r);
+        if (realContractorFilter === NONE ? who !== "" : who !== realContractorFilter) {
+          return false;
+        }
+      }
+      if (realSiteFilter !== "all") {
+        const site = (r.site || "").trim();
+        if (realSiteFilter === NONE ? site !== "" : site !== realSiteFilter) return false;
+      }
+      // Migawka nazwy zostaje na dokumencie nawet bez powiązania, więc „bez
+      // obiektu z kartoteki" pyta o KLUCZ (`objectId`), a nie o pusty napis.
+      if (realObjectFilter !== "all") {
+        const linked = r.objectId != null;
+        if (realObjectFilter === "linked" ? !linked : linked) return false;
+      }
+      // Realizacja na 0 zł = wpis, w którym nikt jeszcze nie policzył kwot —
+      // tryb „tylko zerowe" służy właśnie do ich wyłapania.
+      const total = r.total ?? 0;
+      if (realValueMode === "with" && total <= 0) return false;
+      if (realValueMode === "without" && total > 0) return false;
+      if (min !== undefined && total < min) return false;
+      if (max !== undefined && total > max) return false;
+      return true;
+    };
+
+    const mul = realDir === "asc" ? 1 : -1;
+    const text = (r: Realization): string => {
+      switch (realSort) {
+        case "site":
+          return r.site ?? "";
+        case "workType":
+          return (
+            REALIZATION_WORK_TYPE_META[r.workType] ?? REALIZATION_WORK_TYPE_META.inne
+          ).label;
+        case "billing":
+          return (BILLING_META[r.billing] ?? BILLING_META.paid).label;
+        default:
+          return realizationContractor(r);
+      }
+    };
+    /** Liczba do sortowania; `null` = w tabeli jest kreska, czyli wartość pusta. */
+    const number = (r: Realization): number | null => {
+      switch (realSort) {
+        case "date":
+          return parseDate(r.date);
+        // Godziny, kilometry i rabat tabela pokazuje jako „—", gdy są zerowe —
+        // dla sortowania to wartość pusta (NULLS LAST), nie zero.
+        case "actualHours":
+          return Number(r.actualHours) || null;
+        case "actualKm":
+          return Number(r.actualKm) || null;
+        case "discount":
+          return Number(r.discount) || null;
+        case "invoiced":
+          return r.invoiced ? 1 : 0;
+        // Kwoty tabela pokazuje zawsze (także „0,00 zł") — zero to wartość.
+        case "amountHours":
+          return Number(r.amountHours) || 0;
+        case "amountMaterial":
+          return Number(r.amountMaterial) || 0;
+        case "amountKm":
+          return Number(r.amountKm) || 0;
+        default:
+          return Number(r.total) || 0;
+      }
+    };
+
+    const numeric = !REALIZATION_TEXT_SORT_KEYS.has(realSort);
+
+    // Puste teksty i wartości bez treści lądują na końcu w OBU kierunkach (jak
+    // NULLS LAST w sortowaniu obiektów) — inaczej „sortuj po wykonawcy"
+    // zaczynałoby się od realizacji bez wpisanego wykonawcy. Realizacja nie ma
+    // numeru dokumentu, więc remis rozstrzyga data (najnowsze u góry) i id.
+    const compare = (a: Realization, b: Realization): number => {
+      if (numeric) {
+        const av = number(a);
+        const bv = number(b);
+        if (av === null || bv === null) {
+          if (av === null && bv === null) return 0;
+          return av !== null ? -1 : 1;
+        }
+        return (av - bv) * mul;
+      }
+      const as = text(a).trim();
+      const bs = text(b).trim();
+      if (!as || !bs) {
+        if (!as && !bs) return 0;
+        return as ? -1 : 1;
+      }
+      return as.localeCompare(bs, "pl") * mul;
+    };
+
+    const list = rows
+      .filter((r) => matches(r))
+      .sort((a, b) => compare(a, b) || b.date.localeCompare(a.date) || a.id - b.id);
+
+    const countBy = <K extends string>(source: Realization[], pick: (r: Realization) => K) => {
+      const out = {} as Record<K, number>;
+      for (const r of source) out[pick(r)] = (out[pick(r)] ?? 0) + 1;
+      return out;
+    };
+    const protoBase = rows.filter((r) => matches(r, "protocol"));
+    const withProtocolCount = protoBase.filter((r) => !!r.protocol).length;
+
+    const sum = (pick: (r: Realization) => number) =>
+      list.reduce((acc, r) => acc + Number(pick(r) || 0), 0);
+
+    return {
+      list,
+      workTypeCounts: countBy(
+        rows.filter((r) => matches(r, "workType")),
+        (r) => r.workType
+      ),
+      billingCounts: countBy(
+        rows.filter((r) => matches(r, "billing")),
+        (r) => r.billing
+      ),
+      withProtocolCount,
+      missingProtocolCount: protoBase.length - withProtocolCount,
+      // Stopka tabeli sumuje TO, CO WIDAĆ — inaczej „Razem" kłóciłoby się
+      // z wierszami po zawężeniu filtrów.
+      totals: {
+        actualHours: sum((r) => r.actualHours),
+        actualKm: sum((r) => r.actualKm),
+        amountHours: sum((r) => r.amountHours),
+        amountMaterial: sum((r) => r.amountMaterial),
+        amountKm: sum((r) => r.amountKm),
+        discount: sum((r) => r.discount),
+        total: sum((r) => r.total),
+      },
+    };
+  }, [
+    rows,
+    realSearch,
+    workTypeFilter,
+    billingFilter,
+    protoFilter,
+    realInvoicedFilter,
+    realContractorFilter,
+    realSiteFilter,
+    realObjectFilter,
+    realValueMode,
+    realMinInput,
+    realMaxInput,
+    realSort,
+    realDir,
+  ]);
+
+  const visibleRows = realizationView.list;
+  const workTypeCounts = realizationView.workTypeCounts;
+  const billingCounts = realizationView.billingCounts;
+  const withProtocolCount = realizationView.withProtocolCount;
+  const missingProtocolCount = realizationView.missingProtocolCount;
+  const realTotals = realizationView.totals;
+
+  /** Klik w nagłówek: ta sama kolumna odwraca kierunek, nowa startuje od swojego domyślnego. */
+  const toggleRealSort = (key: RealizationSortKey) => {
+    if (realSort === key) {
+      setRealDir((d) => (d === "asc" ? "desc" : "asc"));
+      return;
+    }
+    setRealSort(key);
+    setRealDir(REALIZATION_DEFAULT_DIR[key]);
+  };
+
+  const realFiltersActive =
+    realSearch !== "" ||
+    workTypeFilter !== "" ||
+    billingFilter !== "" ||
+    protoFilter !== "" ||
+    realInvoicedFilter !== "all" ||
+    realContractorFilter !== "all" ||
+    realSiteFilter !== "all" ||
+    realObjectFilter !== "all" ||
+    realValueMode !== "all" ||
+    realMinInput !== "" ||
+    realMaxInput !== "";
+
+  /** Nagłówek klikalny — strzałka pokazuje kolumnę i kierunek sortowania. */
+  const RealSortHeader = ({
+    label,
+    sortKey,
+    align = "left",
+    title,
+  }: {
+    label: string;
+    sortKey: RealizationSortKey;
+    align?: "left" | "right";
+    title?: string;
+  }) => {
+    const activeCol = realSort === sortKey;
+    const Icon = !activeCol ? ChevronsUpDown : realDir === "asc" ? ArrowUp : ArrowDown;
+    return (
+      <th className={cn("px-3 py-2 font-medium", align === "right" ? "text-right" : "text-left")}>
+        <button
+          type="button"
+          data-testid={`realizacje-sort-${sortKey}`}
+          onClick={() => toggleRealSort(sortKey)}
+          aria-label={`Sortuj po: ${label}`}
+          title={title}
+          className={cn(
+            "inline-flex items-center gap-1 rounded px-1 -mx-1 transition-colors hover:text-foreground",
+            align === "right" && "flex-row-reverse",
+            activeCol ? "text-foreground" : "text-muted-foreground"
+          )}
+        >
+          {label}
+          <Icon className={cn("h-3.5 w-3.5", !activeCol && "opacity-40")} />
+        </button>
+      </th>
+    );
+  };
 
   const openEdit = (row: Realization) => {
     setEditing(row);
@@ -1111,6 +2132,133 @@ export function Technical() {
             ))}
           </div>
 
+          {/* Filtry selectowe (jak w Protokołach / Wycenach). Chipy niżej
+              zostają — dokładają rodzaj prac, typ rozliczenia i protokół. */}
+          {!loading && rows.length > 0 && (
+            <div className="space-y-2">
+              {/* Pierwsza linia: szukajka, faktura, wykonawca, obiekt, kartoteka. */}
+              <div className="flex flex-wrap items-center gap-2">
+                <Input
+                  placeholder="Szukaj po obiekcie, wykonawcy, opisie…"
+                  data-testid="realizacje-filter-search"
+                  value={realSearch}
+                  onChange={(e) => setRealSearch(e.target.value)}
+                  className="max-w-xs"
+                />
+
+                <Select value={realInvoicedFilter} onValueChange={setRealInvoicedFilter}>
+                  <SelectTrigger className="w-[200px]" data-testid="realizacje-filter-invoiced">
+                    <SelectValue placeholder="Faktura" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">Faktura: wszystkie</SelectItem>
+                    <SelectItem value="yes">Tylko zafakturowane</SelectItem>
+                    <SelectItem value="no">Tylko niezafakturowane</SelectItem>
+                  </SelectContent>
+                </Select>
+
+                <Select
+                  value={realContractorFilter}
+                  onValueChange={setRealContractorFilter}
+                >
+                  <SelectTrigger className="w-[200px]" data-testid="realizacje-filter-contractor">
+                    <SelectValue placeholder="Wykonawca" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">Wszyscy wykonawcy</SelectItem>
+                    <SelectItem value={NONE}>Bez wykonawcy</SelectItem>
+                    {realizationContractors.map((c) => (
+                      <SelectItem key={c} value={c}>
+                        {c}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+
+                <Select value={realSiteFilter} onValueChange={setRealSiteFilter}>
+                  <SelectTrigger className="w-[220px]" data-testid="realizacje-filter-site">
+                    <SelectValue placeholder="Obiekt" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">Wszystkie obiekty</SelectItem>
+                    <SelectItem value={NONE}>Bez obiektu</SelectItem>
+                    {realizationSites.map((s) => (
+                      <SelectItem key={s} value={s}>
+                        {s}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+
+                {/* Nazwa obiektu to migawka na dokument — ten filtr pyta o
+                    powiązanie z kartoteką (`objectId`), nie o napis. */}
+                <Select value={realObjectFilter} onValueChange={setRealObjectFilter}>
+                  <SelectTrigger className="w-[240px]" data-testid="realizacje-filter-object">
+                    <SelectValue placeholder="Kartoteka" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">Kartoteka: wszystkie</SelectItem>
+                    <SelectItem value="linked">Tylko z obiektem z kartoteki</SelectItem>
+                    <SelectItem value="unlinked">Tylko bez obiektu z kartoteki</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              {/* Druga linia: suma netto — tryb i widełki. */}
+              <div className="flex flex-wrap items-center gap-2">
+                <Select
+                  value={realValueMode}
+                  onValueChange={(v) => setRealValueMode(v as ValueMode)}
+                >
+                  <SelectTrigger className="w-[220px]" data-testid="realizacje-filter-value-mode">
+                    <SelectValue placeholder="Kwota" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">Kwota: wszystkie</SelectItem>
+                    <SelectItem value="with">Tylko z kwotą</SelectItem>
+                    <SelectItem value="without">Tylko zerowe (0 zł)</SelectItem>
+                  </SelectContent>
+                </Select>
+                <div className="flex items-center gap-1 text-sm text-muted-foreground">
+                  <span>Kwota od</span>
+                  <Input
+                    type="number"
+                    min="0"
+                    step="50"
+                    inputMode="decimal"
+                    className="w-28 tabular-nums"
+                    data-testid="realizacje-filter-min"
+                    value={realMinInput}
+                    onChange={(e) => setRealMinInput(e.target.value)}
+                  />
+                  <span>do</span>
+                  <Input
+                    type="number"
+                    min="0"
+                    step="50"
+                    inputMode="decimal"
+                    className="w-28 tabular-nums"
+                    data-testid="realizacje-filter-max"
+                    value={realMaxInput}
+                    onChange={(e) => setRealMaxInput(e.target.value)}
+                  />
+                  <span>zł netto</span>
+                </div>
+                {realFiltersActive && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={clearRealFilters}
+                    data-testid="realizacje-filters-clear"
+                  >
+                    <X className="h-4 w-4 mr-1" />
+                    Wyczyść filtry
+                  </Button>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Filtry: rodzaj prac i typ rozliczenia (chipy jak w kalendarzu) */}
           {!loading && rows.length > 0 && (
             <div className="space-y-2">
@@ -1131,7 +2279,9 @@ export function Technical() {
                       data-testid={`realization-worktype-filter-${t}`}
                       aria-pressed={active}
                       onClick={() => setWorkTypeFilter(active ? "" : t)}
-                      {...tip(`Rodzaj prac: ${meta.label} — ${workTypeCounts[t] ?? 0} w tym miesiącu`)}
+                      {...tip(
+                        `Rodzaj prac: ${meta.label} — ${workTypeCounts[t] ?? 0} po pozostałych filtrach`
+                      )}
                       className={cn(
                         "inline-flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:h-6",
                         active ? meta.chipActive : meta.chip
@@ -1161,7 +2311,9 @@ export function Technical() {
                       data-testid={`realization-billing-filter-${b}`}
                       aria-pressed={active}
                       onClick={() => setBillingFilter(active ? "" : b)}
-                      {...tip(`Rozliczenie: ${meta.label} (${meta.hint}) — ${billingCounts[b] ?? 0} w tym miesiącu`)}
+                      {...tip(
+                        `Rozliczenie: ${meta.label} (${meta.hint}) — ${billingCounts[b] ?? 0} po pozostałych filtrach`
+                      )}
                       className={cn(
                         "inline-flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:h-6",
                         active ? meta.chipActive : meta.chip
@@ -1173,19 +2325,8 @@ export function Technical() {
                     </button>
                   );
                 })}
-                {(workTypeFilter || billingFilter) && (
-                  <button
-                    type="button"
-                    data-testid="realization-kind-filter-clear"
-                    onClick={() => {
-                      setWorkTypeFilter("");
-                      setBillingFilter("");
-                    }}
-                    className="ml-1 text-xs font-medium text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
-                  >
-                    Wyczyść filtry
-                  </button>
-                )}
+                {/* Bez lokalnego „wyczyść" — jeden przycisk nad chipami
+                    (`realizacje-filters-clear`) zdejmuje wszystkie filtry. */}
               </div>
             </div>
           )}
@@ -1230,7 +2371,7 @@ export function Technical() {
                       aria-pressed={active}
                       onClick={() => setProtoFilter(active && o.key ? "" : o.key)}
                       {...tip(
-                        `Filtr protokołu: ${o.label.toLowerCase()}${o.count != null ? ` — ${o.count} w tym miesiącu` : ""}\n${o.hint}`
+                        `Filtr protokołu: ${o.label.toLowerCase()}${o.count != null ? ` — ${o.count} po pozostałych filtrach` : ""}\n${o.hint}`
                       )}
                       className={cn(
                         "inline-flex h-7 items-center gap-1.5 rounded-full px-2.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:h-6",
@@ -1255,16 +2396,20 @@ export function Technical() {
                   );
                 })}
               </div>
-              {missingProtocolCount > 0 && (
+              {/* Pigułka i „Utwórz brakujące" chodzą parą z akcją globalną,
+                  więc liczą CAŁY miesiąc — filtry tabeli ich nie zawężają
+                  (chipy obok pokazują liczby po filtrach). */}
+              {monthMissingProtocolCount > 0 && (
                 <div className="ml-auto flex items-center gap-2">
                   <span
                     data-testid="missing-protocols-count"
                     className={pillClass("amber")}
+                    {...tip("Cały miesiąc — niezależnie od filtrów tabeli")}
                   >
-                    {missingProtocolCount}{" "}
-                    {missingProtocolCount === 1
+                    {monthMissingProtocolCount}{" "}
+                    {monthMissingProtocolCount === 1
                       ? "realizacja bez protokołu"
-                      : missingProtocolCount < 5
+                      : monthMissingProtocolCount < 5
                         ? "realizacje bez protokołu"
                         : "realizacji bez protokołu"}
                   </span>
@@ -1297,52 +2442,50 @@ export function Technical() {
                   aby wpisać pierwszą.
                 </div>
               ) : visibleRows.length === 0 ? (
-                <div className="py-10 text-center text-muted-foreground">
-                  {workTypeFilter || billingFilter
-                    ? "Żadna realizacja w tym miesiącu nie pasuje do wybranych filtrów."
-                    : protoFilter === "with"
-                      ? "Żadna realizacja w tym miesiącu nie ma jeszcze protokołu."
-                      : "Wszystkie realizacje w tym miesiącu mają protokół."}
+                <div
+                  className="py-10 text-center text-muted-foreground"
+                  data-testid="realizacje-empty-filtered"
+                >
+                  Brak realizacji dla wybranych filtrów
                 </div>
               ) : (
                 <div className="overflow-x-auto">
                   <table className="w-full min-w-[1360px] text-sm">
                     <thead>
                       <tr className="border-b text-left text-xs uppercase tracking-wide text-muted-foreground">
-                        <th className="px-3 py-2 font-medium">Data</th>
-                        <th className="px-3 py-2 font-medium">Obiekt</th>
-                        <th className="px-3 py-2 font-medium">Rodzaj</th>
-                        <th className="px-3 py-2 font-medium">Typ</th>
-                        <th
-                          className="px-3 py-2 text-right font-medium"
-                          {...tip("Faktyczne godziny pracownicze (nie kwota)")}
-                        >
-                          Godz.
-                        </th>
-                        <th
-                          className="px-3 py-2 text-right font-medium"
-                          {...tip("Faktycznie przejechane kilometry (nie kwota)")}
-                        >
-                          KM
-                        </th>
-                        <th className="px-3 py-2 text-right font-medium">
-                          Kwota godz.
-                        </th>
-                        <th className="px-3 py-2 text-right font-medium">
-                          Materiały
-                        </th>
-                        <th className="px-3 py-2 text-right font-medium">
-                          Kwota KM
-                        </th>
-                        <th className="px-3 py-2 text-right font-medium">
-                          Rabat
-                        </th>
-                        <th className="px-3 py-2 text-right font-medium">
-                          Suma netto
-                        </th>
+                        <RealSortHeader label="Data" sortKey="date" />
+                        <RealSortHeader label="Obiekt" sortKey="site" />
+                        <RealSortHeader label="Rodzaj" sortKey="workType" />
+                        <RealSortHeader label="Typ" sortKey="billing" />
+                        <RealSortHeader
+                          label="Godz."
+                          sortKey="actualHours"
+                          align="right"
+                          title="Faktyczne godziny pracownicze (nie kwota)"
+                        />
+                        <RealSortHeader
+                          label="KM"
+                          sortKey="actualKm"
+                          align="right"
+                          title="Faktycznie przejechane kilometry (nie kwota)"
+                        />
+                        <RealSortHeader
+                          label="Kwota godz."
+                          sortKey="amountHours"
+                          align="right"
+                        />
+                        <RealSortHeader
+                          label="Materiały"
+                          sortKey="amountMaterial"
+                          align="right"
+                        />
+                        <RealSortHeader label="Kwota KM" sortKey="amountKm" align="right" />
+                        <RealSortHeader label="Rabat" sortKey="discount" align="right" />
+                        <RealSortHeader label="Suma netto" sortKey="total" align="right" />
                         <th className="px-3 py-2 font-medium">Adnotacja</th>
-                        <th className="px-3 py-2 font-medium">Zafakt.</th>
-                        <th className="px-3 py-2 font-medium">Wykonawca</th>
+                        <RealSortHeader label="Zafakt." sortKey="invoiced" />
+                        {/* Kolumna pokazuje `contractor1 || caretaker` — sortujemy po tym samym. */}
+                        <RealSortHeader label="Wykonawca" sortKey="caretaker" />
                         <th className="px-3 py-2 font-medium">Protokół</th>
                         <th className="px-3 py-2 font-medium">Kalendarz</th>
                         <th className="px-3 py-2"></th>
@@ -1552,6 +2695,38 @@ export function Technical() {
                         </tr>
                       ))}
                     </tbody>
+                    {/* Sumy liczone po TYM, CO WIDAĆ — zawężenie filtrów
+                        natychmiast zmienia „Razem". */}
+                    <tfoot data-testid="realizacje-totals">
+                      <tr className="border-t bg-muted/40 font-medium">
+                        <td className="px-3 py-2" colSpan={4}>
+                          Razem ({visibleRows.length}
+                          {visibleRows.length !== rows.length ? ` z ${rows.length}` : ""})
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums">
+                          {numFmt.format(realTotals.actualHours)} h
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums">
+                          {numFmt.format(realTotals.actualKm)} km
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums">
+                          {money(realTotals.amountHours)}
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums">
+                          {money(realTotals.amountMaterial)}
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums">
+                          {money(realTotals.amountKm)}
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums">
+                          {money(realTotals.discount)}
+                        </td>
+                        <td className="px-3 py-2 text-right font-semibold tabular-nums">
+                          {money(realTotals.total)}
+                        </td>
+                        <td className="px-3 py-2" colSpan={6}></td>
+                      </tr>
+                    </tfoot>
                   </table>
                 </div>
               )}
@@ -1634,6 +2809,112 @@ export function Technical() {
             </p>
           </div>
 
+          {/* Pierwsza linia filtrów: szukajka, status, rodzaj prac, podpis. */}
+          <div className="flex flex-wrap items-center gap-2">
+            <Input
+              placeholder="Szukaj po numerze, obiekcie, zleceniodawcy…"
+              data-testid="protokoly-filter-search"
+              value={protoSearch}
+              onChange={(e) => setProtoSearch(e.target.value)}
+              className="max-w-xs"
+            />
+
+            <Select value={protoStatusFilter} onValueChange={setProtoStatusFilter}>
+              <SelectTrigger className="w-[180px]" data-testid="protokoly-filter-status">
+                <SelectValue placeholder="Status" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Wszystkie statusy</SelectItem>
+                <SelectItem value="draft">Szkic</SelectItem>
+                <SelectItem value="final">Zatwierdzony</SelectItem>
+              </SelectContent>
+            </Select>
+
+            <Select value={protoWorkTypeFilter} onValueChange={setProtoWorkTypeFilter}>
+              <SelectTrigger className="w-[180px]" data-testid="protokoly-filter-worktype">
+                <SelectValue placeholder="Rodzaj prac" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Wszystkie rodzaje</SelectItem>
+                {/* Rodzaj protokołu to podzbiór rodzajów realizacji — etykiety
+                    bierzemy z tego samego słownika, co plakietki w tabeli. */}
+                {(["serwis", "montaz", "wizja", "inne"] as const).map((t) => (
+                  <SelectItem key={t} value={t}>
+                    {REALIZATION_WORK_TYPE_META[t].label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+
+            <Select value={protoSignFilter} onValueChange={setProtoSignFilter}>
+              <SelectTrigger className="w-[190px]" data-testid="protokoly-filter-signature">
+                <SelectValue placeholder="Podpis" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Podpis: wszystkie</SelectItem>
+                <SelectItem value="signed">Tylko podpisane</SelectItem>
+                <SelectItem value="unsigned">Tylko bez podpisu</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          {/* Druga linia: obiekt i wykonawca z danych miesiąca + braki danych zleceniodawcy. */}
+          <div className="flex flex-wrap items-center gap-2">
+            <Select value={protoSiteFilter} onValueChange={setProtoSiteFilter}>
+              <SelectTrigger className="w-[220px]" data-testid="protokoly-filter-site">
+                <SelectValue placeholder="Obiekt" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Wszystkie obiekty</SelectItem>
+                <SelectItem value={NONE}>Bez obiektu</SelectItem>
+                {protocolSites.map((s) => (
+                  <SelectItem key={s} value={s}>
+                    {s}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+
+            <Select value={protoContractorFilter} onValueChange={setProtoContractorFilter}>
+              <SelectTrigger className="w-[200px]" data-testid="protokoly-filter-contractor">
+                <SelectValue placeholder="Wykonawca" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Wszyscy wykonawcy</SelectItem>
+                <SelectItem value={NONE}>Bez wykonawcy</SelectItem>
+                {protocolContractors.map((c) => (
+                  <SelectItem key={c} value={c}>
+                    {c}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+
+            {/* To ten sam warunek, co plakietka „do uzupełnienia" przy numerze. */}
+            <Select value={protoPrefillFilter} onValueChange={setProtoPrefillFilter}>
+              <SelectTrigger className="w-[230px]" data-testid="protokoly-filter-prefill">
+                <SelectValue placeholder="Dane zleceniodawcy" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Dane zleceniodawcy: wszystkie</SelectItem>
+                <SelectItem value="todo">Tylko do uzupełnienia</SelectItem>
+                <SelectItem value="done">Tylko uzupełnione</SelectItem>
+              </SelectContent>
+            </Select>
+
+            {protoFiltersActive && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={clearProtoFilters}
+                data-testid="protokoly-filters-clear"
+              >
+                <X className="h-4 w-4 mr-1" />
+                Wyczyść filtry
+              </Button>
+            )}
+          </div>
+
           {signNote && (
             <div
               className="flex items-start justify-between gap-3 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-800 dark:text-emerald-200"
@@ -1662,23 +2943,39 @@ export function Technical() {
                   Brak protokołów w tym miesiącu — dodaj realizację, a protokół
                   powstanie automatycznie.
                 </div>
+              ) : visibleProtocols.length === 0 ? (
+                <div className="py-10 text-center text-muted-foreground">
+                  Brak protokołów dla wybranych filtrów
+                </div>
               ) : (
                 <div className="overflow-x-auto">
                   <table className="w-full min-w-[820px] text-sm">
                     <thead>
                       <tr className="border-b text-left text-xs uppercase tracking-wide text-muted-foreground">
-                        <th className="px-3 py-2 font-medium">Numer</th>
-                        <th className="px-3 py-2 font-medium">Data</th>
-                        <th className="px-3 py-2 font-medium">Obiekt</th>
-                        <th className="px-3 py-2 font-medium">Typ</th>
-                        <th className="px-3 py-2 font-medium">Wykonawca</th>
-                        <th className="px-3 py-2 font-medium">Podpis</th>
-                        <th className="px-3 py-2 font-medium">Status</th>
+                        <ProtoSortHeader
+                          label="Numer"
+                          sortKey="number"
+                          title="Numer koduje rok i miesiąc, więc malejąco = najnowsze protokoły u góry"
+                        />
+                        <ProtoSortHeader label="Data" sortKey="date" />
+                        <ProtoSortHeader label="Obiekt" sortKey="site" />
+                        <ProtoSortHeader label="Typ" sortKey="workType" />
+                        <ProtoSortHeader
+                          label="Wykonawca"
+                          sortKey="contractor"
+                          title="Protokoły bez wpisanego wykonawcy idą na koniec"
+                        />
+                        <ProtoSortHeader
+                          label="Podpis"
+                          sortKey="signature"
+                          title="Sortowanie po dacie podpisu; protokoły bez podpisu idą na koniec"
+                        />
+                        <ProtoSortHeader label="Status" sortKey="status" />
                         <th className="px-3 py-2"></th>
                       </tr>
                     </thead>
                     <tbody>
-                      {protocols.map((proto) => (
+                      {visibleProtocols.map((proto) => (
                         <tr
                           key={proto.id}
                           data-protocol-id={proto.id}
@@ -1817,6 +3114,113 @@ export function Technical() {
             )}
           </div>
 
+          {/* Pierwsza linia filtrów: szukajka, obiekt z danych, źródło, świeżość. */}
+          <div className="flex flex-wrap items-center gap-2">
+            <Input
+              placeholder="Szukaj po numerze, obiekcie, adresie…"
+              data-testid="wyceny-filter-search"
+              value={quoteSearch}
+              onChange={(e) => setQuoteSearch(e.target.value)}
+              className="max-w-xs"
+            />
+
+            <Select value={quoteSiteFilter} onValueChange={setQuoteSiteFilter}>
+              <SelectTrigger className="w-[220px]" data-testid="wyceny-filter-site">
+                <SelectValue placeholder="Obiekt" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Wszystkie obiekty</SelectItem>
+                <SelectItem value={NONE}>Bez obiektu</SelectItem>
+                {quoteSites.map((s) => (
+                  <SelectItem key={s} value={s}>
+                    {s}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+
+            {/* Wycena z realizacji powstaje automatem po podpisaniu protokołu —
+                warto umieć oddzielić ją od wycen pisanych od zera. */}
+            <Select value={quoteSourceFilter} onValueChange={setQuoteSourceFilter}>
+              <SelectTrigger className="w-[210px]" data-testid="wyceny-filter-source">
+                <SelectValue placeholder="Źródło" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Wszystkie źródła</SelectItem>
+                <SelectItem value="realization">Tylko z realizacji</SelectItem>
+                <SelectItem value="standalone">Tylko wolnostojące</SelectItem>
+              </SelectContent>
+            </Select>
+
+            <Select
+              value={quoteFreshMode}
+              onValueChange={(v) => setQuoteFreshMode(v as FreshMode)}
+            >
+              <SelectTrigger className="w-[200px]" data-testid="wyceny-filter-fresh">
+                <SelectValue placeholder="Zmieniane" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Zmieniane: kiedykolwiek</SelectItem>
+                <SelectItem value="7">Ostatnie 7 dni</SelectItem>
+                <SelectItem value="30">Ostatnie 30 dni</SelectItem>
+                <SelectItem value="90">Ostatnie 90 dni</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          {/* Druga linia: kwota netto — tryb i widełki. */}
+          <div className="flex flex-wrap items-center gap-2">
+            <Select
+              value={quoteValueMode}
+              onValueChange={(v) => setQuoteValueMode(v as ValueMode)}
+            >
+              <SelectTrigger className="w-[220px]" data-testid="wyceny-filter-value-mode">
+                <SelectValue placeholder="Kwota" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Kwota: wszystkie</SelectItem>
+                <SelectItem value="with">Tylko wycenione</SelectItem>
+                <SelectItem value="without">Tylko puste (0 zł)</SelectItem>
+              </SelectContent>
+            </Select>
+            <div className="flex items-center gap-1 text-sm text-muted-foreground">
+              <span>Kwota od</span>
+              <Input
+                type="number"
+                min="0"
+                step="50"
+                inputMode="decimal"
+                className="w-28 tabular-nums"
+                data-testid="wyceny-filter-min"
+                value={quoteMinInput}
+                onChange={(e) => setQuoteMinInput(e.target.value)}
+              />
+              <span>do</span>
+              <Input
+                type="number"
+                min="0"
+                step="50"
+                inputMode="decimal"
+                className="w-28 tabular-nums"
+                data-testid="wyceny-filter-max"
+                value={quoteMaxInput}
+                onChange={(e) => setQuoteMaxInput(e.target.value)}
+              />
+              <span>zł netto</span>
+            </div>
+            {quoteFiltersActive && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={clearQuoteFilters}
+                data-testid="wyceny-filters-clear"
+              >
+                <X className="h-4 w-4 mr-1" />
+                Wyczyść filtry
+              </Button>
+            )}
+          </div>
+
           <Card>
             <CardContent className="p-0">
               {quotesLoading ? (
@@ -1827,23 +3231,37 @@ export function Technical() {
                 <div className="py-10 text-center text-muted-foreground">
                   Brak wycen. Kliknij „Nowa wycena".
                 </div>
+              ) : visibleQuotes.length === 0 ? (
+                <div className="py-10 text-center text-muted-foreground">
+                  Brak wycen dla wybranych filtrów
+                </div>
               ) : (
                 <div className="overflow-x-auto">
                   <table className="w-full min-w-[680px] text-sm">
                     <thead>
                       <tr className="border-b text-left text-xs uppercase tracking-wide text-muted-foreground">
-                        <th className="px-3 py-2 font-medium">Numer</th>
-                        <th className="px-3 py-2 font-medium">Data</th>
-                        <th className="px-3 py-2 font-medium">Obiekt</th>
-                        <th className="px-3 py-2 font-medium">Adres</th>
-                        <th className="px-3 py-2 text-right font-medium">
-                          Razem (netto)
-                        </th>
+                        <QuoteSortHeader
+                          label="Numer"
+                          sortKey="number"
+                          title="Numer koduje rok i miesiąc, więc malejąco = najnowsze wyceny u góry"
+                        />
+                        <QuoteSortHeader label="Data" sortKey="date" />
+                        <QuoteSortHeader label="Obiekt" sortKey="site" />
+                        <QuoteSortHeader
+                          label="Adres"
+                          sortKey="address"
+                          title="Wyceny bez adresu idą na koniec"
+                        />
+                        <QuoteSortHeader
+                          label="Razem (netto)"
+                          sortKey="total"
+                          align="right"
+                        />
                         <th className="px-3 py-2"></th>
                       </tr>
                     </thead>
                     <tbody>
-                      {quotes.map((quote) => (
+                      {visibleQuotes.map((quote) => (
                         <tr
                           key={quote.id}
                           data-quote-id={quote.id}
@@ -1929,6 +3347,69 @@ export function Technical() {
               <Button onClick={() => setTechFormOpen(true)}>
                 <Plus className="h-4 w-4 mr-2" />
                 Dodaj technika
+              </Button>
+            )}
+          </div>
+
+          {/* Filtry kartoteki: szukajka, rodzaj, cennik i powiązanie z kadrami. */}
+          <div className="flex flex-wrap items-center gap-2">
+            <Input
+              placeholder="Szukaj po nazwisku, firmie, telefonie…"
+              data-testid="technicy-filter-search"
+              value={techSearch}
+              onChange={(e) => setTechSearch(e.target.value)}
+              className="max-w-xs"
+            />
+
+            <Select value={techTypeFilter} onValueChange={setTechTypeFilter}>
+              <SelectTrigger className="w-[190px]" data-testid="technicy-filter-type">
+                <SelectValue placeholder="Typ" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Wszystkie typy</SelectItem>
+                <SelectItem value="internal">Wewnętrzni</SelectItem>
+                <SelectItem value="external">Zewnętrzni</SelectItem>
+              </SelectContent>
+            </Select>
+
+            {/* „Główny" to brak własnego cennika — tak samo pokazuje to tabela. */}
+            <Select value={techPriceListFilter} onValueChange={setTechPriceListFilter}>
+              <SelectTrigger className="w-[200px]" data-testid="technicy-filter-pricelist">
+                <SelectValue placeholder="Cennik" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Wszystkie cenniki</SelectItem>
+                <SelectItem value="main">Cennik główny</SelectItem>
+                {priceLists
+                  .filter((l) => !l.isDefault)
+                  .map((l) => (
+                    <SelectItem key={l.id} value={String(l.id)}>
+                      {l.name}
+                    </SelectItem>
+                  ))}
+              </SelectContent>
+            </Select>
+
+            <Select value={techHrFilter} onValueChange={setTechHrFilter}>
+              <SelectTrigger className="w-[210px]" data-testid="technicy-filter-hr">
+                <SelectValue placeholder="Kadry" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Kadry: wszyscy</SelectItem>
+                <SelectItem value="linked">Tylko na liście płac</SelectItem>
+                <SelectItem value="unlinked">Tylko spoza kadr</SelectItem>
+              </SelectContent>
+            </Select>
+
+            {techFiltersActive && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={clearTechFilters}
+                data-testid="technicy-filters-clear"
+              >
+                <X className="h-4 w-4 mr-1" />
+                Wyczyść filtry
               </Button>
             )}
           </div>
@@ -2084,11 +3565,11 @@ export function Technical() {
           <AlertDialogHeader>
             <AlertDialogTitle>Utworzyć brakujące protokoły?</AlertDialogTitle>
             <AlertDialogDescription>
-              W tym miesiącu {missingProtocolCount === 1 ? "jest" : "są"}{" "}
-              <strong>{missingProtocolCount}</strong>{" "}
-              {missingProtocolCount === 1
+              W tym miesiącu {monthMissingProtocolCount === 1 ? "jest" : "są"}{" "}
+              <strong>{monthMissingProtocolCount}</strong>{" "}
+              {monthMissingProtocolCount === 1
                 ? "realizacja bez protokołu"
-                : missingProtocolCount < 5
+                : monthMissingProtocolCount < 5
                   ? "realizacje bez protokołu"
                   : "realizacji bez protokołu"}
               . Operacja utworzy protokoły (szkice) dla{" "}

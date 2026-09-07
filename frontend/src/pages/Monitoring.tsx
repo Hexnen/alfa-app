@@ -1,9 +1,16 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useMemo, useState, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   Dialog,
   DialogContent,
@@ -11,7 +18,20 @@ import {
   DialogTitle,
   DialogFooter,
 } from "@/components/ui/dialog";
-import { Plus, Pencil, Trash2, ExternalLink, Cctv, FileText, Receipt } from "lucide-react";
+import {
+  ArrowDown,
+  ArrowUp,
+  Cctv,
+  ChevronsUpDown,
+  ExternalLink,
+  FileText,
+  Pencil,
+  Plus,
+  Receipt,
+  Search,
+  Trash2,
+  X,
+} from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { MonitoringOfferDialog } from "@/components/MonitoringOfferDialog";
 import { usePerms } from "@/auth/permissions";
@@ -25,16 +45,65 @@ import {
   type MonitoringProject,
   type OfferPackage,
 } from "@/lib/api";
+import { cn } from "@/lib/utils";
 
 // Designer to samodzielna strona (frontend/public/monitoring/designer.html) —
 // mapa satelitarna z kamerami, otwierana w nowej karcie z ?id= projektu.
 const designerUrl = (id: number) => `/monitoring/designer.html?id=${id}`;
+
+/** Kolumny, po których da się sortować listę projektów monitoringu. */
+type ProjectSortKey = "id" | "name" | "address" | "cameras" | "created" | "updated";
+
+/**
+ * Domyślny kierunek sortowania kolumny — liczniki i daty ludzie czytają od
+ * największej wartości (najnowsze/najliczniejsze u góry), teksty alfabetycznie
+ * (jak w kartotece obiektów).
+ */
+const DEFAULT_DIR: Record<ProjectSortKey, "asc" | "desc"> = {
+  id: "desc",
+  name: "asc",
+  address: "asc",
+  cameras: "desc",
+  created: "desc",
+  updated: "desc",
+};
+
+/** Filtr planu kamer: wszystkie / tylko z rozmieszczeniem / tylko puste. */
+type CamerasMode = "all" | "with" | "without";
+
+/** Filtr świeżości zmiany — wartość to liczba dni wstecz albo „all”. */
+type FreshMode = "all" | "7" | "30" | "90";
+
+/** Liczba z pola tekstowego — przecinek jak kropka, śmieci traktujemy jak brak filtra. */
+function parseAmount(raw: string): number | undefined {
+  const n = parseFloat(raw.replace(",", "."));
+  return Number.isFinite(n) ? n : undefined;
+}
+
+/** Data z bazy na liczbę do porównań; brak lub śmieć = wartość pusta (NULLS LAST). */
+function parseDate(raw: string | null | undefined): number | null {
+  if (!raw) return null;
+  const t = Date.parse(raw);
+  return Number.isFinite(t) ? t : null;
+}
 
 export function Monitoring() {
   const { canEdit } = usePerms();
   const editable = canEdit("technical/projekty");
   const [projects, setProjects] = useState<MonitoringProject[]>([]);
   const [loading, setLoading] = useState(true);
+  // Filtry i sortowanie liczymy po stronie klienta — `getMonitoringProjects()`
+  // i tak zwraca całą listę (backend nie stronicuje), więc nie ma po co
+  // dokładać parametrów do API. Z tego samego powodu widełki liczby kamer idą
+  // bez debounce'u: nie ma żądania do odciążenia, a lista przelicza się w tym
+  // samym renderze co wpisana cyfra.
+  const [search, setSearch] = useState("");
+  const [camerasMode, setCamerasMode] = useState<CamerasMode>("all");
+  const [minInput, setMinInput] = useState("");
+  const [maxInput, setMaxInput] = useState("");
+  const [freshMode, setFreshMode] = useState<FreshMode>("all");
+  const [sort, setSort] = useState<ProjectSortKey>("updated");
+  const [dir, setDir] = useState<"asc" | "desc">("desc");
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<MonitoringProject | null>(null);
   const [name, setName] = useState("");
@@ -117,6 +186,144 @@ export function Monitoring() {
     load();
   }, [load]);
 
+  /** Adres pokazywany w tabeli: pinezka z designera ma pierwszeństwo nad wpisem ręcznym. */
+  const addressOf = (p: MonitoringProject) => p.pinAddress || p.address || "";
+
+  /** Jeden przebieg: filtry + sortowanie. */
+  const visible = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const min = parseAmount(minInput);
+    const max = parseAmount(maxInput);
+    // Granica świeżości liczona raz na przebieg — „ostatnie 30 dni” od teraz.
+    const freshAfter =
+      freshMode === "all" ? null : Date.now() - parseInt(freshMode, 10) * 24 * 3600_000;
+
+    const list = projects.filter((p) => {
+      if (
+        q &&
+        ![p.name, p.address, p.pinAddress, p.notes].some((v) =>
+          (v ?? "").toLowerCase().includes(q)
+        )
+      ) {
+        return false;
+      }
+      // Projekt bez ani jednej kamery = założona teczka, w której nikt jeszcze
+      // nie rozstawił planu — filtr „puste” służy właśnie do ich wyłapania.
+      const cams = p.cameras ?? 0;
+      if (camerasMode === "with" && cams <= 0) return false;
+      if (camerasMode === "without" && cams > 0) return false;
+      if (min !== undefined && cams < min) return false;
+      if (max !== undefined && cams > max) return false;
+      if (freshAfter !== null) {
+        const changed = parseDate(p.updatedAt) ?? parseDate(p.createdAt);
+        if (changed === null || changed < freshAfter) return false;
+      }
+      return true;
+    });
+
+    const mul = dir === "asc" ? 1 : -1;
+    const text = (p: MonitoringProject) => (sort === "name" ? p.name : addressOf(p));
+    /** Liczba do sortowania; `null` = w tabeli jest kreska, czyli wartość pusta. */
+    const number = (p: MonitoringProject): number | null => {
+      switch (sort) {
+        case "id":
+          return p.id;
+        case "cameras":
+          return p.cameras ?? 0;
+        case "created":
+          return parseDate(p.createdAt);
+        default:
+          return parseDate(p.updatedAt);
+      }
+    };
+
+    const numeric = sort === "id" || sort === "cameras" || sort === "created" || sort === "updated";
+
+    // Puste adresy i brak daty lądują na końcu w OBU kierunkach (jak NULLS LAST
+    // w sortowaniu obiektów) — inaczej „sortuj po adresie” zaczynałoby się od
+    // projektów bez pinezki. Remis rozstrzyga nazwa, żeby kolejność była stabilna.
+    const compare = (a: MonitoringProject, b: MonitoringProject): number => {
+      if (numeric) {
+        const av = number(a);
+        const bv = number(b);
+        if (av === null || bv === null) {
+          if (av === null && bv === null) return 0;
+          return av !== null ? -1 : 1;
+        }
+        return (av - bv) * mul;
+      }
+      const as = text(a).trim();
+      const bs = text(b).trim();
+      if (!as || !bs) {
+        if (!as && !bs) return 0;
+        return as ? -1 : 1;
+      }
+      return as.localeCompare(bs, "pl") * mul;
+    };
+
+    return list.sort((a, b) => compare(a, b) || a.name.localeCompare(b.name, "pl"));
+  }, [projects, search, camerasMode, minInput, maxInput, freshMode, sort, dir]);
+
+  /** Klik w nagłówek: ta sama kolumna odwraca kierunek, nowa startuje od swojego domyślnego. */
+  const toggleSort = (key: ProjectSortKey) => {
+    if (sort === key) {
+      setDir((d) => (d === "asc" ? "desc" : "asc"));
+      return;
+    }
+    setSort(key);
+    setDir(DEFAULT_DIR[key]);
+  };
+
+  const filtersActive =
+    search !== "" ||
+    camerasMode !== "all" ||
+    minInput !== "" ||
+    maxInput !== "" ||
+    freshMode !== "all";
+
+  const clearFilters = () => {
+    setSearch("");
+    setCamerasMode("all");
+    setMinInput("");
+    setMaxInput("");
+    setFreshMode("all");
+  };
+
+  /** Nagłówek klikalny — strzałka pokazuje kolumnę i kierunek sortowania. */
+  const SortHeader = ({
+    label,
+    sortKey,
+    align = "left",
+    title,
+  }: {
+    label: string;
+    sortKey: ProjectSortKey;
+    align?: "left" | "right";
+    title?: string;
+  }) => {
+    const activeCol = sort === sortKey;
+    const Icon = !activeCol ? ChevronsUpDown : dir === "asc" ? ArrowUp : ArrowDown;
+    return (
+      <th className={cn("py-3 px-2 font-medium", align === "right" ? "text-right" : "text-left")}>
+        <button
+          type="button"
+          data-testid={`projekty-sort-${sortKey}`}
+          onClick={() => toggleSort(sortKey)}
+          aria-label={`Sortuj po: ${label}`}
+          title={title}
+          className={cn(
+            "inline-flex items-center gap-1 rounded px-1 -mx-1 transition-colors hover:text-foreground",
+            align === "right" && "flex-row-reverse",
+            activeCol ? "text-foreground" : "text-muted-foreground"
+          )}
+        >
+          {label}
+          <Icon className={cn("h-3.5 w-3.5", !activeCol && "opacity-40")} />
+        </button>
+      </th>
+    );
+  };
+
   const openForm = (project: MonitoringProject | null) => {
     setEditing(project);
     setName(project?.name ?? "");
@@ -165,44 +372,118 @@ export function Monitoring() {
     <div className="space-y-3">
       {!editable && <ReadOnlyBanner className="mb-4" />}
 
-      <Card>
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="relative flex-1 min-w-[200px] max-w-sm">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+          <Input
+            placeholder="Szukaj projektu, adresu, notatki..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="pl-10"
+          />
+        </div>
+
+        {/* Świeżość liczymy z ostatniej zmiany, a gdy projektu nikt nie ruszał —
+            z daty utworzenia, bo to wtedy ta sama chwila. */}
+        <Select value={freshMode} onValueChange={(v) => setFreshMode(v as FreshMode)}>
+          <SelectTrigger className="w-[200px]" data-testid="projekty-filter-updated">
+            <SelectValue placeholder="Ostatnia zmiana" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">Zmiana: kiedykolwiek</SelectItem>
+            <SelectItem value="7">Ostatnie 7 dni</SelectItem>
+            <SelectItem value="30">Ostatnie 30 dni</SelectItem>
+            <SelectItem value="90">Ostatnie 90 dni</SelectItem>
+          </SelectContent>
+        </Select>
+
         {editable && (
-          <CardHeader className="flex flex-row items-center justify-end p-3">
-            <Button onClick={() => openForm(null)}>
-              <Plus className="h-4 w-4 mr-2" />
-              Nowy projekt
-            </Button>
-          </CardHeader>
+          <Button className="ml-auto" onClick={() => openForm(null)}>
+            <Plus className="h-4 w-4 mr-2" />
+            Nowy projekt
+          </Button>
         )}
-        <CardContent className={editable ? "p-2 pt-0" : "p-2"}>
+      </div>
+
+      {/* Druga linia filtrów: plan kamer — tryb i widełki liczby. */}
+      <div className="flex flex-wrap items-center gap-2">
+        <Select value={camerasMode} onValueChange={(v) => setCamerasMode(v as CamerasMode)}>
+          <SelectTrigger className="w-[220px]" data-testid="projekty-filter-cameras-mode">
+            <SelectValue placeholder="Kamery" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">Kamery: wszystkie</SelectItem>
+            <SelectItem value="with">Tylko z rozmieszczeniem</SelectItem>
+            <SelectItem value="without">Tylko bez kamer</SelectItem>
+          </SelectContent>
+        </Select>
+        <div className="flex items-center gap-1 text-sm text-muted-foreground">
+          <span>Kamer od</span>
+          <Input
+            type="number"
+            min="0"
+            step="1"
+            inputMode="numeric"
+            className="w-24 tabular-nums"
+            data-testid="projekty-filter-min"
+            value={minInput}
+            onChange={(e) => setMinInput(e.target.value)}
+          />
+          <span>do</span>
+          <Input
+            type="number"
+            min="0"
+            step="1"
+            inputMode="numeric"
+            className="w-24 tabular-nums"
+            data-testid="projekty-filter-max"
+            value={maxInput}
+            onChange={(e) => setMaxInput(e.target.value)}
+          />
+        </div>
+        {filtersActive && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={clearFilters}
+            data-testid="projekty-filters-clear"
+          >
+            <X className="h-4 w-4 mr-1" />
+            Wyczyść filtry
+          </Button>
+        )}
+      </div>
+
+      <Card>
+        <CardContent className="p-2">
           {loading ? (
             <div className="text-center py-8">Ładowanie...</div>
-          ) : projects.length === 0 ? (
+          ) : visible.length === 0 ? (
             <div className="text-center py-8 text-muted-foreground">
-              Brak projektów. Utwórz pierwszy projekt monitoringu.
+              {filtersActive
+                ? "Brak projektów dla wybranych filtrów"
+                : "Brak projektów. Utwórz pierwszy projekt monitoringu."}
             </div>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full">
                 <thead>
                   <tr className="border-b">
-                    <th className="text-right py-3 px-2 font-medium">
-                      Nr oferty
-                    </th>
-                    <th className="text-left py-3 px-2 font-medium">Nazwa</th>
-                    <th className="text-left py-3 px-2 font-medium">Adres</th>
-                    <th className="text-right py-3 px-2 font-medium">Kamery</th>
-                    <th className="text-left py-3 px-2 font-medium">
-                      Data utworzenia
-                    </th>
-                    <th className="text-left py-3 px-2 font-medium">
-                      Ostatnia zmiana
-                    </th>
+                    <SortHeader label="Nr oferty" sortKey="id" align="right" />
+                    <SortHeader label="Nazwa" sortKey="name" />
+                    <SortHeader
+                      label="Adres"
+                      sortKey="address"
+                      title="Adres z pinezki w designerze, a bez niej wpisany ręcznie; projekty bez adresu idą na koniec"
+                    />
+                    <SortHeader label="Kamery" sortKey="cameras" align="right" />
+                    <SortHeader label="Data utworzenia" sortKey="created" />
+                    <SortHeader label="Ostatnia zmiana" sortKey="updated" />
                     <th className="text-right py-3 px-2 font-medium">Akcje</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {projects.map((p) => (
+                  {visible.map((p) => (
                     <tr key={p.id} className="border-b hover:bg-muted/50">
                       <td className="py-3 px-2 text-right tabular-nums font-medium">
                         #{p.id}
@@ -218,9 +499,7 @@ export function Monitoring() {
                           {p.name}
                         </a>
                       </td>
-                      <td className="py-3 px-2">
-                        {p.pinAddress || p.address || "-"}
-                      </td>
+                      <td className="py-3 px-2">{addressOf(p) || "-"}</td>
                       <td className="py-3 px-2 text-right tabular-nums">
                         {p.cameras}
                       </td>

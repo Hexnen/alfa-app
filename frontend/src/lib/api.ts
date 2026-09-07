@@ -75,6 +75,17 @@ export async function getStats() {
 }
 
 // Contractors
+/** Klucze sortowania listy kontrahentów — te same, co SORT_COLUMNS w src/routes/contractors.ts. */
+export type ContractorSortKey =
+  | "name"
+  | "city"
+  | "salesperson"
+  | "objects"
+  | "value"
+  | "cost"
+  | "profit"
+  | "created";
+
 export async function getContractors(params?: {
   search?: string;
   /** Zakładka: "1" = aktualni, "0" = archiwalni, brak = wszyscy. */
@@ -83,6 +94,15 @@ export async function getContractors(params?: {
   salespersonId?: number | "none";
   /** Id spółki albo "none" = kontrahenci bez spółki. */
   companyId?: number | "none";
+  /** Widełki SUMY abonamentów portfela (kontrahent bez żadnej kwoty nigdy w nie nie wpada). */
+  minValue?: number;
+  maxValue?: number;
+  /** "1" = tylko z abonamentem, "0" = tylko bez. */
+  hasValue?: "1" | "0";
+  /** "1" = ma choć jeden obiekt z uzupełnionym kosztem, "0" = nie ma żadnego. */
+  hasCost?: "1" | "0";
+  sort?: ContractorSortKey;
+  dir?: "asc" | "desc";
   page?: number;
   pageSize?: number;
 }) {
@@ -91,11 +111,33 @@ export async function getContractors(params?: {
   if (params?.active) searchParams.set("active", params.active);
   if (params?.salespersonId !== undefined) searchParams.set("salespersonId", String(params.salespersonId));
   if (params?.companyId !== undefined) searchParams.set("companyId", String(params.companyId));
+  if (params?.minValue !== undefined) searchParams.set("minValue", String(params.minValue));
+  if (params?.maxValue !== undefined) searchParams.set("maxValue", String(params.maxValue));
+  if (params?.hasValue) searchParams.set("hasValue", params.hasValue);
+  if (params?.hasCost) searchParams.set("hasCost", params.hasCost);
+  if (params?.sort) searchParams.set("sort", params.sort);
+  if (params?.dir) searchParams.set("dir", params.dir);
   if (params?.page) searchParams.set("page", String(params.page));
   if (params?.pageSize) searchParams.set("pageSize", String(params.pageSize));
 
   const query = searchParams.toString();
   return request<ContractorsResponse>(`/contractors${query ? `?${query}` : ""}`);
+}
+
+/** Pozycja listy wyboru kontrahenta — tyle, ile potrzebuje select (GET /contractors/catalog). */
+export interface ContractorCatalogEntry {
+  id: number;
+  name: string;
+  nip: string;
+  active: boolean;
+}
+
+/**
+ * Komplet kontrahentów do list rozwijanych — bez paginacji i bez agregatów.
+ * Listy filtrów muszą pokazywać całą kartotekę, a nie pierwszą stronę.
+ */
+export async function getContractorCatalog() {
+  return request<ApiResponse<ContractorCatalogEntry[]>>("/contractors/catalog");
 }
 
 export async function getContractor(id: number) {
@@ -244,10 +286,46 @@ export async function deleteObject(id: number) {
 }
 
 // Contracts
+/** Klucze sortowania listy umów — te same, co SORT_COLUMNS w src/routes/contracts.ts. */
+export type ContractSortKey =
+  | "number"
+  | "object"
+  | "contractor"
+  | "start"
+  | "end"
+  | "value"
+  | "status"
+  | "created";
+
+/** Lista umów + podsumowanie CAŁEGO wyniku filtrowania (nie tylko strony). */
+export interface ContractsResponse extends PaginatedResponse<ContractWithDetails> {
+  sort: ContractSortKey;
+  dir: "asc" | "desc";
+  /** Suma wartości umów spełniających filtry (puste liczone jak 0 — patrz withValue). */
+  totalValue: number;
+  /** Ile z nich ma UZUPEŁNIONĄ wartość. Puste ≠ 0 zł, więc bez tej liczby suma kłamie. */
+  withValue: number;
+}
+
 export async function getContracts(params?: {
   search?: string;
   status?: string;
   objectId?: number;
+  /** Kontrahent umowy = kontrahent jej obiektu (umowa nie ma własnego pola). */
+  contractorId?: number;
+  /** Widełki wartości umowy (umowa bez kwoty nigdy w nie nie wpada). */
+  minValue?: number;
+  maxValue?: number;
+  /** "1" = tylko z wpisaną wartością, "0" = tylko bez. */
+  hasValue?: "1" | "0";
+  /**
+   * Zakres obowiązywania: umowy, których okres ZACHODZI na przedział `activeFrom`–`activeTo`
+   * („YYYY-MM-DD"). Umowa bez daty końca trwa do odwołania, więc zawsze łapie koniec zakresu.
+   */
+  activeFrom?: string;
+  activeTo?: string;
+  sort?: ContractSortKey;
+  dir?: "asc" | "desc";
   page?: number;
   pageSize?: number;
 }) {
@@ -255,13 +333,19 @@ export async function getContracts(params?: {
   if (params?.search) searchParams.set("search", params.search);
   if (params?.status) searchParams.set("status", params.status);
   if (params?.objectId) searchParams.set("objectId", String(params.objectId));
+  if (params?.contractorId) searchParams.set("contractorId", String(params.contractorId));
+  if (params?.minValue !== undefined) searchParams.set("minValue", String(params.minValue));
+  if (params?.maxValue !== undefined) searchParams.set("maxValue", String(params.maxValue));
+  if (params?.hasValue) searchParams.set("hasValue", params.hasValue);
+  if (params?.activeFrom) searchParams.set("activeFrom", params.activeFrom);
+  if (params?.activeTo) searchParams.set("activeTo", params.activeTo);
+  if (params?.sort) searchParams.set("sort", params.sort);
+  if (params?.dir) searchParams.set("dir", params.dir);
   if (params?.page) searchParams.set("page", String(params.page));
   if (params?.pageSize) searchParams.set("pageSize", String(params.pageSize));
 
   const query = searchParams.toString();
-  return request<PaginatedResponse<ContractWithDetails>>(
-    `/contracts${query ? `?${query}` : ""}`
-  );
+  return request<ContractsResponse>(`/contracts${query ? `?${query}` : ""}`);
 }
 
 export async function getContract(id: number) {
@@ -345,6 +429,8 @@ export interface Contractor {
 
 /** Lista kontrahentów + podsumowanie całego wyniku filtrowania. */
 export interface ContractorsResponse extends PaginatedResponse<Contractor> {
+  sort: ContractorSortKey;
+  dir: "asc" | "desc";
   totalObjects: number;
   totalMonthlyValue: number;
   totalMonthlyCost: number;
@@ -659,22 +745,61 @@ export async function getContractorObjects(contractorId: number) {
   return request<ApiResponse<Array<ObjectRecord & { latestAction: ObjectHistoryRecord | null }>>>(`/contractors/${contractorId}/objects`);
 }
 
+/** Klucze sortowania listy zleceń — te same, co SORT_COLUMNS w src/routes/orders.ts. */
+export type OrderSortKey =
+  | "number"
+  | "status"
+  | "requester"
+  | "object"
+  | "payer"
+  | "created";
+
+/** Lista zleceń + rozkład statusów CAŁEGO wyniku filtrowania (nie tylko strony). */
+export interface OrdersResponse extends PaginatedResponse<Order> {
+  sort: OrderSortKey;
+  dir: "asc" | "desc";
+  /** Liczba zleceń przy filtrach BEZ statusu — suma czterech liczników niżej. */
+  statusTotal: number;
+  /** Rozkład statusów przy tych samych filtrach (bez samego filtra statusu). */
+  statusCounts: {
+    new: number;
+    in_progress: number;
+    completed: number;
+    cancelled: number;
+  };
+}
+
 export async function getOrders(params?: {
   search?: string;
   status?: string;
+  /** Id płatnika z kartoteki albo "none" = zlecenia od klienta spoza bazy. */
+  payerContractorId?: number | "none";
+  /** "1" = tylko montaże kamer, "0" = tylko pozostałe. */
+  camera?: "1" | "0";
+  /** Zakres daty przyjęcia zlecenia („YYYY-MM-DD"). */
+  createdFrom?: string;
+  createdTo?: string;
+  sort?: OrderSortKey;
+  dir?: "asc" | "desc";
   page?: number;
   pageSize?: number;
 }) {
   const searchParams = new URLSearchParams();
   if (params?.search) searchParams.set("search", params.search);
   if (params?.status) searchParams.set("status", params.status);
+  if (params?.payerContractorId !== undefined) {
+    searchParams.set("payerContractorId", String(params.payerContractorId));
+  }
+  if (params?.camera) searchParams.set("camera", params.camera);
+  if (params?.createdFrom) searchParams.set("createdFrom", params.createdFrom);
+  if (params?.createdTo) searchParams.set("createdTo", params.createdTo);
+  if (params?.sort) searchParams.set("sort", params.sort);
+  if (params?.dir) searchParams.set("dir", params.dir);
   if (params?.page) searchParams.set("page", String(params.page));
   if (params?.pageSize) searchParams.set("pageSize", String(params.pageSize));
 
   const query = searchParams.toString();
-  return request<PaginatedResponse<Order>>(
-    `/orders${query ? `?${query}` : ""}`
-  );
+  return request<OrdersResponse>(`/orders${query ? `?${query}` : ""}`);
 }
 
 export async function getOrder(id: number) {
@@ -833,14 +958,62 @@ export interface CmaCameraIssues {
   issues: CmaCameraIssueObject[];
 }
 
+/** Klucze sortowania listy raportów CMA — te same, co REPORT_SORT_COLUMNS w src/routes/cma.ts. */
+export type CmaReportSortKey =
+  | "title"
+  | "fileName"
+  | "dateFrom"
+  | "dateTo"
+  | "entryCount"
+  | "importedAt";
+
+/** Klucze sortowania listy zdarzeń raportu — te same, co ENTRY_SORT_COLUMNS w src/routes/cma.ts. */
+export type CmaEntrySortKey =
+  | "generatedAt"
+  | "objectName"
+  | "patrolName"
+  | "endType"
+  | "userName"
+  | "videoChannel"
+  | "startedAt"
+  | "endedAt";
+
+/** Odpowiedź listy zdarzeń: poza stroną wyników niesie użyte sortowanie i opcje selecta kanałów. */
+export interface CmaReportEntriesResponse
+  extends PaginatedResponse<CmaReportEntry> {
+  sort: CmaEntrySortKey;
+  dir: "asc" | "desc";
+  /** Kanały wideo pasujące do pozostałych filtrów (bez filtra kanału) — opcje selecta. */
+  channels: string[];
+}
+
 export const cmaApi = {
   async getReports(params?: {
+    /** Szukajka po tytule raportu i nazwie pliku. */
     search?: string;
+    /** Zakres dat raportu („YYYY-MM-DD"): raport ZACHODZI na podany przedział. */
+    dateFrom?: string;
+    dateTo?: string;
+    /** Widełki liczby zdarzeń w raporcie. */
+    minEntries?: number;
+    maxEntries?: number;
+    sort?: CmaReportSortKey;
+    dir?: "asc" | "desc";
     page?: number;
     pageSize?: number;
   }) {
     const searchParams = new URLSearchParams();
     if (params?.search) searchParams.set("search", params.search);
+    if (params?.dateFrom) searchParams.set("dateFrom", params.dateFrom);
+    if (params?.dateTo) searchParams.set("dateTo", params.dateTo);
+    if (params?.minEntries !== undefined) {
+      searchParams.set("minEntries", String(params.minEntries));
+    }
+    if (params?.maxEntries !== undefined) {
+      searchParams.set("maxEntries", String(params.maxEntries));
+    }
+    if (params?.sort) searchParams.set("sort", params.sort);
+    if (params?.dir) searchParams.set("dir", params.dir);
     if (params?.page) searchParams.set("page", String(params.page));
     if (params?.pageSize) searchParams.set("pageSize", String(params.pageSize));
 
@@ -859,9 +1032,18 @@ export const cmaApi = {
   async getReportEntries(
     id: number,
     params?: {
+      /** Szukajka po obiekcie, adresie, obchodzie, opisie, kanale i operatorze. */
       search?: string;
       objectName?: string;
+      /** Rodzaj zakończenia; "__none__" = zdarzenia bez rodzaju (zamknięte automatycznie). */
       endType?: string;
+      /** Operator, który zamknął zdarzenie; "__none__" = zdarzenia bez operatora. */
+      userName?: string;
+      videoChannel?: string;
+      /** "operator" = zamknięte przez operatora, "auto" = bez operatora. */
+      handled?: "operator" | "auto";
+      sort?: CmaEntrySortKey;
+      dir?: "asc" | "desc";
       page?: number;
       pageSize?: number;
     }
@@ -870,11 +1052,18 @@ export const cmaApi = {
     if (params?.search) searchParams.set("search", params.search);
     if (params?.objectName) searchParams.set("objectName", params.objectName);
     if (params?.endType) searchParams.set("endType", params.endType);
+    if (params?.userName) searchParams.set("userName", params.userName);
+    if (params?.videoChannel) {
+      searchParams.set("videoChannel", params.videoChannel);
+    }
+    if (params?.handled) searchParams.set("handled", params.handled);
+    if (params?.sort) searchParams.set("sort", params.sort);
+    if (params?.dir) searchParams.set("dir", params.dir);
     if (params?.page) searchParams.set("page", String(params.page));
     if (params?.pageSize) searchParams.set("pageSize", String(params.pageSize));
 
     const query = searchParams.toString();
-    return request<PaginatedResponse<CmaReportEntry>>(
+    return request<CmaReportEntriesResponse>(
       `/cma/reports/${id}/entries${query ? `?${query}` : ""}`
     );
   },
@@ -1049,6 +1238,9 @@ export interface CmaMailLogEntry {
   createdAt: string;
 }
 
+/** Klucze sortowania historii poczty — te same, co LOG_SORT_COLUMNS w src/routes/cma-mail.ts. */
+export type CmaMailLogSortKey = "createdAt" | "status" | "direction" | "subject";
+
 export const cmaMailApi = {
   async getSettings() {
     return request<ApiResponse<CmaMailSettings>>("/cma/mail/settings");
@@ -1082,8 +1274,22 @@ export const cmaMailApi = {
     );
   },
 
-  async getLog(params?: { page?: number; pageSize?: number }) {
+  async getLog(params?: {
+    /** Szukajka po temacie wiadomości i nazwie pliku. */
+    search?: string;
+    status?: CmaMailLogEntry["status"];
+    direction?: CmaMailLogEntry["direction"];
+    sort?: CmaMailLogSortKey;
+    dir?: "asc" | "desc";
+    page?: number;
+    pageSize?: number;
+  }) {
     const searchParams = new URLSearchParams();
+    if (params?.search) searchParams.set("search", params.search);
+    if (params?.status) searchParams.set("status", params.status);
+    if (params?.direction) searchParams.set("direction", params.direction);
+    if (params?.sort) searchParams.set("sort", params.sort);
+    if (params?.dir) searchParams.set("dir", params.dir);
     if (params?.page) searchParams.set("page", String(params.page));
     if (params?.pageSize) searchParams.set("pageSize", String(params.pageSize));
 
@@ -3745,6 +3951,8 @@ export interface HrSummary {
   wyplaty: number;
   missingMain: number;
   pendingBonus: number;
+  /** Wiersze z którymkolwiek brakiem — umowa z oboma liczona raz. */
+  gaps: number;
   officeTotal: number;
   officeCount: number;
 }
@@ -6094,6 +6302,23 @@ export const isMissingEndpoint = (e: unknown): boolean => errStatus(e) === 404;
 export type AnalyticsScope = "current" | "active" | "all";
 
 /**
+ * Linia usługowa, po której zawężona jest CAŁA analityka (filtr działa przed
+ * agregacją, więc kontrahenci i handlowcy też liczą się z zawężonego zbioru):
+ *   zdv = zdalny dozór wizyjny (kamery / SSWiN / wideorecepcja),
+ *   ofi = ochrona fizyczna,
+ *   all = obie linie razem (domyślnie).
+ *
+ * PRZEKRÓJ NIE JEST ROZŁĄCZNY: obiekt z OFI i kamerami wchodzi do OBU w całości,
+ * więc „zdv" plus „ofi" daje WIĘCEJ niż „all". Nie ma co tych sum zestawiać.
+ *
+ * Różnica dotyczy też kosztu osobowego: w „ofi" liczą się tylko godziny ludzi na
+ * obiekcie, w „zdv" tylko udział w puli centrum monitorowania, w „all" oba.
+ * Przychód i koszt pozostały zostają w całości po obu stronach — kartoteka ma
+ * jedną kwotę na obiekt, bez rozbicia na linie.
+ */
+export type AnalyticsService = "zdv" | "ofi" | "all";
+
+/**
  * Okno uśredniania KOSZTU OSOBOWEGO: ostatni pełny miesiąc / średnia z 3 / z 12.
  * Jeden miesiąc bywa wystrzałowy (premie, wyrównania), dwanaście rozmywa sezon —
  * stąd domyślna trójka po stronie backendu (`DEFAULT_COST_WINDOW`).
@@ -6221,6 +6446,8 @@ export interface AnalyticsBucket {
 /** Wspólna koperta odpowiedzi wszystkich trzech widoków. */
 interface AnalyticsEnvelope {
   scope: AnalyticsScope;
+  /** Echo parametru zapytania — linia usługowa, do której zawężono dane. */
+  service: AnalyticsService;
   /** Echo parametru zapytania — okno, z którego policzono koszt osobowy. */
   costWindow: CostWindow;
   generatedAt: string;
@@ -6381,6 +6608,7 @@ function analyticsQuery(params?: {
   scope?: AnalyticsScope;
   limit?: number;
   costWindow?: CostWindow;
+  service?: AnalyticsService;
 }) {
   const sp = new URLSearchParams();
   if (params?.scope) sp.set("scope", params.scope);
@@ -6388,6 +6616,8 @@ function analyticsQuery(params?: {
   // Brak wartości = nie wysyłamy parametru: domyślne okno (3 mies.) zna backend
   // i nie ma powodu, żeby front trzymał drugą kopię tej decyzji.
   if (params?.costWindow) sp.set("costWindow", String(params.costWindow));
+  // Tak samo z przekrojem usługowym: brak parametru = „oba" po stronie backendu.
+  if (params?.service && params.service !== "all") sp.set("service", params.service);
   const q = sp.toString();
   return q ? `?${q}` : "";
 }
@@ -6396,6 +6626,7 @@ export async function getAnalyticsContractors(params?: {
   scope?: AnalyticsScope;
   limit?: number;
   costWindow?: CostWindow;
+  service?: AnalyticsService;
 }) {
   return request<ApiResponse<AnalyticsContractorsData>>(
     `/analytics/kontrahenci${analyticsQuery(params)}`
@@ -6406,6 +6637,7 @@ export async function getAnalyticsObjects(params?: {
   scope?: AnalyticsScope;
   limit?: number;
   costWindow?: CostWindow;
+  service?: AnalyticsService;
 }) {
   return request<ApiResponse<AnalyticsObjectsData>>(
     `/analytics/obiekty${analyticsQuery(params)}`
@@ -6416,6 +6648,7 @@ export async function getAnalyticsSalespeople(params?: {
   scope?: AnalyticsScope;
   limit?: number;
   costWindow?: CostWindow;
+  service?: AnalyticsService;
 }) {
   return request<ApiResponse<AnalyticsSalespeopleData>>(
     `/analytics/handlowcy${analyticsQuery(params)}`

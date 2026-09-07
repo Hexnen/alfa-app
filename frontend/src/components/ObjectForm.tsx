@@ -22,13 +22,13 @@ import { tip } from "./ui/tooltip";
 import {
   adminCompanyApi,
   errStatus,
-  getContractors,
+  getContractorCatalog,
   getSalespeople,
   salespersonName,
   getCompanies,
   type Company,
   type Salesperson,
-  type Contractor,
+  type ContractorCatalogEntry,
   type ObjectRecord,
   type ObjectInput,
 } from "@/lib/api";
@@ -110,7 +110,7 @@ export function ObjectForm({
   preselectedContractorId,
 }: ObjectFormProps) {
   const [loading, setLoading] = useState(false);
-  const [contractors, setContractors] = useState<Contractor[]>([]);
+  const [contractors, setContractors] = useState<ContractorCatalogEntry[]>([]);
   const [salespeople, setSalespeople] = useState<Salesperson[]>([]);
   const [companies, setCompanies] = useState<Company[]>([]);
   const [formData, setFormData] = useState<ObjectInput>({
@@ -146,9 +146,12 @@ export function ObjectForm({
 
   useEffect(() => {
     if (open) {
-      getContractors({ pageSize: 1000 }).then((res) => {
-        setContractors(res.data);
-      });
+      // Lista wyboru MUSI mieć całą kartotekę — paginowane `GET /contractors`
+      // ucinało ją na rozmiarze strony i nowego obiektu nie dało się przypiąć
+      // do klienta z końca alfabetu.
+      getContractorCatalog()
+        .then((res) => setContractors(res.data ?? []))
+        .catch(() => setContractors([]));
       // Archiwalnych nie proponujemy, ale zostawiamy tego, który już jest przypisany.
       getSalespeople()
         .then((res) => setSalespeople(res.data ?? []))

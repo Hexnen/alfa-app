@@ -1847,6 +1847,15 @@ app.get("/summary", async (c) => {
     (r) => r.faktGodziny != null && r.faktGodziny > 0 && r.kwotaGlowna == null,
   ).length;
   const pendingBonus = payroll.filter((r) => r.bonusPending).length;
+  // Liczba WIERSZY do uzupełnienia, nie suma dwóch liczników: umowa bez kwoty
+  // i jednocześnie z dodatkiem do przeliczenia to jeden brak, nie dwa. Kafel
+  // „Braki" pokazuje tę liczbę, a filtr tabeli „Braki (jak na kaflu)" ma dać
+  // dokładnie tyle wierszy.
+  const gaps = payroll.filter(
+    (r) =>
+      (r.faktGodziny != null && r.faktGodziny > 0 && r.kwotaGlowna == null) ||
+      r.bonusPending,
+  ).length;
 
   const office = officeRows.map(withOfficeComputed);
   const officeTotal = office.reduce((s, r) => s + r.total, 0);
@@ -1865,6 +1874,7 @@ app.get("/summary", async (c) => {
       wyplaty: round2(przelew + gotowka),
       missingMain, // wiersze z godzinami, ale bez kwoty od księgowości
       pendingBonus, // dodatki "do przeliczenia"
+      gaps, // wiersze z którymkolwiek z powyższych braków (bez podwójnego liczenia)
       officeTotal: round2(officeTotal),
       officeCount: office.length,
     },
