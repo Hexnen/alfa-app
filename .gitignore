@@ -50,3 +50,6 @@ images.jpg
 
 # Local designer test snapshots
 data/snapshots/
+
+# załączniki notatek kalendarza (pliki użytkowników)
+data/attachments/

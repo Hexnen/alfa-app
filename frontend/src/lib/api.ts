@@ -47,6 +47,21 @@ async function request<T>(
   return data;
 }
 
+/**
+ * Wariant `request` dla multipart/form-data — bez ręcznego Content-Type
+ * (przeglądarka sama dopisuje boundary). Ten sam format błędu co `request`.
+ */
+async function requestMultipart<T>(endpoint: string, body: FormData, method = "POST"): Promise<T> {
+  const response = await fetch(`${API_BASE}${endpoint}`, { method, body });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.success) {
+    throw Object.assign(new Error(data.error || data.message || `Request failed (${response.status})`), {
+      status: response.status,
+    });
+  }
+  return data;
+}
+
 // Stats
 export async function getStats() {
   return request<ApiResponse<{
@@ -4455,6 +4470,25 @@ export interface CalendarEvent {
 
 export type CalendarNoteSource = "user" | "assistant" | "system";
 
+/** Załącznik notatki (obrazki serwer konwertuje do WebP — `fileName` może różnić się od oryginału). */
+export interface CalendarNoteAttachment {
+  id: number;
+  fileName: string;
+  mime: string;
+  size: number;
+  kind: "image" | "file";
+  width: number | null;
+  height: number | null;
+  /** Ścieżka względem origin (`/api/calendar/attachments/:id`); `?download=1` wymusza pobranie. */
+  url: string;
+}
+
+/** Limity załączników notatki — zgodne z backendem (walidacja po stronie klienta). */
+export const CALENDAR_ATTACHMENT_MAX_FILES = 15;
+export const CALENDAR_ATTACHMENT_MAX_SIZE = 5 * 1024 * 1024;
+export const CALENDAR_ATTACHMENT_ACCEPT =
+  "image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.odt,.ods,.odp,.csv,.txt,.rtf";
+
 /** Notatka do wydarzenia (dziennik) — osobna od `description` (stały opis). */
 export interface CalendarNote {
   id: number;
@@ -4465,6 +4499,8 @@ export interface CalendarNote {
   text: string;
   createdAt: string;
   updatedAt: string;
+  /** Brak = starszy backend bez załączników. */
+  attachments?: CalendarNoteAttachment[];
 }
 
 export interface CalendarEventWithHistory extends CalendarEvent {
@@ -4703,6 +4739,19 @@ export const calendarApi = {
       method: "POST",
       body: JSON.stringify({ text }),
     });
+  },
+
+  /** Notatka z załącznikami — multipart (`text` + wiele pól `files`). Tekst może być pusty, gdy są pliki. */
+  async addNoteWithFiles(eventId: number, text: string, files: File[]) {
+    const formData = new FormData();
+    formData.append("text", text);
+    for (const f of files) formData.append("files", f, f.name);
+    return requestMultipart<ApiResponse<CalendarNote>>(`/calendar/events/${eventId}/notes`, formData);
+  },
+
+  /** Usuwa załącznik notatki; autor lub admin. */
+  async deleteNoteAttachment(attachmentId: number) {
+    return request<ApiResponse<null>>(`/calendar/attachments/${attachmentId}`, { method: "DELETE" });
   },
 
   /** Autor lub admin. */

@@ -44,6 +44,18 @@ await src.backup(COPY);
 src.close();
 console.log(`Kopia bazy: ${COPY}`);
 
+// Migracje na kopii: nowe migracje (np. tabela dodana w tej gałęzi) mogą nie być jeszcze
+// zastosowane na bazie źródłowej — test ma chodzić na aktualnym schemacie, a przy okazji
+// sprawdzamy, że migracje w ogóle przechodzą.
+{
+  const mig = spawnSync("npx", ["tsx", "src/db/migrate.ts"], { stdio: "inherit", env: { ...process.env, ALFA_DB_PATH: COPY } });
+  if (mig.status !== 0) {
+    rmSync(WORKDIR, { recursive: true, force: true });
+    console.error("Migracje na kopii nie przeszły — przerywam.");
+    process.exit(1);
+  }
+}
+
 let failed = 0;
 for (const script of scripts) {
   console.log(`\n=== ${script} ===`);

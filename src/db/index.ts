@@ -15,10 +15,12 @@ import { dirname } from "path";
  */
 const DB_PATH = process.env.ALFA_DB_PATH ?? "./data/alfa.db";
 
+/** Katalog danych (obok bazy) — tu lądują też pliki załączników (data/attachments). */
+export const DATA_DIR = dirname(DB_PATH);
+
 // Ensure data directory exists
-const dir = dirname(DB_PATH);
-if (!existsSync(dir)) {
-  mkdirSync(dir, { recursive: true });
+if (!existsSync(DATA_DIR)) {
+  mkdirSync(DATA_DIR, { recursive: true });
 }
 
 const sqlite = new Database(DB_PATH);

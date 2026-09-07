@@ -15,6 +15,8 @@
  */
 import { Hono, type Context } from "hono";
 import { randomBytes } from "crypto";
+import { createReadStream, statSync } from "node:fs";
+import { Readable } from "node:stream";
 import { db, schema } from "../db/index.js";
 import { eq, and, desc, asc, isNull, inArray, sql, lt, gt, gte, ne } from "drizzle-orm";
 import { type CalendarEventType, type CalendarEventStatus, type CalendarBilling } from "../db/schema.js";
@@ -39,6 +41,14 @@ import {
   type ParsedInput,
 } from "../lib/calendar-mutations.js";
 import { ApiError, BILLING_LABELS, PROTOCOL_TYPES, STATUS_LABELS, TYPE_LABELS } from "../lib/calendar-labels.js";
+import {
+  attachmentFilePath,
+  contentDisposition,
+  removeStoredFiles,
+  storeUploads,
+  type IncomingFile,
+} from "../lib/calendar-attachments.js";
+import { canManageNote, getNoteRow } from "../lib/calendar-mutations.js";
 import calendarFilterSetsRoutes from "./calendar-filter-sets.js";
 import calendarDayRouteRoutes from "./calendar-day-route.js";
 
@@ -163,16 +173,100 @@ app.get("/events/:id/notes", (c) => {
   return c.json({ success: true, data: loadNotes(db, id) });
 });
 
+/**
+ * Ciało POST /events/:id/notes: JSON `{text}` jak dotąd albo `multipart/form-data`
+ * z polami `text` (opcjonalne) i `files` (wiele). Pliki trafiają do pamięci — limit
+ * ciała pilnuje src/routes/index.ts (bodyLimitFor), limit per plik storeUploads.
+ */
+async function readNoteBody(c: Context): Promise<{ text: string; files: IncomingFile[] }> {
+  const ct = c.req.header("content-type") ?? "";
+  if (!/multipart\/form-data/i.test(ct)) {
+    const body = (await c.req.json().catch(() => null)) as { text?: unknown } | null;
+    return { text: String(body?.text ?? ""), files: [] };
+  }
+  const form = await c.req.formData().catch(() => null);
+  if (!form) throw new ApiError(400, "Nieprawidłowe dane formularza");
+  const textField = form.get("text");
+  const files: IncomingFile[] = [];
+  for (const entry of form.getAll("files")) {
+    if (!(entry instanceof File)) continue;
+    files.push({ name: entry.name, mime: entry.type, data: Buffer.from(await entry.arrayBuffer()) });
+  }
+  return { text: typeof textField === "string" ? textField : "", files };
+}
+
 app.post("/events/:id/notes", async (c) => {
   const user = getUser(c);
   const id = Number(c.req.param("id"));
   if (!Number.isInteger(id)) return c.json({ success: false, error: "Nieprawidłowe id" }, 400);
   try {
-    const body = (await c.req.json().catch(() => null)) as { text?: unknown } | null;
-    const note = db.transaction((tx) => addNote(tx, { eventId: id, text: String(body?.text ?? ""), ctx: { user } }));
+    const { text, files } = await readNoteBody(c);
+    // Wydarzenie i treść sprawdzamy PRZED zapisem plików (żeby nie mielić obrazków
+    // dla nieistniejącego wydarzenia); pliki lądują na dysku przed transakcją, a przy
+    // błędzie wstawiania są sprzątane.
+    const ev = getEventRow(db, id);
+    if (!ev) throw new ApiError(404, "Wydarzenie nie istnieje");
+    if (ev.deletedAt) throw new ApiError(409, "Wydarzenie jest usunięte — najpierw je przywróć");
+    if (!text.trim() && files.length === 0) throw new ApiError(400, "Treść notatki jest wymagana");
+    const attachments = await storeUploads(id, files);
+    let note: Note;
+    try {
+      note = db.transaction((tx) => addNote(tx, { eventId: id, text, ctx: { user }, attachments }));
+    } catch (error) {
+      removeStoredFiles(attachments);
+      throw error;
+    }
     return c.json({ success: true, data: note }, 201);
   } catch (error) {
     return handleError(c, error, "dodawania notatki");
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Załączniki notatek: GET /attachments/:attachmentId (?download=1), DELETE (autor notatki lub admin)
+// ---------------------------------------------------------------------------
+
+app.get("/attachments/:attachmentId", (c) => {
+  const attId = Number(c.req.param("attachmentId"));
+  if (!Number.isInteger(attId)) return c.json({ success: false, error: "Nieprawidłowe id" }, 400);
+  const att = db.select().from(schema.calendarNoteAttachments).where(eq(schema.calendarNoteAttachments.id, attId)).get();
+  if (!att) return c.json({ success: false, error: "Załącznik nie istnieje" }, 404);
+  const abs = attachmentFilePath(att.storedPath);
+  if (!abs) return c.json({ success: false, error: "Plik załącznika nie istnieje na dysku" }, 404);
+  const download = c.req.query("download") === "1";
+  const size = statSync(abs).size;
+  const stream = Readable.toWeb(createReadStream(abs)) as ReadableStream;
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      "Content-Type": att.mime,
+      "Content-Length": String(size),
+      "Cache-Control": "private, max-age=86400",
+      "X-Content-Type-Options": "nosniff",
+      "Content-Disposition": contentDisposition(download ? "attachment" : "inline", att.fileName),
+    },
+  });
+});
+
+app.delete("/attachments/:attachmentId", (c) => {
+  const user = getUser(c);
+  const attId = Number(c.req.param("attachmentId"));
+  if (!Number.isInteger(attId)) return c.json({ success: false, error: "Nieprawidłowe id" }, 400);
+  try {
+    const removed = db.transaction((tx) => {
+      const att = tx.select().from(schema.calendarNoteAttachments).where(eq(schema.calendarNoteAttachments.id, attId)).get();
+      if (!att) throw new ApiError(404, "Załącznik nie istnieje");
+      const note = getNoteRow(tx, att.noteId);
+      if (!note || note.deletedAt) throw new ApiError(404, "Notatka nie istnieje");
+      if (!canManageNote(note, user)) throw new ApiError(403, "Tylko autor notatki lub administrator może usunąć załącznik");
+      tx.delete(schema.calendarNoteAttachments).where(eq(schema.calendarNoteAttachments.id, attId)).run();
+      return att;
+    });
+    // Plik znika dopiero po commicie — nieudana transakcja nie zostawia wiersza bez pliku.
+    removeStoredFiles([removed]);
+    return c.json({ success: true, data: { id: attId, noteId: removed.noteId } });
+  } catch (error) {
+    return handleError(c, error, "usuwania załącznika");
   }
 });
 

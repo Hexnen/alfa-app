@@ -8,6 +8,7 @@ import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, sql } from "drizzle-or
 import { alias } from "drizzle-orm/sqlite-core";
 import { db, schema } from "../db/index.js";
 import type { DbOrTx } from "./activity-log.js";
+import { attachmentsByNote, type NoteAttachmentJson } from "./calendar-attachments.js";
 import type { CalendarBilling, CalendarEventNote, CalendarEventStatus, CalendarEventType, CalendarNoteSource, CalendarSeriesFreq } from "../db/schema.js";
 
 /**
@@ -210,6 +211,8 @@ export interface Note {
   text: string;
   createdAt: string;
   updatedAt: string;
+  /** Załączniki (pliki na dysku; url = GET /api/calendar/attachments/:id). */
+  attachments: NoteAttachmentJson[];
 }
 
 /**
@@ -239,20 +242,27 @@ function quoteTotals(raw: string): { total: number; filledItems: number } {
   return { total: Math.round(total * 100) / 100, filledItems };
 }
 
-export function noteOfRow(r: CalendarEventNote): Note {
-  return { id: r.id, eventId: r.eventId, userId: r.userId, userLabel: r.userLabel, source: r.source, text: r.text, createdAt: r.createdAt, updatedAt: r.updatedAt };
+export function noteOfRow(r: CalendarEventNote, attachments: NoteAttachmentJson[] = []): Note {
+  return { id: r.id, eventId: r.eventId, userId: r.userId, userLabel: r.userLabel, source: r.source, text: r.text, createdAt: r.createdAt, updatedAt: r.updatedAt, attachments };
+}
+
+/** Notatka z bazy + jej załączniki (jedno zapytanie po załączniki). */
+export function noteWithAttachments(dbx: DbOrTx, r: CalendarEventNote): Note {
+  return noteOfRow(r, attachmentsByNote(dbx, [r.id]).get(r.id) ?? []);
 }
 
 /** Nieusunięte notatki wydarzenia, od najstarszej (dziennik). */
 export function loadNotes(dbx: DbOrTx, eventId: number, limit = 500): Note[] {
-  return dbx
+  const rows = dbx
     .select()
     .from(schema.calendarEventNotes)
     .where(and(eq(schema.calendarEventNotes.eventId, eventId), isNull(schema.calendarEventNotes.deletedAt)))
     .orderBy(asc(schema.calendarEventNotes.createdAt), asc(schema.calendarEventNotes.id))
     .limit(limit)
-    .all()
-    .map(noteOfRow);
+    .all();
+  // Załączniki jednym zapytaniem dla wszystkich notatek (bez N+1).
+  const att = attachmentsByNote(dbx, rows.map((r) => r.id));
+  return rows.map((r) => noteOfRow(r, att.get(r.id) ?? []));
 }
 
 /** Liczba nieusuniętych notatek per wydarzenie — jedno zapytanie zbiorcze. */

@@ -1434,7 +1434,22 @@ export const hrOfficePayroll = sqliteTable("hr_office_payroll", {
   updatedAt: text("updated_at")
     .default(sql`(datetime('now'))`)
     .notNull(),
-});
+},
+(t) => ({
+  /**
+   * Jeden wiersz na (osoba, rok, miesiąc, SPÓŁKA). Spółka w kluczu świadomie:
+   * osoba z etatem w dwóch spółkach ma dwa legalne wiersze na miesiąc (na
+   * produkcji: ALFA ETAT + CONTROL ETAT tej samej osoby). Bez indeksu `POST /office`
+   * dwa razy dawał dwa wiersze i podsumowanie miesiąca liczyło pensję podwójnie
+   * — router robi upsert, a UNIQUE pilnuje wyścigu dwóch kart.
+   */
+  employeeMonthCompanyUidx: uniqueIndex("hr_office_payroll_employee_month_company_uidx").on(
+    t.employeeId,
+    t.year,
+    t.month,
+    t.company,
+  ),
+}));
 
 export type HrOfficePayroll = typeof hrOfficePayroll.$inferSelect;
 export type NewHrOfficePayroll = typeof hrOfficePayroll.$inferInsert;
@@ -2312,6 +2327,43 @@ export const calendarEventNotes = sqliteTable(
 
 export type CalendarEventNote = typeof calendarEventNotes.$inferSelect;
 export type NewCalendarEventNote = typeof calendarEventNotes.$inferInsert;
+
+/**
+ * Załączniki do notatek wydarzeń — pliki leżą na dysku (data/attachments/<eventId>/<uuid>.<ext>,
+ * patrz src/lib/calendar-attachments.ts), w bazie tylko metadane. Obrazki są ZAWSZE
+ * konwertowane do WebP (sharp), stąd `width`/`height` tylko dla kind = "image".
+ */
+export const CALENDAR_ATTACHMENT_KINDS = ["image", "file"] as const;
+export type CalendarAttachmentKind = (typeof CALENDAR_ATTACHMENT_KINDS)[number];
+
+export const calendarNoteAttachments = sqliteTable(
+  "calendar_note_attachments",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    noteId: integer("note_id")
+      .notNull()
+      .references(() => calendarEventNotes.id, { onDelete: "cascade" }),
+    /** Oryginalna nazwa pliku; dla obrazków rozszerzenie zamienione na .webp. */
+    fileName: text("file_name").notNull(),
+    mime: text("mime").notNull(),
+    /** Bajty zapisane na dysku (po konwersji, nie surowy upload). */
+    size: integer("size").notNull(),
+    /** Ścieżka relatywna wewnątrz katalogu załączników, np. `12/3f0a….webp`. */
+    storedPath: text("stored_path").notNull(),
+    kind: text("kind", { enum: CALENDAR_ATTACHMENT_KINDS }).notNull(),
+    width: integer("width"),
+    height: integer("height"),
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+  },
+  (t) => ({
+    noteIdx: index("calendar_note_attachments_note_idx").on(t.noteId),
+  })
+);
+
+export type CalendarNoteAttachment = typeof calendarNoteAttachments.$inferSelect;
+export type NewCalendarNoteAttachment = typeof calendarNoteAttachments.$inferInsert;
 
 /**
  * Zapisane zestawy filtrów kalendarza (per użytkownik). `filters` to JSON z tymi

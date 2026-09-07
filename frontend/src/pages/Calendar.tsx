@@ -59,6 +59,7 @@ import {
   Loader2,
   MapPin,
   MousePointerClick,
+  Paperclip,
   Pencil,
   Plus,
   RefreshCw,
@@ -134,6 +135,7 @@ import {
   fmtShort,
   fmtTimestamp,
   parseLocal,
+  pluralPl,
   techShort,
   timestampDayKey,
   toDateStr,
@@ -2810,6 +2812,11 @@ function EventPreview({
     };
   }, [ev.id, inlineLast, notesCount]);
   const lastNote = inlineLast ?? (fetchedLast?.id === ev.id && notesCount ? fetchedLast.note : null);
+  // Notatka może być SAMYMI załącznikami (pusty tekst) — wtedy zamiast pustej
+  // linii „autor:" pokazujemy, ile plików doszło.
+  const lastNoteText = (lastNote?.text ?? "").replace(/\s+/g, " ").trim();
+  const lastNoteFiles = lastNote?.attachments?.length ?? 0;
+  const lastNoteLine = lastNoteText || (lastNoteFiles ? pluralPl(lastNoteFiles, "załącznik", "załączniki", "załączników") : "");
 
   useLayoutEffect(() => {
     const el = ref.current;
@@ -2944,12 +2951,13 @@ function EventPreview({
             <dd className="line-clamp-2 text-muted-foreground">{ev.description}</dd>
           </div>
         )}
-        {lastNote && (
+        {lastNote && lastNoteLine && (
           <div className="flex gap-2" data-testid="preview-last-note">
             <dt className="w-4 shrink-0 text-amber-600 dark:text-amber-400"><StickyNote className="h-3.5 w-3.5" aria-label="Ostatnia notatka" /></dt>
-            <dd className="min-w-0 truncate" {...tip(lastNote.text.replace(/\s+/g, " "))}>
+            <dd className="min-w-0 truncate" {...tip(lastNoteLine)}>
               <span className="text-muted-foreground">{lastNote.userLabel || (lastNote.source === "assistant" ? "Asystent" : "—")}:</span>{" "}
-              {lastNote.text.replace(/\s+/g, " ")}
+              {!lastNoteText && <Paperclip className="mr-0.5 inline h-3 w-3 align-[-1px] text-muted-foreground" aria-hidden />}
+              {lastNoteLine}
             </dd>
           </div>
         )}
