@@ -269,7 +269,7 @@ function rowHtml(row: Row, showEmpty = false): string {
 function cardTitleRowHtml(title: string): string {
   return `
           <tr>
-            <td ${cellBg(NAVY, "padding:7px 14px;")}>${whiteHtml(esc(title), "font-size:11px;font-weight:bold;letter-spacing:1px;text-transform:uppercase;")}</td>
+            <td ${cellBg(NAVY, "padding:6px 14px;font-size:11px;line-height:14px;mso-line-height-rule:exactly;")}>${whiteHtml(esc(title.toUpperCase()), "font-size:11px;line-height:14px;font-weight:bold;letter-spacing:1px;")}</td>
           </tr>`;
 }
 
