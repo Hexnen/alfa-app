@@ -68,7 +68,7 @@ ok("temat: [TYP] OBIEKT / KONTRAHENT", mail.subject === "[ZDW] OSIEDLE ZIELONA D
 ok("html zawiera nazwę obiektu", mail.html.includes("Osiedle Zielona Dolina"));
 ok("html zawiera numer zlecenia", mail.html.includes("ZDW/2026/0042"));
 ok("html wita zlecającą po imieniu", mail.html.includes("Dzień dobry Anna Kowalska,"));
-ok("html ma sekcję zakresu usługi", mail.html.includes("Zakres usługi") && mail.html.includes("Kamery: 12 szt."));
+ok("html ma sekcję zakresu usługi", mail.html.includes("ZAKRES USŁUGI") && mail.html.includes("Kamery: 12 szt."));
 // „Zakres usługi” wymienia tylko to, co klient DOSTAJE — w fixture
 // interventionGroup: false, więc tego punktu ma w ogóle nie być.
 ok("zakres pomija odpowiedzi „Nie”", !mail.html.includes("Grupa interwencyjna"), mail.html.match(/Grupa interwencyjna[^<]*/)?.[0]);
@@ -265,7 +265,9 @@ const LABELS = [
   "Uwagi",
   "Metadane", "ID zlecenia", "Status", "Utworzono", "Zaktualizowano",
 ];
-const missingFull = LABELS.filter((l) => !internal.html.includes(l));
+// Tytuły kart są w HTML wersalikami (Word ignoruje text-transform), etykiety wierszy — jak w LABELS.
+const hasLabel = (html: string, l: string) => html.includes(l) || html.includes(l.toUpperCase());
+const missingFull = LABELS.filter((l) => !hasLabel(internal.html, l));
 ok("wewn.: html ma wszystkie etykiety", missingFull.length === 0, missingFull);
 
 ok("wewn.: telefon jako link tel:", internal.html.includes('href="tel:600100200"'));
@@ -314,14 +316,14 @@ ok("wewn.: text bez null/undefined", !NOISE.test(internal.text), internal.text.m
 
 const bareInternal = buildOrderInternalMail(bare);
 
-const missingBare = LABELS.filter((l) => !bareInternal.html.includes(l));
+const missingBare = LABELS.filter((l) => !hasLabel(bareInternal.html, l));
 ok("wewn. puste: wszystkie etykiety nadal są", missingBare.length === 0, missingBare);
 ok(
   "wewn. puste: Numer oferty Vtools ma „—”",
   /Numer oferty Vtools<\/span><\/td>\s*<td[^>]*>\s*<span[^>]*>—<\/span>/.test(bareInternal.html),
   bareInternal.html.match(/Numer oferty Vtools[\s\S]{0,320}/)?.[0]
 );
-ok("wewn. puste: sekcja Uwagi zostaje", bareInternal.html.includes(">Uwagi<"));
+ok("wewn. puste: sekcja Uwagi zostaje", bareInternal.html.includes(">UWAGI<"));
 ok("wewn. puste: html bez null/undefined", !NOISE.test(bareInternal.html), bareInternal.html.match(NOISE)?.[0]);
 ok("wewn. puste: text bez null/undefined", !NOISE.test(bareInternal.text), bareInternal.text.match(NOISE)?.[0]);
 ok("wewn. puste: bez Invalid Date przy złej dacie montażu", !bareInternal.html.includes("Invalid"));
