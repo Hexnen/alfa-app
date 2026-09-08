@@ -235,8 +235,25 @@ export async function geoGetJson(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     const timedOut = /timeout|abort/i.test(msg);
-    return { error: `${what}: ${timedOut ? `brak odpowiedzi w ${TIMEOUT_MS / 1000} s` : "brak połączenia"}` };
+    // undici opakowuje prawdziwą przyczynę (ENOTFOUND, ECONNREFUSED, certyfikat…) w `cause`
+    // pod ogólnym „fetch failed” — bez niej log z produkcji nic nie mówi.
+    const cause = describeFetchCause(err);
+    console.warn(`[geo] ${what} ${url.split("?")[0]}: ${msg}${cause ? ` (${cause})` : ""}`);
+    if (timedOut) return { error: `${what}: brak odpowiedzi w ${TIMEOUT_MS / 1000} s` };
+    return { error: `${what}: brak połączenia${cause ? ` (${cause})` : ""}` };
   }
+}
+
+/** Kod/komunikat z `err.cause` (np. `ENOTFOUND nominatim.openstreetmap.org`), gdy jest. */
+function describeFetchCause(err: unknown): string {
+  const cause = err instanceof Error ? (err as Error & { cause?: unknown }).cause : undefined;
+  if (!cause) return "";
+  if (cause instanceof Error) {
+    const code = (cause as Error & { code?: string }).code;
+    if (!code) return cause.message;
+    return cause.message.includes(code) ? cause.message : `${code}: ${cause.message}`;
+  }
+  return String(cause);
 }
 
 const getJson = geoGetJson;
@@ -257,6 +274,24 @@ export interface GeocodeOptions {
   cacheOnly?: boolean;
 }
 
+/** Skróty typu ulicy, które Nominatim traktuje jak część nazwy i przez to nic nie znajduje. */
+const STREET_PREFIX_RE = /(^|[\s,])(ul\.|ulica|al\.|aleja|aleje|pl\.|plac|os\.|osiedle)\s+/gi;
+const POSTCODE_RE = /\b\d{2}-\d{3}\b/g;
+
+/**
+ * Kolejne warianty zapytania do Nominatim (od najwierniejszego): oryginał → bez skrótu
+ * typu ulicy → dodatkowo bez kodu pocztowego. Bez duplikatów i pustych wpisów.
+ */
+export function geocodeQueryVariants(query: string): string[] {
+  const tidy = (v: string) => v.replace(/\s+/g, " ").replace(/\s*,\s*/g, ", ").replace(/^,\s*|,\s*$/g, "").trim();
+  const base = tidy(query);
+  const noPrefix = tidy(base.replace(STREET_PREFIX_RE, "$1"));
+  const noPostcode = tidy(noPrefix.replace(POSTCODE_RE, ""));
+  const out: string[] = [];
+  for (const v of [base, noPrefix, noPostcode]) if (v && !out.includes(v)) out.push(v);
+  return out;
+}
+
 /**
  * Adres → współrzędne (Nominatim, PL). Zwraca `{ error }`, gdy brak wyniku albo brak sieci —
  * nigdy nie rzuca. Trafienie w cache jest darmowe i działa bez internetu.
@@ -273,19 +308,29 @@ export async function geocode(query: string, opts: GeocodeOptions = {}): Promise
   }
   if (opts.cacheOnly) return { error: `Brak współrzędnych dla „${q}” w cache` };
 
-  const url =
-    `${NOMINATIM_SEARCH_URL}?format=json&limit=1&accept-language=pl&countrycodes=pl&q=` +
-    encodeURIComponent(q);
-  const res = await getJson(url, "Geokoder");
-  if (isGeoError(res)) return res;
-
-  const rows = Array.isArray(res.json) ? (res.json as NominatimRow[]) : [];
-  const first = rows[0];
-  const lat = first ? Number(first.lat) : NaN;
-  const lng = first ? Number(first.lon) : NaN;
-  if (!first || !Number.isFinite(lat) || !Number.isFinite(lng)) {
-    return { error: `Nie znaleziono adresu „${q}”` };
+  // Nominatim nie radzi sobie z polskimi skrótami typu ulicy („ul. Koniczynowa 2A” → pusto,
+  // „Koniczynowa 2A” → trafienie), więc po pudle próbujemy kolejnych, prostszych wariantów.
+  let first: NominatimRow | undefined;
+  let lat = NaN;
+  let lng = NaN;
+  for (const variant of geocodeQueryVariants(q)) {
+    const url =
+      `${NOMINATIM_SEARCH_URL}?format=json&limit=1&accept-language=pl&countrycodes=pl&q=` +
+      encodeURIComponent(variant);
+    const res = await getJson(url, "Geokoder");
+    if (isGeoError(res)) return res;
+    const rows = Array.isArray(res.json) ? (res.json as NominatimRow[]) : [];
+    const row = rows[0];
+    const rlat = row ? Number(row.lat) : NaN;
+    const rlng = row ? Number(row.lon) : NaN;
+    if (row && Number.isFinite(rlat) && Number.isFinite(rlng)) {
+      first = row;
+      lat = rlat;
+      lng = rlng;
+      break;
+    }
   }
+  if (!first) return { error: `Nie znaleziono adresu „${q}”` };
 
   const value = { lat: round6(lat), lng: round6(lng), display: first.display_name || q };
   geoCacheSet(key, value, dbx);

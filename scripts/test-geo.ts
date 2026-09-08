@@ -22,6 +22,7 @@ import {
   geoCacheGet,
   geoCacheKey,
   geoCacheSet,
+  geocodeQueryVariants,
   geocode,
   haversineKm,
   isGeoError,
@@ -205,6 +206,32 @@ async function main() {
   ok("geocode zapisuje wynik do cache", !isGeoError(first) && first.cached === false && first.lat === 52.2317, first);
   const second = await geocode(geoQuery);
   ok("drugie wywołanie idzie z cache (1 zapytanie sieciowe łącznie)", !isGeoError(second) && second.cached === true && netCalls === 1, { second, netCalls });
+
+  // „ul.” psuje Nominatim — po pustej odpowiedzi geokoder próbuje wariantu bez skrótu
+  ok(
+    "warianty zapytania: bez „ul.”, potem bez kodu pocztowego",
+    JSON.stringify(geocodeQueryVariants("ul. Koniczynowa 2A, 03-612 Warszawa")) ===
+      JSON.stringify(["ul. Koniczynowa 2A, 03-612 Warszawa", "Koniczynowa 2A, 03-612 Warszawa", "Koniczynowa 2A, Warszawa"]),
+    geocodeQueryVariants("ul. Koniczynowa 2A, 03-612 Warszawa")
+  );
+  const asked: string[] = [];
+  setGeoFetch(async (input) => {
+    netCalls++;
+    const q = decodeURIComponent(String(input).split("q=")[1] ?? "");
+    asked.push(q);
+    const hit = q.startsWith("ul.") ? [] : [{ lat: "52.2797", lon: "21.0532", display_name: "Koniczynowa 2A, Warszawa" }];
+    return new Response(JSON.stringify(hit), { status: 200, headers: { "Content-Type": "application/json" } });
+  });
+  const ulQuery = `ul. ${PREFIX} Koniczynowa 2A, 03-612 Warszawa`;
+  touchedKeys.add(geoCacheKey(ulQuery));
+  netCalls = 0;
+  const viaFallback = await geocode(ulQuery);
+  ok(
+    "„ul. …” bez wyniku → trafienie z wariantu bez skrótu (2 zapytania)",
+    !isGeoError(viaFallback) && viaFallback.lat === 52.2797 && netCalls === 2 && !asked[1].startsWith("ul."),
+    { viaFallback, asked }
+  );
+  ok("wynik z wariantu ląduje w cache pod oryginalnym zapytaniem", !isGeoError(await geocode(ulQuery)) && netCalls === 2, netCalls);
 
   // Pusta lista wyników = czytelny błąd
   setGeoFetch(jsonFetch([]));
