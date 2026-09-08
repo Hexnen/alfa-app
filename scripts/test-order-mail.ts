@@ -64,7 +64,7 @@ const full: OrderMailInput = {
 
 const mail = buildOrderConfirmationMail(full, { baseUrl: "https://app.example.invalid/" });
 
-ok("temat zawiera numer zlecenia", mail.subject.includes("ZDW/2026/0042"), mail.subject);
+ok("temat: [TYP] OBIEKT / KONTRAHENT", mail.subject === "[ZDW] OSIEDLE ZIELONA DOLINA / Firma Testowa Sp. z o.o.", mail.subject);
 ok("html zawiera nazwę obiektu", mail.html.includes("Osiedle Zielona Dolina"));
 ok("html zawiera numer zlecenia", mail.html.includes("ZDW/2026/0042"));
 ok("html wita zlecającą po imieniu", mail.html.includes("Dzień dobry Anna Kowalska,"));
@@ -224,10 +224,10 @@ const internal = buildOrderInternalMail(
   { baseUrl: "https://app.example.invalid/" }
 );
 
-ok("wewn.: temat ma prefiks [ZDW]", internal.subject.startsWith("[ZDW] Nowe zlecenie "), internal.subject);
-ok("wewn.: temat zawiera numer zlecenia", internal.subject.includes("ZDW/2026/0042"), internal.subject);
+ok("wewn.: temat ma prefiks typu", internal.subject.startsWith("[ZDW] "), internal.subject);
+ok("wewn.: temat taki sam jak kliencki", internal.subject === mail.subject, internal.subject);
 ok("wewn.: temat zawiera płatnika", internal.subject.includes("Firma Testowa Sp. z o.o."), internal.subject);
-ok("wewn.: temat zawiera obiekt", internal.subject.includes("Osiedle Zielona Dolina"), internal.subject);
+ok("wewn.: temat zawiera obiekt", internal.subject.includes("OSIEDLE ZIELONA DOLINA"), internal.subject);
 
 ok("wewn.: nagłówek to „Zlecenie {numer}”", internal.html.includes("Zlecenie ZDW/2026/0042"));
 ok("wewn.: plakietka statusu po polsku", internal.html.includes("W realizacji"));

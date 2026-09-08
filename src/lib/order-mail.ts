@@ -560,6 +560,20 @@ const INTRO =
  * @param order wiersz tabeli `orders` (wystarczy sam `orderNumber` — reszta opcjonalna)
  * @param opts.baseUrl absolutny adres aplikacji, z którego składamy URL logo
  */
+/**
+ * Temat maila wg ustaleń z 2026-09-08: `[TYP] NAZWA OBIEKTU / KONTRAHENT`.
+ * Typ zlecenia — dziś wszystkie zlecenia to „Zlecenie do ZDW”, więc stała ZDW
+ * (numer zlecenia, np. ZL-2026-33112, nie niesie typu).
+ */
+const ORDER_TYPE = "ZDW";
+
+function mailSubject(order: OrderMailInput): string {
+  const typ = ORDER_TYPE;
+  const objectName = (text(order.objectName) ?? EMPTY).toUpperCase();
+  const payer = text(order.payerName) ?? EMPTY;
+  return `[${typ}] ${objectName} / ${payer}`;
+}
+
 export function buildOrderConfirmationMail(
   order: OrderMailInput,
   opts: OrderMailOptions = {}
@@ -567,9 +581,7 @@ export function buildOrderConfirmationMail(
   const number = text(order.orderNumber) ?? "";
   const content = collect(order);
 
-  const subject = number
-    ? `Potwierdzenie przyjęcia zlecenia ${number} — Alfa Group`
-    : "Potwierdzenie przyjęcia zlecenia — Alfa Group";
+  const subject = mailSubject(order);
 
   const html = shellHtml({
     subject,
@@ -626,6 +638,7 @@ ${noteCardHtml("Uwagi", content.notes)}
   };
 
   lines.push(subject, "");
+  if (number) lines.push(`Zlecenie nr ${number}`, "");
   lines.push(content.greeting);
   lines.push(INTRO);
   block("Dane obiektu", content.objectRows);
@@ -829,7 +842,7 @@ export function buildOrderInternalMail(
 
   const payer = text(order.payerName) ?? EMPTY;
   const objectName = text(order.objectName) ?? EMPTY;
-  const subject = `[ZDW] Nowe zlecenie ${number || EMPTY} — ${payer} / ${objectName}`;
+  const subject = mailSubject(order);
 
   const crmHref = orderId !== null && base ? `${base}/orders/${orderId}` : null;
 
@@ -865,6 +878,7 @@ ${crmHref ? buttonHtml("Otwórz zlecenie w CRM", crmHref) : ""}
 
   // ---- wersja tekstowa ----------------------------------------------------
   const lines: string[] = [subject, ""];
+  if (number) lines.push(`Zlecenie nr ${number}`, "");
   for (const section of sections) {
     lines.push(section.title.toUpperCase());
     for (const row of section.rows) lines.push(`  ${row.label}: ${row.value ?? EMPTY}`);
