@@ -86,7 +86,7 @@ ok("html ma datę startu usługi po polsku", mail.html.includes("1 kwietnia 2026
 ok("html ma datę startu montażu po polsku", mail.html.includes("15 marca 2026"));
 ok("html ma osobę kontaktową", mail.html.includes("Jan Nowak") && mail.html.includes("601 202 303"));
 ok("html ma uwagi", mail.html.includes("Wjazd na teren od strony"));
-ok("logo ma absolutny URL bez podwójnego ukośnika", mail.html.includes('src="https://app.example.invalid/alfa-logo.png"'));
+ok("logo ma absolutny URL bez podwójnego ukośnika", mail.html.includes('src="https://app.example.invalid/alfa-logo-mail.png"'));
 ok("html ma stopkę Alfa Group", mail.html.includes("ALFA GROUP Sp. z o.o.") && mail.html.includes("KRS 0000119104"));
 ok("html informuje o automacie", mail.html.includes("wygenerowana automatycznie"));
 ok("html nie używa flex/grid (email-safe)", !/display:\s*(flex|grid)/i.test(mail.html));
@@ -112,19 +112,46 @@ ok(
   mail.html.match(/<body[\s\S]{0,320}/)?.[0]
 );
 ok(
-  "klient: preheader jest ukryty i tuż po <body>",
-  /<body[^>]*>\s*(<!--[\s\S]*?-->\s*)?<div style="display:none;max-height:0;overflow:hidden;/.test(mail.html)
+  "klient: preheader jest ukryty (mso-hide) i tuż po <body>",
+  /<body[^>]*>\s*(<!--[\s\S]*?-->\s*)?<div style="display:none;font-size:1px;[^"]*mso-hide:all;">/.test(mail.html),
+  mail.html.match(/<body[\s\S]{0,400}/)?.[0]
 );
 
-// Logo jest granatowe, pasek nagłówka też — bez białej podkładki znak znika.
-// Podkładka ma być KOŁEM: komórka liczy się w content-box, więc 56px + 2×6px
-// paddingu daje 68×68. Z width:68px wychodziła elipsa 80×70.
+// Białą podkładkę pod granatowym znakiem mamy WYPALONĄ W PLIKU
+// (alfa-logo-mail.png, patrz scripts/build-mail-logo.ts): Word ignoruje
+// border-radius, a przezroczysty PNG potrafi spłaszczyć na czarno. Komórka ma
+// więc być goła — bez tła, paddingu i zaokrągleń.
+ok("logo bierze wersję mailową bez alfy", mail.html.includes("alfa-logo-mail.png"));
+// „border-radius" pada w komentarzu szablonu — szukamy DEKLARACJI CSS.
+ok("logo nie polega na border-radius", !/border-radius\s*:/.test(mail.html), mail.html.match(/[^;"]*border-radius\s*:[^;"]*/)?.[0]);
 ok(
-  "logo ma białe kółko pod spodem",
-  /<td width="68" height="68" align="center" valign="middle" style="width:56px;height:56px;padding:6px;border-radius:50%;background:#ffffff;line-height:0;">/.test(mail.html),
+  "komórka logo bez tła i paddingu",
+  /<td width="68" height="68" align="center" valign="middle" style="width:68px;height:68px;line-height:0;font-size:0;">/.test(mail.html),
   mail.html.match(/<td width="\d+"[^>]*>/)?.[0]
 );
-ok("logo jako blok 56×56", mail.html.includes('style="display:block;width:56px;height:56px;border:0;"'));
+ok("logo jako blok 68×68", mail.html.includes('style="display:block;width:68px;height:68px;border:0;"'));
+
+// --- Outlook desktop = silnik Worda ---------------------------------------
+// Word nie dziedziczy `color` z <td>/<div> (białe napisy robią się czarne) i
+// gubi `background` z CSS (chce atrybutu `bgcolor`). Poniższe asercje pilnują
+// obu rzeczy — to one poszły w mail do klienta jako czarny tekst na granacie.
+ok("pasek nagłówka ma bgcolor", mail.html.includes('bgcolor="#14447a"'), mail.html.match(/<td [^>]*#14447a[^>]*>/)?.[0]);
+ok("stopka ma bgcolor", mail.html.includes('bgcolor="#0e3560"'));
+ok("tło strony ma bgcolor na <body>", /<body bgcolor="#f2f5f9"/.test(mail.html), mail.html.match(/<body[^>]*>/)?.[0]);
+ok(
+  "tytuł nagłówka w <font color> i span",
+  mail.html.includes('<font color="#ffffff"><span style="color:#ffffff;font-family:Arial,Helvetica,sans-serif;font-size:19px;font-weight:bold;letter-spacing:0.3px;">Potwierdzenie przyjęcia zlecenia</span></font>'),
+  mail.html.match(/<font color="#ffffff">[\s\S]{0,200}/)?.[0]
+);
+ok("nazwa firmy w nagłówku ma własny kolor", mail.html.includes('<font color="#c8d7ea">'));
+ok("pasek karty ma biały tytuł w <font>", /bgcolor="#14447a"[^>]*><font color="#ffffff">/.test(mail.html));
+ok("zewnętrzna szerokość jako atrybut width=640", mail.html.includes('width="640"'));
+ok(
+  "wszystkie tabele mają cellpadding/cellspacing/role",
+  (mail.html.match(/<table/g) ?? []).length ===
+    (mail.html.match(/<table role="presentation" cellpadding="0" cellspacing="0" border="0"/g) ?? []).length,
+  (mail.html.match(/<table(?! role="presentation" cellpadding="0")[^>]*>/) ?? [])[0]
+);
 
 ok("text zawiera numer zlecenia", mail.text.includes("ZDW/2026/0042"));
 ok("text zawiera nazwę obiektu", mail.text.includes("Osiedle Zielona Dolina"));
@@ -160,7 +187,7 @@ ok("puste zlecenie: brak sekcji Terminy", !bareMail.html.includes("Terminy"));
 ok("puste zlecenie: brak sekcji Uwagi", !bareMail.html.includes(">Uwagi<"));
 ok("puste zlecenie: brak sekcji Osoba kontaktowa", !bareMail.html.includes("Osoba kontaktowa na obiekcie"));
 ok("puste zlecenie: nazwa obiektu jest", bareMail.html.includes("Sklep przy rynku"));
-ok("bez baseUrl logo zostaje względne", bareMail.html.includes('src="/alfa-logo.png"'));
+ok("bez baseUrl logo zostaje względne", bareMail.html.includes('src="/alfa-logo-mail.png"'));
 
 // ---------------------------------------------------------------------------
 // 3. Escapowanie
@@ -210,12 +237,16 @@ ok(
   internal.html.match(/<body[\s\S]{0,400}/)?.[0]
 );
 ok(
-  "wewn.: preheader jest ukryty i tuż po <body>",
-  /<body[^>]*>\s*(<!--[\s\S]*?-->\s*)?<div style="display:none;max-height:0;overflow:hidden;/.test(internal.html)
+  "wewn.: preheader jest ukryty (mso-hide) i tuż po <body>",
+  /<body[^>]*>\s*(<!--[\s\S]*?-->\s*)?<div style="display:none;font-size:1px;[^"]*mso-hide:all;">/.test(internal.html)
 );
+ok("wewn.: logo bierze wersję mailową bez alfy", internal.html.includes("alfa-logo-mail.png"));
+ok("wewn.: bez border-radius", !/border-radius\s*:/.test(internal.html));
+ok("wewn.: pasek nagłówka ma bgcolor", internal.html.includes('bgcolor="#14447a"'));
 ok(
-  "wewn.: logo ma białe kółko pod spodem",
-  /<td width="68" height="68" align="center" valign="middle" style="width:56px;height:56px;padding:6px;border-radius:50%;background:#ffffff;line-height:0;">/.test(internal.html)
+  "wewn.: plakietka statusu ma biały napis w <font>",
+  /<font color="#ffffff"><span style="color:#ffffff;[^"]*">W realizacji<\/span><\/font>/.test(internal.html),
+  internal.html.match(/[^>]*W realizacji[^<]*/)?.[0]
 );
 // Reguła odwrotna do klienckiej: tu „Nie” jest informacją, nie brakiem oferty.
 ok("wewn.: zachowuje odpowiedzi „Nie”", internal.html.includes("Grupa interwencyjna"));
@@ -247,6 +278,13 @@ ok(
   "wewn.: przycisk „Otwórz zlecenie w CRM”",
   internal.html.includes("Otwórz zlecenie w CRM") &&
     internal.html.includes('href="https://app.example.invalid/orders/1"')
+);
+// CTA leży na granacie — bez koloru NA SAMYM <a> (i w środku) Word robi z
+// napisu czarny tekst na granatowym prostokącie.
+ok(
+  "wewn.: CTA ma biały kolor na <a> i w środku",
+  /<a href="https:\/\/app\.example\.invalid\/orders\/1" style="color:#ffffff;[^"]*"><font color="#ffffff"><span style="color:#ffffff;/.test(internal.html),
+  internal.html.match(/<a href="https:\/\/app\.example\.invalid\/orders\/1"[\s\S]{0,220}/)?.[0]
 );
 
 // 1250,50 × 24 + 480 × 36 = 30 012 + 17 280 = 47 292
@@ -280,8 +318,8 @@ const missingBare = LABELS.filter((l) => !bareInternal.html.includes(l));
 ok("wewn. puste: wszystkie etykiety nadal są", missingBare.length === 0, missingBare);
 ok(
   "wewn. puste: Numer oferty Vtools ma „—”",
-  /Numer oferty Vtools<\/td>\s*<td[^>]*>\s*<span[^>]*>—<\/span>/.test(bareInternal.html),
-  bareInternal.html.match(/Numer oferty Vtools[\s\S]{0,240}/)?.[0]
+  /Numer oferty Vtools<\/span><\/td>\s*<td[^>]*>\s*<span[^>]*>—<\/span>/.test(bareInternal.html),
+  bareInternal.html.match(/Numer oferty Vtools[\s\S]{0,320}/)?.[0]
 );
 ok("wewn. puste: sekcja Uwagi zostaje", bareInternal.html.includes(">Uwagi<"));
 ok("wewn. puste: html bez null/undefined", !NOISE.test(bareInternal.html), bareInternal.html.match(NOISE)?.[0]);

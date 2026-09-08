@@ -54,6 +54,14 @@ const GREY = "#5a6673";
 const INK = "#1c2733";
 const LINE = "#d5dce4";
 const PAPER = "#f2f5f9";
+const WHITE = "#ffffff";
+/** Jasny błękit na granacie (podtytuł w nagłówku, treść stopki). */
+const ON_NAVY = "#c8d7ea";
+/** Przygaszony błękit na granacie (dopisek pod stopką). */
+const ON_NAVY_FAINT = "#8ea8c8";
+
+/** Jedyny krój, jaki mamy pewny w Outlooku — powtarzany przy KAŻDYM napisie. */
+const FONT = "Arial,Helvetica,sans-serif";
 
 const COMPANY = {
   name: "ALFA GROUP Sp. z o.o.",
@@ -175,7 +183,61 @@ function statusOf(value: unknown): { label: string; color: string } {
 
 // ---------------------------------------------------------------------------
 // Klocki HTML
+//
+// Wszystko poniżej jest pisane pod NAJGŁUPSZY silnik, jaki dostanie ten mail:
+// Outlook desktop renderuje HTML Wordem, a użytkownik dodatkowo wkleja podgląd
+// przez schowek (Ctrl+V), czyli Word dostaje sam fragment <body>. Stąd trzy
+// żelazne reguły, których łamanie kosztowało nas czarne napisy na granacie:
+//
+//   1. KOLOR TEKSTU NA ELEMENCIE INLINE. Word nie dziedziczy `color` z <td>
+//      ani z <div> — dziedziczy dopiero z <span>/<a>/<font>. Napis bez własnego
+//      koloru wychodzi czarny, więc biały tytuł na granatowym pasku znika.
+//   2. TŁO JAKO ATRYBUT `bgcolor` + styl. Word gubi `background` z CSS na <td>.
+//   3. SZEROKOŚĆ I ODSTĘPY JAKO ATRYBUTY tabeli (`width`, `cellpadding`,
+//      `cellspacing`, `border`) — `max-width` i `border-collapse` bywają
+//      ignorowane, a bez `cellspacing="0"` Word wstawia własne szczeliny.
+//
+// Nie używamy `border-radius` (Word go nie zna) — okrągła podkładka pod logo
+// jest wypalona w samym pliku PNG (patrz `scripts/build-mail-logo.ts`).
 // ---------------------------------------------------------------------------
+
+/** Atrybuty każdej tabeli w mailu — bez nich Word dokłada własne odstępy. */
+const TABLE_ATTRS = 'role="presentation" cellpadding="0" cellspacing="0" border="0"';
+
+/**
+ * Fragment tekstu z kolorem USTAWIONYM NA SOBIE (reguła 1).
+ *
+ * @param onDark dokłada `<font color>` — jedyny zapis koloru, który Word
+ *               respektuje bezwarunkowo. Używamy go tam, gdzie pomyłka jest
+ *               najdroższa: biały/jasny napis na ciemnym tle (czarny tekst na
+ *               granacie jest po prostu nieczytelny).
+ */
+function inkHtml(content: string, color: string, style = "", onDark = false): string {
+  const span = `<span style="color:${color};font-family:${FONT};${style}">${content}</span>`;
+  return onDark ? `<font color="${color}">${span}</font>` : span;
+}
+
+/** Biały napis na ciemnym tle (nagłówek, paski kart, stopka, CTA). */
+function whiteHtml(content: string, style = ""): string {
+  return inkHtml(content, WHITE, style, true);
+}
+
+/** Tło komórki: atrybut `bgcolor` **i** styl (reguła 2). */
+function cellBg(color: string, style: string): string {
+  return `bgcolor="${color}" style="background-color:${color};background:${color};${style}"`;
+}
+
+/** Link z kolorem na sobie; na ciemnym tle dodatkowo w `<font color>`. */
+function linkHtml(
+  href: string,
+  content: string,
+  color: string,
+  style = "",
+  onDark = false
+): string {
+  const a = `<a href="${esc(href)}" style="color:${color};font-family:${FONT};${style}">${content}</a>`;
+  return onDark ? `<font color="${color}">${a}</font>` : a;
+}
 
 type Row = { label: string; value: string | null; href?: string | null };
 
@@ -194,13 +256,21 @@ function rowHtml(row: Row, showEmpty = false): string {
   // Link tylko przy realnej wartości: „—” nie może być klikalne.
   const value =
     row.href && row.value
-      ? `<a href="${esc(row.href)}" style="color:${NAVY};text-decoration:underline;">${esc(raw)}</a>`
-      : `<span style="color:${row.value ? INK : GREY};">${esc(raw)}</span>`;
+      ? linkHtml(row.href, esc(raw), NAVY, "font-size:13px;font-weight:bold;text-decoration:underline;")
+      : inkHtml(esc(raw), row.value ? INK : GREY, "font-size:13px;font-weight:bold;");
   return `
               <tr>
-                <td style="padding:6px 0;border-bottom:1px solid #edf1f5;color:${GREY};font-size:13px;width:42%;vertical-align:top;">${esc(row.label)}</td>
-                <td style="padding:6px 0;border-bottom:1px solid #edf1f5;color:${INK};font-size:13px;font-weight:bold;vertical-align:top;">${value}</td>
+                <td style="padding:6px 0;border-bottom:1px solid #edf1f5;font-size:13px;width:42%;vertical-align:top;">${inkHtml(esc(row.label), GREY, "font-size:13px;")}</td>
+                <td style="padding:6px 0;border-bottom:1px solid #edf1f5;font-size:13px;vertical-align:top;">${value}</td>
               </tr>`;
+}
+
+/** Granatowy pasek z tytułem karty — powtarza się w trzech rodzajach kart. */
+function cardTitleRowHtml(title: string): string {
+  return `
+          <tr>
+            <td ${cellBg(NAVY, "padding:7px 14px;")}>${whiteHtml(esc(title), "font-size:11px;font-weight:bold;letter-spacing:1px;text-transform:uppercase;")}</td>
+          </tr>`;
 }
 
 /**
@@ -213,13 +283,10 @@ function cardHtml(title: string, rows: Row[], showEmpty = false): string {
   const body = rows.map((r) => rowHtml(r, showEmpty)).join("");
   if (!body) return "";
   return `
-        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;border:1px solid ${LINE};margin:0 0 16px;">
+        <table ${TABLE_ATTRS} width="100%" style="width:100%;border-collapse:collapse;border:1px solid ${LINE};margin:0 0 16px;">${cardTitleRowHtml(title)}
           <tr>
-            <td style="background:${NAVY};color:#ffffff;font-size:11px;font-weight:bold;letter-spacing:1px;text-transform:uppercase;padding:7px 14px;">${esc(title)}</td>
-          </tr>
-          <tr>
-            <td style="padding:6px 14px 10px;">
-              <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;">${body}
+            <td ${cellBg(WHITE, "padding:6px 14px 10px;")}>
+              <table ${TABLE_ATTRS} width="100%" style="width:100%;border-collapse:collapse;">${body}
               </table>
             </td>
           </tr>
@@ -230,15 +297,12 @@ function cardHtml(title: string, rows: Row[], showEmpty = false): string {
 function noteCardHtml(title: string, body: string | null, showEmpty = false): string {
   if (!body && !showEmpty) return "";
   const content = body
-    ? esc(body).replace(/\r?\n/g, "<br>")
-    : `<span style="color:${GREY};">${EMPTY}</span>`;
+    ? inkHtml(esc(body).replace(/\r?\n/g, "<br>"), INK, "font-size:13px;line-height:1.6;")
+    : inkHtml(EMPTY, GREY, "font-size:13px;line-height:1.6;");
   return `
-        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;border:1px solid ${LINE};margin:0 0 16px;">
+        <table ${TABLE_ATTRS} width="100%" style="width:100%;border-collapse:collapse;border:1px solid ${LINE};margin:0 0 16px;">${cardTitleRowHtml(title)}
           <tr>
-            <td style="background:${NAVY};color:#ffffff;font-size:11px;font-weight:bold;letter-spacing:1px;text-transform:uppercase;padding:7px 14px;">${esc(title)}</td>
-          </tr>
-          <tr>
-            <td style="padding:10px 14px;color:${INK};font-size:13px;line-height:1.6;">${content}</td>
+            <td ${cellBg(WHITE, "padding:10px 14px;font-size:13px;line-height:1.6;")}>${content}</td>
           </tr>
         </table>`;
 }
@@ -251,19 +315,16 @@ function bulletCardHtml(title: string, items: string[]): string {
     .map(
       (item) => `
               <tr>
-                <td style="padding:5px 0;color:${NAVY};font-size:13px;width:16px;vertical-align:top;">&bull;</td>
-                <td style="padding:5px 0;color:${INK};font-size:13px;vertical-align:top;">${esc(item)}</td>
+                <td style="padding:5px 0;font-size:13px;width:16px;vertical-align:top;">${inkHtml("&bull;", NAVY, "font-size:13px;")}</td>
+                <td style="padding:5px 0;font-size:13px;vertical-align:top;">${inkHtml(esc(item), INK, "font-size:13px;")}</td>
               </tr>`
     )
     .join("");
   return `
-        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;border:1px solid ${LINE};margin:0 0 16px;">
+        <table ${TABLE_ATTRS} width="100%" style="width:100%;border-collapse:collapse;border:1px solid ${LINE};margin:0 0 16px;">${cardTitleRowHtml(title)}
           <tr>
-            <td style="background:${NAVY};color:#ffffff;font-size:11px;font-weight:bold;letter-spacing:1px;text-transform:uppercase;padding:7px 14px;">${esc(title)}</td>
-          </tr>
-          <tr>
-            <td style="padding:6px 14px 10px;">
-              <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;">${body}
+            <td ${cellBg(WHITE, "padding:6px 14px 10px;")}>
+              <table ${TABLE_ATTRS} width="100%" style="width:100%;border-collapse:collapse;">${body}
               </table>
             </td>
           </tr>
@@ -273,10 +334,16 @@ function bulletCardHtml(title: string, items: string[]): string {
 /** Przycisk-link (CTA) w wersji tabelowej — <button> i border-radius Outlook ignoruje. */
 function buttonHtml(label: string, href: string): string {
   return `
-        <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin:0 0 16px;">
+        <table ${TABLE_ATTRS} style="border-collapse:collapse;margin:0 0 16px;">
           <tr>
-            <td style="background:${NAVY};padding:11px 22px;">
-              <a href="${esc(href)}" style="color:#ffffff;font-size:13px;font-weight:bold;text-decoration:none;display:inline-block;">${esc(label)} &rarr;</a>
+            <td ${cellBg(NAVY, "padding:11px 22px;")}>
+              ${linkHtml(
+                href,
+                whiteHtml(`${esc(label)} &rarr;`, "font-size:13px;font-weight:bold;"),
+                WHITE,
+                "font-size:13px;font-weight:bold;text-decoration:none;",
+                true
+              )}
             </td>
           </tr>
         </table>`;
@@ -300,6 +367,7 @@ function shellHtml(params: {
   body: string;
   footerNote: string;
 }): string {
+  const footerText = (content: string) => inkHtml(content, ON_NAVY, "font-size:10px;line-height:1.7;", true);
   return `<!doctype html>
 <html lang="pl">
 <head>
@@ -307,32 +375,34 @@ function shellHtml(params: {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${esc(params.subject)}</title>
 </head>
-<body style="margin:0;padding:0;background:${PAPER};">
+<body bgcolor="${PAPER}" style="margin:0;padding:0;background-color:${PAPER};background:${PAPER};">
 <!-- Preheader: to, co Gmail/Outlook pokazuje na liście obok tematu. Musi być
-     PIERWSZYM tekstem w <body>, inaczej klient weźmie „Dzień dobry…”. -->
-<div style="display:none;max-height:0;overflow:hidden;font-size:1px;line-height:1px;color:#ffffff;">${esc(params.preheader)}</div>
-<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:${PAPER};border-collapse:collapse;">
+     PIERWSZYM tekstem w <body>, inaczej klient weźmie „Dzień dobry…”.
+     Samo display:none Wordowi nie wystarcza (potrafi je pokazać), więc
+     dokładamy zerową wysokość, przezroczystość, kolor tła i mso-hide:all. -->
+<div style="display:none;font-size:1px;color:${PAPER};line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;mso-hide:all;">${inkHtml(esc(params.preheader), PAPER, "font-size:1px;line-height:1px;")}</div>
+<table ${TABLE_ATTRS} width="100%" ${cellBg(PAPER, "width:100%;border-collapse:collapse;")}>
   <tr>
-    <td align="center" style="padding:24px 12px;">
-      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="640" style="width:640px;max-width:640px;background:#ffffff;border-collapse:collapse;font-family:Arial,Helvetica,sans-serif;color:${INK};">
+    <td align="center" ${cellBg(PAPER, "padding:24px 12px;")}>
+      <!-- width JAKO ATRYBUT: Word ignoruje max-width, więc bez tego mail
+           rozjeżdża się na całą szerokość okna Outlooka. -->
+      <table ${TABLE_ATTRS} width="640" ${cellBg(WHITE, `width:640px;max-width:640px;border-collapse:collapse;font-family:${FONT};`)}>
 
         <!-- Pasek nagłówka -->
         <tr>
-          <td style="background:${NAVY};padding:20px 24px;">
-            <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;">
+          <td ${cellBg(NAVY, "padding:20px 24px;")}>
+            <table ${TABLE_ATTRS} width="100%" style="width:100%;border-collapse:collapse;">
               <tr>
-                <!-- Białe kółko pod logo: znak jest granatowy, a pasek też —
-                     bez podkładki logo znika. border-radius NA KOMÓRCE, bo
-                     Outlook ignoruje zaokrąglenie na <img>.
-                     width w stylu to 56px, nie 68: komórka liczy się w
-                     content-box, więc padding 6px z każdej strony dopiero robi
-                     z tego równe koło 68×68 — z 68px wychodziła elipsa 80×70. -->
-                <td width="68" height="68" align="center" valign="middle" style="width:56px;height:56px;padding:6px;border-radius:50%;background:#ffffff;line-height:0;">
-                  <img src="${esc(params.logoUrl)}" alt="Alfa Group" width="56" height="56" style="display:block;width:56px;height:56px;border:0;">
+                <!-- Logo ma białą podkładkę WYPALONĄ W PLIKU (alfa-logo-mail.png,
+                     bez kanału alfa, narożniki w kolorze paska): Word ignoruje
+                     border-radius, a przezroczysty PNG potrafi spłaszczyć na
+                     czarno. Dlatego komórka nie ma ani tła, ani paddingu. -->
+                <td width="68" height="68" align="center" valign="middle" style="width:68px;height:68px;line-height:0;font-size:0;">
+                  <img src="${esc(params.logoUrl)}" alt="Alfa Group" width="68" height="68" style="display:block;width:68px;height:68px;border:0;">
                 </td>
-                <td style="vertical-align:middle;padding-left:16px;color:#ffffff;">
-                  <div style="font-size:19px;font-weight:bold;letter-spacing:0.3px;">${esc(params.headerTitle)}</div>
-                  <div style="font-size:12px;color:#c8d7ea;padding-top:3px;">${esc(COMPANY.name)}</div>
+                <td valign="middle" style="vertical-align:middle;padding-left:16px;">
+                  <div style="font-size:19px;line-height:1.3;">${whiteHtml(esc(params.headerTitle), "font-size:19px;font-weight:bold;letter-spacing:0.3px;")}</div>
+                  <div style="font-size:12px;padding-top:3px;line-height:1.4;">${inkHtml(esc(COMPANY.name), ON_NAVY, "font-size:12px;", true)}</div>
                   ${params.headerExtraHtml}
                 </td>
               </tr>
@@ -342,12 +412,12 @@ function shellHtml(params: {
 ${params.body}
         <!-- Stopka -->
         <tr>
-          <td style="background:${NAVY_DARK};padding:16px 24px;color:#c8d7ea;font-size:10px;line-height:1.7;">
-            <strong style="color:#ffffff;">${esc(COMPANY.name)}</strong> · ${esc(COMPANY.address)}<br>
-            ${esc(COMPANY.phones)} · ${esc(COMPANY.email)} · ${esc(COMPANY.www)}<br>
-            ${esc(COMPANY.legal)}<br>
-            ${esc(COMPANY.licence)}
-            <div style="padding-top:8px;color:#8ea8c8;">${esc(params.footerNote)}</div>
+          <td ${cellBg(NAVY_DARK, "padding:16px 24px;font-size:10px;line-height:1.7;")}>
+            ${whiteHtml(esc(COMPANY.name), "font-size:10px;font-weight:bold;line-height:1.7;")}${footerText(` · ${esc(COMPANY.address)}`)}<br>
+            ${footerText(`${esc(COMPANY.phones)} · ${esc(COMPANY.email)} · ${esc(COMPANY.www)}`)}<br>
+            ${footerText(esc(COMPANY.legal))}<br>
+            ${footerText(esc(COMPANY.licence))}
+            <div style="padding-top:8px;font-size:10px;line-height:1.7;">${inkHtml(esc(params.footerNote), ON_NAVY_FAINT, "font-size:10px;line-height:1.7;", true)}</div>
           </td>
         </tr>
 
@@ -359,10 +429,17 @@ ${params.body}
 </html>`;
 }
 
-/** Absolutny URL logo. Bez `baseUrl` zostaje ścieżka względna (podgląd w iframe ją zniesie). */
+/**
+ * Absolutny URL logo. Bez `baseUrl` zostaje ścieżka względna (podgląd w iframe ją zniesie).
+ *
+ * To NIE jest `alfa-logo.png` z aplikacji: mail używa wersji „mailowej” — bez
+ * kanału alfa, z białym krążkiem i granatowym tłem wypalonymi w pikselach
+ * (`scripts/build-mail-logo.ts`). Outlook potrafi spłaszczyć przezroczysty PNG
+ * na czarno i nie zna `border-radius`, więc podkładki nie da się zrobić w HTML.
+ */
 function logoUrlFrom(opts: OrderMailOptions): string {
   const base = (opts.baseUrl || "").replace(/\/+$/, "");
-  return base ? `${base}/alfa-logo.png` : "/alfa-logo.png";
+  return base ? `${base}/alfa-logo-mail.png` : "/alfa-logo-mail.png";
 }
 
 /** Baza URL bez końcowego ukośnika — do składania linków w CRM. */
@@ -370,9 +447,19 @@ function baseFrom(opts: OrderMailOptions): string {
   return (opts.baseUrl || "").replace(/\/+$/, "");
 }
 
-/** Plakietka (numer zlecenia, status) w nagłówku. */
+/**
+ * Plakietka (numer zlecenia, status) w nagłówku.
+ *
+ * Tło zewnętrznego <span> Word czasem zgubi, ale kolor napisu jest ustawiony na
+ * samym tekście (i przez `<font color>` przy jasnym napisie), więc w najgorszym
+ * razie plakietka traci prostokąt — nigdy czytelność.
+ */
 function badgeHtml(label: string, background: string, color: string): string {
-  return `<span style="display:inline-block;background:${background};color:${color};font-size:13px;font-weight:bold;letter-spacing:0.6px;padding:4px 12px;margin:0 6px 0 0;">${esc(label)}</span>`;
+  const inner =
+    color.toLowerCase() === WHITE
+      ? whiteHtml(esc(label), "font-size:13px;font-weight:bold;letter-spacing:0.6px;")
+      : inkHtml(esc(label), color, "font-size:13px;font-weight:bold;letter-spacing:0.6px;", true);
+  return `<span style="display:inline-block;background-color:${background};background:${background};padding:4px 12px;margin:0 6px 0 0;">${inner}</span>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -496,15 +583,15 @@ export function buildOrderConfirmationMail(
     body: `
         <!-- Powitanie -->
         <tr>
-          <td style="padding:24px 24px 4px;">
-            <p style="margin:0 0 10px;font-size:14px;color:${INK};">${esc(content.greeting)}</p>
-            <p style="margin:0 0 20px;font-size:14px;line-height:1.65;color:${GREY};">${esc(INTRO)}</p>
+          <td ${cellBg(WHITE, "padding:24px 24px 4px;")}>
+            <p style="margin:0 0 10px;font-size:14px;">${inkHtml(esc(content.greeting), INK, "font-size:14px;")}</p>
+            <p style="margin:0 0 20px;font-size:14px;line-height:1.65;">${inkHtml(esc(INTRO), GREY, "font-size:14px;line-height:1.65;")}</p>
           </td>
         </tr>
 
         <!-- Karty -->
         <tr>
-          <td style="padding:0 24px;">
+          <td ${cellBg(WHITE, "padding:0 24px;")}>
 ${cardHtml("Dane obiektu", content.objectRows)}
 ${bulletCardHtml("Zakres usługi", content.scopeItems)}
 ${cardHtml("Warunki", content.termsRows)}
@@ -516,12 +603,14 @@ ${noteCardHtml("Uwagi", content.notes)}
 
         <!-- Zamknięcie -->
         <tr>
-          <td style="padding:4px 24px 24px;">
-            <p style="margin:0;font-size:14px;line-height:1.65;color:${GREY};">
-              W razie pytań prosimy o kontakt: <a href="mailto:${esc(COMPANY.email)}" style="color:${NAVY};">${esc(COMPANY.email)}</a>
-              lub telefonicznie ${esc(PHONES_INLINE)}.
-            </p>
-            <p style="margin:14px 0 0;font-size:14px;color:${INK};">Z poważaniem,<br><strong>Zespół ${esc(COMPANY.name)}</strong></p>
+          <td ${cellBg(WHITE, "padding:4px 24px 24px;")}>
+            <p style="margin:0;font-size:14px;line-height:1.65;">${inkHtml("W razie pytań prosimy o kontakt: ", GREY, "font-size:14px;line-height:1.65;")}${linkHtml(
+              `mailto:${COMPANY.email}`,
+              esc(COMPANY.email),
+              NAVY,
+              "font-size:14px;text-decoration:underline;"
+            )}${inkHtml(` lub telefonicznie ${esc(PHONES_INLINE)}.`, GREY, "font-size:14px;line-height:1.65;")}</p>
+            <p style="margin:14px 0 0;font-size:14px;">${inkHtml("Z poważaniem,", INK, "font-size:14px;")}<br>${inkHtml(`Zespół ${esc(COMPANY.name)}`, INK, "font-size:14px;font-weight:bold;")}</p>
           </td>
         </tr>
 `,
@@ -754,17 +843,18 @@ export function buildOrderInternalMail(
     body: `
         <!-- Wstęp -->
         <tr>
-          <td style="padding:22px 24px 4px;">
-            <p style="margin:0 0 18px;font-size:14px;line-height:1.65;color:${GREY};">
-              Poniżej komplet danych zlecenia tak, jak zostały zapisane w CRM.
-              Pola bez wartości oznaczono znakiem &bdquo;${EMPTY}&rdquo;.
-            </p>
+          <td ${cellBg(WHITE, "padding:22px 24px 4px;")}>
+            <p style="margin:0 0 18px;font-size:14px;line-height:1.65;">${inkHtml(
+              `Poniżej komplet danych zlecenia tak, jak zostały zapisane w CRM. Pola bez wartości oznaczono znakiem &bdquo;${EMPTY}&rdquo;.`,
+              GREY,
+              "font-size:14px;line-height:1.65;"
+            )}</p>
           </td>
         </tr>
 
         <!-- Karty -->
         <tr>
-          <td style="padding:0 24px;">
+          <td ${cellBg(WHITE, "padding:0 24px;")}>
 ${sections.map((s) => cardHtml(s.title, s.rows, true)).join("\n")}
 ${noteCardHtml("Uwagi", notes, true)}
 ${crmHref ? buttonHtml("Otwórz zlecenie w CRM", crmHref) : ""}
