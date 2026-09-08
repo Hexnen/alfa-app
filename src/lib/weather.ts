@@ -71,6 +71,12 @@ export const DETAIL_DAYS = 7;
 /** Typy wydarzeń, dla których punktem zastępczym jest biuro. */
 const OFFICE_TYPES = new Set(["biuro", "przygotowanie"]);
 
+/**
+ * Typy bez pogody z definicji: `urlop` (nieobecność) i `notatka` (kafelek wskazujący notatkę,
+ * nie wyjazd). Powód `vacation` jest wyłącznie diagnostyczny — endpointy zwracają `null`.
+ */
+const NO_WEATHER_TYPES = new Set(["urlop", "notatka"]);
+
 const DAILY_VARS =
   "weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max,wind_speed_10m_max";
 const HOURLY_VARS = "temperature_2m,weather_code,precipitation_probability,precipitation,wind_speed_10m";
@@ -244,7 +250,7 @@ export async function eventWeatherPoint(
   ev: Pick<WeatherEventInput, "type" | "location" | "objectId">,
   opts: WeatherOptions = {}
 ): Promise<WeatherOutcome<WeatherPoint>> {
-  if (ev.type === "urlop") return { value: null, reason: "vacation" };
+  if (NO_WEATHER_TYPES.has(ev.type)) return { value: null, reason: "vacation" };
 
   const line = (ev.location ?? "").trim();
   if (line) {
@@ -865,7 +871,7 @@ export async function weatherBriefs(
 
   for (const ev of events) {
     items.set(ev.id, null);
-    if (ev.type === "urlop") continue;
+    if (NO_WEATHER_TYPES.has(ev.type)) continue;
     if (!isInWeatherWindow(ev.startAt.slice(0, 10), now)) continue;
 
     let pt = await eventWeatherPoint(ev, { ...opts, cacheOnly: true });
@@ -919,7 +925,7 @@ export async function weatherDetail(
   opts: WeatherOptions = {}
 ): Promise<WeatherOutcome<WeatherDetail>> {
   const now = opts.now ?? new Date();
-  if (ev.type === "urlop") return { value: null, reason: "vacation" };
+  if (NO_WEATHER_TYPES.has(ev.type)) return { value: null, reason: "vacation" };
 
   const date = ev.startAt.slice(0, 10);
   if (!isInWeatherWindow(date, now)) return { value: null, reason: "out_of_range" };

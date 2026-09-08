@@ -25,7 +25,7 @@ import {
   type CalendarSettingsField,
   type CalendarSettingsValues,
 } from "@/lib/api";
-import { EVENT_TYPE_META, EVENT_TYPE_ORDER, REALIZATION_TYPES } from "@/lib/calendar-labels";
+import { EVENT_TYPE_META, EVENT_TYPE_ORDER, REALIZATION_TYPES, isNoteEvent } from "@/lib/calendar-labels";
 import { ErrorBox, Field, SectionCard, Switch } from "@/components/admin-assistant/shared";
 import { deepEq, errMsg, useFlash } from "@/components/admin-assistant/helpers";
 import { cn } from "@/lib/utils";
@@ -195,10 +195,10 @@ export function AdminCalendar() {
   const candidates = backfill ? backfillCount(backfill.candidates) : 0;
   /** Płatne wydarzenia, którym brakuje samej wyceny (realizację już mają). */
   const quoteCandidates = backfill?.quoteCandidates ?? 0;
-  /** Typy do wyboru: z backendu (meta.allowedTypes) albo wszystkie poza urlopem. */
+  /** Typy do wyboru: z backendu (meta.allowedTypes) albo wszystkie poza urlopem i notatką. */
   const allowedTypes = settings.meta?.allowedTypes?.length
     ? settings.meta.allowedTypes
-    : EVENT_TYPE_ORDER.filter((t) => t !== "urlop");
+    : EVENT_TYPE_ORDER.filter((t) => t !== "urlop" && !isNoteEvent(t));
 
   return (
     <div className="space-y-3 pb-24">

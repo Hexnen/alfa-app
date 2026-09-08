@@ -2,13 +2,17 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useMemo,
   useRef,
   useState,
   type ChangeEvent,
   type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
   type Ref,
+  type RefObject,
 } from "react";
 import {
+  CalendarDays,
   Check,
   Download,
   ExternalLink,
@@ -47,7 +51,8 @@ import {
   type CalendarNote,
   type CalendarNoteAttachment,
 } from "@/lib/api";
-import { NOTE_MAX, fmtRelative, fmtTimestamp, initials, notesLabel } from "@/lib/calendar-labels";
+import { NOTE_MAX, fmtRelative, fmtShort, fmtTimestamp, initials, notesLabel } from "@/lib/calendar-labels";
+import { mentionSuggestions, parseMentions, toDateStr } from "@/lib/note-mentions";
 import { cn } from "@/lib/utils";
 
 /** Badge „n notatek” — podgląd wydarzenia, karty asystenta. Nic nie renderuje przy 0. */
@@ -92,6 +97,308 @@ function NoteAvatar({ note }: { note: CalendarNote }) {
 }
 
 const errMsg = (e: unknown, fallback: string) => (e instanceof Error && e.message ? e.message : fallback);
+
+// ---------------------------------------------------------------------------
+// Wzmianki dat („@piątek”, „@15.09”) — chipy w treści, autouzupełnianie, podgląd
+// ---------------------------------------------------------------------------
+
+/** Klik we wzmiankę / link „w kalendarzu”: `eventId` = kafelek notatki, inaczej sam dzień. */
+type OpenMention = (date: string, eventId: number | null) => void;
+
+/** Kotwica wzmianek: dzisiejsza data lokalna (backend liczy w strefie warszawskiej). */
+const mentionToday = () => toDateStr(new Date());
+
+const WEEKDAY_SHORT = new Intl.DateTimeFormat("pl-PL", { weekday: "short" });
+
+/** „pt 11.09” — krótka etykieta dnia na chipie / linku. */
+function dayChipLabel(date: string): string {
+  const d = new Date(`${date}T12:00:00`);
+  if (Number.isNaN(d.getTime())) return date;
+  return `${WEEKDAY_SHORT.format(d).replace(".", "")} ${fmtShort(date, true)}`;
+}
+
+interface ResolvedMention {
+  raw: string;
+  key: string;
+  start: number;
+  end: number;
+  date: string;
+  /** Kafelek `notatka` powstały z tej wzmianki (null = jeszcze nie ma). */
+  eventId: number | null;
+}
+
+/**
+ * Wzmianki w treści notatki: pozycje z lokalnego parsera, a data i `eventId` — o ile
+ * backend je przysłał — z `note.mentions` (kanoniczne rozstrzygnięcie po stronie serwera).
+ */
+function resolveMentions(note: CalendarNote, today: string): ResolvedMention[] {
+  const fromApi = new Map((note.mentions ?? []).map((m) => [m.key, m]));
+  return parseMentions(note.text ?? "", today).map((m) => {
+    const api = fromApi.get(m.key);
+    return { raw: m.raw, key: m.key, start: m.start, end: m.end, date: api?.date ?? m.date, eventId: api?.eventId ?? null };
+  });
+}
+
+const MENTION_CHIP =
+  "mx-px inline-flex items-baseline gap-1 rounded-full bg-amber-500/15 px-1.5 py-px align-baseline text-[11px] font-medium text-amber-800 dark:text-amber-200";
+
+function MentionChip({ mention, onOpen }: { mention: ResolvedMention; onOpen?: OpenMention }) {
+  const label = `${mention.raw} · ${dayChipLabel(mention.date)}`;
+  if (!onOpen) {
+    return (
+      <span className={MENTION_CHIP} data-testid="note-mention" data-mention-key={mention.key}>
+        {label}
+      </span>
+    );
+  }
+  return (
+    <button
+      type="button"
+      onClick={() => onOpen(mention.date, mention.eventId)}
+      className={cn(
+        MENTION_CHIP,
+        "hover:bg-amber-500/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      )}
+      data-testid="note-mention"
+      data-mention-key={mention.key}
+      data-event-id={mention.eventId ?? undefined}
+      title={mention.eventId ? "Otwórz kafelek notatki w kalendarzu" : "Pokaż ten dzień w kalendarzu"}
+    >
+      {label}
+    </button>
+  );
+}
+
+/** Treść notatki z klikalnymi chipami wzmianek dat. */
+function NoteText({ note, onOpenMention }: { note: CalendarNote; onOpenMention?: OpenMention }) {
+  const text = note.text ?? "";
+  const mentions = resolveMentions(note, mentionToday());
+  if (mentions.length === 0) {
+    return (
+      <p className="whitespace-pre-wrap break-words text-sm leading-relaxed" data-testid="note-text">
+        {text}
+      </p>
+    );
+  }
+  const parts: ReactNode[] = [];
+  let cursor = 0;
+  mentions.forEach((m, i) => {
+    if (m.start > cursor) parts.push(text.slice(cursor, m.start));
+    parts.push(<MentionChip key={`m-${i}-${m.key}`} mention={m} onOpen={onOpenMention} />);
+    cursor = m.end;
+  });
+  if (cursor < text.length) parts.push(text.slice(cursor));
+  return (
+    <p className="whitespace-pre-wrap break-words text-sm leading-relaxed" data-testid="note-text">
+      {parts}
+    </p>
+  );
+}
+
+/** Linki „w kalendarzu: 11.09” — kafelki `notatka` tej notatki (ze wzmianek i ręczne). */
+function NoteLinkedEvents({ note, onOpenMention }: { note: CalendarNote; onOpenMention?: OpenMention }) {
+  const fromMentions = (note.mentions ?? []).filter((m) => m.eventId != null);
+  const covered = new Set(fromMentions.map((m) => m.eventId as number));
+  const extra = (note.linkedEventIds ?? []).filter((id) => !covered.has(id));
+  if (fromMentions.length === 0 && extra.length === 0) return null;
+  const item = (key: string, label: string, date: string | null, eventId: number) =>
+    onOpenMention ? (
+      <button
+        key={key}
+        type="button"
+        onClick={() => onOpenMention(date ?? "", eventId)}
+        className="inline-flex items-center gap-1 rounded-full border border-amber-500/40 px-1.5 py-px text-[10px] font-medium text-amber-800 hover:bg-amber-500/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring dark:text-amber-200"
+        data-testid="note-linked-event"
+        data-event-id={eventId}
+        title="Otwórz kafelek notatki w kalendarzu"
+      >
+        <CalendarDays className="h-3 w-3" aria-hidden />
+        {label}
+      </button>
+    ) : (
+      <span
+        key={key}
+        className="inline-flex items-center gap-1 rounded-full border border-amber-500/40 px-1.5 py-px text-[10px] font-medium text-amber-800 dark:text-amber-200"
+        data-testid="note-linked-event"
+        data-event-id={eventId}
+      >
+        <CalendarDays className="h-3 w-3" aria-hidden />
+        {label}
+      </span>
+    );
+  return (
+    <span className="mt-1 flex flex-wrap items-center gap-1" data-testid="note-linked-events">
+      {fromMentions.map((m) =>
+        item(`m-${m.eventId}`, `w kalendarzu: ${fmtShort(m.date, true)}`, m.date, m.eventId as number)
+      )}
+      {extra.map((id) => item(`e-${id}`, "w kalendarzu", null, id))}
+    </span>
+  );
+}
+
+const MENTION_PREFIX_RE = /(?:^|[^\p{L}\p{N}_@])@([\p{L}]*)$/u;
+
+interface SuggestState {
+  items: ReturnType<typeof mentionSuggestions>;
+  /** Pozycja „@” w tekście i pozycja kursora, między którymi wstawiamy token. */
+  start: number;
+  end: number;
+  active: number;
+}
+
+/**
+ * Pole treści notatki z autouzupełnianiem po „@” (dziś/jutro/pojutrze/dni tygodnia)
+ * i podglądem „Utworzy kafelki: …”. Poza tym zwykła `Textarea` — skróty rodzica
+ * (Ctrl/Cmd+Enter, Escape) działają jak wcześniej.
+ */
+function MentionTextarea({
+  value,
+  onChange,
+  onKeyDown,
+  textareaRef,
+  rows,
+  maxLength,
+  placeholder,
+  ariaLabel,
+  className,
+  autoFocus,
+  testId,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  onKeyDown?: (e: ReactKeyboardEvent<HTMLTextAreaElement>) => void;
+  textareaRef?: RefObject<HTMLTextAreaElement | null>;
+  rows?: number;
+  maxLength?: number;
+  placeholder?: string;
+  ariaLabel?: string;
+  className?: string;
+  autoFocus?: boolean;
+  testId?: string;
+}) {
+  const today = useMemo(() => mentionToday(), []);
+  const [sug, setSug] = useState<SuggestState | null>(null);
+  const ownRef = useRef<HTMLTextAreaElement>(null);
+  const ref = textareaRef ?? ownRef;
+
+  const refresh = (el: HTMLTextAreaElement) => {
+    const caret = el.selectionStart ?? el.value.length;
+    const m = MENTION_PREFIX_RE.exec(el.value.slice(0, caret));
+    if (!m) {
+      setSug(null);
+      return;
+    }
+    const items = mentionSuggestions(m[1], today).slice(0, 8);
+    if (items.length === 0) {
+      setSug(null);
+      return;
+    }
+    setSug({ items, start: caret - m[1].length - 1, end: caret, active: 0 });
+  };
+
+  const insert = (token: string) => {
+    if (!sug) return;
+    const next = `${value.slice(0, sug.start)}@${token} ${value.slice(sug.end)}`;
+    const caret = sug.start + token.length + 2;
+    setSug(null);
+    onChange(next);
+    window.requestAnimationFrame(() => {
+      const el = ref.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(caret, caret);
+    });
+  };
+
+  const handleKeyDown = (e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+    if (sug && !e.ctrlKey && !e.metaKey) {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        const dir = e.key === "ArrowDown" ? 1 : -1;
+        setSug((s) => (s ? { ...s, active: (s.active + dir + s.items.length) % s.items.length } : s));
+        return;
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        e.stopPropagation();
+        insert(sug.items[sug.active].token);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        setSug(null);
+        return;
+      }
+    }
+    onKeyDown?.(e);
+  };
+
+  const preview = useMemo(() => {
+    const seen = new Map<string, string>();
+    for (const m of parseMentions(value, today)) if (!seen.has(m.key)) seen.set(m.key, m.label);
+    return [...seen.values()];
+  }, [value, today]);
+
+  return (
+    <div className="relative">
+      <Textarea
+        ref={ref}
+        value={value}
+        onChange={(e) => {
+          onChange(e.target.value);
+          refresh(e.target);
+        }}
+        onKeyDown={handleKeyDown}
+        onKeyUp={(e) => refresh(e.currentTarget)}
+        onClick={(e) => refresh(e.currentTarget)}
+        onBlur={() => window.setTimeout(() => setSug(null), 120)}
+        rows={rows}
+        maxLength={maxLength}
+        placeholder={placeholder}
+        aria-label={ariaLabel}
+        autoFocus={autoFocus}
+        className={className}
+        data-testid={testId}
+      />
+      {sug && (
+        <ul
+          role="listbox"
+          aria-label="Podpowiedzi dat"
+          className="absolute left-1 z-30 mt-1 max-h-56 w-64 overflow-y-auto rounded-md border bg-popover p-1 text-sm shadow-md"
+          data-testid="mention-suggestions"
+        >
+          {sug.items.map((s, i) => (
+            <li
+              key={s.token}
+              role="option"
+              aria-selected={i === sug.active}
+              onMouseEnter={() => setSug((prev) => (prev ? { ...prev, active: i } : prev))}
+              onMouseDown={(e) => {
+                e.preventDefault();
+                insert(s.token);
+              }}
+              className={cn(
+                "flex cursor-pointer items-center justify-between gap-2 rounded px-2 py-1",
+                i === sug.active && "bg-accent text-accent-foreground"
+              )}
+              data-testid="mention-suggestion"
+              data-token={s.token}
+            >
+              <span className="font-medium">@{s.token}</span>
+              <span className="text-xs text-muted-foreground">{s.label}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {preview.length > 0 && (
+        <p className="mt-1 px-1 text-[11px] text-amber-700 dark:text-amber-300" data-testid="note-mentions-preview">
+          Utworzy kafelki: {preview.join(", ")}
+        </p>
+      )}
+    </div>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Załączniki — pomocnicze
@@ -219,6 +526,11 @@ export interface CalendarEventNotesProps {
    * zwiniętej sekcji pokazuje wtedy badge „szkic”. Przy odmontowaniu zgłasza `false`.
    */
   onDraftChange?: (hasDraft: boolean) => void;
+  /**
+   * Klik we wzmiankę daty w treści (`@piątek`) albo w link „w kalendarzu”. Bez tego
+   * propa chipy są nieklikalne (nadal pokazują rozstrzygniętą datę).
+   */
+  onOpenMention?: OpenMention;
   /** Uchwyt imperatywny (React 19: `ref` jako zwykły prop). */
   ref?: Ref<CalendarEventNotesHandle>;
 }
@@ -228,7 +540,16 @@ export interface CalendarEventNotesProps {
  * Własne notatki (lub admin): edycja inline, usunięcie z potwierdzeniem.
  * Załączniki: wybór z dysku / drop (przez `ref.addFiles`), multipart przy wysyłce.
  */
-export function CalendarEventNotes({ eventId, initialNotes, canEdit, onCountChange, autoFocus, onDraftChange, ref }: CalendarEventNotesProps) {
+export function CalendarEventNotes({
+  eventId,
+  initialNotes,
+  canEdit,
+  onCountChange,
+  autoFocus,
+  onDraftChange,
+  onOpenMention,
+  ref,
+}: CalendarEventNotesProps) {
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
   const [notes, setNotes] = useState<CalendarNote[]>(() => initialNotes ?? []);
@@ -650,15 +971,15 @@ export function CalendarEventNotes({ eventId, initialNotes, canEdit, onCountChan
                   </div>
                   {editing ? (
                     <div className="mt-1 space-y-1.5">
-                      <Textarea
-                        ref={editRef}
+                      <MentionTextarea
+                        textareaRef={editRef}
                         value={editDraft}
-                        onChange={(e) => setEditDraft(e.target.value)}
+                        onChange={setEditDraft}
                         onKeyDown={(e) => onKey(e, () => void submitEdit(), () => setEditingId(null))}
                         rows={3}
                         maxLength={NOTE_MAX}
-                        aria-label="Treść notatki"
-                        data-testid="note-edit-input"
+                        ariaLabel="Treść notatki"
+                        testId="note-edit-input"
                       />
                       <div className="flex items-center gap-1.5">
                         <Button
@@ -682,12 +1003,9 @@ export function CalendarEventNotes({ eventId, initialNotes, canEdit, onCountChan
                   ) : (
                     <div className="flex items-start gap-2">
                       <div className="min-w-0 flex-1">
-                        {hasText && (
-                          <p className="whitespace-pre-wrap break-words text-sm leading-relaxed" data-testid="note-text">
-                            {n.text}
-                          </p>
-                        )}
+                        {hasText && <NoteText note={n} onOpenMention={onOpenMention} />}
                         {renderAttachments(n)}
+                        <NoteLinkedEvents note={n} onOpenMention={onOpenMention} />
                       </div>
                       {canManage(n) && (
                         <span className="flex shrink-0 items-center gap-0.5 opacity-70 transition-opacity focus-within:opacity-100 group-hover:opacity-100 sm:opacity-0">
@@ -728,10 +1046,10 @@ export function CalendarEventNotes({ eventId, initialNotes, canEdit, onCountChan
 
       {canEdit && (
         <div className="rounded-md border bg-background p-2 shadow-sm focus-within:ring-1 focus-within:ring-ring" data-testid="note-add">
-          <Textarea
-            ref={addRef}
+          <MentionTextarea
+            textareaRef={addRef}
             value={draft}
-            onChange={(e) => setDraft(e.target.value)}
+            onChange={setDraft}
             onKeyDown={(e) => onKey(e, () => void submitAdd())}
             rows={2}
             maxLength={NOTE_MAX}
@@ -739,11 +1057,11 @@ export function CalendarEventNotes({ eventId, initialNotes, canEdit, onCountChan
             placeholder={
               pending.length
                 ? "Opis do załączników (opcjonalnie)…"
-                : "Dodaj notatkę — przebieg, ustalenia z klientem, co zostało do zrobienia…"
+                : "Dodaj notatkę — przebieg, ustalenia… data po „@” (np. @piątek) tworzy kafelek w kalendarzu"
             }
-            aria-label="Nowa notatka"
+            ariaLabel="Nowa notatka"
             className="min-h-0 resize-y border-0 px-1 py-1 shadow-none focus-visible:ring-0"
-            data-testid="note-add-input"
+            testId="note-add-input"
           />
 
           {pending.length > 0 && (

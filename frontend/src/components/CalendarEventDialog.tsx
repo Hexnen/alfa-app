@@ -81,6 +81,8 @@ import {
   type CalendarEventStatus,
   type CalendarEventType,
   type CalendarNote,
+  type CalendarNoteAttachment,
+  type CalendarNoteRef,
   type CalendarSeriesFreq,
   type CalendarSeriesScope,
   type ObjectWithContractor,
@@ -119,6 +121,9 @@ import {
   fmtRange,
   fmtShort,
   fmtTimestamp,
+  isNoteEvent,
+  noteEventTitle,
+  noteSnippet,
   notesLabel,
   parseLocal,
   pluralPl,
@@ -183,6 +188,11 @@ interface CalendarEventDialogProps {
    * ten dialog i otwiera inne). Bez propa pozycje kolizji są tylko tekstem.
    */
   onOpenEvent?: (id: number) => void;
+  /**
+   * Przejście kalendarza do dnia (klik we wzmiankę daty w notatce, gdy nie ma jeszcze
+   * kafelka). Bez propa dialog nawiguje na `/technical/kalendarz?date=…`.
+   */
+  onGoToDate?: (date: string) => void;
   /** Zmiana liczby notatek (zapis natychmiastowy, poza „Zapisz”) — rodzic aktualizuje licznik w kalendarzu. */
   onNotesChanged?: (eventId: number, count: number) => void;
   /**
@@ -232,6 +242,8 @@ interface FormState {
   realizationId: number | null;
   /** `true` = realizacja ręcznie odpięta — automat jej nie odtworzy. */
   realizationOptout: boolean;
+  /** Typ `notatka`: notatka, na którą wskazuje kafelek. */
+  noteId: number | null;
   // Powtarzanie (tylko create)
   recFreq: "" | CalendarSeriesFreq;
   recInterval: string;
@@ -240,7 +252,7 @@ interface FormState {
   recCount: string;
 }
 
-type FieldKey = "title" | "start" | "end" | "technicians" | "recUntil" | "recCount";
+type FieldKey = "title" | "start" | "end" | "technicians" | "recUntil" | "recCount" | "note";
 type FieldErrors = Partial<Record<FieldKey, string>>;
 
 /**
@@ -304,6 +316,7 @@ function buildInitial(
       quoteId: event.quoteId ?? null,
       realizationId: event.realizationId ?? null,
       realizationOptout: event.realizationOptout ?? false,
+      noteId: event.noteId ?? null,
       recFreq: "",
       recInterval: "1",
       recMode: "until",
@@ -312,13 +325,15 @@ function buildInitial(
     };
   }
   const prefillType = prefill?.type ?? "serwis";
-  const allDay = prefillType === "urlop" ? true : (prefill?.allDay ?? false);
+  const isNote = prefillType === "notatka";
+  const allDay = prefillType === "urlop" || isNote ? true : (prefill?.allDay ?? false);
   const def = defaultRange();
   let start = prefill?.startAt ?? def.start;
   let end = prefill?.endAt ?? def.end;
   if (allDay) {
     start = start.slice(0, 10);
-    end = prefill?.endAt ? addDays(end.slice(0, 10), -1) : start;
+    // Kafelek notatki jest zawsze jednodniowy — zaznaczenie zakresu w siatce ignorujemy.
+    end = isNote ? start : prefill?.endAt ? addDays(end.slice(0, 10), -1) : start;
   } else {
     if (start.length === 10) start = `${start}T08:00`;
     if (end.length === 10) end = `${end}T11:00`;
@@ -340,6 +355,7 @@ function buildInitial(
     quoteId: null,
     realizationId: null,
     realizationOptout: false,
+    noteId: null,
     recFreq: isKons ? "quarterly" : "",
     recInterval: "1",
     recMode: "until",
@@ -350,6 +366,28 @@ function buildInitial(
 
 /** Konwersja stanu formularza → payload API (all-day: koniec exclusive). */
 function toInput(f: FormState): CalendarEventInput {
+  // Kafelek notatki: zawsze jeden dzień, bez techników, obiektu i dokumentów.
+  if (isNoteEvent(f.type)) {
+    const day = f.start.slice(0, 10);
+    return {
+      type: f.type,
+      title: f.title.trim() || "Notatka",
+      description: null,
+      location: null,
+      startAt: day,
+      endAt: addDays(day, 1),
+      allDay: true,
+      status: f.status,
+      objectId: null,
+      technicianIds: [],
+      billing: null,
+      protocolId: null,
+      quoteId: null,
+      realizationId: null,
+      realizationOptout: false,
+      noteId: f.noteId,
+    };
+  }
   const startAt = f.allDay ? f.start.slice(0, 10) : f.start;
   const endAt = f.allDay ? addDays(f.end.slice(0, 10) || startAt, 1) : f.end;
   const isUrlop = f.type === "urlop";
@@ -1117,6 +1155,268 @@ function QuotePicker({ onPick, disabled }: { onPick: (q: Quote) => void; disable
 }
 
 // ---------------------------------------------------------------------------
+// Notatka jako wydarzenie (typ `notatka`)
+// ---------------------------------------------------------------------------
+
+/** Jedna linia opisu notatki: „Serwis kamer — 12.09.2026 · Jan Kowalski”. */
+function noteMetaLine(n: CalendarNoteRef): string {
+  return [
+    `${eventTypeLabel(n.eventType)}: ${n.eventTitle}`,
+    fmtLong(n.eventStartAt, n.eventStartAt.length <= 10),
+    n.userLabel || null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+/** Wyszukiwarka notatek (GET /calendar/notes/search) — wybór notatki dla kafelka. */
+function NotePicker({
+  value,
+  onPick,
+  onClear,
+  inputId,
+  invalid,
+}: {
+  value: CalendarNoteRef | null;
+  onPick: (n: CalendarNoteRef) => void;
+  onClear: () => void;
+  inputId: string;
+  invalid?: boolean;
+}) {
+  const [q, setQ] = useState("");
+  const [items, setItems] = useState<CalendarNoteRef[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const [active, setActive] = useState(0);
+  const hasValue = !!value;
+
+  useEffect(() => {
+    if (hasValue) return;
+    let cancelled = false;
+    const t = window.setTimeout(() => {
+      setLoading(true);
+      calendarApi
+        .searchNotes(q.trim() || undefined, 20)
+        .then((res) => {
+          if (cancelled) return;
+          setItems(res.data ?? []);
+          setActive(0);
+          setFailed(false);
+        })
+        .catch(() => {
+          if (cancelled) return;
+          setItems([]);
+          setFailed(true);
+        })
+        .finally(() => {
+          if (!cancelled) setLoading(false);
+        });
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(t);
+    };
+  }, [q, hasValue]);
+
+  if (value) {
+    return (
+      <div
+        className="flex flex-wrap items-start gap-2 rounded-md border bg-muted/40 px-2.5 py-2 text-sm"
+        data-testid="note-picked"
+        data-note-id={value.id}
+      >
+        <StickyNote className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+        <div className="min-w-0 flex-1">
+          <div className="whitespace-pre-wrap break-words">
+            {noteSnippet(value.text, 200) || <span className="text-muted-foreground">notatka bez treści (sam załącznik)</span>}
+          </div>
+          <div className="mt-0.5 truncate text-xs text-muted-foreground">{noteMetaLine(value)}</div>
+          {value.attachmentsCount > 0 && (
+            <div className="mt-0.5 inline-flex items-center gap-1 text-xs text-muted-foreground">
+              <Paperclip className="h-3 w-3" aria-hidden />
+              {pluralPl(value.attachmentsCount, "załącznik", "załączniki", "załączników")}
+            </div>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={onClear}
+          aria-label="Wybierz inną notatkę"
+          {...tip("Odepnij notatkę — wybierzesz inną z listy")}
+          className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          data-testid="note-clear"
+        >
+          <X className="h-4 w-4" />
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-1.5">
+      <div className="relative">
+        <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+        <Input
+          id={inputId}
+          value={q}
+          placeholder="Szukaj w treści notatek i tytułach wydarzeń…"
+          className={cn("pl-8", invalid && "border-destructive focus-visible:ring-destructive")}
+          aria-invalid={invalid || undefined}
+          onChange={(e) => {
+            setQ(e.target.value);
+            setActive(0);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowDown") {
+              e.preventDefault();
+              setActive((a) => Math.min(a + 1, items.length - 1));
+            } else if (e.key === "ArrowUp") {
+              e.preventDefault();
+              setActive((a) => Math.max(a - 1, 0));
+            } else if (e.key === "Enter" && items[active]) {
+              e.preventDefault();
+              onPick(items[active]);
+            }
+          }}
+          data-testid="note-search"
+        />
+      </div>
+      <ul
+        role="listbox"
+        aria-label="Notatki"
+        className="max-h-64 overflow-y-auto rounded-md border p-1 text-sm"
+        data-testid="note-search-results"
+      >
+        {loading && items.length === 0 ? (
+          <li className="flex items-center gap-1.5 px-2 py-1.5 text-xs text-muted-foreground">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> Szukam notatek…
+          </li>
+        ) : failed ? (
+          <li className="px-2 py-1.5 text-xs text-destructive">Nie udało się pobrać notatek.</li>
+        ) : items.length === 0 ? (
+          <li className="px-2 py-1.5 text-xs text-muted-foreground">
+            {q.trim() ? "Brak notatek pasujących do zapytania." : "Brak notatek — dopisz je najpierw w wydarzeniu."}
+          </li>
+        ) : (
+          items.map((n, i) => (
+            <li
+              key={n.id}
+              role="option"
+              aria-selected={i === active}
+              onMouseEnter={() => setActive(i)}
+              onMouseDown={(e) => {
+                e.preventDefault();
+                onPick(n);
+              }}
+              className={cn(
+                "cursor-pointer rounded px-2 py-1.5",
+                i === active && "bg-accent text-accent-foreground"
+              )}
+              data-testid="note-search-item"
+              data-note-id={n.id}
+            >
+              <div className="line-clamp-2 break-words">
+                {noteSnippet(n.text, 160) || <span className="text-muted-foreground">notatka bez treści</span>}
+              </div>
+              <div className="mt-0.5 flex items-center gap-1.5 truncate text-xs text-muted-foreground">
+                <span className="truncate">{noteMetaLine(n)}</span>
+                {n.attachmentsCount > 0 && <Paperclip className="h-3 w-3 shrink-0" aria-hidden />}
+              </div>
+            </li>
+          ))
+        )}
+      </ul>
+    </div>
+  );
+}
+
+/** Podgląd notatki źródłowej kafelka `notatka` (readonly) z załącznikami i linkiem do wydarzenia. */
+function SourceNoteCard({
+  note,
+  onOpenSource,
+}: {
+  note: CalendarNoteRef;
+  onOpenSource?: () => void;
+}) {
+  // Skrót notatki nie niesie plików — dociągamy je z wydarzenia źródłowego (tylko do odczytu).
+  const [loaded, setLoaded] = useState<{ noteId: number; list: CalendarNoteAttachment[] } | null>(null);
+  useEffect(() => {
+    if (!note.attachmentsCount) return;
+    let cancelled = false;
+    calendarApi
+      .notes(note.eventId)
+      .then((res) => {
+        if (cancelled) return;
+        setLoaded({ noteId: note.id, list: (res.data ?? []).find((n) => n.id === note.id)?.attachments ?? [] });
+      })
+      .catch(() => {
+        /* bez załączników — sama treść notatki wystarczy */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [note.id, note.eventId, note.attachmentsCount]);
+  const attachments = loaded?.noteId === note.id ? loaded.list : [];
+
+  return (
+    <div className="space-y-2 rounded-md border bg-muted/40 px-2.5 py-2 text-sm" data-testid="source-note">
+      <div className="flex items-start gap-2">
+        <StickyNote className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+        <div className="min-w-0 flex-1">
+          <div className="whitespace-pre-wrap break-words" data-testid="source-note-text">
+            {note.text?.trim() || <span className="text-muted-foreground">notatka bez treści (sam załącznik)</span>}
+          </div>
+          <div className="mt-0.5 text-xs text-muted-foreground">{noteMetaLine(note)}</div>
+        </div>
+      </div>
+      {attachments.length > 0 && (
+        <ul className="flex flex-wrap gap-1.5" aria-label="Załączniki notatki" data-testid="source-note-attachments">
+          {attachments.map((a) =>
+            a.kind === "image" ? (
+              <li key={a.id}>
+                <a href={a.url} target="_blank" rel="noopener noreferrer" title={a.fileName}>
+                  <img
+                    src={a.url}
+                    alt={a.fileName}
+                    loading="lazy"
+                    className="h-20 w-20 rounded-md border object-cover"
+                  />
+                </a>
+              </li>
+            ) : (
+              <li key={a.id} className="flex max-w-full items-center gap-1 rounded-md border bg-background px-2 py-1 text-xs">
+                <a
+                  href={a.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex min-w-0 items-center gap-1.5 hover:underline"
+                >
+                  <FileText className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
+                  <span className="truncate">{a.fileName}</span>
+                  <ExternalLink className="h-3 w-3 shrink-0 text-muted-foreground" aria-hidden />
+                </a>
+              </li>
+            )
+          )}
+        </ul>
+      )}
+      {onOpenSource && (
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          className="h-8"
+          onClick={onOpenSource}
+          data-testid="source-note-open-event"
+        >
+          <ExternalLink className="mr-1 h-3.5 w-3.5" /> Otwórz wydarzenie źródłowe
+        </Button>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Historia (oś czasu)
 // — agregacja wpisów z jednej operacji, grupowanie po dniu
 // ---------------------------------------------------------------------------
@@ -1624,6 +1924,7 @@ export function CalendarEventDialog({
   onSaved,
   onDeleted,
   onOpenEvent,
+  onGoToDate,
   onEdit,
   onNotesChanged,
   variant = "modal",
@@ -1661,6 +1962,8 @@ export function CalendarEventDialog({
   const [pickedRealization, setPickedRealization] = useState<CalendarEventRealization | null>(null);
   /** Wycena wybrana z listy w tej sesji edycji (podgląd przed zapisem). */
   const [pickedQuote, setPickedQuote] = useState<CalendarEventQuote | null>(null);
+  /** Notatka wybrana z wyszukiwarki (typ `notatka`) — podgląd przed zapisem. */
+  const [pickedNote, setPickedNote] = useState<CalendarNoteRef | null>(event?.sourceNote ?? null);
   const [technicians, setTechnicians] = useState<Technician[]>([]);
   const [objects, setObjects] = useState<ObjectWithContractor[]>([]);
   const [history, setHistory] = useState<ActivityEntry[]>([]);
@@ -1692,7 +1995,9 @@ export function CalendarEventDialog({
   // --- Drag & drop plików na całe okno → załączniki w kompozytorze notatki ---
   const notesRef = useRef<CalendarEventNotesHandle>(null);
   /** Te same warunki, na jakich kompozytor notatek dostaje `canEdit`. */
-  const dropEnabled = !!event && !event.deletedAt && (isEdit || (readOnly && !!onEdit));
+  // Kafelek notatki nie ma własnych notatek, więc nie ma też gdzie upuścić plików.
+  const dropEnabled =
+    !!event && !event.deletedAt && !isNoteEvent(event.type) && (isEdit || (readOnly && !!onEdit));
   const dragDepth = useRef(0);
   const [dragOver, setDragOver] = useState(false);
   /** Pliki z dropu czekają, aż sekcja notatek się rozwinie i komponent zamontuje. */
@@ -1876,10 +2181,14 @@ export function CalendarEventDialog({
   }, [draftRange]);
 
   const isUrlop = form.type === "urlop";
+  /** Kafelek notatki — formularz redukuje się do daty, statusu i wyboru notatki. */
+  const isNote = isNoteEvent(form.type);
   const showBilling = billingApplies(form.type);
+  /** Notatka źródłowa: wybrana w tej sesji albo przysłana przez backend z wydarzeniem. */
+  const sourceNote = pickedNote ?? event?.sourceNote ?? null;
 
   /** Dojazd — pole informacyjne, poza FormState: nie zapisuje się z wydarzeniem. */
-  const { travel, loading: travelLoading } = useTravel(form.objectId, open && !isUrlop);
+  const { travel, loading: travelLoading } = useTravel(form.objectId, open && !isUrlop && !isNote);
   /** Protokół widoczny w formularzu: wybrany z listy / przypięty / z realizacji (gdy nic nie przypięto). */
   const formProtocol: CalendarEventProtocol | null =
     form.protocolId != null
@@ -2002,6 +2311,25 @@ export function CalendarEventDialog({
         next.recFreq = "";
         setMultiDayPref(true);
       }
+      if (!isNoteEvent(type) && isNoteEvent(f.type)) {
+        // Wyjście z trybu notatki — tytuł był generowany z jej treści.
+        next.noteId = null;
+        next.title = "";
+        setPickedNote(null);
+      }
+      if (isNoteEvent(type)) {
+        // Kafelek notatki: jeden dzień, bez techników, obiektu, cykliczności i dokumentów.
+        next.allDay = true;
+        next.start = f.start.slice(0, 10);
+        next.end = next.start;
+        next.objectId = "";
+        next.location = "";
+        next.description = "";
+        next.technicianIds = [];
+        next.recFreq = "";
+        next.realizationOptout = false;
+        setMultiDayPref(false);
+      }
       if (type === "konserwacja" && !f.recFreq && mode === "create") {
         next.recFreq = "quarterly";
         next.recInterval = "1";
@@ -2103,6 +2431,11 @@ export function CalendarEventDialog({
 
   const validate = (): FieldErrors => {
     const e: FieldErrors = {};
+    if (isNote) {
+      if (!form.noteId) e.note = "Wskaż notatkę, do której ma prowadzić kafelek.";
+      if (!form.start) e.start = "Podaj dzień.";
+      return e;
+    }
     if (!form.title.trim() && !isUrlop) e.title = "Podaj tytuł wydarzenia.";
     if (isUrlop && form.technicianIds.length === 0)
       e.technicians = "Urlop wymaga wskazania co najmniej jednego technika.";
@@ -2133,6 +2466,7 @@ export function CalendarEventDialog({
       technicians: "cal-tech-first",
       recUntil: "cal-rec-until",
       recCount: "cal-rec-count",
+      note: "cal-note-search",
     };
     window.setTimeout(() => document.getElementById(idMap[k])?.focus(), 0);
   };
@@ -2364,6 +2698,38 @@ export function CalendarEventDialog({
     navigate(`/objects/${objectId}`);
   };
 
+  /**
+   * Klik we wzmiankę daty w notatce („@piątek”) albo w link „w kalendarzu”:
+   * z `eventId` otwieramy kafelek notatki, bez niego przechodzimy do dnia.
+   */
+  const openMention = (date: string, eventId: number | null) => {
+    if (eventId != null) {
+      if (onOpenEvent) {
+        onOpenEvent(eventId);
+        return;
+      }
+      onClose();
+      navigate(`/technical/kalendarz?event=${eventId}`);
+      return;
+    }
+    if (!date) return;
+    onClose();
+    if (onGoToDate) onGoToDate(date);
+    else navigate(`/technical/kalendarz?date=${date}`);
+  };
+
+  /** „Otwórz wydarzenie źródłowe” — wydarzenie, do którego należy notatka kafelka. */
+  const openSourceEvent = () => {
+    const id = sourceNote?.eventId;
+    if (!id) return;
+    if (onOpenEvent) {
+      onOpenEvent(id);
+      return;
+    }
+    onClose();
+    navigate(`/technical/kalendarz?event=${id}`);
+  };
+
   // --- Wyliczenia do nagłówka / podsumowań ---
   const typeMeta = EVENT_TYPE_META[form.type];
   const typeUi = EVENT_TYPE_UI[form.type];
@@ -2480,9 +2846,11 @@ export function CalendarEventDialog({
               ? `${typeMeta?.label ?? form.type} · ${fmtRange(event.startAt, event.endAt, event.allDay)}`
               : event
                 ? `${typeMeta?.label ?? form.type} · #${event.id}${dirty ? " · niezapisane zmiany" : ""}`
-                : isUrlop
-                  ? "Wskaż technika i termin urlopu. Tytuł jest opcjonalny."
-                  : "Typ, tytuł, termin i technicy. Reszta pod rozwijanymi sekcjami."}
+                : isNote
+                  ? "Wybierz notatkę i dzień — kafelek tylko do niej prowadzi."
+                  : isUrlop
+                    ? "Wskaż technika i termin urlopu. Tytuł jest opcjonalny."
+                    : "Typ, tytuł, termin i technicy. Reszta pod rozwijanymi sekcjami."}
           </Description>
         </div>
       </div>
@@ -2554,7 +2922,23 @@ export function CalendarEventDialog({
             {fmtDuration(event.startAt, event.endAt, event.allDay)}
           </div>
         </dd>
-        {event.type !== "urlop" && (
+        {isNoteEvent(event.type) && (
+          <>
+            <dt className="flex items-center gap-1.5 text-muted-foreground">
+              <StickyNote className="h-3.5 w-3.5" /> Notatka
+            </dt>
+            <dd>
+              {sourceNote ? (
+                <SourceNoteCard note={sourceNote} onOpenSource={openSourceEvent} />
+              ) : (
+                <span className="text-muted-foreground">
+                  Notatka źródłowa niedostępna (mogła zostać usunięta).
+                </span>
+              )}
+            </dd>
+          </>
+        )}
+        {event.type !== "urlop" && !isNoteEvent(event.type) && (
           <>
             <dt className="flex items-center gap-1.5 text-muted-foreground">
               <Building2 className="h-3.5 w-3.5" /> Obiekt
@@ -2700,92 +3084,151 @@ export function CalendarEventDialog({
           </>
         )}
 
-        <dt className="flex items-center gap-1.5 text-muted-foreground">
-          <Users className="h-3.5 w-3.5" /> Technicy
-        </dt>
-        <dd>
-          {event.technicians.length ? (
-            <div className="flex flex-wrap gap-1.5">
-              {event.technicians.map((t) => (
-                <span
-                  key={t.id}
-                  className="inline-flex items-center gap-1.5 rounded-full border py-0.5 pl-0.5 pr-2.5 text-sm"
-                >
-                  <Avatar name={`${t.firstName} ${t.lastName}`} className="h-5 w-5 text-[9px]" />
-                  {t.firstName} {t.lastName}
-                </span>
-              ))}
-            </div>
-          ) : (
-            <span className="text-muted-foreground">nieprzypisani</span>
-          )}
-        </dd>
-        <dt className="flex items-center gap-1.5 text-muted-foreground">
-          <FileText className="h-3.5 w-3.5" /> Opis
-        </dt>
-        <dd className="whitespace-pre-wrap">
-          {event.description || <span className="text-muted-foreground">—</span>}
-        </dd>
+        {!isNoteEvent(event.type) && (
+          <>
+            <dt className="flex items-center gap-1.5 text-muted-foreground">
+              <Users className="h-3.5 w-3.5" /> Technicy
+            </dt>
+            <dd>
+              {event.technicians.length ? (
+                <div className="flex flex-wrap gap-1.5">
+                  {event.technicians.map((t) => (
+                    <span
+                      key={t.id}
+                      className="inline-flex items-center gap-1.5 rounded-full border py-0.5 pl-0.5 pr-2.5 text-sm"
+                    >
+                      <Avatar name={`${t.firstName} ${t.lastName}`} className="h-5 w-5 text-[9px]" />
+                      {t.firstName} {t.lastName}
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <span className="text-muted-foreground">nieprzypisani</span>
+              )}
+            </dd>
+            <dt className="flex items-center gap-1.5 text-muted-foreground">
+              <FileText className="h-3.5 w-3.5" /> Opis
+            </dt>
+            <dd className="whitespace-pre-wrap">
+              {event.description || <span className="text-muted-foreground">—</span>}
+            </dd>
+          </>
+        )}
       </dl>
-      <Section id="sec-journal" icon={StickyNote} title={`Notatki (${notesCount})`}>
-        <CalendarEventNotes
-          ref={notesRef}
-          eventId={event.id}
-          initialNotes={notes}
-          canEdit={!!onEdit && !event.deletedAt}
-          onCountChange={handleNotesCount}
-        />
-      </Section>
+      {/* Kafelek notatki nie ma własnego dziennika — treść pokazuje karta notatki źródłowej. */}
+      {!isNoteEvent(event.type) && (
+        <Section id="sec-journal" icon={StickyNote} title={`Notatki (${notesCount})`}>
+          <CalendarEventNotes
+            ref={notesRef}
+            eventId={event.id}
+            initialNotes={notes}
+            canEdit={!!onEdit && !event.deletedAt}
+            onCountChange={handleNotesCount}
+            onOpenMention={openMention}
+          />
+        </Section>
+      )}
     </div>
   );
 
   // --- Tryb edycji/tworzenia ---
   const formBody = (
     <div className="space-y-4 px-5 py-4">
-      {/* Typ */}
-      <div
-        role="radiogroup"
-        aria-label="Typ wydarzenia"
-        className={cn("grid gap-1.5", docked ? "grid-cols-2" : "grid-cols-2 sm:grid-cols-4")}
-      >
-        {EVENT_TYPE_ORDER.map((t) => {
-          const m = EVENT_TYPE_META[t];
-          const I = m.icon;
-          const active = form.type === t;
-          return (
-            <button
-              key={t}
-              type="button"
-              role="radio"
-              aria-checked={active}
-              onClick={() => changeType(t)}
-              className={cn(
-                "flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none",
-                active ? m.chipActive : cn(m.chip, "bg-background hover:bg-muted")
-              )}
-            >
-              <I className="h-4 w-4 shrink-0" />
-              <span className="truncate">{m.label}</span>
-            </button>
-          );
-        })}
-      </div>
+      {/* Typ — typu `notatka` nie da się nadać ani zdjąć w edycji (backend odrzuca). */}
+      {isEdit && isNote ? (
+        <div className="flex items-center gap-2 rounded-md border bg-muted/40 px-2.5 py-1.5 text-sm" data-testid="type-locked">
+          <StickyNote className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+          <span className="font-medium">Notatka</span>
+          <span className="text-xs text-muted-foreground">typu kafelka notatki nie da się zmienić</span>
+        </div>
+      ) : (
+        <div
+          role="radiogroup"
+          aria-label="Typ wydarzenia"
+          className={cn("grid gap-1.5", docked ? "grid-cols-2" : "grid-cols-2 sm:grid-cols-4")}
+        >
+          {EVENT_TYPE_ORDER.filter((t) => !isEdit || !isNoteEvent(t)).map((t) => {
+            const m = EVENT_TYPE_META[t];
+            const I = m.icon;
+            const active = form.type === t;
+            return (
+              <button
+                key={t}
+                type="button"
+                role="radio"
+                aria-checked={active}
+                onClick={() => changeType(t)}
+                data-testid={`type-chip-${t}`}
+                className={cn(
+                  "flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none",
+                  active ? m.chipActive : cn(m.chip, "bg-background hover:bg-muted")
+                )}
+              >
+                <I className="h-4 w-4 shrink-0" />
+                <span className="truncate">{m.label}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Notatka — kafelek wskazuje istniejącą notatkę (tytuł generuje backend) */}
+      {isNote && (
+        <Section id="sec-note" icon={StickyNote} title={mode === "create" ? "Notatka *" : "Notatka"}>
+          {mode === "create" ? (
+            <>
+              <NotePicker
+                inputId="cal-note-search"
+                value={sourceNote}
+                invalid={!!fieldErrors.note}
+                onPick={(n) => {
+                  setPickedNote(n);
+                  setForm((f) => ({ ...f, noteId: n.id, title: noteEventTitle(n.text, n.eventTitle) }));
+                  setFieldErrors((e) => {
+                    if (!("note" in e)) return e;
+                    const next = { ...e };
+                    delete next.note;
+                    return next;
+                  });
+                }}
+                onClear={() => {
+                  setPickedNote(null);
+                  setForm((f) => ({ ...f, noteId: null, title: "" }));
+                }}
+              />
+              <FieldError id="cal-note-err" msg={fieldErrors.note} />
+              <p className="text-[11px] text-muted-foreground">
+                Kafelek prowadzi do notatki — nie da się go stworzyć „z niczego”. Notatkę można też przypiąć
+                sama, wpisując w jej treści datę po „@” (np. „@piątek”).
+              </p>
+            </>
+          ) : sourceNote ? (
+            <SourceNoteCard note={sourceNote} onOpenSource={openSourceEvent} />
+          ) : (
+            <p className="text-xs text-muted-foreground" data-testid="source-note-missing">
+              Notatka źródłowa niedostępna (mogła zostać usunięta).
+            </p>
+          )}
+        </Section>
+      )}
 
       {/* Tytuł */}
-      <div className="space-y-1">
-        <Label htmlFor="cal-title">{isUrlop ? "Tytuł" : "Tytuł *"}</Label>
-        <Input
-          id="cal-title"
-          value={form.title}
-          onChange={(e) => set("title", e.target.value)}
-          placeholder={isUrlop ? "domyślnie: Urlop — Imię Nazwisko" : "np. Serwis kamer — magazyn A"}
-          autoFocus={mode === "create"}
-          aria-invalid={!!fieldErrors.title}
-          aria-describedby={fieldErrors.title ? "cal-title-err" : undefined}
-          className={cn(fieldErrors.title && "border-destructive focus-visible:ring-destructive")}
-        />
-        <FieldError id="cal-title-err" msg={fieldErrors.title} />
-      </div>
+      {!isNote && (
+        <div className="space-y-1">
+          <Label htmlFor="cal-title">{isUrlop ? "Tytuł" : "Tytuł *"}</Label>
+          <Input
+            id="cal-title"
+            value={form.title}
+            onChange={(e) => set("title", e.target.value)}
+            placeholder={isUrlop ? "domyślnie: Urlop — Imię Nazwisko" : "np. Serwis kamer — magazyn A"}
+            autoFocus={mode === "create"}
+            aria-invalid={!!fieldErrors.title}
+            aria-describedby={fieldErrors.title ? "cal-title-err" : undefined}
+            className={cn(fieldErrors.title && "border-destructive focus-visible:ring-destructive")}
+          />
+          <FieldError id="cal-title-err" msg={fieldErrors.title} />
+        </div>
+      )}
 
       {/* Status — cztery wartości, więc segmenty zamiast rozwijanej listy */}
       <div className="space-y-1">
@@ -2821,8 +3264,8 @@ export function CalendarEventDialog({
         </div>
       </div>
 
-      {/* Gdzie (nie dla urlopu) */}
-      {!isUrlop && (
+      {/* Gdzie (nie dla urlopu ani kafelka notatki) */}
+      {!isUrlop && !isNote && (
         <Section
           id="sec-where"
           icon={Building2}
@@ -2959,8 +3402,30 @@ export function CalendarEventDialog({
         </div>
       )}
 
-      {/* Kiedy — jeden wiersz: Data · od → do · czas trwania */}
-
+      {/* Kiedy — kafelek notatki ma tylko dzień */}
+      {isNote ? (
+        <Section id="sec-when" icon={Clock} title="Kiedy">
+          <div className="flex flex-wrap items-center gap-2">
+            <Input
+              id="cal-start"
+              type="date"
+              aria-label="Dzień"
+              value={dateOf(form.start)}
+              aria-invalid={!!fieldErrors.start}
+              aria-describedby={fieldErrors.start ? "cal-start-err" : undefined}
+              className={cn("w-auto min-w-[9.5rem]", fieldErrors.start && "border-destructive")}
+              onChange={(e) => {
+                clearWhenErrors();
+                if (e.target.value) setForm((f) => ({ ...f, start: e.target.value, end: e.target.value }));
+              }}
+              data-testid="note-event-date"
+            />
+            <span className="text-xs text-muted-foreground">cały dzień</span>
+          </div>
+          <FieldError id="cal-start-err" msg={fieldErrors.start} />
+        </Section>
+      ) : (
+      /* Kiedy — jeden wiersz: Data · od → do · czas trwania */
       <Section id="sec-when" icon={Clock} title="Kiedy">
         <div className="flex flex-wrap items-center gap-x-2 gap-y-2">
           <Input
@@ -3064,8 +3529,10 @@ export function CalendarEventDialog({
           </p>
         )}
       </Section>
+      )}
 
-      {/* Kto */}
+      {/* Kto (kafelek notatki nie ma techników) */}
+      {!isNote && (
       <Section id="sec-who" icon={Users} title={isUrlop ? "Kto *" : "Kto"}>
         {techList.length === 0 ? (
           <p className="text-xs text-muted-foreground">Brak aktywnych techników.</p>
@@ -3203,6 +3670,7 @@ export function CalendarEventDialog({
           </div>
         )}
       </Section>
+      )}
 
       {/* Protokół — przypięty jawnie albo wyliczony z realizacji */}
       {showBilling && (
@@ -3496,7 +3964,7 @@ export function CalendarEventDialog({
 
       {/* Powtarzanie — tylko przy tworzeniu (nie dla urlopu) */}
 
-      {mode === "create" && !isUrlop && (
+      {mode === "create" && !isUrlop && !isNote && (
         <Section
           id="sec-repeat"
           icon={Repeat}
@@ -3607,7 +4075,8 @@ export function CalendarEventDialog({
         </Section>
       )}
 
-      {/* Opis (stały) */}
+      {/* Opis (stały) — kafelek notatki go nie ma */}
+      {!isNote && (
       <Section
         id="sec-notes"
         icon={FileText}
@@ -3632,9 +4101,10 @@ export function CalendarEventDialog({
           </p>
         </div>
       </Section>
+      )}
 
       {/* Notatki (dziennik) — edycja: zapis natychmiastowy; tworzenie: pierwsza notatka po utworzeniu */}
-      {isEdit && event ? (
+      {isNote ? null : isEdit && event ? (
         <Section
           id="sec-journal"
           icon={StickyNote}
@@ -3665,6 +4135,7 @@ export function CalendarEventDialog({
             canEdit={!event.deletedAt}
             onCountChange={handleNotesCount}
             onDraftChange={setHasNoteDraft}
+            onOpenMention={openMention}
           />
         </Section>
       ) : mode === "create" ? (

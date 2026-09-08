@@ -19,8 +19,11 @@ export const AUTO_REALIZATION_LABELS: Record<AutoRealizationMode, string> = {
   off: "Nigdy (tylko ręczne podpięcie)",
 };
 
-/** Typy, dla których realizacja NIGDY nie powstaje (urlop to nieobecność, nie praca na obiekcie). */
-export const REALIZATION_FORBIDDEN_TYPES: readonly CalendarEventType[] = ["urlop"];
+/**
+ * Typy, dla których realizacja NIGDY nie powstaje (urlop to nieobecność, nie praca na obiekcie;
+ * notatka to tylko kafelek wskazujący notatkę innego wydarzenia).
+ */
+export const REALIZATION_FORBIDDEN_TYPES: readonly CalendarEventType[] = ["urlop", "notatka"];
 
 /** Typy, które admin może zaznaczyć jako „objęte” (wszystkie poza zabronionymi). */
 export const REALIZATION_ALLOWED_TYPES: CalendarEventType[] = CALENDAR_EVENT_TYPES.filter(

@@ -70,7 +70,10 @@ export function assembleSystemPrompt(ctx: PromptContext): string {
   if (!r.allowModifications) disabled.add("propose_changes");
   const has = (t: string) => !disabled.has(t);
   const changes = has("propose_changes");
+  // „notatka” to kafelek wskazujący notatkę innego wydarzenia — powstaje wyłącznie w kalendarzu
+  // (ręcznie albo ze wzmianki daty w treści notatki), więc modelowi go nie oferujemy.
   const types = (ctx.types ?? CALENDAR_EVENT_TYPES)
+    .filter((t) => t !== "notatka")
     .map((t) => `${t} (${TYPE_LABELS[t as keyof typeof TYPE_LABELS] ?? t})`)
     .join(", ");
   // Tylko aktywni, jedna linia — nieaktywnych model znajdzie `find_technician` (na wyraźne życzenie).
@@ -238,6 +241,7 @@ export function assembleSystemPrompt(ctx: PromptContext): string {
     "",
     "## Słowniki",
     `Typy: ${types}.`,
+    "Typ „notatka” (kafelek wskazujący notatkę innego wydarzenia) jest TYLKO DO ODCZYTU: nie proponuj go, nie twórz i nie zmieniaj na niego typu — takie wydarzenia powstają wyłącznie w kalendarzu.",
     `Statusy: ${(ctx.statuses ?? CALENDAR_EVENT_STATUSES).join(", ")}.`,
     "Rozliczenie (billing): warranty = Gwarancyjny, free = Darmowy, paid = Płatny, null = nie dotyczy.",
     ...(r.allowRecurrence ? ["Częstotliwości serii: weekly, monthly, quarterly, semiannual, yearly."] : []),

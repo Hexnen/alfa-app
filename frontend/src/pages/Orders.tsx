@@ -39,10 +39,12 @@ import {
 } from "@/components/ui/alert-dialog";
 import { OrderForm } from "@/components/OrderForm";
 import { OrderIntakeForm } from "@/components/OrderIntakeForm";
+import { OrderMailPreviewDialog } from "@/components/OrderMailPreviewDialog";
 import {
   Plus,
   Search,
   Eye,
+  Mail,
   Trash2,
   Edit3,
   ClipboardList,
@@ -138,6 +140,8 @@ export function Orders() {
   const [editingOrder, setEditingOrder] = useState<Order | null>(null);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [orderToDelete, setOrderToDelete] = useState<Order | null>(null);
+  /** Zlecenie, którego mail potwierdzający oglądamy (null = dialog zamknięty). */
+  const [mailPreviewOrder, setMailPreviewOrder] = useState<Order | null>(null);
 
   // Debounce pól tekstowych (szukajka i zakres dat — pole typu `date` wysyła zmiany
   // już w trakcie wpisywania roku).
@@ -297,11 +301,27 @@ export function Orders() {
 
   const handleUpdateOrder = async (data: OrderInput) => {
     if (!editable) return;
-    if (editingOrder) {
-      await updateOrder(editingOrder.id, data);
-      fetchOrders();
-      setEditingOrder(null);
+    if (!editingOrder) return;
+    try {
+      // Backend wymaga echa `updatedAt` wersji, którą użytkownik miał na
+      // ekranie — bez tego odrzuca zapis (428).
+      await updateOrder(editingOrder.id, data, editingOrder.updatedAt);
+    } catch (err) {
+      if ((err as { status?: number }).status === 409) {
+        // Ktoś zapisał zlecenie w międzyczasie. Odświeżamy listę (świeże
+        // `updatedAt` dla kolejnej edycji) i podmieniamy angielski komunikat
+        // backendu — formularz pokaże go w swoim Alercie.
+        fetchOrders();
+        throw new Error(
+          "Zlecenie zostało w międzyczasie zmienione przez kogoś innego. Odśwież i spróbuj ponownie."
+        );
+      }
+      throw err;
     }
+    // Po udanym zapisie lista wraca ze świeżym `updatedAt`, więc kolejna
+    // edycja tego samego zlecenia nie dostanie 409.
+    fetchOrders();
+    setEditingOrder(null);
   };
 
   const handleDeleteOrder = async () => {
@@ -523,7 +543,13 @@ export function Orders() {
                   wartość — nie ma po czym sortować, więc nagłówek zostaje zwykły. */}
               <TableHead className="font-semibold">Techniczne</TableHead>
               <SortHeader label="Data" sortKey="created" />
-              <TableHead className="text-right font-semibold">Akcje</TableHead>
+              {/* Tabela jest szersza niż ekran poniżej ~1440 px i kolumna akcji
+                  wyjeżdżała poza kadr (widać było samo „oko”). Przyklejamy ją do
+                  prawej krawędzi kontenera przewijania — `Table` opakowuje
+                  <table> w div z `overflow-auto`, więc `sticky right-0` działa. */}
+              <TableHead className="sticky right-0 z-20 bg-slate-50 text-right font-semibold shadow-[-6px_0_8px_-6px_rgba(0,0,0,0.15)]">
+                Akcje
+              </TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -543,7 +569,11 @@ export function Orders() {
               </TableRow>
             ) : (
               orders.map((order) => (
-                <TableRow key={order.id} className="hover:bg-slate-50">
+                // `group` jest po to, żeby przyklejona komórka akcji podświetlała
+                // się razem z wierszem — ma własne, nieprzezroczyste tło (inaczej
+                // przewijana treść prześwitywałaby pod spodem), więc sam
+                // `hover:bg-slate-50` na <tr> by jej nie dosięgnął.
+                <TableRow key={order.id} className="group hover:bg-slate-50">
                   <TableCell>
                     <div className="flex items-center gap-2">
                       <ClipboardList className="w-4 h-4 text-indigo-500" />
@@ -611,7 +641,7 @@ export function Orders() {
                   <TableCell className="text-sm text-slate-500">
                     {new Date(order.createdAt).toLocaleDateString("pl-PL")}
                   </TableCell>
-                  <TableCell className="text-right">
+                  <TableCell className="sticky right-0 z-10 bg-white text-right shadow-[-6px_0_8px_-6px_rgba(0,0,0,0.15)] group-hover:bg-slate-50">
                     <div className="flex items-center justify-end gap-2">
                       <Button
                         variant="ghost"
@@ -621,6 +651,18 @@ export function Orders() {
                         title="Szczegóły"
                       >
                         <Eye className="w-4 h-4" />
+                      </Button>
+                      {/* Podgląd maila potwierdzającego — sam podgląd, bez wysyłki,
+                          więc dostępny też w trybie tylko do odczytu. */}
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => setMailPreviewOrder(order)}
+                        className="text-slate-600 hover:text-indigo-600"
+                        title="Podgląd maila do klienta"
+                        data-testid="zlecenia-mail-preview-open"
+                      >
+                        <Mail className="w-4 h-4" />
                       </Button>
                       {editable && (
                         <>
@@ -695,6 +737,13 @@ export function Orders() {
         onClose={closeForm}
         onSubmit={editingOrder ? handleUpdateOrder : handleCreateOrder}
         order={editingOrder}
+      />
+
+      {/* Podgląd maila potwierdzającego przyjęcie zlecenia */}
+      <OrderMailPreviewDialog
+        order={mailPreviewOrder}
+        open={mailPreviewOrder !== null}
+        onClose={() => setMailPreviewOrder(null)}
       />
 
       {/* Delete Confirmation Dialog */}

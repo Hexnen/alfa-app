@@ -11,8 +11,36 @@ import {
   parseOrderStatus,
 } from "../services/orders.js";
 import { isValidationError } from "../lib/validate.js";
+import { buildOrderConfirmationMail, buildOrderInternalMail } from "../lib/order-mail.js";
 
 const app = new Hono();
+
+/**
+ * Absolutny adres aplikacji dla zasobów i linków wklejanych do maila (logo, CRM).
+ *
+ * Kolejność: `APP_PUBLIC_URL` (wdrożenie) → `Origin` (żądanie z przeglądarki) →
+ * `X-Forwarded-Host` (proxy) → `Host`. Gdy nic nie da się ustalić — pusty string,
+ * czyli szablon zostawi ścieżkę względną.
+ *
+ * `X-Forwarded-Host` MUSI iść przed `Host`: w devie front woła /api przez proxy
+ * Vite z `changeOrigin: true`, które przepisuje Host na `localhost:4001` i nie
+ * przesyła Origin. Bez tego kroku mail wskazywałby backend zamiast aplikacji.
+ */
+function resolveBaseUrl(c: { req: { header(name: string): string | undefined } }): string {
+  const configured = (process.env.APP_PUBLIC_URL || "").trim();
+  if (configured) return configured.replace(/\/+$/, "");
+
+  const origin = (c.req.header("origin") || "").trim();
+  if (/^https?:\/\//i.test(origin)) return origin.replace(/\/+$/, "");
+
+  // Nagłówki proxy bywają listą („a, b”) — liczy się pierwszy wpis, czyli klient.
+  const first = (name: string) => (c.req.header(name) || "").split(",")[0].trim();
+
+  const host = first("x-forwarded-host") || (c.req.header("host") || "").trim();
+  if (!host) return "";
+  const proto = first("x-forwarded-proto") || "http";
+  return `${proto}://${host}`;
+}
 
 /** Body żądania → 400 z komunikatem, gdy JSON jest niepoprawny albo nie jest obiektem. */
 async function readJson(c: { req: { json(): Promise<unknown> } }): Promise<unknown> {
@@ -230,6 +258,73 @@ app.get("/:id", async (c) => {
   return c.json<ApiResponse<typeof order[0]>>({
     success: true,
     data: order[0],
+  });
+});
+
+/**
+ * Podgląd maila „potwierdzenie przyjęcia zlecenia” — gotowy HTML, temat, wersja
+ * tekstowa i adresaci. NIC NIE WYSYŁA: front pokazuje to w dialogu, a ta sama
+ * funkcja (src/lib/order-mail.ts) posłuży później wysyłce nodemailerem.
+ *
+ * Uprawnienia załatwia `tabPermissionGuard` (prefiks "/orders" → zakładka
+ * "orders", GET = poziom "view"), więc trasa nie sprawdza ich po raz drugi.
+ */
+app.get("/:id/mail-preview", async (c) => {
+  const id = parseInt(c.req.param("id"));
+  if (!Number.isInteger(id)) {
+    return c.json<ApiResponse<null>>({ success: false, error: "Nieprawidłowy identyfikator" }, 400);
+  }
+
+  // Dwa szablony: „client” — potwierdzenie DO KLIENTA (tylko wypełnione pola),
+  // „internal” — komplet danych DLA ZESPOŁU (puste pola jako „—”).
+  const variant = c.req.query("variant") ?? "client";
+  if (variant !== "client" && variant !== "internal") {
+    return c.json<ApiResponse<null>>(
+      { success: false, error: "Nieprawidłowy wariant maila (dozwolone: client, internal)" },
+      400
+    );
+  }
+
+  const rows = await db
+    .select()
+    .from(schema.orders)
+    .where(eq(schema.orders.id, id))
+    .limit(1);
+
+  if (rows.length === 0) {
+    return c.json<ApiResponse<null>>({ success: false, error: "Order not found" }, 404);
+  }
+  const order = rows[0];
+
+  // Logo w mailu musi być absolutne — klient pocztowy nie zna adresu aplikacji.
+  // Kolejność: jawna konfiguracja wdrożenia → Origin żądania (dev: :4000, prod:
+  // domena appki) → Host z nagłówka. Bez żadnego z nich zostaje ścieżka względna.
+  const baseUrl = resolveBaseUrl(c);
+
+  const mail =
+    variant === "internal"
+      ? buildOrderInternalMail(order, { baseUrl })
+      : buildOrderConfirmationMail(order, { baseUrl });
+
+  // Adresat wewnętrznego maila to skrzynka zespołu z konfiguracji wdrożenia.
+  // Bez niej zwracamy pusty string — front pokaże, że adres nie jest ustawiony,
+  // zamiast podstawić przypadkowo adres klienta.
+  // Kopia do osoby kontaktowej na obiekcie tylko wtedy, gdy to KTOŚ INNY niż
+  // zlecający — inaczej ta sama osoba dostałaby wiadomość dwa razy.
+  const requester = (order.requesterEmail || "").trim();
+  const contact = (order.contactEmail || "").trim();
+  const to =
+    variant === "internal" ? (process.env.ORDER_INTERNAL_MAIL_TO || "").trim() : requester;
+  const cc =
+    variant === "internal"
+      ? null
+      : contact && contact.toLowerCase() !== to.toLowerCase()
+        ? contact
+        : null;
+
+  return c.json<ApiResponse<{ subject: string; html: string; text: string; to: string; cc: string | null }>>({
+    success: true,
+    data: { ...mail, to, cc },
   });
 });
 

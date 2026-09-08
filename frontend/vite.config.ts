@@ -12,6 +12,10 @@ export default defineConfig({
       '/api': {
         target: 'http://localhost:4001',
         changeOrigin: true,
+        // changeOrigin przepisuje Host na :4001 i gubi Origin, więc backend nie
+        // wie, spod jakiego adresu przyszło żądanie — a składa z niego absolutne
+        // linki (mail zlecenia). xfwd dokłada X-Forwarded-Host/-Proto z oryginału.
+        xfwd: true,
       },
     },
   },

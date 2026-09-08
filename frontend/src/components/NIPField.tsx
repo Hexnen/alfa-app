@@ -67,8 +67,40 @@ export function NIPField({
   const [companyError, setCompanyError] = useState<string | null>(null);
   const [notInRegistry, setNotInRegistry] = useState(false);
 
+  const normalizedValue = normalizeNIP(value);
+
+  // Callbacki w refach. Formularze rodziców przekazują je jako inline'owe strzałki
+  // (`onChange={(nip) => set(...)}`), więc przy każdym renderze mają nową tożsamość.
+  // Gdyby efekt debounce'a zależał od nich, każdy render rodzica uruchamiałby
+  // sprawdzanie NIP-u → onChange → render rodzica → … czyli pętla co 400 ms.
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+  const onUseExistingRef = useRef(onUseExisting);
+  onUseExistingRef.current = onUseExisting;
+  const onCompanyFoundRef = useRef(onCompanyFound);
+  onCompanyFoundRef.current = onCompanyFound;
+
+  // Aktualny (znormalizowany) NIP z propsów — do odrzucania spóźnionych odpowiedzi.
+  const valueRef = useRef(normalizedValue);
+  valueRef.current = normalizedValue;
+
   // Ostatni NIP pobrany z MF — chroni przed powtarzaniem zapytania przy każdym renderze.
   const lookedUpRef = useRef<string>("");
+  // Ostatni sprawdzony NIP — rodzic może przerenderować się z tą samą wartością.
+  const lastCheckedRef = useRef<string | null>(null);
+  // Liczniki zapytań — odpowiedź starsza niż ostatnie zapytanie jest ignorowana.
+  const checkSeqRef = useRef(0);
+  const companySeqRef = useRef(0);
+
+  /**
+   * Powiadamia rodzica o zmianie. Pomija zbędne aktualizacje: gdy nie znaleziono
+   * kontrahenta, a rodzic i tak ma już tę wartość, kolejne setState tylko wywołałoby
+   * następny render (i kolejne sprawdzanie).
+   */
+  const emitChange = useCallback((normalized: string, found: Contractor | null) => {
+    if (!found && normalized === valueRef.current) return;
+    onChangeRef.current(normalized, found);
+  }, []);
 
   const resetRegistry = useCallback(() => {
     setCompany(null);
@@ -85,11 +117,14 @@ export function NIPField({
       if (!refresh && lookedUpRef.current === normalized) return;
 
       lookedUpRef.current = normalized;
+      const seq = ++companySeqRef.current;
       setCompanyLoading(true);
       setCompanyError(null);
       setNotInRegistry(false);
       try {
         const res = await lookupCompanyByNip(normalized, refresh);
+        // NIP zmienił się w trakcie zapytania — odpowiedź jest już nieaktualna.
+        if (seq !== companySeqRef.current) return;
         if (res.data?.found && res.data.company) {
           setCompany(res.data.company);
         } else {
@@ -97,6 +132,7 @@ export function NIPField({
           setNotInRegistry(true);
         }
       } catch (err) {
+        if (seq !== companySeqRef.current) return;
         // Awaria rejestru nie może blokować formularza — pokazujemy ostrzeżenie,
         // dane zawsze można wpisać ręcznie.
         setCompany(null);
@@ -105,7 +141,8 @@ export function NIPField({
         );
         lookedUpRef.current = "";
       } finally {
-        setCompanyLoading(false);
+        // Loader gasi tylko najświeższe zapytanie.
+        if (seq === companySeqRef.current) setCompanyLoading(false);
       }
     },
     []
@@ -114,13 +151,14 @@ export function NIPField({
   const checkNIP = useCallback(
     async (nip: string) => {
       const normalized = normalizeNIP(nip);
+      const seq = ++checkSeqRef.current;
 
       if (normalized.length === 0) {
         setStatus("empty");
         setContractor(null);
         setError(null);
         resetRegistry();
-        onChange("", null);
+        emitChange("", null);
         return;
       }
 
@@ -129,7 +167,7 @@ export function NIPField({
         setContractor(null);
         setError("Nieprawidłowy format NIP");
         resetRegistry();
-        onChange(normalized, null);
+        emitChange(normalized, null);
         return;
       }
 
@@ -138,7 +176,7 @@ export function NIPField({
         setStatus("available");
         setContractor(null);
         setError(null);
-        onChange(normalized, null);
+        emitChange(normalized, null);
         if (lookupRegistry && autoLookup) void fetchCompany(normalized);
         return;
       }
@@ -148,6 +186,8 @@ export function NIPField({
 
       try {
         const response = await checkContractorByNIP(normalized);
+        // NIP zmienił się w trakcie zapytania — odpowiedź jest już nieaktualna.
+        if (seq !== checkSeqRef.current) return;
 
         if (response.data?.exists && response.data) {
           const contractorData = response.data as unknown as Contractor;
@@ -155,36 +195,51 @@ export function NIPField({
           setContractor(contractorData);
           // Kontrahent jest już w bazie — nie zawracamy głowy rejestrem.
           resetRegistry();
-          onChange(normalized, contractorData);
+          emitChange(normalized, contractorData);
         } else {
           setStatus("available");
           setContractor(null);
-          onChange(normalized, null);
+          emitChange(normalized, null);
           if (lookupRegistry && autoLookup) void fetchCompany(normalized);
         }
-      } catch (err) {
+      } catch {
+        if (seq !== checkSeqRef.current) return;
         setStatus("error");
         setError("Błąd sprawdzania NIP");
-        onChange(normalized, null);
+        emitChange(normalized, null);
       }
     },
-    [onChange, checkExisting, lookupRegistry, autoLookup, fetchCompany, resetRegistry]
+    [checkExisting, lookupRegistry, autoLookup, fetchCompany, resetRegistry, emitChange]
   );
 
-  // Debounced check
+  // Sprawdzanie z debounce'em. Efekt zależy wyłącznie od znormalizowanego NIP-u
+  // i stabilnych callbacków, więc renderowanie rodzica samo w sobie go nie budzi.
   useEffect(() => {
+    if (!normalizedValue) {
+      // Wyczyszczone pole: unieważniamy zapytania w locie i wracamy do stanu pustego.
+      checkSeqRef.current += 1;
+      lastCheckedRef.current = null;
+      setStatus("empty");
+      setContractor(null);
+      setError(null);
+      resetRegistry();
+      return;
+    }
+
+    // Ten NIP już sprawdziliśmy — rodzic po prostu przerenderował się z tą samą wartością.
+    if (lastCheckedRef.current === normalizedValue) return;
+
     const timer = setTimeout(() => {
-      if (value) {
-        checkNIP(value);
-      }
+      lastCheckedRef.current = normalizedValue;
+      void checkNIP(normalizedValue);
     }, 400);
 
     return () => clearTimeout(timer);
-  }, [value, checkNIP]);
+  }, [normalizedValue, checkNIP, resetRegistry]);
 
   const handleUseExisting = () => {
-    if (contractor && onUseExisting) {
-      onUseExisting(contractor);
+    if (contractor && onUseExistingRef.current) {
+      onUseExistingRef.current(contractor);
     }
   };
 
@@ -225,7 +280,7 @@ export function NIPField({
     }
   };
 
-  const nipValid = validateNIP(normalizeNIP(value));
+  const nipValid = validateNIP(normalizedValue);
   const canLookup = lookupRegistry && nipValid && !disabled && status !== "exists";
 
   return (
@@ -241,7 +296,8 @@ export function NIPField({
             onChange={(e) => {
               const normalized = normalizeNIP(e.target.value);
               resetRegistry();
-              onChange(normalized, null);
+              // Wpisywanie zawsze propaguje od razu — rodzic musi widzieć bieżącą wartość.
+              onChangeRef.current(normalized, null);
             }}
             placeholder="123-456-78-90"
             maxLength={13}
@@ -265,7 +321,7 @@ export function NIPField({
             size="sm"
             className="h-10 shrink-0"
             disabled={companyLoading}
-            onClick={() => fetchCompany(value, true)}
+            onClick={() => void fetchCompany(normalizedValue, true)}
             title="Pobierz nazwę i adres z wykazu podatników VAT (Ministerstwo Finansów)"
           >
             {companyLoading ? (
@@ -348,7 +404,7 @@ export function NIPField({
               <Button
                 type="button"
                 size="sm"
-                onClick={() => onCompanyFound(company)}
+                onClick={() => onCompanyFoundRef.current?.(company)}
                 className="bg-blue-600 hover:bg-blue-700 text-white shrink-0"
               >
                 Wstaw dane

@@ -561,6 +561,13 @@
       "when": 1788775807216,
       "tag": "0079_calendar_note_attachments",
       "breakpoints": true
+    },
+    {
+      "idx": 80,
+      "version": "6",
+      "when": 1788852563284,
+      "tag": "0080_calendar_note_events",
+      "breakpoints": true
     }
   ]
 }

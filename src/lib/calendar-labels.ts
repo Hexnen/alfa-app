@@ -26,6 +26,7 @@ export const TYPE_LABELS: Record<CalendarEventType, string> = {
   przygotowanie: "Przygotowanie",
   konserwacja: "Konserwacja",
   urlop: "Urlop",
+  notatka: "Notatka",
 };
 
 export const STATUS_LABELS: Record<CalendarEventStatus, string> = {
@@ -42,7 +43,7 @@ export const BILLING_LABELS: Record<CalendarBilling, string> = {
 };
 
 /** Typy, dla których rozliczenie nie ma sensu (pole ukryte, zawsze NULL). */
-export const BILLING_HIDDEN_TYPES: readonly CalendarEventType[] = ["urlop", "biuro", "przygotowanie"];
+export const BILLING_HIDDEN_TYPES: readonly CalendarEventType[] = ["urlop", "biuro", "przygotowanie", "notatka"];
 
 /** Typy „prac na obiekcie” — wykonane wydarzenie bez protokołu dostaje badge „Brak protokołu”. */
 export const PROTOCOL_TYPES: readonly CalendarEventType[] = ["serwis", "montaz", "demontaz", "konserwacja", "wizja"];
