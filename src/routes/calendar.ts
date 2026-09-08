@@ -22,7 +22,7 @@ import { eq, and, desc, asc, isNull, inArray, sql, lt, gt, gte, ne } from "drizz
 import { type CalendarEventType, type CalendarEventStatus, type CalendarBilling } from "../db/schema.js";
 import { getUser } from "../middleware/auth.js";
 import { describeRule } from "../lib/calendar-recurrence.js";
-import { conflictEventIds, loadEvent, loadEvents, loadNotes, type CalendarEventJson, type Note } from "../lib/calendar-queries.js";
+import { conflictEventIds, loadEvent, loadEvents, loadNotes, searchNotes, type CalendarEventJson, type Note } from "../lib/calendar-queries.js";
 import {
   CALENDAR_ENTITY as ENTITY,
   DATE_RE,
@@ -174,6 +174,25 @@ app.get("/events/:id/notes", (c) => {
   return c.json({ success: true, data: loadNotes(db, id) });
 });
 
+// ---------------------------------------------------------------------------
+// GET /notes/search?q=&limit=20 — notatki do przypięcia kafelka typu „notatka”.
+// Uprawnienia: te same co odczyt kalendarza (trasa pod /calendar → API_TAB_MAP
+// `technical/kalendarz`, GET przechodzi przy poziomie `view`).
+// ---------------------------------------------------------------------------
+
+const NOTES_SEARCH_MAX = 50;
+
+app.get("/notes/search", (c) => {
+  try {
+    const q = (c.req.query("q") || "").trim().slice(0, 200);
+    const rawLimit = Number(c.req.query("limit"));
+    const limit = Number.isInteger(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, NOTES_SEARCH_MAX) : 20;
+    return c.json({ success: true, data: searchNotes(db, q, limit) });
+  } catch (error) {
+    return handleError(c, error, "wyszukiwania notatek");
+  }
+});
+
 /**
  * Ciało POST /events/:id/notes: JSON `{text}` jak dotąd albo `multipart/form-data`
  * z polami `text` (opcjonalne) i `files` (wiele). Pliki trafiają do pamięci — limit
@@ -208,6 +227,8 @@ app.post("/events/:id/notes", async (c) => {
     const ev = getEventRow(db, id);
     if (!ev) throw new ApiError(404, "Wydarzenie nie istnieje");
     if (ev.deletedAt) throw new ApiError(409, "Wydarzenie jest usunięte — najpierw je przywróć");
+    // Kafelek notatki tylko wskazuje cudzą notatkę — własnego dziennika nie ma (też w addNote).
+    if (ev.type === "notatka") throw new ApiError(400, "Wydarzenie typu notatka nie może mieć własnych notatek");
     if (!text.trim() && files.length === 0) throw new ApiError(400, "Treść notatki jest wymagana");
     const attachments = await storeUploads(id, files);
     let note: Note;

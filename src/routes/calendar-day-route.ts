@@ -36,7 +36,7 @@ import type { ApiResponse } from "../types/index.js";
 const app = new Hono();
 
 /** Typy wydarzeń, które z definicji nie są wyjazdem do obiektu. */
-const OFF_SITE_TYPES = new Set(["urlop", "biuro", "przygotowanie"]);
+const OFF_SITE_TYPES = new Set(["urlop", "biuro", "przygotowanie", "notatka"]);
 
 /** Dlaczego wydarzenie nie weszło na trasę. */
 export type DayRouteSkip = "no-object" | "no-coords" | "all-day" | "off-site" | "cancelled" | "limit";

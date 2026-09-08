@@ -70,6 +70,7 @@ export const EVENT_TYPE_ORDER: CalendarEventType[] = [
   "przygotowanie",
   "biuro",
   "urlop",
+  "notatka",
 ];
 
 export const EVENT_TYPE_META: Record<CalendarEventType, EventTypeMeta> = {
@@ -129,7 +130,35 @@ export const EVENT_TYPE_META: Record<CalendarEventType, EventTypeMeta> = {
     chipActive: "bg-rose-500 border-rose-500 text-white",
     cssVar: "--cal-urlop",
   },
+  notatka: {
+    label: "Notatka",
+    icon: StickyNote,
+    chip: "border-amber-600/50 text-amber-800 dark:text-amber-200",
+    chipActive: "bg-amber-600 border-amber-600 text-white",
+    cssVar: "--cal-notatka",
+  },
 };
+
+/** Typ wydarzenia będący kafelkiem notatki — formularz redukuje się do daty i statusu. */
+export const NOTE_EVENT_TYPE = "notatka" as const;
+
+/** Czy wydarzenie jest kafelkiem notatki (bez techników, rozliczenia, protokołu…). */
+export const isNoteEvent = (type: CalendarEventType | string): boolean => type === NOTE_EVENT_TYPE;
+
+/** Skrót treści notatki do tytułu/kafelka („—” gdy pusto). */
+export function noteSnippet(text: string | null | undefined, max = 60): string {
+  const t = (text ?? "").replace(/\s+/g, " ").trim();
+  if (!t) return "";
+  return t.length > max ? `${t.slice(0, max)}…` : t;
+}
+
+/**
+ * Tytuł kafelka notatki — ta sama reguła co backend: „Notatka: <pierwsze ~60 znaków>”,
+ * a dla notatki bez treści (sam załącznik) tytuł wydarzenia źródłowego.
+ */
+export function noteEventTitle(text: string | null | undefined, fallbackTitle: string): string {
+  return `Notatka: ${noteSnippet(text) || fallbackTitle}`;
+}
 
 export const eventTypeLabel = (t: string): string =>
   (EVENT_TYPE_META as Record<string, EventTypeMeta>)[t]?.label ?? t;
@@ -265,6 +294,7 @@ export const EVENT_TYPE_UI: Record<CalendarEventType, { bar: string; soft: strin
   przygotowanie: { bar: "bg-amber-500", soft: "bg-amber-500/15 text-amber-700 dark:text-amber-300", dot: "bg-amber-500" },
   konserwacja: { bar: "bg-teal-500", soft: "bg-teal-500/15 text-teal-700 dark:text-teal-300", dot: "bg-teal-500" },
   urlop: { bar: "bg-rose-500", soft: "bg-rose-500/15 text-rose-700 dark:text-rose-300", dot: "bg-rose-500" },
+  notatka: { bar: "bg-amber-600", soft: "bg-amber-600/15 text-amber-800 dark:text-amber-300", dot: "bg-amber-600" },
 };
 
 export const eventStatusLabel = (s: string): string =>
@@ -806,7 +836,7 @@ export function billingBadgeClass(b: CalendarBilling): string {
 }
 
 /** Typy, dla których rozliczenie nie ma sensu (pole ukryte, zawsze null). */
-export const BILLING_HIDDEN_TYPES: readonly CalendarEventType[] = ["urlop", "biuro", "przygotowanie"];
+export const BILLING_HIDDEN_TYPES: readonly CalendarEventType[] = ["urlop", "biuro", "przygotowanie", "notatka"];
 export const billingApplies = (type: CalendarEventType | string): boolean => !BILLING_HIDDEN_TYPES.includes(type as CalendarEventType);
 
 /** Typy „prac na obiekcie” — wykonane wydarzenie bez protokołu dostaje badge „Brak protokołu”. */
@@ -1175,6 +1205,8 @@ export function eventTooltipText(
     seriesTotal?: number;
     notesCount?: number;
     deletedAt?: string | null;
+    /** Kafelek typu `notatka` — treść notatki źródłowej trafia do dymka. */
+    sourceNote?: { text: string; userLabel?: string | null; eventTitle?: string } | null;
   },
   now: Date | number = Date.now()
 ): string {
@@ -1184,6 +1216,11 @@ export function eventTooltipText(
     [typeLabel, ev.objectName || ""].filter(Boolean).join(" · "),
     eventTermLine(ev),
   ];
+  if (ev.sourceNote) {
+    const body = noteSnippet(ev.sourceNote.text, 160);
+    lines.push(`Notatka${ev.sourceNote.userLabel ? ` (${ev.sourceNote.userLabel})` : ""}: ${body || "sam załącznik"}`);
+    if (ev.sourceNote.eventTitle) lines.push(`Z wydarzenia: ${ev.sourceNote.eventTitle}`);
+  }
   if (ev.location) lines.push(`Lokalizacja: ${ev.location}`);
   if (ev.technicians?.length) {
     lines.push(
@@ -1276,6 +1313,16 @@ export function eventTipData(
   const typeLabel = eventTypeLabel(String(ev.type));
 
   const rows: TipRow[] = [{ icon: "clock", text: eventTermLine(ev, opts.compactDate) }];
+  if (ev.sourceNote) {
+    rows.push({
+      icon: "note",
+      label: ev.sourceNote.userLabel || undefined,
+      text: noteSnippet(ev.sourceNote.text, 160) || "sam załącznik",
+    });
+    if (ev.sourceNote.eventTitle) {
+      rows.push({ icon: "object", label: "Z wydarzenia", text: ev.sourceNote.eventTitle });
+    }
+  }
   if (opts.departure) rows.push({ icon: "route", text: opts.departure });
   if (ev.technicians?.length) {
     rows.push({

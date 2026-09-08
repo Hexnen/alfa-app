@@ -813,17 +813,29 @@ export async function createOrder(data: OrderInput) {
   });
 }
 
-export async function updateOrder(id: number, data: Partial<OrderInput>) {
+export async function updateOrder(
+  id: number,
+  data: Partial<OrderInput>,
+  // Backend wymaga optymistycznej blokady: znacznik updatedAt wersji, którą
+  // użytkownik miał na ekranie (bez niego PUT kończy się 428, przy cudzej
+  // zmianie w międzyczasie — 409).
+  expectedUpdatedAt: string
+) {
   return request<ApiResponse<Order>>(`/orders/${id}`, {
     method: "PUT",
-    body: JSON.stringify(data),
+    body: JSON.stringify({ ...data, expectedUpdatedAt }),
   });
 }
 
-export async function updateOrderStatus(id: number, status: string) {
+export async function updateOrderStatus(
+  id: number,
+  status: string,
+  // Ta sama blokada co w `updateOrder` — PATCH statusu też wymaga tokenu.
+  expectedUpdatedAt: string
+) {
   return request<ApiResponse<Order>>(`/orders/${id}/status`, {
     method: "PATCH",
-    body: JSON.stringify({ status }),
+    body: JSON.stringify({ status, expectedUpdatedAt }),
   });
 }
 
@@ -831,6 +843,34 @@ export async function deleteOrder(id: number) {
   return request<ApiResponse<null>>(`/orders/${id}`, {
     method: "DELETE",
   });
+}
+
+/** Gotowy mail zlecenia — szablon składa backend (src/lib/order-mail.ts). */
+export interface OrderMailPreview {
+  subject: string;
+  html: string;
+  text: string;
+  /**
+   * Adresat główny. Wariant „client” — e-mail osoby zlecającej; wariant
+   * „internal” — skrzynka zespołu z ORDER_INTERNAL_MAIL_TO (pusty string,
+   * gdy zmienna nie jest ustawiona).
+   */
+  to: string;
+  /** Kopia do osoby kontaktowej na obiekcie, o ile to inny adres (tylko wariant „client”). */
+  cc: string | null;
+}
+
+/**
+ * Wariant szablonu:
+ *   • `client` — potwierdzenie przyjęcia zlecenia DLA KLIENTA (tylko wypełnione pola),
+ *   • `internal` — komplet danych DLA ZESPOŁU (braki jako „—”).
+ */
+export type OrderMailVariant = "client" | "internal";
+
+export async function getOrderMailPreview(id: number, variant: OrderMailVariant = "client") {
+  return request<ApiResponse<OrderMailPreview>>(
+    `/orders/${id}/mail-preview?variant=${encodeURIComponent(variant)}`
+  );
 }
 
 // Public order intake (external "Formularz Zlecenia do ZDW" — no auth required).
@@ -4550,7 +4590,9 @@ export type CalendarEventType =
   | "biuro"
   | "przygotowanie"
   | "konserwacja"
-  | "urlop";
+  | "urlop"
+  /** Kafelek wskazujący na istniejącą notatkę (ręcznie albo ze wzmianki daty w treści). */
+  | "notatka";
 
 export type CalendarEventStatus = "planned" | "confirmed" | "done" | "cancelled";
 
@@ -4674,6 +4716,30 @@ export interface CalendarEvent {
   notesCount?: number;
   /** Notatki — tylko w GET /calendar/events/:id. */
   notes?: CalendarNote[];
+  /** Typ `notatka`: notatka, na którą wskazuje kafelek. Brak pola = starszy backend. */
+  noteId?: number | null;
+  /** Klucz wzmianki, z której powstał kafelek (`null` = podpięty ręcznie). */
+  noteMention?: string | null;
+  /** Skrót notatki źródłowej — tylko dla `type === "notatka"`. */
+  sourceNote?: CalendarNoteRef | null;
+}
+
+/**
+ * Skrót notatki wraz z jej wydarzeniem źródłowym — używany przez wyszukiwarkę
+ * notatek (`calendarApi.searchNotes`) i przez `sourceNote` kafelka typu `notatka`.
+ */
+export interface CalendarNoteRef {
+  id: number;
+  eventId: number;
+  eventTitle: string;
+  eventStartAt: string;
+  eventType: CalendarEventType;
+  text: string;
+  userLabel: string | null;
+  createdAt: string;
+  attachmentsCount: number;
+  /** Tylko w `sourceNote`; wyszukiwarka pola nie zwraca. */
+  source?: CalendarNoteSource;
 }
 
 export type CalendarNoteSource = "user" | "assistant" | "system";
@@ -4709,6 +4775,24 @@ export interface CalendarNote {
   updatedAt: string;
   /** Brak = starszy backend bez załączników. */
   attachments?: CalendarNoteAttachment[];
+  /** Wzmianki dat w treści (`@piątek`, `@15.09`…). Brak = starszy backend. */
+  mentions?: CalendarNoteMention[];
+  /** Wszystkie żywe kafelki `notatka` tej notatki (także podpięte ręcznie). */
+  linkedEventIds?: number[];
+}
+
+/** Wzmianka daty w treści notatki (parser: `@/lib/note-mentions`). */
+export interface CalendarNoteMention {
+  /** Dokładny fragment tekstu, np. „@piątek”. */
+  raw: string;
+  /** Klucz znormalizowany („piatek”, „jutro”, „2026-09-15”). */
+  key: string;
+  /** Rozstrzygnięta data „YYYY-MM-DD”. */
+  date: string;
+  /** Etykieta, np. „piątek 11.09”. */
+  label: string;
+  /** Kafelek `notatka` powstały z tej wzmianki (null = jeszcze nie ma / usunięty). */
+  eventId: number | null;
 }
 
 export interface CalendarEventWithHistory extends CalendarEvent {
@@ -4738,6 +4822,8 @@ export interface CalendarEventInput {
   quoteId?: number | null;
   technicianIds: number[];
   recurrence?: CalendarRecurrenceInput | null;
+  /** Tylko dla `type === "notatka"`: notatka, na którą wskazuje kafelek. */
+  noteId?: number | null;
 }
 
 export interface CalendarMoveInput {
@@ -5035,6 +5121,18 @@ export const calendarApi = {
 
   async notes(eventId: number) {
     return request<ApiResponse<CalendarNote[]>>(`/calendar/events/${eventId}/notes`);
+  },
+
+  /**
+   * Wyszukiwarka notatek do podpięcia kafelka typu `notatka` — nieskasowane notatki
+   * nieskasowanych wydarzeń typu ≠ notatka, od najnowszych. `q` szuka w treści notatki
+   * i w tytule wydarzenia; limit maks. 50.
+   */
+  async searchNotes(q?: string, limit = 20) {
+    const sp = new URLSearchParams();
+    if (q?.trim()) sp.set("q", q.trim());
+    sp.set("limit", String(Math.min(Math.max(1, limit), 50)));
+    return request<ApiResponse<CalendarNoteRef[]>>(`/calendar/notes/search?${sp.toString()}`);
   },
 
   async addNote(eventId: number, text: string) {

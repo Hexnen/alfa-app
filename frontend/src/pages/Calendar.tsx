@@ -122,6 +122,7 @@ import {
   eventTipAria,
   eventTipData,
   eventsCount,
+  isNoteEvent,
   overdueTip,
   protocolBadgeKind,
   protocolHref,
@@ -368,9 +369,9 @@ function inWeatherWindow(startAt: string, today: Date): boolean {
   return day >= shiftedDay(today, -WEATHER_PAST_DAYS) && day <= shiftedDay(today, WEATHER_FUTURE_DAYS);
 }
 
-/** Wydarzenia, dla których w ogóle warto pytać o pogodę (urlop nigdy jej nie ma). */
+/** Wydarzenia, dla których w ogóle warto pytać o pogodę (urlop i notatka nigdy jej nie mają). */
 const weatherApplies = (ev: CalendarEvent, today: Date): boolean =>
-  ev.type !== "urlop" && !ev.deletedAt && inWeatherWindow(ev.startAt, today);
+  ev.type !== "urlop" && !isNoteEvent(ev.type) && !ev.deletedAt && inWeatherWindow(ev.startAt, today);
 
 /**
  * Sygnatura wydarzenia dla pogody: wszystko, co wpływa na prognozę (termin + miejsce).
@@ -436,6 +437,8 @@ function toEventInput(ev: CalendarEvent): CalendarEventInput {
     orderId: ev.orderId,
     realizationId: ev.realizationId,
     technicianIds: ev.technicians.map((t) => t.id),
+    // Kafelek notatki musi zachować powiązanie z notatką przy każdym zapisie.
+    ...(ev.noteId != null ? { noteId: ev.noteId } : {}),
   };
 }
 
@@ -1167,7 +1170,7 @@ export function Calendar() {
     const ids = [
       ...new Set(
         events
-          .filter((e) => e.type !== "urlop" && e.objectId && !travelAskedRef.current.has(e.objectId))
+          .filter((e) => e.type !== "urlop" && !isNoteEvent(e.type) && e.objectId && !travelAskedRef.current.has(e.objectId))
           .map((e) => e.objectId as number)
       ),
     ];
@@ -1393,6 +1396,14 @@ export function Calendar() {
       await setStatus(ev, target as CalendarEventStatus);
       return;
     }
+    // Typu `notatka` nie da się nadać ani zdjąć — kafelek zawsze wskazuje notatkę.
+    if (isNoteEvent(target) || isNoteEvent(ev.type)) {
+      notify({
+        kind: "error",
+        message: "Kafelka notatki nie da się zmienić na inny typ (ani odwrotnie).",
+      });
+      return;
+    }
     try {
       await calendarApi.update(
         ev.id,
@@ -1499,12 +1510,15 @@ export function Calendar() {
           onSelect: () => void setStatus(ev, "done"),
         });
       }
-      items.push({
-        key: "dup",
-        label: "Duplikuj",
-        icon: CopyPlus,
-        onSelect: () => duplicateEvent(ev),
-      });
+      // Kafelka notatki nie duplikujemy — nowy kafelek powstaje przez wskazanie notatki.
+      if (!isNoteEvent(ev.type)) {
+        items.push({
+          key: "dup",
+          label: "Duplikuj",
+          icon: CopyPlus,
+          onSelect: () => duplicateEvent(ev),
+        });
+      }
       items.push({ key: "sep2", label: null, separator: true });
       items.push({
         key: "del",
@@ -2117,6 +2131,7 @@ export function Calendar() {
         setAllEvents((list) => list.map((e) => (e.id === id ? { ...e, notesCount: count } : e)))
       }
       onOpenEvent={(id) => void openEventById(id)}
+      onGoToDate={(date) => gotoDateRef.current(date)}
     />
   );
 
@@ -2991,7 +3006,7 @@ function EventPreview({
   const Icon = meta?.icon ?? Building2;
   const status = EVENT_STATUS_META[ev.status];
   // Dojazd biuro → obiekt; przy urlopie i wydarzeniach bez obiektu nie ma czego liczyć.
-  const { travel, loading: travelLoading } = useTravel(ev.objectId, ev.type !== "urlop");
+  const { travel, loading: travelLoading } = useTravel(ev.objectId, ev.type !== "urlop" && !isNoteEvent(ev.type));
   // Dzień widać z siatki kalendarza, więc jednodniowe wydarzenia pokazują sam zakres godzin.
   const term = fmtRangeCompact(ev.startAt, ev.endAt, ev.allDay);
   const travelText = travelSummary(travel, { startAt: ev.startAt, allDay: ev.allDay });
@@ -3158,6 +3173,23 @@ function EventPreview({
           <div className="flex gap-2">
             <dt className="w-4 shrink-0 text-muted-foreground"><AlertCircle className="h-3.5 w-3.5" aria-label="Opis" /></dt>
             <dd className="line-clamp-2 text-muted-foreground">{ev.description}</dd>
+          </div>
+        )}
+        {/* Kafelek notatki: treść notatki źródłowej wprost w podglądzie. */}
+        {ev.sourceNote && (
+          <div className="flex gap-2" data-testid="preview-source-note">
+            <dt className="w-4 shrink-0 text-amber-600 dark:text-amber-400">
+              <StickyNote className="h-3.5 w-3.5" aria-label="Notatka" />
+            </dt>
+            <dd className="min-w-0">
+              <span className="line-clamp-3 whitespace-pre-wrap break-words">
+                {ev.sourceNote.text?.trim() || "notatka bez treści (sam załącznik)"}
+              </span>
+              <span className="mt-0.5 block truncate text-muted-foreground">
+                {ev.sourceNote.eventTitle}
+                {ev.sourceNote.userLabel ? ` · ${ev.sourceNote.userLabel}` : ""}
+              </span>
+            </dd>
           </div>
         )}
         {lastNote && lastNoteLine && (

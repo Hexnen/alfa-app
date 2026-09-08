@@ -6,7 +6,7 @@
  * Tryb `any` („dowolny technik”): slot jest wolny, gdy co najmniej jeden technik jest wolny —
  * `technicianIds` slotu zawiera wtedy tylko wolnych.
  */
-import { and, asc, gt, isNull, lt, ne, sql } from "drizzle-orm";
+import { and, asc, gt, isNull, lt, ne, notInArray, sql } from "drizzle-orm";
 import { db, schema } from "../../db/index.js";
 import { shiftLocal } from "../calendar-recurrence.js";
 
@@ -206,7 +206,8 @@ export function loadUnassignedEvents(from: string, to: string, limit = 20): Unas
       and(
         isNull(schema.calendarEvents.deletedAt),
         ne(schema.calendarEvents.status, "cancelled"),
-        ne(schema.calendarEvents.type, "urlop"),
+        // Ani urlop, ani kafelek notatki nie są „nieprzydzieloną pracą firmy”.
+        notInArray(schema.calendarEvents.type, ["urlop", "notatka"]),
         lt(schema.calendarEvents.startAt, to),
         gt(schema.calendarEvents.endAt, from),
         sql`NOT EXISTS (SELECT 1 FROM calendar_event_assignees a WHERE a.event_id = ${schema.calendarEvents.id})`

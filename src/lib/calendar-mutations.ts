@@ -7,7 +7,7 @@
  *
  * better-sqlite3 jest synchroniczny — wszystkie funkcje są synchroniczne i rzucają ApiError.
  */
-import { and, asc, eq, gt, inArray, isNull, ne, sql } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, isNotNull, isNull, ne, sql } from "drizzle-orm";
 import { schema } from "../db/index.js";
 import {
   CALENDAR_EVENT_TYPES,
@@ -25,10 +25,12 @@ import {
 } from "../db/schema.js";
 import { logActivity, logFieldDiffs, userLabelOf, type ActivityUser, type DbOrTx, type Tx } from "./activity-log.js";
 import { onEventCreated, onEventDeleted, onEventRestored, onEventUpdated } from "./calendar-realizations.js";
-import { noteOfRow, noteWithAttachments, type Note } from "./calendar-queries.js";
+import { noteEventLinks, noteOfRow, noteWithAttachments, type Note } from "./calendar-queries.js";
 import { attachmentOfRow, type StoredAttachment } from "./calendar-attachments.js";
 import { expandOccurrences, describeRule, shiftLocal, diffMinutes, type RecurrenceRule } from "./calendar-recurrence.js";
 import { ApiError, BILLING_HIDDEN_TYPES, BILLING_LABELS, STATUS_LABELS, TYPE_LABELS } from "./calendar-labels.js";
+import { mentionKeys } from "./note-mentions.js";
+import { zonedToday } from "./tz.js";
 
 export const CALENDAR_ENTITY = "calendar_event";
 
@@ -82,6 +84,11 @@ export interface ParsedInput {
   quoteId: number | null;
   technicianIds: number[];
   recurrence: RecurrenceRule | null;
+  /**
+   * Tylko dla type = "notatka": notatka, na którą wskazuje kafelek (wymagana). Dla pozostałych
+   * typów zawsze null — notatki-kafelka nie da się zrobić z „niczego”.
+   */
+  noteId: number | null;
 }
 
 export const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -180,17 +187,27 @@ export function parseInput(body: unknown): ParsedInput {
   }
   const type = b.type as CalendarEventType;
   const isUrlop = type === "urlop";
+  // Kafelek notatki: tytuł, daty, technicy i reszta są WYMUSZANE (patrz niżej) — z ciała
+  // liczą się tylko `noteId`, `startAt` i `status`.
+  const isNote = type === "notatka";
   const title = typeof b.title === "string" ? b.title.trim() : "";
-  // Urlop: tytuł opcjonalny (generowany z nazwiska technika w transakcji)
-  if (!title && !isUrlop) throw new ApiError(400, "Tytuł jest wymagany");
+  // Urlop/notatka: tytuł opcjonalny (generowany w transakcji — z nazwiska technika / treści notatki)
+  if (!title && !isUrlop && !isNote) throw new ApiError(400, "Tytuł jest wymagany");
   if (title.length > 300) throw new ApiError(400, "Tytuł jest za długi (max 300 znaków)");
 
-  // Urlop: domyślnie cały dzień (chyba że klient jawnie poda allDay=false)
-  const allDay = isUrlop
-    ? !(b.allDay === false || b.allDay === 0 || b.allDay === "0" || b.allDay === "false")
-    : b.allDay === true || b.allDay === 1 || b.allDay === "1" || b.allDay === "true";
+  const noteId = isNote ? optInt(b.noteId, "noteId") : null;
+  if (isNote && noteId == null) throw new ApiError(400, "Wydarzenie typu notatka wymaga wskazania notatki (pole noteId)");
+
+  // Urlop: domyślnie cały dzień (chyba że klient jawnie poda allDay=false). Notatka: ZAWSZE cały dzień.
+  const allDay = isNote
+    ? true
+    : isUrlop
+      ? !(b.allDay === false || b.allDay === 0 || b.allDay === "0" || b.allDay === "false")
+      : b.allDay === true || b.allDay === 1 || b.allDay === "1" || b.allDay === "true";
   const startAt = normDate(b.startAt, allDay, "startAt");
   let endAt = normDate(b.endAt ?? b.startAt, allDay, "endAt");
+  // Notatka zajmuje dokładnie jeden dzień — koniec liczymy sami, cokolwiek przyszło w ciele.
+  if (isNote) endAt = shiftLocal(startAt, 24 * 60, true);
   if (allDay) {
     // end EXCLUSIVE: 1-dniowy event = start 12.09, end 13.09
     if (endAt === startAt) endAt = shiftLocal(startAt, 24 * 60, true);
@@ -208,7 +225,7 @@ export function parseInput(body: unknown): ParsedInput {
   }
 
   let technicianIds: number[] = [];
-  if (b.technicianIds != null) {
+  if (b.technicianIds != null && !isNote) {
     if (!Array.isArray(b.technicianIds)) throw new ApiError(400, "Pole technicianIds: oczekiwano tablicy");
     technicianIds = [...new Set(b.technicianIds.map((x) => optInt(x, "technicianIds")!))];
   }
@@ -222,25 +239,28 @@ export function parseInput(body: unknown): ParsedInput {
     billing = b.billing as CalendarBilling;
   }
 
+  // Notatka: obiekt/zlecenie kopiujemy ze źródłowego wydarzenia w transakcji, reszta odpada.
+  const noRefs = isUrlop || isNote;
   return {
     type,
     title,
-    description: optText(b.description),
+    description: isNote ? null : optText(b.description),
     // Urlop nie dotyczy obiektu ani lokalizacji — ignorujemy te pola
-    location: isUrlop ? null : optText(b.location),
+    location: noRefs ? null : optText(b.location),
     startAt,
     endAt,
     allDay,
     status,
-    objectId: isUrlop ? null : optInt(b.objectId, "objectId"),
-    orderId: isUrlop ? null : optInt(b.orderId, "orderId"),
-    realizationId: isUrlop ? null : "realizationId" in b ? optInt(b.realizationId, "realizationId") : undefined,
-    realizationOptout: optBool(b.realizationOptout, "realizationOptout"),
+    objectId: noRefs ? null : optInt(b.objectId, "objectId"),
+    orderId: noRefs ? null : optInt(b.orderId, "orderId"),
+    realizationId: noRefs ? null : "realizationId" in b ? optInt(b.realizationId, "realizationId") : undefined,
+    realizationOptout: isNote ? undefined : optBool(b.realizationOptout, "realizationOptout"),
     billing,
-    protocolId: isUrlop ? null : optInt(b.protocolId, "protocolId"),
-    quoteId: isUrlop ? null : optInt(b.quoteId, "quoteId"),
+    protocolId: noRefs ? null : optInt(b.protocolId, "protocolId"),
+    quoteId: noRefs ? null : optInt(b.quoteId, "quoteId"),
     technicianIds,
-    recurrence: parseRecurrence(b.recurrence),
+    recurrence: isNote ? null : parseRecurrence(b.recurrence),
+    noteId,
   };
 }
 
@@ -249,6 +269,11 @@ export function parseInput(body: unknown): ParsedInput {
  * `excludeEventId` — edytowane wydarzenie (jego własna realizacja nie jest „zajęta”).
  */
 export function assertRefs(tx: DbOrTx, input: ParsedInput, excludeEventId: number | null = null) {
+  if (input.type === "notatka") {
+    if (input.noteId == null) throw new ApiError(400, "Wydarzenie typu notatka wymaga wskazania notatki (pole noteId)");
+    // Rzuca 400, gdy notatka nie istnieje / jest skasowana / jej wydarzenie jest kafelkiem notatki.
+    loadNoteSource(tx, input.noteId);
+  }
   if (input.objectId != null) {
     const o = tx.select({ id: schema.objects.id }).from(schema.objects).where(eq(schema.objects.id, input.objectId)).get();
     if (!o) throw new ApiError(400, `Obiekt #${input.objectId} nie istnieje`);
@@ -409,6 +434,179 @@ export function getEventRow(dbx: DbOrTx, id: number): CalendarEventRow | undefin
   return dbx.select().from(schema.calendarEvents).where(eq(schema.calendarEvents.id, id)).get();
 }
 
+// ---------------------------------------------------------------------------
+// Kafelki typu „notatka” — wydarzenie WSKAZUJĄCE istniejącą notatkę.
+//
+// Kafelek powstaje wyłącznie (a) ręcznie z gotowej notatki (`note_mention` = NULL) albo
+// (b) ze wzmianki daty w treści notatki (`note_mention` = klucz wzmianki, patrz
+// src/lib/note-mentions.ts). Zawsze 1 dzień, allDay, bez techników, serii, rozliczenia,
+// realizacji, protokołu i wyceny; `object_id`/`order_id` kopiowane ze źródła, żeby filtry
+// po obiekcie działały tak samo jak dla wydarzenia, przy którym notatka wisi.
+// ---------------------------------------------------------------------------
+
+/** Ile znaków treści notatki wchodzi do tytułu kafelka. */
+const NOTE_TITLE_TEXT_MAX = 60;
+
+export interface NoteEventSource {
+  note: CalendarEventNoteRow;
+  /** Wydarzenie, przy którym wisi notatka (nigdy typu „notatka”). */
+  event: CalendarEventRow;
+}
+
+/** Notatka + jej wydarzenie źródłowe albo null, gdy któregoś nie ma / jest skasowane. */
+export function findNoteSource(dbx: DbOrTx, noteId: number): NoteEventSource | null {
+  const note = getNoteRow(dbx, noteId);
+  if (!note || note.deletedAt) return null;
+  const event = getEventRow(dbx, note.eventId);
+  if (!event || event.deletedAt || event.type === "notatka") return null;
+  return { note, event };
+}
+
+/** Jak `findNoteSource`, ale z czytelnym 400 zamiast null (walidacja wejścia). */
+export function loadNoteSource(dbx: DbOrTx, noteId: number): NoteEventSource {
+  const note = getNoteRow(dbx, noteId);
+  if (!note || note.deletedAt) throw new ApiError(400, `Notatka #${noteId} nie istnieje`);
+  const event = getEventRow(dbx, note.eventId);
+  if (!event || event.deletedAt) throw new ApiError(400, `Wydarzenie notatki #${noteId} nie istnieje lub jest usunięte`);
+  if (event.type === "notatka") throw new ApiError(400, "Wydarzenie typu notatka nie może być źródłem kolejnej notatki");
+  return { note, event };
+}
+
+/** Tytuł kafelka: „Notatka: <początek treści>”; pusta treść (sam załącznik) → tytuł źródła. */
+export function noteEventTitle(note: Pick<CalendarEventNoteRow, "text">, source: Pick<CalendarEventRow, "title">): string {
+  const t = note.text.replace(/\s+/g, " ").trim();
+  const body = t ? (t.length > NOTE_TITLE_TEXT_MAX ? `${t.slice(0, NOTE_TITLE_TEXT_MAX - 1)}…` : t) : source.title;
+  return `Notatka: ${body}`.slice(0, 300);
+}
+
+/** Wstawia kafelek notatki (1 dzień) + wpis „created” w activity_log. Zwraca id. */
+function insertNoteEvent(
+  tx: DbOrTx,
+  p: { note: CalendarEventNoteRow; source: CalendarEventRow; startAt: string; mention: string | null; status?: CalendarEventStatus; ctx: MutationCtx }
+): number {
+  const ev = tx
+    .insert(schema.calendarEvents)
+    .values({
+      type: "notatka",
+      title: noteEventTitle(p.note, p.source),
+      description: null,
+      location: null,
+      startAt: p.startAt,
+      endAt: shiftLocal(p.startAt, 24 * 60, true),
+      allDay: true,
+      status: p.status ?? "planned",
+      department: "technical",
+      objectId: p.source.objectId,
+      orderId: p.source.orderId,
+      billing: null,
+      noteId: p.note.id,
+      noteMention: p.mention,
+      createdBy: p.ctx.user.id,
+      updatedBy: p.ctx.user.id,
+    })
+    .returning()
+    .get();
+  logActivity(tx, {
+    entityType: CALENDAR_ENTITY, entityId: ev.id, objectId: ev.objectId, user: p.ctx.user, summarySuffix: p.ctx.summarySuffix,
+    action: "created",
+    summary: p.mention
+      ? `Utworzono kafelek notatki ze wzmianki „@${p.mention}” (${fmtDate(ev.startAt)})`
+      : `Przypięto notatkę do kalendarza (${fmtDate(ev.startAt)})`,
+  });
+  return ev.id;
+}
+
+/** Soft delete wydarzenia + wpis „deleted” (wspólne dla kafelków notatek). */
+function softDeleteEventRow(tx: DbOrTx, ev: CalendarEventRow, ctx: MutationCtx, summary: string): void {
+  tx.update(schema.calendarEvents)
+    .set({ deletedAt: sql`(datetime('now'))`, updatedBy: ctx.user.id, updatedAt: sql`(datetime('now'))` })
+    .where(eq(schema.calendarEvents.id, ev.id))
+    .run();
+  logActivity(tx, {
+    entityType: CALENDAR_ENTITY, entityId: ev.id, objectId: ev.objectId, user: ctx.user, summarySuffix: ctx.summarySuffix,
+    action: "deleted", summary,
+  });
+}
+
+/** Kafelki wskazujące daną notatkę (żywe albo usunięte). */
+function noteEventsOfNote(dbx: DbOrTx, noteId: number, deleted = false): CalendarEventRow[] {
+  return dbx
+    .select()
+    .from(schema.calendarEvents)
+    .where(
+      and(
+        eq(schema.calendarEvents.type, "notatka"),
+        eq(schema.calendarEvents.noteId, noteId),
+        deleted ? isNotNull(schema.calendarEvents.deletedAt) : isNull(schema.calendarEvents.deletedAt)
+      )
+    )
+    .orderBy(asc(schema.calendarEvents.startAt), asc(schema.calendarEvents.id))
+    .all();
+}
+
+/** Kafelki wskazujące którąkolwiek notatkę danego wydarzenia (żywe albo usunięte). */
+function noteEventsOfEvent(dbx: DbOrTx, eventId: number, deleted = false): CalendarEventRow[] {
+  return dbx
+    .select()
+    .from(schema.calendarEvents)
+    .where(
+      and(
+        eq(schema.calendarEvents.type, "notatka"),
+        deleted ? isNotNull(schema.calendarEvents.deletedAt) : isNull(schema.calendarEvents.deletedAt),
+        sql`${schema.calendarEvents.noteId} IN (SELECT id FROM calendar_event_notes WHERE event_id = ${eventId})`
+      )
+    )
+    .orderBy(asc(schema.calendarEvents.startAt), asc(schema.calendarEvents.id))
+    .all();
+}
+
+/**
+ * Doprowadza kafelki ze wzmianek do stanu zgodnego z treścią notatki (addNote/updateNote,
+ * w tej samej transakcji). Kotwica `today` = dziś w strefie aplikacji (src/lib/tz.ts).
+ *
+ * Klucz nadal w tekście → kafelek ZOSTAJE bez zmiany daty (użytkownik mógł go przeciągnąć);
+ * klucz zniknął → soft delete; nowy klucz → nowy kafelek. Kafelków podpiętych RĘCZNIE
+ * (`note_mention IS NULL`) synchronizacja nie dotyka.
+ */
+export function syncNoteMentionEvents(
+  tx: DbOrTx,
+  note: CalendarEventNoteRow,
+  source: CalendarEventRow,
+  ctx: MutationCtx,
+  today: string = zonedToday()
+): { created: number[]; deleted: number[] } {
+  const keys = mentionKeys(note.text, today);
+  const created: number[] = [];
+  const deleted: number[] = [];
+  const kept = new Set<string>();
+  for (const ev of noteEventsOfNote(tx, note.id).filter((e) => e.noteMention != null)) {
+    const key = ev.noteMention!;
+    if (keys.has(key)) {
+      kept.add(key);
+      continue;
+    }
+    softDeleteEventRow(tx, ev, ctx, `Usunięto kafelek notatki — wzmianka „@${key}” zniknęła z treści`);
+    deleted.push(ev.id);
+  }
+  for (const [key, date] of keys) {
+    if (kept.has(key)) continue;
+    created.push(insertNoteEvent(tx, { note, source, startAt: date, mention: key, ctx }));
+  }
+  return { created, deleted };
+}
+
+/** Odświeża tytuły żywych kafelków notatki po zmianie jej treści (bez wpisów w dzienniku). */
+function refreshNoteEventTitles(tx: DbOrTx, note: CalendarEventNoteRow, source: CalendarEventRow): void {
+  const title = noteEventTitle(note, source);
+  for (const ev of noteEventsOfNote(tx, note.id)) {
+    if (ev.title === title) continue;
+    tx.update(schema.calendarEvents)
+      .set({ title, updatedAt: sql`(datetime('now'))` })
+      .where(eq(schema.calendarEvents.id, ev.id))
+      .run();
+  }
+}
+
 export type Scope = "this" | "future" | "all";
 export function parseScope(raw: string | undefined): Scope {
   if (raw === "future" || raw === "all") return raw;
@@ -506,6 +704,13 @@ function shiftedDates(sib: CalendarEventRow, deltaStart: number, deltaEnd: numbe
 export function createEvent(tx: Tx, input: ParsedInput, ctx: MutationCtx): { firstId: number; seriesId: number | null; occurrencesCount: number } {
   assertRefs(tx, input);
 
+  // Kafelek notatki: bez serii, techników i realizacji — wszystko bierze się z notatki źródłowej.
+  if (input.type === "notatka") {
+    const src = loadNoteSource(tx, input.noteId!);
+    const firstId = insertNoteEvent(tx, { note: src.note, source: src.event, startAt: input.startAt, mention: null, status: input.status, ctx });
+    return { firstId, seriesId: null, occurrencesCount: 1 };
+  }
+
   let seriesId: number | null = null;
   let occurrences = [{ startAt: input.startAt, endAt: input.endAt }];
   let seriesLabel = "";
@@ -575,6 +780,14 @@ export function updateEvent(tx: Tx, id: number, input: ParsedInput, scope: Scope
   const row = getEventRow(tx, id);
   if (!row) throw new ApiError(404, "Wydarzenie nie istnieje");
   if (row.deletedAt) throw new ApiError(409, "Wydarzenie jest usunięte — najpierw je przywróć");
+  // Typ „notatka” to inny byt niż zwykłe wydarzenie — konwersji w żadną stronę nie ma.
+  if ((row.type === "notatka") !== (input.type === "notatka")) {
+    throw new ApiError(400, "Nie można zmienić typu wydarzenia na „notatka” ani z „notatka” na inny");
+  }
+  if (row.type === "notatka") {
+    updateNoteEvent(tx, row, input, ctx);
+    return [id];
+  }
   assertRefs(tx, input, id);
 
   const updatedIds = [id];
@@ -590,15 +803,43 @@ export function updateEvent(tx: Tx, id: number, input: ParsedInput, scope: Scope
   return updatedIds;
 }
 
+/**
+ * PUT na kafelku notatki: wolno zmienić WYŁĄCZNIE dzień i status. Notatka źródłowa,
+ * obiekt i zlecenie zostają, tytuł odświeżamy z aktualnej treści notatki.
+ */
+function updateNoteEvent(tx: Tx, row: CalendarEventRow, input: ParsedInput, ctx: MutationCtx): CalendarEventRow {
+  const src = row.noteId != null ? findNoteSource(tx, row.noteId) : null;
+  const after = tx
+    .update(schema.calendarEvents)
+    .set({
+      title: src ? noteEventTitle(src.note, src.event) : row.title,
+      startAt: input.startAt,
+      endAt: shiftLocal(input.startAt, 24 * 60, true),
+      allDay: true,
+      status: input.status,
+      updatedBy: ctx.user.id,
+      updatedAt: sql`(datetime('now'))`,
+    })
+    .where(eq(schema.calendarEvents.id, row.id))
+    .returning()
+    .get();
+  logEventDiff(tx, row, after, ctx);
+  return after;
+}
+
 /** Przesunięcie / zmiana czasu (drag&drop, resize) — tylko daty i allDay. */
 export function moveEvent(tx: Tx, id: number, body: Record<string, unknown>, ctx: MutationCtx): CalendarEventRow {
   const row = getEventRow(tx, id);
   if (!row) throw new ApiError(404, "Wydarzenie nie istnieje");
   if (row.deletedAt) throw new ApiError(409, "Wydarzenie jest usunięte");
 
-  const allDay = body.allDay == null ? row.allDay : body.allDay === true || body.allDay === 1 || body.allDay === "true";
+  // Kafelek notatki zostaje całodniowy i jednodniowy — drag zmienia wyłącznie dzień.
+  const isNote = row.type === "notatka";
+  const allDay = isNote ? true : body.allDay == null ? row.allDay : body.allDay === true || body.allDay === 1 || body.allDay === "true";
   const startAt = normDate(body.startAt ?? row.startAt, allDay, "startAt");
-  let endAt = normDate(body.endAt ?? (allDay ? startAt : shiftLocal(startAt, Math.max(30, diffMinutes(row.startAt, row.endAt)), false)), allDay, "endAt");
+  let endAt = isNote
+    ? shiftLocal(startAt, 24 * 60, true)
+    : normDate(body.endAt ?? (allDay ? startAt : shiftLocal(startAt, Math.max(30, diffMinutes(row.startAt, row.endAt)), false)), allDay, "endAt");
   if (allDay) {
     if (endAt <= startAt) endAt = shiftLocal(startAt, 24 * 60, true);
   } else if (endAt <= startAt) {
@@ -633,6 +874,13 @@ export function deleteEvent(tx: Tx, id: number, scope: Scope, ctx: MutationCtx):
     });
     // Realizacja „nietknięta” znika razem z wydarzeniem; z kwotami/podpisem zostaje z adnotacją.
     onEventDeleted(tx, t, ctx);
+    // Kafelki notatek tego wydarzenia nie mają już czego pokazywać — znikają razem z nim
+    // (restoreEvent je przywraca). Same kafelki notatek żadnych notatek nie mają.
+    if (t.type !== "notatka") {
+      for (const tile of noteEventsOfEvent(tx, t.id)) {
+        softDeleteEventRow(tx, tile, ctx, `Usunięto kafelek notatki — wydarzenie źródłowe „${t.title}” zostało usunięte`);
+      }
+    }
   }
   return targets.map((t) => t.id);
 }
@@ -653,6 +901,33 @@ export function restoreEvent(tx: Tx, id: number, ctx: MutationCtx): CalendarEven
     summary: `Przywrócono wydarzenie „${row.title}” (${fmtDate(row.startAt)})`,
   });
   onEventRestored(tx, after, ctx);
+  // Kafelki notatek wracają razem z wydarzeniem — ale tylko te, które POWINNY istnieć:
+  // notatka nadal żyje, a kafelek jest ręczny albo jego wzmianka wciąż jest w treści
+  // (kafelek po skasowanej wzmiance i tak zniknąłby przy najbliższej synchronizacji).
+  if (after.type !== "notatka") {
+    const today = zonedToday();
+    // Jeden kafelek na wzmiankę: klucze zajęte przez żywe kafelki (i te już przywrócone).
+    const taken = new Set<string>();
+    for (const tile of noteEventsOfEvent(tx, id)) if (tile.noteMention) taken.add(`${tile.noteId}:${tile.noteMention}`);
+    for (const tile of noteEventsOfEvent(tx, id, true)) {
+      if (tile.noteId == null) continue;
+      const note = getNoteRow(tx, tile.noteId);
+      if (!note || note.deletedAt) continue;
+      if (tile.noteMention != null) {
+        const key = `${tile.noteId}:${tile.noteMention}`;
+        if (taken.has(key) || !mentionKeys(note.text, today).has(tile.noteMention)) continue;
+        taken.add(key);
+      }
+      tx.update(schema.calendarEvents)
+        .set({ deletedAt: null, updatedBy: ctx.user.id, updatedAt: sql`(datetime('now'))` })
+        .where(eq(schema.calendarEvents.id, tile.id))
+        .run();
+      logActivity(tx, {
+        entityType: CALENDAR_ENTITY, entityId: tile.id, objectId: tile.objectId, user: ctx.user, summarySuffix: ctx.summarySuffix,
+        action: "restored", summary: `Przywrócono kafelek notatki (${fmtDate(tile.startAt)})`,
+      });
+    }
+  }
   return after;
 }
 
@@ -702,6 +977,8 @@ export function addNote(tx: DbOrTx, input: AddNoteInput): Note {
   const ev = getEventRow(tx, input.eventId);
   if (!ev) throw new ApiError(404, "Wydarzenie nie istnieje");
   if (ev.deletedAt) throw new ApiError(409, "Wydarzenie jest usunięte — najpierw je przywróć");
+  // Kafelek notatki tylko WSKAZUJE cudzą notatkę — własnego dziennika nie ma (brak rekurencji).
+  if (ev.type === "notatka") throw new ApiError(400, "Wydarzenie typu notatka nie może mieć własnych notatek");
   const attachments = input.attachments ?? [];
   const text = parseNoteText(input.text, attachments.length > 0);
   const source = input.source ?? "user";
@@ -720,7 +997,9 @@ export function addNote(tx: DbOrTx, input: AddNoteInput): Note {
     entityType: CALENDAR_ENTITY, entityId: ev.id, objectId: ev.objectId, user: input.ctx.user, summarySuffix: input.ctx.summarySuffix,
     action: "note_added", field: "note", newValue: row.id, summary: `Dodano notatkę: ${noteSummary(text)}${attInfo}`,
   });
-  return noteOfRow(row, attRows.map(attachmentOfRow));
+  // Wzmianki dat w treści (@piątek, @15.09) → kafelki w kalendarzu, w tej samej transakcji.
+  syncNoteMentionEvents(tx, row, ev, input.ctx);
+  return noteOfRow(row, attRows.map(attachmentOfRow), noteEventLinks(tx, [row.id]).get(row.id));
 }
 
 /** Edycja treści notatki (autor lub admin). */
@@ -742,7 +1021,12 @@ export function updateNote(tx: DbOrTx, noteId: number, rawText: unknown, ctx: Mu
     entityType: CALENDAR_ENTITY, entityId: note.eventId, objectId: ev?.objectId ?? null, user: ctx.user, summarySuffix: ctx.summarySuffix,
     action: "note_updated", field: "note", oldValue: noteSummary(note.text), newValue: noteSummary(text), summary: `Zmieniono notatkę: ${noteSummary(text)}`,
   });
-  return noteOfRow(after, current.attachments);
+  // Wzmianki: nowe → kafelki, usunięte → soft delete; pozostałe kafelki dostają nowy tytuł.
+  if (ev && ev.type !== "notatka" && !ev.deletedAt) {
+    syncNoteMentionEvents(tx, after, ev, ctx);
+    refreshNoteEventTitles(tx, after, ev);
+  }
+  return noteOfRow(after, current.attachments, noteEventLinks(tx, [after.id]).get(after.id));
 }
 
 /** Soft delete notatki (autor lub admin). */
@@ -759,4 +1043,8 @@ export function deleteNote(tx: DbOrTx, noteId: number, ctx: MutationCtx): void {
     entityType: CALENDAR_ENTITY, entityId: note.eventId, objectId: ev?.objectId ?? null, user: ctx.user, summarySuffix: ctx.summarySuffix,
     action: "note_deleted", field: "note", oldValue: noteSummary(note.text), summary: `Usunięto notatkę: ${noteSummary(note.text)}`,
   });
+  // Kafelki wskazujące tę notatkę nie mają już czego pokazywać — także te podpięte ręcznie.
+  for (const tile of noteEventsOfNote(tx, noteId)) {
+    softDeleteEventRow(tx, tile, ctx, `Usunięto kafelek notatki — notatka „${noteSummary(note.text, 60)}” została usunięta`);
+  }
 }

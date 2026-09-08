@@ -9,6 +9,8 @@ import { alias } from "drizzle-orm/sqlite-core";
 import { db, schema } from "../db/index.js";
 import type { DbOrTx } from "./activity-log.js";
 import { attachmentsByNote, type NoteAttachmentJson } from "./calendar-attachments.js";
+import { parseMentions } from "./note-mentions.js";
+import { zonedToday } from "./tz.js";
 import type { CalendarBilling, CalendarEventNote, CalendarEventStatus, CalendarEventType, CalendarNoteSource, CalendarSeriesFreq } from "../db/schema.js";
 
 /**
@@ -199,6 +201,47 @@ export interface CalendarEventJson {
   deletedAt: string | null;
   /** Liczba nieusuniętych notatek (dziennik wydarzenia). */
   notesCount: number;
+  /** Tylko dla type = "notatka": notatka, na którą wskazuje kafelek. */
+  noteId: number | null;
+  /** Klucz wzmianki, z której powstał kafelek (NULL = podpięty ręcznie). */
+  noteMention: string | null;
+  /** Wyliczone: notatka z `noteId` wraz z jej wydarzeniem źródłowym (tylko dla type = "notatka"). */
+  sourceNote: SourceNoteRef | null;
+}
+
+/**
+ * Notatka w skrócie razem z jej wydarzeniem źródłowym — wynik wyszukiwarki
+ * (GET /calendar/notes/search) i podgląd w kafelku typu „notatka”.
+ */
+export interface NoteBrief {
+  id: number;
+  eventId: number;
+  eventTitle: string;
+  eventStartAt: string;
+  eventType: CalendarEventType;
+  text: string;
+  userLabel: string | null;
+  createdAt: string;
+  attachmentsCount: number;
+}
+
+/** `NoteBrief` + źródło wpisu — pole `sourceNote` wydarzenia typu „notatka”. */
+export interface SourceNoteRef extends NoteBrief {
+  source: CalendarNoteSource;
+}
+
+/** Wzmianka daty w treści notatki + kafelek, który z niej powstał (jeśli żyje). */
+export interface NoteMentionJson {
+  /** Dokładny fragment tekstu, np. "@piątek". */
+  raw: string;
+  /** Klucz znormalizowany (NoteMention.key) — po nim synchronizujemy kafelki. */
+  key: string;
+  /** Rozstrzygnięta data YYYY-MM-DD. */
+  date: string;
+  /** Etykieta do wyświetlenia, np. „piątek 11.09”. */
+  label: string;
+  /** Id żywego kafelka „notatka” z tym `note_mention` (null = jeszcze/już go nie ma). */
+  eventId: number | null;
 }
 
 /** Notatka wydarzenia (kontrakt z frontem: CalendarNote). */
@@ -213,6 +256,83 @@ export interface Note {
   updatedAt: string;
   /** Załączniki (pliki na dysku; url = GET /api/calendar/attachments/:id). */
   attachments: NoteAttachmentJson[];
+  /** Wzmianki dat w treści (src/lib/note-mentions.ts) + ich kafelki w kalendarzu. */
+  mentions: NoteMentionJson[];
+  /** Wszystkie żywe kafelki „notatka” tej notatki — także podpięte ręcznie. */
+  linkedEventIds: number[];
+}
+
+/** Kafelki „notatka” wskazujące daną notatkę (żywe): id per klucz wzmianki + wszystkie id. */
+export interface NoteEventLinks {
+  byMention: Map<string, number>;
+  ids: number[];
+}
+
+const EMPTY_LINKS: NoteEventLinks = { byMention: new Map(), ids: [] };
+
+/** Żywe kafelki „notatka” dla podanych notatek — jedno zapytanie (bez N+1). */
+export function noteEventLinks(dbx: DbOrTx, noteIds: number[]): Map<number, NoteEventLinks> {
+  const out = new Map<number, NoteEventLinks>();
+  if (noteIds.length === 0) return out;
+  const rows = dbx
+    .select({ id: schema.calendarEvents.id, noteId: schema.calendarEvents.noteId, noteMention: schema.calendarEvents.noteMention })
+    .from(schema.calendarEvents)
+    .where(
+      and(
+        eq(schema.calendarEvents.type, "notatka"),
+        inArray(schema.calendarEvents.noteId, noteIds),
+        isNull(schema.calendarEvents.deletedAt)
+      )
+    )
+    .orderBy(asc(schema.calendarEvents.startAt), asc(schema.calendarEvents.id))
+    .all();
+  for (const r of rows) {
+    if (r.noteId == null) continue;
+    const entry = out.get(r.noteId) ?? { byMention: new Map<string, number>(), ids: [] };
+    entry.ids.push(r.id);
+    if (r.noteMention && !entry.byMention.has(r.noteMention)) entry.byMention.set(r.noteMention, r.id);
+    out.set(r.noteId, entry);
+  }
+  return out;
+}
+
+/** Liczba załączników per notatka — jedno zapytanie zbiorcze. */
+export function attachmentsCountByNote(dbx: DbOrTx, noteIds: number[]): Map<number, number> {
+  const out = new Map<number, number>();
+  if (noteIds.length === 0) return out;
+  const rows = dbx
+    .select({ noteId: schema.calendarNoteAttachments.noteId, n: sql<number>`count(*)` })
+    .from(schema.calendarNoteAttachments)
+    .where(inArray(schema.calendarNoteAttachments.noteId, noteIds))
+    .groupBy(schema.calendarNoteAttachments.noteId)
+    .all();
+  for (const r of rows) out.set(r.noteId, Number(r.n));
+  return out;
+}
+
+/** Notatki + ich wydarzenia źródłowe (skrót dla kafelków „notatka”) — jedno zapytanie + liczniki. */
+export function loadSourceNotes(dbx: DbOrTx, noteIds: number[]): Map<number, SourceNoteRef> {
+  const out = new Map<number, SourceNoteRef>();
+  if (noteIds.length === 0) return out;
+  const rows = dbx
+    .select({
+      id: schema.calendarEventNotes.id,
+      eventId: schema.calendarEventNotes.eventId,
+      text: schema.calendarEventNotes.text,
+      userLabel: schema.calendarEventNotes.userLabel,
+      source: schema.calendarEventNotes.source,
+      createdAt: schema.calendarEventNotes.createdAt,
+      eventTitle: schema.calendarEvents.title,
+      eventStartAt: schema.calendarEvents.startAt,
+      eventType: schema.calendarEvents.type,
+    })
+    .from(schema.calendarEventNotes)
+    .innerJoin(schema.calendarEvents, eq(schema.calendarEventNotes.eventId, schema.calendarEvents.id))
+    .where(inArray(schema.calendarEventNotes.id, noteIds))
+    .all();
+  const counts = attachmentsCountByNote(dbx, rows.map((r) => r.id));
+  for (const r of rows) out.set(r.id, { ...r, attachmentsCount: counts.get(r.id) ?? 0 });
+  return out;
 }
 
 /**
@@ -242,13 +362,36 @@ function quoteTotals(raw: string): { total: number; filledItems: number } {
   return { total: Math.round(total * 100) / 100, filledItems };
 }
 
-export function noteOfRow(r: CalendarEventNote, attachments: NoteAttachmentJson[] = []): Note {
-  return { id: r.id, eventId: r.eventId, userId: r.userId, userLabel: r.userLabel, source: r.source, text: r.text, createdAt: r.createdAt, updatedAt: r.updatedAt, attachments };
+export function noteOfRow(
+  r: CalendarEventNote,
+  attachments: NoteAttachmentJson[] = [],
+  links: NoteEventLinks = EMPTY_LINKS,
+  today: string = zonedToday()
+): Note {
+  return {
+    id: r.id,
+    eventId: r.eventId,
+    userId: r.userId,
+    userLabel: r.userLabel,
+    source: r.source,
+    text: r.text,
+    createdAt: r.createdAt,
+    updatedAt: r.updatedAt,
+    attachments,
+    mentions: parseMentions(r.text, today).map((m) => ({
+      raw: m.raw,
+      key: m.key,
+      date: m.date,
+      label: m.label,
+      eventId: links.byMention.get(m.key) ?? null,
+    })),
+    linkedEventIds: links.ids,
+  };
 }
 
-/** Notatka z bazy + jej załączniki (jedno zapytanie po załączniki). */
+/** Notatka z bazy + jej załączniki i kafelki w kalendarzu (po jednym zapytaniu na każde). */
 export function noteWithAttachments(dbx: DbOrTx, r: CalendarEventNote): Note {
-  return noteOfRow(r, attachmentsByNote(dbx, [r.id]).get(r.id) ?? []);
+  return noteOfRow(r, attachmentsByNote(dbx, [r.id]).get(r.id) ?? [], noteEventLinks(dbx, [r.id]).get(r.id) ?? EMPTY_LINKS);
 }
 
 /** Nieusunięte notatki wydarzenia, od najstarszej (dziennik). */
@@ -260,9 +403,51 @@ export function loadNotes(dbx: DbOrTx, eventId: number, limit = 500): Note[] {
     .orderBy(asc(schema.calendarEventNotes.createdAt), asc(schema.calendarEventNotes.id))
     .limit(limit)
     .all();
-  // Załączniki jednym zapytaniem dla wszystkich notatek (bez N+1).
-  const att = attachmentsByNote(dbx, rows.map((r) => r.id));
-  return rows.map((r) => noteOfRow(r, att.get(r.id) ?? []));
+  // Załączniki i kafelki jednym zapytaniem dla wszystkich notatek (bez N+1).
+  const ids = rows.map((r) => r.id);
+  const att = attachmentsByNote(dbx, ids);
+  const links = noteEventLinks(dbx, ids);
+  const today = zonedToday();
+  return rows.map((r) => noteOfRow(r, att.get(r.id) ?? [], links.get(r.id) ?? EMPTY_LINKS, today));
+}
+
+/**
+ * Wyszukiwarka notatek do przypięcia kafelka (GET /calendar/notes/search):
+ * nieskasowane notatki nieskasowanych wydarzeń typu ≠ „notatka”, od najnowszych.
+ * `q` szuka w treści notatki i w tytule wydarzenia (LIKE bez rozróżniania wielkości liter).
+ */
+export function searchNotes(dbx: DbOrTx, q: string, limit = 20): NoteBrief[] {
+  const conds = [
+    isNull(schema.calendarEventNotes.deletedAt),
+    isNull(schema.calendarEvents.deletedAt),
+    ne(schema.calendarEvents.type, "notatka"),
+  ];
+  const needle = q.trim().toLowerCase();
+  if (needle) {
+    const pattern = `%${needle.replace(/[%_]/g, (ch) => `\\${ch}`)}%`;
+    conds.push(
+      sql`(lower(${schema.calendarEventNotes.text}) LIKE ${pattern} ESCAPE '\\' OR lower(${schema.calendarEvents.title}) LIKE ${pattern} ESCAPE '\\')`
+    );
+  }
+  const rows = dbx
+    .select({
+      id: schema.calendarEventNotes.id,
+      eventId: schema.calendarEventNotes.eventId,
+      text: schema.calendarEventNotes.text,
+      userLabel: schema.calendarEventNotes.userLabel,
+      createdAt: schema.calendarEventNotes.createdAt,
+      eventTitle: schema.calendarEvents.title,
+      eventStartAt: schema.calendarEvents.startAt,
+      eventType: schema.calendarEvents.type,
+    })
+    .from(schema.calendarEventNotes)
+    .innerJoin(schema.calendarEvents, eq(schema.calendarEventNotes.eventId, schema.calendarEvents.id))
+    .where(and(...conds))
+    .orderBy(desc(schema.calendarEventNotes.createdAt), desc(schema.calendarEventNotes.id))
+    .limit(limit)
+    .all();
+  const counts = attachmentsCountByNote(dbx, rows.map((r) => r.id));
+  return rows.map((r) => ({ ...r, attachmentsCount: counts.get(r.id) ?? 0 }));
 }
 
 /** Liczba nieusuniętych notatek per wydarzenie — jedno zapytanie zbiorcze. */
@@ -401,6 +586,11 @@ export function loadEvents(dbx: DbOrTx, ids: number[]): CalendarEventJson[] {
   }
 
   const notesCount = notesCountByEvent(dbx, ids);
+  // Kafelki „notatka” → podgląd notatki źródłowej (tylko dla nich, więc zwykle 0 zapytań).
+  const sourceNoteIds = [
+    ...new Set(rows.filter((r) => r.ev.type === "notatka").map((r) => r.ev.noteId).filter((x): x is number => x != null)),
+  ];
+  const sourceNotes = loadSourceNotes(dbx, sourceNoteIds);
   const label = (email: string | null, name: string | null) => (email == null ? null : (name || "").trim() || email);
 
   const byId = new Map<number, CalendarEventJson>();
@@ -439,6 +629,9 @@ export function loadEvents(dbx: DbOrTx, ids: number[]): CalendarEventJson[] {
       updatedAt: e.updatedAt,
       deletedAt: e.deletedAt,
       notesCount: notesCount.get(e.id) ?? 0,
+      noteId: e.noteId,
+      noteMention: e.noteMention,
+      sourceNote: (e.type === "notatka" && e.noteId != null ? sourceNotes.get(e.noteId) : null) ?? null,
     });
   }
   return ids.map((id) => byId.get(id)).filter((x): x is CalendarEventJson => !!x);

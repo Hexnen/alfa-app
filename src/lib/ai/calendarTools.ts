@@ -743,7 +743,7 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
           suggestActions: Boolean(suggestActions),
           groupBy: effectiveGroupBy,
           range: range ?? null,
-          unassignedCount: events.filter((e) => !e.deleted && e.technicians.length === 0 && e.type !== "urlop").length,
+          unassignedCount: events.filter((e) => !e.deleted && e.technicians.length === 0 && e.type !== "urlop" && e.type !== "notatka").length,
           ...(missing.length ? { missing } : {}),
         };
       },

@@ -2151,6 +2151,11 @@ export const CALENDAR_EVENT_TYPES = [
   "przygotowanie",
   "konserwacja",
   "urlop",
+  // Kafelek WSKAZUJĄCY istniejącą notatkę (calendar_event_notes) — nie da się go stworzyć
+  // „z niczego”: albo ręcznie z gotowej notatki, albo automatycznie ze wzmianki daty w jej
+  // treści (@piątek, @15.09 — src/lib/note-mentions.ts). Zawsze całodniowy, bez techników,
+  // bez serii, bez realizacji/protokołu/wyceny.
+  "notatka",
 ] as const;
 export type CalendarEventType = (typeof CALENDAR_EVENT_TYPES)[number];
 
@@ -2246,6 +2251,17 @@ export const calendarEvents = sqliteTable(
     quoteId: integer("quote_id").references(() => quotes.id, {
       onDelete: "set null",
     }),
+    // Tylko dla type = "notatka": notatka, na którą wskazuje kafelek. Twarde usunięcie notatki
+    // (kaskada po wydarzeniu źródłowym) zostawia osierocony kafelek z NULL — sprząta go
+    // soft-delete w src/lib/calendar-mutations.ts.
+    // `AnySQLiteColumn` przerywa cykl wnioskowania typów: calendar_event_notes wskazuje
+    // z powrotem na calendar_events (event_id).
+    noteId: integer("note_id").references((): AnySQLiteColumn => calendarEventNotes.id, {
+      onDelete: "set null",
+    }),
+    // Klucz wzmianki (NoteMention.key), z której powstał kafelek — NULL = podpięty ręcznie.
+    // Synchronizacja wzmianek dotyka wyłącznie kafelków z niepustym note_mention.
+    noteMention: text("note_mention"),
     createdBy: integer("created_by").references(() => users.id, {
       onDelete: "set null",
     }),
@@ -2265,6 +2281,7 @@ export const calendarEvents = sqliteTable(
     objectIdIdx: index("calendar_events_object_id_idx").on(t.objectId),
     deletedAtIdx: index("calendar_events_deleted_at_idx").on(t.deletedAt),
     seriesIdIdx: index("calendar_events_series_id_idx").on(t.seriesId),
+    noteIdIdx: index("calendar_events_note_id_idx").on(t.noteId),
     // Realizacja ↔ wydarzenie 1:1 (indeks częściowy — wiele wydarzeń bez realizacji jest OK).
     realizationIdIdx: uniqueIndex("calendar_events_realization_id_uidx")
       .on(t.realizationId)
