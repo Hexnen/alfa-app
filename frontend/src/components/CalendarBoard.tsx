@@ -1,6 +1,6 @@
 import { useMemo, useState, type DragEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { AlertTriangle, Building2, CalendarX2, Repeat, Users } from "lucide-react";
-import type { CalendarEvent, CalendarEventStatus, CalendarEventType } from "@/lib/api";
+import type { CalendarEvent, CalendarEventStatus, CalendarEventType, WeatherBrief } from "@/lib/api";
 import {
   EVENT_STATUS_META,
   EVENT_STATUS_ORDER,
@@ -16,6 +16,7 @@ import {
   seriesShortLabel,
 } from "@/lib/calendar-labels";
 import { BillingBadge, ProtocolBadge, QuoteBadge, RealizationBadge } from "@/components/CalendarEventBadges";
+import { WeatherMark } from "@/components/CalendarWeather";
 import { tipAttrs } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
@@ -24,6 +25,8 @@ export type BoardGroupBy = "status" | "type";
 
 interface CalendarBoardProps {
   events: CalendarEvent[];
+  /** Skróty pogody po id wydarzenia (dolatują osobnym batchem — mogą być puste). */
+  weather?: Record<number, WeatherBrief | null>;
   groupBy: BoardGroupBy;
   /** Uprawnienie edycji — bez niego karty nie są przeciągalne. */
   editable: boolean;
@@ -72,6 +75,7 @@ const initials = (t: { firstName: string; lastName: string }) =>
 
 export function CalendarBoard({
   events,
+  weather,
   groupBy,
   editable,
   loading,
@@ -282,6 +286,7 @@ export function CalendarBoard({
                   <BoardCard
                     key={ev.id}
                     ev={ev}
+                    wx={weather?.[ev.id] ?? null}
                     overdue={isOverdue(ev, grouped.now)}
                     draggable={editable}
                     dragging={dragId === ev.id}
@@ -308,6 +313,8 @@ export function CalendarBoard({
 
 interface BoardCardProps {
   ev: CalendarEvent;
+  /** Skrót pogody dla dnia wydarzenia (null = brak prognozy / jeszcze nie dojechała). */
+  wx: WeatherBrief | null;
   overdue: boolean;
   draggable: boolean;
   dragging: boolean;
@@ -320,6 +327,7 @@ interface BoardCardProps {
 
 function BoardCard({
   ev,
+  wx,
   overdue,
   draggable,
   dragging,
@@ -387,7 +395,7 @@ function BoardCard({
         </div>
       </div>
 
-      {(ev.objectName || techs.length > 0 || ev.seriesId || overdue || ev.billing || protocolBadgeKind(ev)) && (
+      {(ev.objectName || techs.length > 0 || ev.seriesId || overdue || ev.billing || protocolBadgeKind(ev) || wx) && (
         <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
           {ev.objectName && (
             <span className="inline-flex min-w-0 max-w-full items-center gap-1">
@@ -445,6 +453,7 @@ function BoardCard({
               <AlertTriangle className="h-3 w-3" aria-hidden /> po terminie
             </span>
           )}
+          <WeatherMark brief={wx} compact />
           <BillingBadge billing={ev.billing} compact />
           <ProtocolBadge event={ev} compact />
           <QuoteBadge event={ev} compact />

@@ -20,9 +20,19 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   AlertCircle,
+  ArrowDown,
+  ArrowUp,
   CheckCircle2,
   ChevronDown,
+  ChevronsUpDown,
   History,
   Inbox,
   Loader2,
@@ -31,13 +41,16 @@ import {
   PlugZap,
   RefreshCw,
   Save,
+  Search,
   Send,
   Server,
+  X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
   cmaMailApi,
   type CmaMailLogEntry,
+  type CmaMailLogSortKey,
   type CmaMailSettings,
   type CmaMailSettingsInput,
   type CmaMailTestImapResult,
@@ -46,6 +59,18 @@ import { usePerms } from "@/auth/permissions";
 import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
 
 const LOG_PAGE_SIZE = 20;
+
+/** Domyślny kierunek sortowania kolumny historii — daty czytamy od najnowszych. */
+const LOG_DEFAULT_DIR: Record<CmaMailLogSortKey, "asc" | "desc"> = {
+  createdAt: "desc",
+  status: "asc",
+  direction: "asc",
+  subject: "asc",
+};
+
+/** Sentinel selectów: „wszystkie" zamiast pustej wartości (Radix nie przyjmuje ""). */
+type LogStatusFilter = "all" | CmaMailLogEntry["status"];
+type LogDirectionFilter = "all" | CmaMailLogEntry["direction"];
 
 // Backend dates come as "YYYY-MM-DD HH:MM:SS" (or ISO with "T").
 function formatMailDateTime(value: string | null): string {
@@ -196,7 +221,17 @@ export function CmaSettings() {
   const [logEntries, setLogEntries] = useState<CmaMailLogEntry[]>([]);
   const [logLoading, setLogLoading] = useState(true);
   const [logPage, setLogPage] = useState(1);
+  const [logTotal, setLogTotal] = useState(0);
   const [logTotalPages, setLogTotalPages] = useState(0);
+
+  // Filtry historii poczty. Szukajkę trzymamy osobno od wartości wysyłanej do API —
+  // wpisywanie w pole nie może strzelać żądaniem na każdą literę (debounce niżej).
+  const [logSearchInput, setLogSearchInput] = useState("");
+  const [logSearch, setLogSearch] = useState("");
+  const [logStatus, setLogStatus] = useState<LogStatusFilter>("all");
+  const [logDirection, setLogDirection] = useState<LogDirectionFilter>("all");
+  const [logSort, setLogSort] = useState<CmaMailLogSortKey>("createdAt");
+  const [logDir, setLogDir] = useState<"asc" | "desc">("desc");
 
   const anyActionRunning =
     saving || imapTesting || checking || smtpTesting || sendingLatest;
@@ -227,25 +262,107 @@ export function CmaSettings() {
     };
   }, []);
 
+  // Debounce szukajki historii poczty.
+  useEffect(() => {
+    const t = setTimeout(() => setLogSearch(logSearchInput.trim()), 300);
+    return () => clearTimeout(t);
+  }, [logSearchInput]);
+
+  /**
+   * Każda zmiana filtra albo sortowania wraca na pierwszą stronę historii — inaczej po
+   * zawężeniu listy użytkownik ląduje na nieistniejącej stronie. Przestawiamy w trakcie
+   * renderu (a nie w efekcie), żeby nie poszło zbędne żądanie o starą stronę z nowym filtrem.
+   */
+  const logFiltersKey = [
+    logSearch,
+    logStatus,
+    logDirection,
+    logSort,
+    logDir,
+  ].join("|");
+  const [prevLogFiltersKey, setPrevLogFiltersKey] = useState(logFiltersKey);
+  if (prevLogFiltersKey !== logFiltersKey) {
+    setPrevLogFiltersKey(logFiltersKey);
+    setLogPage(1);
+  }
+
   const fetchLog = useCallback(async () => {
     setLogLoading(true);
     try {
       const response = await cmaMailApi.getLog({
+        search: logSearch || undefined,
+        status: logStatus !== "all" ? logStatus : undefined,
+        direction: logDirection !== "all" ? logDirection : undefined,
+        sort: logSort,
+        dir: logDir,
         page: logPage,
         pageSize: LOG_PAGE_SIZE,
       });
       setLogEntries(response.data);
+      setLogTotal(response.total);
       setLogTotalPages(response.totalPages);
     } catch (error) {
       console.error("Error fetching CMA mail log:", error);
     } finally {
       setLogLoading(false);
     }
-  }, [logPage]);
+  }, [logSearch, logStatus, logDirection, logSort, logDir, logPage]);
 
   useEffect(() => {
     fetchLog();
   }, [fetchLog]);
+
+  /** Klik w nagłówek: ta sama kolumna odwraca kierunek, nowa startuje od swojego domyślnego. */
+  const toggleLogSort = (key: CmaMailLogSortKey) => {
+    if (logSort === key) {
+      setLogDir((d) => (d === "asc" ? "desc" : "asc"));
+      return;
+    }
+    setLogSort(key);
+    setLogDir(LOG_DEFAULT_DIR[key]);
+  };
+
+  const logFiltersActive =
+    logSearchInput !== "" || logStatus !== "all" || logDirection !== "all";
+
+  const clearLogFilters = () => {
+    setLogSearchInput("");
+    setLogStatus("all");
+    setLogDirection("all");
+  };
+
+  /** Nagłówek klikalny — strzałka pokazuje kolumnę i kierunek sortowania. */
+  const LogSortHeader = ({
+    label,
+    sortKey,
+  }: {
+    label: string;
+    sortKey: CmaMailLogSortKey;
+  }) => {
+    const active = logSort === sortKey;
+    const Icon = !active
+      ? ChevronsUpDown
+      : logDir === "asc"
+        ? ArrowUp
+        : ArrowDown;
+    return (
+      <TableHead className="font-semibold">
+        <button
+          type="button"
+          data-testid={`cma-poczta-sort-${sortKey}`}
+          onClick={() => toggleLogSort(sortKey)}
+          aria-label={`Sortuj po: ${label}`}
+          className={cn(
+            "inline-flex items-center gap-1 rounded px-1 -mx-1 transition-colors hover:text-slate-900",
+            active ? "text-slate-900" : "text-slate-500"
+          )}
+        >
+          {label}
+          <Icon className={cn("h-3.5 w-3.5", !active && "opacity-40")} />
+        </button>
+      </TableHead>
+    );
+  };
 
   const update = (patch: Partial<MailForm>) => {
     setForm((f) => (f ? { ...f, ...patch } : f));
@@ -981,16 +1098,84 @@ export function CmaSettings() {
               </div>
             </CardHeader>
             <CardContent className="space-y-4">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="relative min-w-[200px] max-w-sm flex-1">
+                  <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                  <Input
+                    placeholder="Szukaj tematu lub pliku..."
+                    className="pl-10"
+                    data-testid="cma-poczta-filter-search"
+                    value={logSearchInput}
+                    onChange={(e) => setLogSearchInput(e.target.value)}
+                  />
+                </div>
+
+                <Select
+                  value={logStatus}
+                  onValueChange={(v) => setLogStatus(v as LogStatusFilter)}
+                >
+                  <SelectTrigger
+                    className="w-[180px]"
+                    data-testid="cma-poczta-filter-status"
+                  >
+                    <SelectValue placeholder="Status" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">Status: wszystkie</SelectItem>
+                    <SelectItem value="ok">OK</SelectItem>
+                    <SelectItem value="skipped">Pominięto</SelectItem>
+                    <SelectItem value="error">Błąd</SelectItem>
+                  </SelectContent>
+                </Select>
+
+                <Select
+                  value={logDirection}
+                  onValueChange={(v) => setLogDirection(v as LogDirectionFilter)}
+                >
+                  <SelectTrigger
+                    className="w-[190px]"
+                    data-testid="cma-poczta-filter-direction"
+                  >
+                    <SelectValue placeholder="Kierunek" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">Kierunek: wszystkie</SelectItem>
+                    <SelectItem value="import">Import</SelectItem>
+                    <SelectItem value="send">Wysyłka</SelectItem>
+                  </SelectContent>
+                </Select>
+
+                {logFiltersActive && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={clearLogFilters}
+                    data-testid="cma-poczta-filters-clear"
+                  >
+                    <X className="mr-1 h-4 w-4" />
+                    Wyczyść filtry
+                  </Button>
+                )}
+
+                <p
+                  className="ml-auto text-sm text-slate-500"
+                  data-testid="cma-poczta-summary"
+                >
+                  {/* Liczymy CAŁY wynik filtrowania, a nie wczytaną stronę. */}
+                  {logTotal} {logTotal === 1 ? "wpis" : "wpisów"}
+                </p>
+              </div>
+
               <div className="overflow-hidden rounded-lg border border-slate-200">
                 <Table>
                   <TableHeader>
                     <TableRow className="bg-slate-50">
-                      <TableHead className="font-semibold">Data</TableHead>
-                      <TableHead className="font-semibold">Kierunek</TableHead>
-                      <TableHead className="font-semibold">
-                        Temat / plik
-                      </TableHead>
-                      <TableHead className="font-semibold">Status</TableHead>
+                      <LogSortHeader label="Data" sortKey="createdAt" />
+                      <LogSortHeader label="Kierunek" sortKey="direction" />
+                      <LogSortHeader label="Temat / plik" sortKey="subject" />
+                      <LogSortHeader label="Status" sortKey="status" />
+                      {/* Szczegóły i raport to opisy zdarzenia — nie ma po czym ich
+                          sensownie porządkować, więc nagłówki zostają zwykłe. */}
                       <TableHead className="font-semibold">Szczegóły</TableHead>
                       <TableHead className="font-semibold text-right">
                         Raport
@@ -1013,7 +1198,9 @@ export function CmaSettings() {
                           colSpan={6}
                           className="py-8 text-center text-slate-500"
                         >
-                          Brak wpisów w historii poczty.
+                          {logFiltersActive
+                            ? "Brak wpisów dla wybranych filtrów"
+                            : "Brak wpisów w historii poczty."}
                         </TableCell>
                       </TableRow>
                     ) : (

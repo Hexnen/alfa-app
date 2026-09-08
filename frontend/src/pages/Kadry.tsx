@@ -5,7 +5,15 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import { Navigate, useParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Tabs, TabsContent } from "@/components/ui/tabs";
 import {
   HrContractForm,
@@ -17,7 +25,7 @@ import {
 import { HrHoursTab } from "@/components/kadry/HoursTab";
 import { DepartmentsTab } from "@/components/kadry/DepartmentsTab";
 import { TABLE_SELECT_CLS, hrs, money } from "@/components/kadry/shared";
-import { Th } from "@/components/kadry/parts";
+import { SortTh, Th, type SortDir } from "@/components/kadry/parts";
 import { catalogLabel } from "@/lib/labels";
 import { printHrStatement } from "@/lib/hrPrint";
 import { usePerms } from "@/auth/permissions";
@@ -32,6 +40,8 @@ import {
   Trash2,
   Printer,
   AlertTriangle,
+  Search,
+  X,
 } from "lucide-react";
 import {
   getCompanies,
@@ -119,6 +129,143 @@ function overheadKind(name: string): "techniczna" | null {
   return name.trim().startsWith("#") ? "techniczna" : null;
 }
 
+// --- sortowanie list: wspólne porównania (wzorzec z Obiektów i Spółek) ---
+
+/**
+ * Teksty po polsku (żeby Ł nie lądowało za Z), a puste na końcu w OBU
+ * kierunkach — jak NULLS LAST w SQL. Inaczej „sortuj po dziale” zaczynałoby się
+ * od osób bez działu, czyli od wierszy, które w tej kolumnie nic nie mówią.
+ */
+const cmpText = (
+  a: string | null | undefined,
+  b: string | null | undefined,
+  mul: number,
+): number => {
+  const as = (a ?? "").trim();
+  const bs = (b ?? "").trim();
+  if (!as || !bs) return !as && !bs ? 0 : as ? -1 : 1;
+  return as.localeCompare(bs, "pl") * mul;
+};
+
+/** Liczby — ta sama reguła: brak wartości zawsze na końcu. */
+const cmpNum = (
+  a: number | null | undefined,
+  b: number | null | undefined,
+  mul: number,
+): number => {
+  if (a == null || b == null)
+    return a == null && b == null ? 0 : a == null ? 1 : -1;
+  return (a - b) * mul;
+};
+
+/**
+ * Kwoty, które tabela rysuje pustą komórką przy zerze (przelew/gotówka/wypłata,
+ * kwota biura) — zero znaczy tu „nic nie ma”, więc sortuje się jak brak.
+ */
+const cmpMoney = (a: number, b: number, mul: number) =>
+  cmpNum(a || null, b || null, mul);
+
+/** Kwota z pola widełek — przecinek jak kropka, śmieci znaczą „bez ograniczenia”. */
+function parseAmount(raw: string): number | undefined {
+  const n = parseFloat(raw.replace(",", "."));
+  return Number.isFinite(n) ? n : undefined;
+}
+
+/** Kartoteka pracowników — kolumny, po których wolno sortować. */
+type EmployeeSortKey =
+  | "fullName"
+  | "code"
+  | "kind"
+  | "departmentName"
+  | "contracts"
+  | "active"
+  | "updatedAt";
+
+/** Domyślny kierunek: teksty alfabetycznie, liczniki i daty od największych. */
+const EMPLOYEE_DIR: Record<EmployeeSortKey, SortDir> = {
+  fullName: "asc",
+  code: "asc",
+  kind: "asc",
+  departmentName: "asc",
+  contracts: "desc",
+  active: "desc",
+  updatedAt: "desc",
+};
+
+type PayrollSortKey =
+  | "employeeName"
+  | "company"
+  | "contractType"
+  | "maksGodziny"
+  | "faktGodziny"
+  | "stawkaNetto"
+  | "kwotaGlowna"
+  | "kwotaWyrownania"
+  | "dodatekFinalny"
+  | "przelew"
+  | "gotowka"
+  | "wyplata";
+
+const PAYROLL_DIR: Record<PayrollSortKey, SortDir> = {
+  employeeName: "asc",
+  company: "asc",
+  contractType: "asc",
+  maksGodziny: "desc",
+  faktGodziny: "desc",
+  stawkaNetto: "desc",
+  kwotaGlowna: "desc",
+  kwotaWyrownania: "desc",
+  dodatekFinalny: "desc",
+  przelew: "desc",
+  gotowka: "desc",
+  wyplata: "desc",
+};
+
+type OfficeSortKey =
+  | "employeeName"
+  | "company"
+  | "hoursForAccounting"
+  | "rate"
+  | "total";
+
+const OFFICE_DIR: Record<OfficeSortKey, SortDir> = {
+  employeeName: "asc",
+  company: "asc",
+  hoursForAccounting: "desc",
+  rate: "desc",
+  total: "desc",
+};
+
+type ObjectSortKey = "name" | "hoursTotal" | "employeesCount" | "mapping";
+
+const OBJECT_DIR: Record<ObjectSortKey, SortDir> = {
+  name: "asc",
+  hoursTotal: "desc",
+  employeesCount: "desc",
+  mapping: "asc",
+};
+
+/**
+ * Tryb „Braki” w wynagrodzeniach. `braki` odpowiada dokładnie liczbie z kafla
+ * (`summary.gaps` — wiersze z którymkolwiek brakiem, każdy liczony raz), a dwa
+ * kolejne tryby rozbijają go na składniki z podpisu kafla — dzięki temu z liczby
+ * na kaflu da się dojść do konkretnych wierszy, zamiast szukać ich po tabeli
+ * okiem. Składniki mogą sumować się do więcej niż `gaps`, bo jedna umowa bywa
+ * jednocześnie bez kwoty i z dodatkiem do przeliczenia.
+ */
+type PayrollGapMode = "all" | "braki" | "missing" | "pending" | "warnings";
+
+/**
+ * Wiersz bez kwoty od księgowości — ten sam warunek, którym backend liczy
+ * `summary.missingMain` (`src/routes/hr.ts`). Rozjechanie się tych dwóch reguł
+ * dałoby kafel z liczbą, której filtr nie potrafi odtworzyć.
+ */
+const payrollMissingMain = (r: HrPayrollRow) =>
+  r.faktGodziny != null && r.faktGodziny > 0 && r.kwotaGlowna == null;
+
+/** Filtr aktywności — wspólny kształt dla kartoteki i słownika obiektów. */
+type ActiveFilter = "all" | "active" | "inactive";
+
 const KADRY_TABS = [
   "wynagrodzenia",
   "godziny",
@@ -171,7 +318,36 @@ export function Kadry() {
   const [officeFormOpen, setOfficeFormOpen] = useState(false);
   const [officeEdit, setOfficeEdit] = useState<HrOfficeRow | null>(null);
 
+  /**
+   * Szukajka wypłat — obejmuje TEŻ sekcję Biuro pod tabelą. Obie listy są
+   * rozliczeniem tego samego miesiąca, więc filtr, który zawężał tylko górną
+   * połowę ekranu, pokazywał „wypłaty Kowalskiego” razem z całym biurem.
+   */
   const [payrollFilter, setPayrollFilter] = useState("");
+  /** Spółka — wspólna dla wypłat ochrony i biura (jedna lista wyboru na oba). */
+  const [payrollCompany, setPayrollCompany] = useState<string>("all");
+  const [payrollContractType, setPayrollContractType] = useState<
+    "all" | "praca" | "zlecenie"
+  >("all");
+  /** Zgłoszenie: `none` = wiersz bez ZUA i bez ZZA (umowa nieprzypisana do gałęzi). */
+  const [payrollRegistration, setPayrollRegistration] = useState<
+    "all" | "zua" | "zza" | "none"
+  >("all");
+  const [payrollBonusType, setPayrollBonusType] = useState<string>("all");
+  const [payrollMainChannel, setPayrollMainChannel] = useState<
+    "all" | "przelew" | "gotowka"
+  >("all");
+  const [payrollMaxSource, setPayrollMaxSource] = useState<
+    "all" | "override" | "individual" | "norm"
+  >("all");
+  const [payrollGaps, setPayrollGaps] = useState<PayrollGapMode>("all");
+  const [payrollMin, setPayrollMin] = useState("");
+  const [payrollMax, setPayrollMax] = useState("");
+  const [payrollSort, setPayrollSort] = useState<PayrollSortKey>("employeeName");
+  const [payrollDir, setPayrollDir] = useState<SortDir>("asc");
+  const [officeSort, setOfficeSort] = useState<OfficeSortKey>("employeeName");
+  const [officeDir, setOfficeDir] = useState<SortDir>("asc");
+
   const [employeeFilter, setEmployeeFilter] = useState("");
   /** Kartoteka: wszyscy / tylko ochrona (umowy) / tylko biuro — dawne podzakładki. */
   const [employeeKind, setEmployeeKind] = useState<"all" | "ochrona" | "biuro">(
@@ -184,6 +360,36 @@ export function Kadry() {
   const [employeeDept, setEmployeeDept] = useState<"all" | "none" | number>(
     "all",
   );
+  /**
+   * Kartoteka domyślnie pokazuje AKTYWNYCH. Wcześniej zwolnieni mieszali się
+   * z pracującymi i lista rosła w nieskończoność (kartoteka nie jest czyszczona
+   * — pracownika się dezaktywuje, nie usuwa). Zwolnionych wciąż widać po
+   * przełączeniu filtra albo przez „Wyczyść filtry”.
+   */
+  const [employeeActive, setEmployeeActive] = useState<ActiveFilter>("active");
+  /** Spółka z umów LUB z rozliczenia biura (`all` = bez filtra). */
+  const [employeeCompany, setEmployeeCompany] = useState<string>("all");
+  /**
+   * „Ochrona bez umów”: `none` = tylko osoby bez ani jednej umowy (to one nie
+   * pojawią się w wynagrodzeniach), `with` = tylko z umowami.
+   */
+  const [employeeContracts, setEmployeeContracts] = useState<
+    "all" | "none" | "with"
+  >("all");
+  const [employeeSort, setEmployeeSort] = useState<EmployeeSortKey>("fullName");
+  const [employeeDir, setEmployeeDir] = useState<SortDir>("asc");
+
+  const [objectSearch, setObjectSearch] = useState("");
+  const [objectMapping, setObjectMapping] = useState<
+    "all" | "mapped" | "unmapped"
+  >("all");
+  const [objectActive, setObjectActive] = useState<ActiveFilter>("all");
+  /** Pozycje techniczne (#BIURO, #zlecenie): ukryj / tylko one / wszystkie. */
+  const [objectTech, setObjectTech] = useState<"all" | "hide" | "only">("all");
+  const [objectWithHours, setObjectWithHours] = useState(false);
+  const [objectSort, setObjectSort] = useState<ObjectSortKey>("hoursTotal");
+  const [objectDir, setObjectDir] = useState<SortDir>("desc");
+
   /** Rozwinięci pracownicy w kartotece (umowy + biuro pod wierszem). */
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   /** Pracownik podstawiany w nowej umowie / nowym wpisie biura. */
@@ -308,18 +514,71 @@ export function Kadry() {
   );
 
   /**
-   * Pozycje kadrowe od najcięższych: mapuje się je ręcznie i po kolei, więc
-   * na górze mają stać te, na których wisi najwięcej godzin — to one przeniosą
-   * do Analityki największy kawałek kosztu osobowego.
+   * Pozycje kadrowe: filtr + sortowanie w jednym przebiegu. Domyślnie od
+   * najcięższych — mapuje się je ręcznie i po kolei, więc na górze mają stać
+   * te, na których wisi najwięcej godzin: to one przeniosą do Analityki
+   * największy kawałek kosztu osobowego.
    */
-  const sortedObjects = useMemo(
-    () =>
-      [...objects].sort(
-        (a, b) =>
-          b.hoursTotal - a.hoursTotal || a.name.localeCompare(b.name, "pl"),
-      ),
-    [objects],
-  );
+  const objectsVisible = useMemo(() => {
+    const q = objectSearch.trim().toLowerCase();
+    const list = objects.filter((o) => {
+      if (q && !o.name.toLowerCase().includes(q)) return false;
+      if (objectMapping === "mapped" && o.objectId == null) return false;
+      if (objectMapping === "unmapped" && o.objectId != null) return false;
+      if (objectActive === "active" && !o.active) return false;
+      if (objectActive === "inactive" && o.active) return false;
+      const tech = overheadKind(o.name) != null;
+      if (objectTech === "hide" && tech) return false;
+      if (objectTech === "only" && !tech) return false;
+      if (objectWithHours && o.hoursTotal <= 0) return false;
+      return true;
+    });
+
+    const mul = objectDir === "asc" ? 1 : -1;
+    const mappingLabel = (o: HrObject) =>
+      o.object ? catalogLabel(o.object) : "";
+    const cmp = (a: HrObject, b: HrObject) => {
+      switch (objectSort) {
+        case "name":
+          return cmpText(a.name, b.name, mul);
+        case "employeesCount":
+          return cmpNum(a.employeesCount, b.employeesCount, mul);
+        case "mapping":
+          return cmpText(mappingLabel(a), mappingLabel(b), mul);
+        default:
+          // Godziny: 0 to „pozycja bez historii” — tabela pisze tam kreskę,
+          // więc w sortowaniu zachowuje się jak brak wartości.
+          return cmpMoney(a.hoursTotal, b.hoursTotal, mul);
+      }
+    };
+    return list.sort(
+      (a, b) => cmp(a, b) || a.name.localeCompare(b.name, "pl") || a.id - b.id,
+    );
+  }, [
+    objects,
+    objectSearch,
+    objectMapping,
+    objectActive,
+    objectTech,
+    objectWithHours,
+    objectSort,
+    objectDir,
+  ]);
+
+  const objectFiltersActive =
+    objectSearch !== "" ||
+    objectMapping !== "all" ||
+    objectActive !== "all" ||
+    objectTech !== "all" ||
+    objectWithHours;
+
+  const clearObjectFilters = () => {
+    setObjectSearch("");
+    setObjectMapping("all");
+    setObjectActive("all");
+    setObjectTech("all");
+    setObjectWithHours(false);
+  };
 
   /**
    * Postęp mapowania liczymy TYLKO z pozycji, które mają godziny i nie są
@@ -352,15 +611,37 @@ export function Kadry() {
     return m;
   }, [contracts]);
 
+  /** Spółki widziane przez kartotekę — z umów i z rozliczeń biura (cała historia). */
+  const employeeCompanyOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const c of contracts) if (c.company) set.add(c.company);
+    for (const e of employees)
+      for (const c of e.officeCompanies ?? []) if (c) set.add(c);
+    return [...set].sort((a, b) => a.localeCompare(b, "pl"));
+  }, [contracts, employees]);
+
   // Rodzaj rozliczenia to cecha pracownika (ochrona / biuro). Szukajka obejmuje
   // też spółki, żeby dało się wyciągnąć „ludzi z GUARD 21".
   const employeesVisible = useMemo(() => {
     const q = employeeFilter.trim().toLowerCase();
-    return employees.filter((e) => {
+    const companiesOf = (e: HrEmployee) => [
+      ...(contractsByEmployee.get(e.id) ?? []).map((c) => c.company),
+      ...(e.officeCompanies ?? []),
+    ];
+    const list = employees.filter((e) => {
       const ctrs = contractsByEmployee.get(e.id) ?? [];
       if (employeeKind !== "all" && e.kind !== employeeKind) return false;
       if (employeeDept === "none" && e.departmentId != null) return false;
       if (typeof employeeDept === "number" && e.departmentId !== employeeDept)
+        return false;
+      if (employeeActive === "active" && !e.active) return false;
+      if (employeeActive === "inactive" && e.active) return false;
+      if (employeeContracts === "none" && ctrs.length > 0) return false;
+      if (employeeContracts === "with" && ctrs.length === 0) return false;
+      if (
+        employeeCompany !== "all" &&
+        !companiesOf(e).some((c) => c === employeeCompany)
+      )
         return false;
       if (!q) return true;
       const haystack = [
@@ -368,18 +649,71 @@ export function Kadry() {
         e.code,
         e.notes,
         e.departmentName,
-        ...ctrs.map((c) => c.company),
-        ...(e.officeCompanies ?? []),
+        ...companiesOf(e),
       ];
       return haystack.some((v) => (v ?? "").toLowerCase().includes(q));
     });
+
+    const mul = employeeDir === "asc" ? 1 : -1;
+    const cmp = (a: HrEmployee, b: HrEmployee) => {
+      switch (employeeSort) {
+        case "code":
+          return cmpText(a.code, b.code, mul);
+        case "kind":
+          return cmpText(a.kind, b.kind, mul);
+        case "departmentName":
+          return cmpText(a.departmentName, b.departmentName, mul);
+        case "contracts":
+          // Zero umów to informacja (kolumna pisze „brak umów”), a nie brak
+          // danych — sortuje się jak liczba, nie jak wartość pusta.
+          return cmpNum(
+            contractsByEmployee.get(a.id)?.length ?? 0,
+            contractsByEmployee.get(b.id)?.length ?? 0,
+            mul,
+          );
+        case "active":
+          return cmpNum(Number(a.active), Number(b.active), mul);
+        case "updatedAt":
+          return cmpText(a.updatedAt, b.updatedAt, mul);
+        default:
+          return cmpText(a.fullName, b.fullName, mul);
+      }
+    };
+    return list.sort(
+      (a, b) =>
+        cmp(a, b) || a.fullName.localeCompare(b.fullName, "pl") || a.id - b.id,
+    );
   }, [
     employees,
     employeeFilter,
     employeeKind,
     employeeDept,
+    employeeActive,
+    employeeCompany,
+    employeeContracts,
+    employeeSort,
+    employeeDir,
     contractsByEmployee,
   ]);
+
+  const employeeFiltersActive =
+    employeeFilter !== "" ||
+    employeeKind !== "all" ||
+    employeeDept !== "all" ||
+    // Domyślnie kartoteka pokazuje aktywnych, więc „aktywni” nie liczy się jako
+    // filtr — inaczej przycisk „Wyczyść filtry” stałby na ekranie na stałe.
+    employeeActive !== "active" ||
+    employeeCompany !== "all" ||
+    employeeContracts !== "all";
+
+  const clearEmployeeFilters = () => {
+    setEmployeeFilter("");
+    setEmployeeKind("all");
+    setEmployeeDept("all");
+    setEmployeeActive("active");
+    setEmployeeCompany("all");
+    setEmployeeContracts("all");
+  };
 
   const visibleContractsCount = employeesVisible.reduce(
     (s, e) => s + (contractsByEmployee.get(e.id)?.length ?? 0),
@@ -394,15 +728,205 @@ export function Kadry() {
       return next;
     });
 
+  /** Spółki z rozliczenia miesiąca — jedna lista wyboru na wypłaty i biuro. */
+  const payrollCompanyOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const r of payroll) if (r.company) set.add(r.company);
+    for (const r of office) if (r.company) set.add(r.company);
+    return [...set].sort((a, b) => a.localeCompare(b, "pl"));
+  }, [payroll, office]);
+
   const payrollVisible = useMemo(() => {
     const q = payrollFilter.trim().toLowerCase();
-    if (!q) return payroll;
-    return payroll.filter(
-      (r) =>
-        r.employeeName.toLowerCase().includes(q) ||
-        r.company.toLowerCase().includes(q),
+    const min = parseAmount(payrollMin);
+    const max = parseAmount(payrollMax);
+    const list = payroll.filter((r) => {
+      if (q && !`${r.employeeName} ${r.company}`.toLowerCase().includes(q))
+        return false;
+      if (payrollCompany !== "all" && r.company !== payrollCompany) return false;
+      if (
+        payrollContractType !== "all" &&
+        r.contractType !== payrollContractType
+      )
+        return false;
+      if (
+        payrollRegistration !== "all" &&
+        (r.registration ?? "none") !== payrollRegistration
+      )
+        return false;
+      if (payrollBonusType !== "all" && r.bonusType !== payrollBonusType)
+        return false;
+      if (payrollMainChannel !== "all" && r.mainChannel !== payrollMainChannel)
+        return false;
+      if (payrollMaxSource !== "all" && r.maxHoursSource !== payrollMaxSource)
+        return false;
+      if (payrollGaps === "missing" && !payrollMissingMain(r)) return false;
+      if (payrollGaps === "pending" && !r.bonusPending) return false;
+      if (payrollGaps === "braki" && !payrollMissingMain(r) && !r.bonusPending)
+        return false;
+      if (payrollGaps === "warnings" && r.warnings.length === 0) return false;
+      if (min !== undefined && r.wyplata < min) return false;
+      if (max !== undefined && r.wyplata > max) return false;
+      return true;
+    });
+
+    const mul = payrollDir === "asc" ? 1 : -1;
+    const cmp = (a: HrPayrollRow, b: HrPayrollRow) => {
+      switch (payrollSort) {
+        case "company":
+          return cmpText(a.company, b.company, mul);
+        case "contractType":
+          return cmpText(a.contractType, b.contractType, mul);
+        case "maksGodziny":
+          return cmpNum(a.maksGodziny, b.maksGodziny, mul);
+        case "faktGodziny":
+          return cmpNum(a.faktGodziny, b.faktGodziny, mul);
+        case "stawkaNetto":
+          return cmpNum(a.stawkaNetto, b.stawkaNetto, mul);
+        case "kwotaGlowna":
+          return cmpNum(a.kwotaGlowna, b.kwotaGlowna, mul);
+        case "kwotaWyrownania":
+          return cmpNum(a.kwotaWyrownania, b.kwotaWyrownania, mul);
+        case "dodatekFinalny":
+          return cmpNum(a.dodatekFinalny, b.dodatekFinalny, mul);
+        case "przelew":
+          return cmpMoney(a.przelew, b.przelew, mul);
+        case "gotowka":
+          return cmpMoney(a.gotowka, b.gotowka, mul);
+        case "wyplata":
+          return cmpMoney(a.wyplata, b.wyplata, mul);
+        default:
+          return cmpText(a.employeeName, b.employeeName, mul);
+      }
+    };
+    // Remis rozstrzyga nazwisko i id umowy — czyli dokładnie kolejność, w
+    // której backend oddaje wiersze; jedna osoba miewa kilka umów w miesiącu.
+    return list.sort(
+      (a, b) =>
+        cmp(a, b) ||
+        a.employeeName.localeCompare(b.employeeName, "pl") ||
+        a.contractId - b.contractId,
     );
-  }, [payroll, payrollFilter]);
+  }, [
+    payroll,
+    payrollFilter,
+    payrollCompany,
+    payrollContractType,
+    payrollRegistration,
+    payrollBonusType,
+    payrollMainChannel,
+    payrollMaxSource,
+    payrollGaps,
+    payrollMin,
+    payrollMax,
+    payrollSort,
+    payrollDir,
+  ]);
+
+  /**
+   * Biuro dzieli z wypłatami szukajkę i filtr spółki (to jedno rozliczenie
+   * miesiąca w dwóch tabelach), ale ma własne sortowanie — kolumny są inne.
+   */
+  const officeVisible = useMemo(() => {
+    const q = payrollFilter.trim().toLowerCase();
+    const list = office.filter((r) => {
+      if (q && !`${r.employeeName} ${r.company}`.toLowerCase().includes(q))
+        return false;
+      if (payrollCompany !== "all" && r.company !== payrollCompany) return false;
+      return true;
+    });
+    const mul = officeDir === "asc" ? 1 : -1;
+    const cmp = (a: HrOfficeRow, b: HrOfficeRow) => {
+      switch (officeSort) {
+        case "company":
+          return cmpText(a.company, b.company, mul);
+        case "hoursForAccounting":
+          return cmpNum(a.hoursForAccounting, b.hoursForAccounting, mul);
+        case "rate":
+          return cmpNum(a.rate, b.rate, mul);
+        case "total":
+          return cmpMoney(a.total, b.total, mul);
+        default:
+          return cmpText(a.employeeName, b.employeeName, mul);
+      }
+    };
+    return list.sort(
+      (a, b) =>
+        cmp(a, b) ||
+        a.employeeName.localeCompare(b.employeeName, "pl") ||
+        a.id - b.id,
+    );
+  }, [office, payrollFilter, payrollCompany, officeSort, officeDir]);
+
+  const payrollFiltersActive =
+    payrollFilter !== "" ||
+    payrollCompany !== "all" ||
+    payrollContractType !== "all" ||
+    payrollRegistration !== "all" ||
+    payrollBonusType !== "all" ||
+    payrollMainChannel !== "all" ||
+    payrollMaxSource !== "all" ||
+    payrollGaps !== "all" ||
+    payrollMin !== "" ||
+    payrollMax !== "";
+
+  const clearPayrollFilters = () => {
+    setPayrollFilter("");
+    setPayrollCompany("all");
+    setPayrollContractType("all");
+    setPayrollRegistration("all");
+    setPayrollBonusType("all");
+    setPayrollMainChannel("all");
+    setPayrollMaxSource("all");
+    setPayrollGaps("all");
+    setPayrollMin("");
+    setPayrollMax("");
+  };
+
+  /**
+   * Klik w nagłówek: ta sama kolumna odwraca kierunek, nowa startuje od swojego
+   * domyślnego (teksty rosnąco, kwoty i liczniki malejąco).
+   */
+  const makeToggleSort =
+    <K extends string>(
+      sort: K,
+      setSort: (k: K) => void,
+      setDir: React.Dispatch<React.SetStateAction<SortDir>>,
+      defaults: Record<K, SortDir>,
+    ) =>
+    (key: K) => {
+      if (sort === key) {
+        setDir((d) => (d === "asc" ? "desc" : "asc"));
+        return;
+      }
+      setSort(key);
+      setDir(defaults[key]);
+    };
+
+  const togglePayrollSort = makeToggleSort(
+    payrollSort,
+    setPayrollSort,
+    setPayrollDir,
+    PAYROLL_DIR,
+  );
+  const toggleOfficeSort = makeToggleSort(
+    officeSort,
+    setOfficeSort,
+    setOfficeDir,
+    OFFICE_DIR,
+  );
+  const toggleEmployeeSort = makeToggleSort(
+    employeeSort,
+    setEmployeeSort,
+    setEmployeeDir,
+    EMPLOYEE_DIR,
+  );
+  const toggleObjectSort = makeToggleSort(
+    objectSort,
+    setObjectSort,
+    setObjectDir,
+    OBJECT_DIR,
+  );
 
   // --- handlery CRUD (wzorzec: zapis → przeładowanie miesiąca/słowników) ---
 
@@ -627,13 +1151,10 @@ export function Kadry() {
         },
         {
           label: "Braki",
-          value: String(summary.missingMain + summary.pendingBonus),
+          value: String(summary.gaps),
           sub: `${summary.missingMain} bez kwoty, ${summary.pendingBonus} do przeliczenia`,
-          tip: "Wiersze z godzinami bez kwoty od księgowości + dodatki czekające na stawkę",
-          accent:
-            summary.missingMain + summary.pendingBonus > 0
-              ? "text-amber-600"
-              : undefined,
+          tip: "Wiersze z godzinami bez kwoty od księgowości albo z dodatkiem czekającym na stawkę (umowa z oboma brakami liczona raz)",
+          accent: summary.gaps > 0 ? "text-amber-600" : undefined,
         },
         {
           label: "Biuro",
@@ -692,18 +1213,179 @@ export function Kadry() {
       <Tabs value={tab}>
         {/* ==================== WYNAGRODZENIA ==================== */}
         <TabsContent value="wynagrodzenia" className="space-y-4">
-          <div className="flex flex-wrap items-center gap-3">
+          <div className="flex flex-wrap items-center gap-2">
             {monthNav}
-            <Input
-              value={payrollFilter}
-              onChange={(e) => setPayrollFilter(e.target.value)}
-              placeholder="Szukaj: pracownik / spółka…"
-              className="max-w-xs"
-            />
+            <div className="relative min-w-[200px] max-w-xs flex-1">
+              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={payrollFilter}
+                onChange={(e) => setPayrollFilter(e.target.value)}
+                placeholder="Szukaj: pracownik / spółka…"
+                className="pl-10"
+                data-testid="kadry-wynagrodzenia-filter-search"
+              />
+            </div>
+            <Select value={payrollCompany} onValueChange={setPayrollCompany}>
+              <SelectTrigger
+                className="w-[190px]"
+                data-testid="kadry-wynagrodzenia-filter-company"
+              >
+                <SelectValue placeholder="Spółka" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Wszystkie spółki</SelectItem>
+                {payrollCompanyOptions.map((c) => (
+                  <SelectItem key={c} value={c}>
+                    {c}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Select
+              value={payrollContractType}
+              onValueChange={(v) =>
+                setPayrollContractType(v as typeof payrollContractType)
+              }
+            >
+              <SelectTrigger
+                className="w-[160px]"
+                data-testid="kadry-wynagrodzenia-filter-contract-type"
+              >
+                <SelectValue placeholder="Umowa" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Umowa: wszystkie</SelectItem>
+                <SelectItem value="praca">Praca (UoP)</SelectItem>
+                <SelectItem value="zlecenie">Zlecenie</SelectItem>
+              </SelectContent>
+            </Select>
+            <Select
+              value={payrollRegistration}
+              onValueChange={(v) =>
+                setPayrollRegistration(v as typeof payrollRegistration)
+              }
+            >
+              <SelectTrigger
+                className="w-[170px]"
+                data-testid="kadry-wynagrodzenia-filter-registration"
+              >
+                <SelectValue placeholder="Zgłoszenie" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Zgłoszenie: wszystkie</SelectItem>
+                <SelectItem value="zua">ZUA (umowa główna)</SelectItem>
+                <SelectItem value="zza">ZZA (nadwyżka)</SelectItem>
+                <SelectItem value="none">Bez zgłoszenia</SelectItem>
+              </SelectContent>
+            </Select>
+            <Select value={payrollBonusType} onValueChange={setPayrollBonusType}>
+              <SelectTrigger
+                className="w-[180px]"
+                data-testid="kadry-wynagrodzenia-filter-bonus-type"
+              >
+                <SelectValue placeholder="Dodatek" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Dodatek: wszystkie</SelectItem>
+                <SelectItem value="brak">Bez dodatku</SelectItem>
+                <SelectItem value="gotowka">Gotówka</SelectItem>
+                <SelectItem value="delegacja_przelew">Deleg. przelew</SelectItem>
+                <SelectItem value="delegacja_gotowka">Deleg. gotówka</SelectItem>
+              </SelectContent>
+            </Select>
+            <Select
+              value={payrollMainChannel}
+              onValueChange={(v) =>
+                setPayrollMainChannel(v as typeof payrollMainChannel)
+              }
+            >
+              <SelectTrigger
+                className="w-[170px]"
+                data-testid="kadry-wynagrodzenia-filter-main-channel"
+              >
+                <SelectValue placeholder="Kanał głównej" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Główna: oba kanały</SelectItem>
+                <SelectItem value="przelew">Główna: przelew</SelectItem>
+                <SelectItem value="gotowka">Główna: gotówka</SelectItem>
+              </SelectContent>
+            </Select>
+            <Select
+              value={payrollMaxSource}
+              onValueChange={(v) =>
+                setPayrollMaxSource(v as typeof payrollMaxSource)
+              }
+            >
+              <SelectTrigger
+                className="w-[190px]"
+                data-testid="kadry-wynagrodzenia-filter-max-source"
+              >
+                <SelectValue placeholder="Źródło maks" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Maks: dowolne źródło</SelectItem>
+                <SelectItem value="norm">Maks: norma miesiąca</SelectItem>
+                <SelectItem value="individual">Maks: indywidualne</SelectItem>
+                <SelectItem value="override">Maks: nadpisane ręcznie</SelectItem>
+              </SelectContent>
+            </Select>
+            {/* Tryby odpowiadają kaflowi „Braki”: `braki` to jego liczba,
+                dwa kolejne — jego składniki z podpisu kafla. */}
+            <Select
+              value={payrollGaps}
+              onValueChange={(v) => setPayrollGaps(v as PayrollGapMode)}
+            >
+              <SelectTrigger
+                className="w-[200px]"
+                data-testid="kadry-wynagrodzenia-filter-gaps"
+              >
+                <SelectValue placeholder="Braki" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Braki: wszystkie wiersze</SelectItem>
+                <SelectItem value="braki">Braki (jak na kaflu)</SelectItem>
+                <SelectItem value="missing">Kwota główna pusta</SelectItem>
+                <SelectItem value="pending">Dodatek do przeliczenia</SelectItem>
+                <SelectItem value="warnings">Z ostrzeżeniami</SelectItem>
+              </SelectContent>
+            </Select>
+            <div className="flex items-center gap-1">
+              <Input
+                value={payrollMin}
+                onChange={(e) => setPayrollMin(e.target.value)}
+                placeholder="Wypłata od"
+                inputMode="decimal"
+                className="w-[110px]"
+                data-testid="kadry-wynagrodzenia-filter-min"
+              />
+              <span className="text-muted-foreground">–</span>
+              <Input
+                value={payrollMax}
+                onChange={(e) => setPayrollMax(e.target.value)}
+                placeholder="do"
+                inputMode="decimal"
+                className="w-[90px]"
+                data-testid="kadry-wynagrodzenia-filter-max"
+              />
+            </div>
+            {payrollFiltersActive && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={clearPayrollFilters}
+                data-testid="kadry-wynagrodzenia-filters-clear"
+              >
+                <X className="mr-1 h-4 w-4" />
+                Wyczyść filtry
+              </Button>
+            )}
+            {/* Wydruk bierze to, co widać w tabeli — inaczej „zestawienie dla
+                księgowości” po zawężeniu do jednej spółki dowoziłoby wszystkie. */}
             <Button
               variant="outline"
               className="ml-auto"
-              onClick={() => printHrStatement(payroll, year, month)}
+              onClick={() => printHrStatement(payrollVisible, year, month)}
             >
               <Printer className="mr-2 h-4 w-4" />
               Zestawienie dla księgowości
@@ -714,52 +1396,92 @@ export function Kadry() {
               <table className="w-full min-w-[1280px] text-sm">
                 <thead className="border-b bg-muted/50 text-xs uppercase tracking-wide text-muted-foreground">
                   <tr>
-                    <Th tip="Pracownik z umowy — kliknij wiersz, aby wpisać kwoty i nadpisania">
-                      Pracownik
-                    </Th>
-                    <Th tip="Spółka zatrudniająca (z umowy)">Spółka</Th>
-                    <Th tip="Typ umowy: Praca (UoP) / Zlecenie — decyduje o normie godzin i wliczaniu L4">
-                      Umowa
-                    </Th>
+                    <SortTh
+                      label="Pracownik"
+                      sortKey="employeeName"
+                      sort={payrollSort}
+                      dir={payrollDir}
+                      onSort={togglePayrollSort}
+                      testIdPrefix="kadry-wynagrodzenia-sort"
+                      tip="Pracownik z umowy — kliknij wiersz, aby wpisać kwoty i nadpisania"
+                    />
+                    <SortTh
+                      label="Spółka"
+                      sortKey="company"
+                      sort={payrollSort}
+                      dir={payrollDir}
+                      onSort={togglePayrollSort}
+                      testIdPrefix="kadry-wynagrodzenia-sort"
+                      tip="Spółka zatrudniająca (z umowy)"
+                    />
+                    <SortTh
+                      label="Umowa"
+                      sortKey="contractType"
+                      sort={payrollSort}
+                      dir={payrollDir}
+                      onSort={togglePayrollSort}
+                      testIdPrefix="kadry-wynagrodzenia-sort"
+                      tip="Typ umowy: Praca (UoP) / Zlecenie — decyduje o normie godzin i wliczaniu L4"
+                    />
                     <Th tip="Zgłoszenie decydujące o gałęzi kalkulacji: ZUA = umowa główna (godziny do maks), ZZA = nadwyżka ponad normę umowy głównej">
                       Rej.
                     </Th>
-                    <Th
+                    <SortTh
+                      label="Maks"
+                      sortKey="maksGodziny"
+                      sort={payrollSort}
+                      dir={payrollDir}
+                      onSort={togglePayrollSort}
+                      testIdPrefix="kadry-wynagrodzenia-sort"
+                      align="right"
                       tip="Limit godzin: ręczne nadpisanie → indywidualne GODZINY MAKS z wpisów godzin (przy UoP, największy wpis) → norma miesiąca z zakładki Normy"
-                      className="text-right"
-                    >
-                      Maks
-                    </Th>
-                    <Th
+                    />
+                    <SortTh
+                      label="Fakt"
+                      sortKey="faktGodziny"
+                      sort={payrollSort}
+                      dir={payrollDir}
+                      onSort={togglePayrollSort}
+                      testIdPrefix="kadry-wynagrodzenia-sort"
+                      align="right"
                       tip="Godziny do rozliczenia: ZUA = min(wypracowane + UW (+ L4 przy UoP), maks); ZZA = nadwyżka ponad normę UoP (gdy pracownik ma umowę o pracę) albo ponad maks. Ręczne nadpisanie ma pierwszeństwo"
-                      className="text-right"
-                    >
-                      Fakt
-                    </Th>
+                    />
                     <Th
                       tip="Godziny dodatku = wypracowane + UW (+ L4 przy UoP lub zleceniu w ALFA) − maks godziny; liczone tylko gdy umowa ma ustawiony dodatek"
                       className="text-right"
                     >
                       Godz. dod.
                     </Th>
-                    <Th
+                    <SortTh
+                      label="Stawka"
+                      sortKey="stawkaNetto"
+                      sort={payrollSort}
+                      dir={payrollDir}
+                      onSort={togglePayrollSort}
+                      testIdPrefix="kadry-wynagrodzenia-sort"
+                      align="right"
                       tip="Stawka netto = kwota główna NETTO ÷ fakt godziny"
-                      className="text-right"
-                    >
-                      Stawka
-                    </Th>
-                    <Th
+                    />
+                    <SortTh
+                      label="Kwota główna"
+                      sortKey="kwotaGlowna"
+                      sort={payrollSort}
+                      dir={payrollDir}
+                      onSort={togglePayrollSort}
+                      testIdPrefix="kadry-wynagrodzenia-sort"
+                      align="right"
                       tip="Kwota główna NETTO — wpisywana ręcznie na podstawie zestawienia od księgowości (kanał: kolumna Główna)"
-                      className="text-right"
-                    >
-                      Kwota główna
-                    </Th>
-                    <Th
+                    />
+                    <SortTh
+                      label="Wyrówn."
+                      sortKey="kwotaWyrownania"
+                      sort={payrollSort}
+                      dir={payrollDir}
+                      onSort={togglePayrollSort}
+                      testIdPrefix="kadry-wynagrodzenia-sort"
+                      align="right"
                       tip="Kwota wyrównania = wyrównanie stawki (zł/h, wpisywane ręcznie) × fakt godziny"
-                      className="text-right"
-                    >
-                      Wyrówn.
-                    </Th>
+                    />
                     <Th
                       tip="Kwota dodatku = godziny dodatku × stawka dodatku (gdy brak stawki dodatku — stawka netto z wypłaty głównej); ręczne nadpisanie ma pierwszeństwo"
                       className="text-right"
@@ -772,30 +1494,46 @@ export function Kadry() {
                     >
                       Premia/potr.
                     </Th>
-                    <Th
+                    <SortTh
+                      label="Dod. finalny"
+                      sortKey="dodatekFinalny"
+                      sort={payrollSort}
+                      dir={payrollDir}
+                      onSort={togglePayrollSort}
+                      testIdPrefix="kadry-wynagrodzenia-sort"
+                      align="right"
                       tip="Dodatek finalny = kwota dodatku + premia/potrącenie + kwota wyrównania"
-                      className="text-right"
-                    >
-                      Dod. finalny
-                    </Th>
-                    <Th
+                    />
+                    <SortTh
+                      label="Przelew"
+                      sortKey="przelew"
+                      sort={payrollSort}
+                      dir={payrollDir}
+                      onSort={togglePayrollSort}
+                      testIdPrefix="kadry-wynagrodzenia-sort"
+                      align="right"
                       tip="Przelew = kwota główna (gdy Główna=przelew) + dodatek finalny (gdy kanał dodatku=przelew; przy braku dodatku — kanałem wypłaty głównej). Poprawka względem Excela: premia bez dodatku nie przepada"
-                      className="text-right"
-                    >
-                      Przelew
-                    </Th>
-                    <Th
+                    />
+                    <SortTh
+                      label="Gotówka"
+                      sortKey="gotowka"
+                      sort={payrollSort}
+                      dir={payrollDir}
+                      onSort={togglePayrollSort}
+                      testIdPrefix="kadry-wynagrodzenia-sort"
+                      align="right"
                       tip="Gotówka = kwota główna (gdy Główna=gotówka) + dodatek finalny (gdy kanał dodatku=gotówka; przy braku dodatku — kanałem wypłaty głównej)"
-                      className="text-right"
-                    >
-                      Gotówka
-                    </Th>
-                    <Th
+                    />
+                    <SortTh
+                      label="Wypłata"
+                      sortKey="wyplata"
+                      sort={payrollSort}
+                      dir={payrollDir}
+                      onSort={togglePayrollSort}
+                      testIdPrefix="kadry-wynagrodzenia-sort"
+                      align="right"
                       tip="Wypłata całkowita = przelew + gotówka"
-                      className="text-right"
-                    >
-                      Wypłata
-                    </Th>
+                    />
                     <Th tip="Rodzaj dodatku z umowy — decyduje o godzinach dodatku i kanale ich wypłaty">
                       Dodatek
                     </Th>
@@ -817,7 +1555,9 @@ export function Kadry() {
                         colSpan={17}
                         className="px-3 py-8 text-center text-muted-foreground"
                       >
-                        Brak umów — dodaj je w zakładce Umowy
+                        {payrollFiltersActive
+                          ? "Brak wypłat dla wybranych filtrów"
+                          : "Brak umów — dodaj je w zakładce Pracownicy"}
                       </td>
                     </tr>
                   ) : (
@@ -956,6 +1696,18 @@ export function Kadry() {
             <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
               Biuro — {MONTH_NAMES[month - 1]} {year}
             </h2>
+            {/* Licznik po filtrach: szukajka i spółka z paska nad wypłatami
+                obejmują też tę tabelę, więc trzeba widać, ile z ilu zostało. */}
+            <span
+              className="text-xs text-muted-foreground"
+              data-testid="kadry-biuro-count"
+            >
+              {officeVisible.length}
+              {officeVisible.length === office.length
+                ? ""
+                : ` z ${office.length}`}{" "}
+              wpisów
+            </span>
             {editable && (
               <Button
                 variant="outline"
@@ -976,27 +1728,50 @@ export function Kadry() {
               <table className="w-full min-w-[1080px] text-sm">
                 <thead className="border-b bg-muted/50 text-xs uppercase tracking-wide text-muted-foreground">
                   <tr>
-                    <Th tip="Pracownik biura — osobne rozliczenie, poza kalkulacją ochrony">
-                      Pracownik
-                    </Th>
-                    <Th tip="Spółka i forma zatrudnienia (ALFA ETAT / ALFA UZ / …)">
-                      Spółka
-                    </Th>
+                    <SortTh
+                      label="Pracownik"
+                      sortKey="employeeName"
+                      sort={officeSort}
+                      dir={officeDir}
+                      onSort={toggleOfficeSort}
+                      testIdPrefix="kadry-biuro-sort"
+                      tip="Pracownik biura — osobne rozliczenie, poza kalkulacją ochrony"
+                    />
+                    <SortTh
+                      label="Spółka"
+                      sortKey="company"
+                      sort={officeSort}
+                      dir={officeDir}
+                      onSort={toggleOfficeSort}
+                      testIdPrefix="kadry-biuro-sort"
+                      tip="Spółka i forma zatrudnienia (ALFA ETAT / ALFA UZ / …)"
+                    />
                     <Th tip="Nominalne godziny etatu" className="text-right">
                       Etat
                     </Th>
                     <Th tip="Urlop / chorobowe (h)" className="text-right">
                       UW/L4
                     </Th>
-                    <Th
+                    <SortTh
+                      label="Godz. do księg."
+                      sortKey="hoursForAccounting"
+                      sort={officeSort}
+                      dir={officeDir}
+                      onSort={toggleOfficeSort}
+                      testIdPrefix="kadry-biuro-sort"
+                      align="right"
                       tip="Godziny do księgowej — dla rozliczanych godzinowo (UZ)"
-                      className="text-right"
-                    >
-                      Godz. do księg.
-                    </Th>
-                    <Th tip="Stawka godzinowa (zł/h)" className="text-right">
-                      Stawka
-                    </Th>
+                    />
+                    <SortTh
+                      label="Stawka"
+                      sortKey="rate"
+                      sort={officeSort}
+                      dir={officeDir}
+                      onSort={toggleOfficeSort}
+                      testIdPrefix="kadry-biuro-sort"
+                      align="right"
+                      tip="Stawka godzinowa (zł/h)"
+                    />
                     <Th
                       tip="Kwota wypłaty: ręczna, a gdy pusta — godziny do księgowej × stawka"
                       className="text-right"
@@ -1015,27 +1790,35 @@ export function Kadry() {
                     >
                       Deleg./gotówka
                     </Th>
-                    <Th
+                    <SortTh
+                      label="Razem"
+                      sortKey="total"
+                      sort={officeSort}
+                      dir={officeDir}
+                      onSort={toggleOfficeSort}
+                      testIdPrefix="kadry-biuro-sort"
+                      align="right"
                       tip="Razem = podstawa ROR + delegacje/gotówka"
-                      className="text-right"
-                    >
-                      Razem
-                    </Th>
+                    />
                     <Th className="w-20" />
                   </tr>
                 </thead>
                 <tbody>
-                  {office.length === 0 ? (
+                  {officeVisible.length === 0 ? (
                     <tr>
                       <td
                         colSpan={11}
                         className="px-3 py-8 text-center text-muted-foreground"
                       >
-                        {loading ? "Ładowanie…" : "Brak wpisów biura w tym miesiącu"}
+                        {loading
+                          ? "Ładowanie…"
+                          : payrollFiltersActive
+                            ? "Brak wpisów biura dla wybranych filtrów"
+                            : "Brak wpisów biura w tym miesiącu"}
                       </td>
                     </tr>
                   ) : (
-                    office.map((r) => (
+                    officeVisible.map((r) => (
                       <tr
                         key={r.id}
                         className={cn(
@@ -1115,20 +1898,26 @@ export function Kadry() {
                     ))
                   )}
                 </tbody>
-                {office.length > 0 && (
+                {/* Sumy liczą PRZEFILTROWANY zbiór — stopka ma podsumowywać to,
+                    co widać nad nią, a nie cały miesiąc. */}
+                {officeVisible.length > 0 && (
                   <tfoot>
                     <tr className="border-t-2 bg-muted/40 font-semibold">
                       <td className="px-3 py-2" colSpan={7}>
-                        Razem ({office.length})
+                        Razem ({officeVisible.length})
                       </td>
                       <td className="px-3 py-2 text-right">
-                        {money(office.reduce((s, r) => s + (r.rorBase ?? 0), 0))}
+                        {money(
+                          officeVisible.reduce((s, r) => s + (r.rorBase ?? 0), 0),
+                        )}
                       </td>
                       <td className="px-3 py-2 text-right">
-                        {money(office.reduce((s, r) => s + (r.cash ?? 0), 0))}
+                        {money(
+                          officeVisible.reduce((s, r) => s + (r.cash ?? 0), 0),
+                        )}
                       </td>
                       <td className="px-3 py-2 text-right">
-                        {money(office.reduce((s, r) => s + r.total, 0))}
+                        {money(officeVisible.reduce((s, r) => s + r.total, 0))}
                       </td>
                       <td />
                     </tr>
@@ -1175,14 +1964,18 @@ export function Kadry() {
             wybranego w pasku. Dzięki temu „kto, w jakiej spółce, za ile” widać
             bez skakania między podzakładkami. */}
         <TabsContent value="pracownicy" className="space-y-4">
-          <div className="flex flex-wrap items-center gap-3">
+          <div className="flex flex-wrap items-center gap-2">
             {monthNav}
-            <Input
-              value={employeeFilter}
-              onChange={(e) => setEmployeeFilter(e.target.value)}
-              placeholder="Szukaj: pracownik, kod, spółka…"
-              className="w-64"
-            />
+            <div className="relative min-w-[200px] max-w-xs flex-1">
+              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={employeeFilter}
+                onChange={(e) => setEmployeeFilter(e.target.value)}
+                placeholder="Szukaj: pracownik, kod, spółka…"
+                className="pl-10"
+                data-testid="kadry-pracownicy-filter-search"
+              />
+            </div>
             {/* Dawne podzakładki jako filtr jednej listy: ochrona = osoby z
                 umowami, biuro = osoby z wpisami biura w tym miesiącu. */}
             <div className="flex overflow-hidden rounded-md border">
@@ -1197,6 +1990,7 @@ export function Kadry() {
                   key={k}
                   type="button"
                   onClick={() => setEmployeeKind(k)}
+                  data-testid={`kadry-pracownicy-filter-kind-${k}`}
                   className={cn(
                     "px-3 py-2 text-sm",
                     employeeKind === k
@@ -1210,25 +2004,93 @@ export function Kadry() {
             </div>
             {/* Dział pracownika: „bez działu" jest osobną opcją, bo to ona
                 wskazuje kartoteki do uzupełnienia. */}
-            <select
+            <Select
               value={employeeDept === "all" ? "all" : String(employeeDept)}
-              onChange={(e) => {
-                const v = e.target.value;
-                setEmployeeDept(
-                  v === "all" || v === "none" ? v : Number(v),
-                );
-              }}
-              className="h-10 rounded-md border border-input bg-background px-3 py-2 text-sm"
-              title="Filtr po dziale z kartoteki pracownika"
+              onValueChange={(v) =>
+                setEmployeeDept(v === "all" || v === "none" ? v : Number(v))
+              }
             >
-              <option value="all">Wszystkie działy</option>
-              <option value="none">Bez działu</option>
-              {departments.map((d) => (
-                <option key={d.id} value={d.id}>
-                  {d.label}
-                </option>
-              ))}
-            </select>
+              <SelectTrigger
+                className="w-[190px]"
+                title="Filtr po dziale z kartoteki pracownika"
+                data-testid="kadry-pracownicy-filter-dept"
+              >
+                <SelectValue placeholder="Dział" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Wszystkie działy</SelectItem>
+                <SelectItem value="none">Bez działu</SelectItem>
+                {departments.map((d) => (
+                  <SelectItem key={d.id} value={String(d.id)}>
+                    {d.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Select
+              value={employeeActive}
+              onValueChange={(v) => setEmployeeActive(v as ActiveFilter)}
+            >
+              <SelectTrigger
+                className="w-[170px]"
+                data-testid="kadry-pracownicy-filter-active"
+              >
+                <SelectValue placeholder="Aktywność" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="active">Tylko aktywni</SelectItem>
+                <SelectItem value="inactive">Tylko nieaktywni</SelectItem>
+                <SelectItem value="all">Aktywni i nieaktywni</SelectItem>
+              </SelectContent>
+            </Select>
+            <Select value={employeeCompany} onValueChange={setEmployeeCompany}>
+              <SelectTrigger
+                className="w-[190px]"
+                title="Spółka z umowy albo z rozliczenia biura"
+                data-testid="kadry-pracownicy-filter-company"
+              >
+                <SelectValue placeholder="Spółka" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Wszystkie spółki</SelectItem>
+                {employeeCompanyOptions.map((c) => (
+                  <SelectItem key={c} value={c}>
+                    {c}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {/* Bez umowy = osoba, która nie pojawi się w wynagrodzeniach —
+                w ochronie to błąd do naprawienia, nie stan docelowy. */}
+            <Select
+              value={employeeContracts}
+              onValueChange={(v) =>
+                setEmployeeContracts(v as typeof employeeContracts)
+              }
+            >
+              <SelectTrigger
+                className="w-[180px]"
+                data-testid="kadry-pracownicy-filter-contracts"
+              >
+                <SelectValue placeholder="Umowy" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Umowy: wszyscy</SelectItem>
+                <SelectItem value="none">Tylko bez umowy</SelectItem>
+                <SelectItem value="with">Tylko z umową</SelectItem>
+              </SelectContent>
+            </Select>
+            {employeeFiltersActive && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={clearEmployeeFilters}
+                data-testid="kadry-pracownicy-filters-clear"
+              >
+                <X className="mr-1 h-4 w-4" />
+                Wyczyść filtry
+              </Button>
+            )}
             <Button
               variant="outline"
               onClick={() =>
@@ -1270,29 +2132,80 @@ export function Kadry() {
           </div>
           <Card>
             <CardContent className="overflow-x-auto p-0">
-              <table className="w-full min-w-[960px] text-sm">
+              <table className="w-full min-w-[1120px] text-sm">
                 <thead className="border-b bg-muted/50 text-xs uppercase tracking-wide text-muted-foreground">
                   <tr>
                     <Th className="w-8" />
-                    <Th tip="Nazwisko i imię — klucz łączący godziny, umowy i wynagrodzenia">
-                      Nazwisko i imię
-                    </Th>
-                    <Th tip="Kod statusu (Emeryt / Rencista / Student <26 lat) — informacyjny">
-                      Kod
-                    </Th>
-                    <Th tip="Ochrona = osoba z umową kadrową; Biuro = osoba rozliczana w zestawieniu biura (wybrany miesiąc)">
-                      Rodzaj
-                    </Th>
-                    <Th tip="Macierzysty dział z kartoteki — podpowiadany przy nowym wpisie godzin, ale wpis można rozliczyć na obiekcie">
-                      Dział
-                    </Th>
+                    <SortTh
+                      label="Nazwisko i imię"
+                      sortKey="fullName"
+                      sort={employeeSort}
+                      dir={employeeDir}
+                      onSort={toggleEmployeeSort}
+                      testIdPrefix="kadry-pracownicy-sort"
+                      tip="Nazwisko i imię — klucz łączący godziny, umowy i wynagrodzenia"
+                    />
+                    <SortTh
+                      label="Kod"
+                      sortKey="code"
+                      sort={employeeSort}
+                      dir={employeeDir}
+                      onSort={toggleEmployeeSort}
+                      testIdPrefix="kadry-pracownicy-sort"
+                      tip="Kod statusu (Emeryt / Rencista / Student <26 lat) — informacyjny"
+                    />
+                    {/* Jedna kolumna, dwa sortowania: „Rodzaj” układa ochronę
+                        przed biurem, „umowy” — po ich liczbie w wierszu. */}
+                    <SortTh
+                      label="Rodzaj"
+                      sortKey="kind"
+                      sort={employeeSort}
+                      dir={employeeDir}
+                      onSort={toggleEmployeeSort}
+                      testIdPrefix="kadry-pracownicy-sort"
+                      tip="Ochrona = osoba z umową kadrową; Biuro = osoba rozliczana w zestawieniu biura (wybrany miesiąc)"
+                    />
+                    <SortTh
+                      label="Umowy"
+                      sortKey="contracts"
+                      sort={employeeSort}
+                      dir={employeeDir}
+                      onSort={toggleEmployeeSort}
+                      testIdPrefix="kadry-pracownicy-sort"
+                      align="right"
+                      tip="Liczba umów kadrowych pracownika — bez żadnej nie pojawi się w wynagrodzeniach"
+                    />
+                    <SortTh
+                      label="Dział"
+                      sortKey="departmentName"
+                      sort={employeeSort}
+                      dir={employeeDir}
+                      onSort={toggleEmployeeSort}
+                      testIdPrefix="kadry-pracownicy-sort"
+                      tip="Macierzysty dział z kartoteki — podpowiadany przy nowym wpisie godzin, ale wpis można rozliczyć na obiekcie"
+                    />
                     <Th tip="Spółki z umów i z rozliczenia biura — rozwiń wiersz, aby wejść w szczegóły">
                       Spółki
                     </Th>
-                    <Th tip="Nieaktywny pracownik nie jest podpowiadany w formularzach">
-                      Status
-                    </Th>
+                    <SortTh
+                      label="Status"
+                      sortKey="active"
+                      sort={employeeSort}
+                      dir={employeeDir}
+                      onSort={toggleEmployeeSort}
+                      testIdPrefix="kadry-pracownicy-sort"
+                      tip="Nieaktywny pracownik nie jest podpowiadany w formularzach"
+                    />
                     <Th>Notatka</Th>
+                    <SortTh
+                      label="Zmiana"
+                      sortKey="updatedAt"
+                      sort={employeeSort}
+                      dir={employeeDir}
+                      onSort={toggleEmployeeSort}
+                      testIdPrefix="kadry-pracownicy-sort"
+                      tip="Ostatnia zmiana w kartotece tego pracownika"
+                    />
                     <Th className="w-20" />
                   </tr>
                 </thead>
@@ -1300,10 +2213,14 @@ export function Kadry() {
                   {employeesVisible.length === 0 ? (
                     <tr>
                       <td
-                        colSpan={9}
+                        colSpan={11}
                         className="px-3 py-8 text-center text-muted-foreground"
                       >
-                        {loading ? "Ładowanie…" : "Brak pracowników"}
+                        {loading
+                          ? "Ładowanie…"
+                          : employeeFiltersActive
+                            ? "Brak pracowników dla wybranych filtrów"
+                            : "Brak pracowników"}
                       </td>
                     </tr>
                   ) : (
@@ -1345,18 +2262,25 @@ export function Kadry() {
                                     Ochrona
                                   </span>
                                 )}
-                                {rowContracts.length > 0 && (
-                                  <span className="text-xs text-muted-foreground">
-                                    {rowContracts.length} umów
-                                  </span>
-                                )}
-                                {r.kind === "ochrona" &&
-                                  rowContracts.length === 0 && (
-                                    <span className="text-xs text-amber-600">
-                                      brak umów
-                                    </span>
-                                  )}
                               </div>
+                            </td>
+                            {/* Liczba umów wyszła z kolumny „Rodzaj” do
+                                własnej, żeby dało się po niej sortować —
+                                „ochrona bez umów” to lista do naprawienia. */}
+                            <td className="px-3 py-2 text-right tabular-nums">
+                              {rowContracts.length > 0 ? (
+                                <span className="text-xs text-muted-foreground">
+                                  {rowContracts.length}
+                                </span>
+                              ) : r.kind === "ochrona" ? (
+                                <span className="text-xs text-amber-600">
+                                  brak umów
+                                </span>
+                              ) : (
+                                <span className="text-xs text-muted-foreground">
+                                  —
+                                </span>
+                              )}
                             </td>
                             <td className="px-3 py-2 text-xs text-muted-foreground">
                               {r.departmentName || "—"}
@@ -1385,6 +2309,12 @@ export function Kadry() {
                             </td>
                             <td className="max-w-[240px] truncate px-3 py-2 text-xs text-muted-foreground">
                               {r.notes}
+                            </td>
+                            <td
+                              className="whitespace-nowrap px-3 py-2 text-xs text-muted-foreground"
+                              title={r.updatedAt}
+                            >
+                              {r.updatedAt ? r.updatedAt.slice(0, 10) : "—"}
                             </td>
                             <td className="px-3 py-2">
                               {editable && (
@@ -1417,7 +2347,7 @@ export function Kadry() {
                           </tr>
                           {isOpen && (
                             <tr className="border-b bg-muted/20">
-                              <td colSpan={9} className="px-3 py-3">
+                              <td colSpan={11} className="px-3 py-3">
                                 <div className="space-y-4">
                                   {/* --- UMOWY pracownika --- */}
                                   <div className="space-y-2">
@@ -1583,13 +2513,17 @@ export function Kadry() {
                 {employeesVisible.length > 0 && (
                   <tfoot>
                     <tr className="border-t-2 bg-muted/40 font-semibold">
-                      <td className="px-3 py-2" colSpan={3}>
-                        Razem ({employeesVisible.length} prac.)
+                      <td className="px-3 py-2" colSpan={4}>
+                        Razem ({employeesVisible.length}
+                        {employeesVisible.length === employees.length
+                          ? ""
+                          : ` z ${employees.length}`}{" "}
+                        prac.)
                       </td>
-                      <td className="px-3 py-2 text-xs font-normal text-muted-foreground">
-                        {visibleContractsCount} umów
+                      <td className="px-3 py-2 text-right text-xs font-normal tabular-nums text-muted-foreground">
+                        {visibleContractsCount}
                       </td>
-                      <td colSpan={4} />
+                      <td colSpan={6} />
                     </tr>
                   </tfoot>
                 )}
@@ -1605,8 +2539,95 @@ export function Kadry() {
 
         {/* ==================== OBIEKTY ==================== */}
         <TabsContent value="obiekty" className="space-y-4">
-          <div className="flex flex-wrap items-center gap-3">
+          <div className="flex flex-wrap items-center gap-2">
             {monthNav}
+            <div className="relative min-w-[180px] max-w-xs flex-1">
+              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={objectSearch}
+                onChange={(e) => setObjectSearch(e.target.value)}
+                placeholder="Szukaj: nazwa pozycji…"
+                className="pl-10"
+                data-testid="kadry-obiekty-filter-search"
+              />
+            </div>
+            <Select
+              value={objectMapping}
+              onValueChange={(v) => setObjectMapping(v as typeof objectMapping)}
+            >
+              <SelectTrigger
+                className="w-[190px]"
+                data-testid="kadry-obiekty-filter-mapping"
+              >
+                <SelectValue placeholder="Mapowanie" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Mapowanie: wszystkie</SelectItem>
+                <SelectItem value="unmapped">Tylko niezmapowane</SelectItem>
+                <SelectItem value="mapped">Tylko zmapowane</SelectItem>
+              </SelectContent>
+            </Select>
+            <Select
+              value={objectActive}
+              onValueChange={(v) => setObjectActive(v as ActiveFilter)}
+            >
+              <SelectTrigger
+                className="w-[170px]"
+                data-testid="kadry-obiekty-filter-active"
+              >
+                <SelectValue placeholder="Aktywność" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Aktywne i nieaktywne</SelectItem>
+                <SelectItem value="active">Tylko aktywne</SelectItem>
+                <SelectItem value="inactive">Tylko nieaktywne</SelectItem>
+              </SelectContent>
+            </Select>
+            {/* #BIURO / #zlecenie są celowo niezmapowane, więc przy przeglądaniu
+                „co zostało do zmapowania” tylko zaśmiecają listę. */}
+            <Select
+              value={objectTech}
+              onValueChange={(v) => setObjectTech(v as typeof objectTech)}
+            >
+              <SelectTrigger
+                className="w-[220px]"
+                data-testid="kadry-obiekty-filter-tech"
+              >
+                <SelectValue placeholder="Pozycje techniczne" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Pozycje techniczne: pokaż</SelectItem>
+                <SelectItem value="hide">Pozycje techniczne: ukryj</SelectItem>
+                <SelectItem value="only">Tylko pozycje techniczne</SelectItem>
+              </SelectContent>
+            </Select>
+            <div className="flex items-center gap-2 whitespace-nowrap">
+              <Checkbox
+                id="kadry-obiekty-with-hours"
+                checked={objectWithHours}
+                onCheckedChange={(checked) =>
+                  setObjectWithHours(checked === true)
+                }
+                data-testid="kadry-obiekty-filter-with-hours"
+              />
+              <label
+                htmlFor="kadry-obiekty-with-hours"
+                className="cursor-pointer text-sm"
+              >
+                Tylko z godzinami
+              </label>
+            </div>
+            {objectFiltersActive && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={clearObjectFilters}
+                data-testid="kadry-obiekty-filters-clear"
+              >
+                <X className="mr-1 h-4 w-4" />
+                Wyczyść filtry
+              </Button>
+            )}
             {editable && (
               <div className="ml-auto flex max-w-md gap-2">
                 <Input
@@ -1663,29 +2684,62 @@ export function Kadry() {
               </p>
             </CardContent>
           </Card>
+          {/* Postęp mapowania powyżej liczy CAŁY słownik (to miara roboty do
+              wykonania), więc licznik listy stoi osobno — pokazuje, ile pozycji
+              zostało po filtrach. */}
+          <p
+            className="text-sm text-muted-foreground"
+            data-testid="kadry-obiekty-count"
+          >
+            {objectsVisible.length}
+            {objectsVisible.length === objects.length
+              ? ""
+              : ` z ${objects.length}`}{" "}
+            pozycji · {hrs(objectsVisible.reduce((s, o) => s + o.hoursTotal, 0))} h
+          </p>
           <Card>
             <CardContent className="p-0">
               <table className="w-full text-sm">
                 <thead className="border-b bg-muted/50 text-xs uppercase tracking-wide text-muted-foreground">
                   <tr>
-                    <Th tip="Nazwa obiektu (posterunku) — słownik do wpisów godzin">
-                      Obiekt kadrowy
-                    </Th>
-                    <Th
+                    <SortTh
+                      label="Obiekt kadrowy"
+                      sortKey="name"
+                      sort={objectSort}
+                      dir={objectDir}
+                      onSort={toggleObjectSort}
+                      testIdPrefix="kadry-obiekty-sort"
+                      tip="Nazwa obiektu (posterunku) — słownik do wpisów godzin"
+                    />
+                    <SortTh
+                      label="Godziny"
+                      sortKey="hoursTotal"
+                      sort={objectSort}
+                      dir={objectDir}
+                      onSort={toggleObjectSort}
+                      testIdPrefix="kadry-obiekty-sort"
+                      align="right"
                       tip="Suma godzin wypracowanych na tej pozycji z całej historii — im więcej, tym ważniejsze mapowanie"
-                      className="text-right"
-                    >
-                      Godziny
-                    </Th>
-                    <Th
+                    />
+                    <SortTh
+                      label="Pracownicy"
+                      sortKey="employeesCount"
+                      sort={objectSort}
+                      dir={objectDir}
+                      onSort={toggleObjectSort}
+                      testIdPrefix="kadry-obiekty-sort"
+                      align="right"
                       tip="Ilu różnych pracowników kiedykolwiek księgowało godziny na tej pozycji"
-                      className="text-right"
-                    >
-                      Pracownicy
-                    </Th>
-                    <Th tip="Obiekt z kartoteki, na który przeniosą się wynagrodzenia z tej pozycji (Analityka → Obiekty)">
-                      Obiekt w kartotece
-                    </Th>
+                    />
+                    <SortTh
+                      label="Obiekt w kartotece"
+                      sortKey="mapping"
+                      sort={objectSort}
+                      dir={objectDir}
+                      onSort={toggleObjectSort}
+                      testIdPrefix="kadry-obiekty-sort"
+                      tip="Obiekt z kartoteki, na który przeniosą się wynagrodzenia z tej pozycji (Analityka → Obiekty). Sortowanie ustawia niezmapowane na końcu"
+                    />
                     <Th tip="Nieaktywny obiekt nie jest podpowiadany przy wpisywaniu godzin">
                       Status
                     </Th>
@@ -1693,7 +2747,21 @@ export function Kadry() {
                   </tr>
                 </thead>
                 <tbody>
-                  {sortedObjects.map((r) => {
+                  {objectsVisible.length === 0 && (
+                    <tr>
+                      <td
+                        colSpan={6}
+                        className="px-3 py-8 text-center text-muted-foreground"
+                      >
+                        {loading
+                          ? "Ładowanie…"
+                          : objectFiltersActive
+                            ? "Brak pozycji dla wybranych filtrów"
+                            : "Brak pozycji w słowniku kadrowym"}
+                      </td>
+                    </tr>
+                  )}
+                  {objectsVisible.map((r) => {
                     const overhead = overheadKind(r.name);
                     return (
                       <tr

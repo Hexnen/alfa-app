@@ -1,0 +1,552 @@
+[
+  {
+    "sourceId": 173,
+    "name": "Kozłowski PŁOŃSK ZDV",
+    "fullName": "Przemysław Kozłowski",
+    "nipRaw": "",
+    "country": "",
+    "city": "Płońsk",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 207,
+    "name": "Sokołowski Niedziałka ZDV",
+    "fullName": "Sokołowska Magdalena",
+    "nipRaw": "",
+    "country": "",
+    "city": "Stara Niedziałka",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 209,
+    "name": "TECHBET KOLEKTORSKA",
+    "fullName": "JUSTYNA KUPRYJAŃCZYK",
+    "nipRaw": "",
+    "country": "",
+    "city": "Warszawa",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 459,
+    "name": "RACŁAWICKA",
+    "fullName": "PAREF EVO. SOCIÉTÉ CIVILE DE PLACEMENT IMMOBILIER A CAPITAL VARIABLE",
+    "nipRaw": "5263374083",
+    "country": "Francja",
+    "city": "PARYŻ",
+    "reason": "foreign",
+    "detail": "podmiot zagraniczny (Państwo: Francja)"
+  },
+  {
+    "sourceId": 616,
+    "name": "Agencja Ochrony ''Major''",
+    "fullName": "Agencja Ochrony Osób i Mienia ''Major'' Paweł Merliński",
+    "nipRaw": "607-253-433",
+    "country": "Polska",
+    "city": "Wieruszów",
+    "reason": "invalid_nip",
+    "detail": "NIP ma 9 cyfr zamiast 10"
+  },
+  {
+    "sourceId": 632,
+    "name": "BNP RACŁAWICKA",
+    "fullName": "PAREF EVO. SOCIÉTÉ CIVILE DE PLACEMENT IMMOBILIER A CAPITAL VARIABLE",
+    "nipRaw": "5263374083",
+    "country": "Francja",
+    "city": "Paryż",
+    "reason": "foreign",
+    "detail": "podmiot zagraniczny (Państwo: Francja)"
+  },
+  {
+    "sourceId": 652,
+    "name": "Ochrona Patrol",
+    "fullName": "Ochrona Mienia i Osób Patrol II",
+    "nipRaw": "914156979",
+    "country": "Polska",
+    "city": "Strzelin",
+    "reason": "invalid_nip",
+    "detail": "NIP ma 9 cyfr zamiast 10"
+  },
+  {
+    "sourceId": 657,
+    "name": "Mario Boss",
+    "fullName": "Mario Bos Sp. z.o.o.",
+    "nipRaw": "6691973059",
+    "country": "Polska",
+    "city": "Pakosław",
+    "reason": "invalid_nip",
+    "detail": "błędna suma kontrolna"
+  },
+  {
+    "sourceId": 676,
+    "name": "Rafał Tomasz Ryszawa",
+    "fullName": "Rafał Tomasz Ryszawa PESEL 78042706235",
+    "nipRaw": "",
+    "country": "",
+    "city": "Ząbki",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 680,
+    "name": "Michał Lech Wiazowa",
+    "fullName": "Michał Lech",
+    "nipRaw": "",
+    "country": "",
+    "city": "Łódź",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 711,
+    "name": "Chengdu Xiangnuoy Tradng Co. Ltd",
+    "fullName": "Chengdu Xiangnuoy Tradng Co. Ltd",
+    "nipRaw": "",
+    "country": "",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 718,
+    "name": "DESTINATION Sp. z.o.o.",
+    "fullName": "DESTINATION Sp. z.o.o.",
+    "nipRaw": "113317081",
+    "country": "Polska",
+    "city": "Warszawa",
+    "reason": "invalid_nip",
+    "detail": "NIP ma 9 cyfr zamiast 10"
+  },
+  {
+    "sourceId": 725,
+    "name": "chojnicki",
+    "fullName": "Tomasz Chojnicki ul. Wrzosowa 14 87-640 Czernikowo",
+    "nipRaw": "",
+    "country": "",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 731,
+    "name": "Alfa Group sp z o.o.",
+    "fullName": "Alfa Group sp z o.o.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 732,
+    "name": "ALFA GROUP SP Z O.O.",
+    "fullName": "ALFA GROUP SP Z O.O.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 734,
+    "name": "ALFA GROUP SP.Z O.O.",
+    "fullName": "ALFA GROUP SP.Z O.O.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 735,
+    "name": "ALFA GROUP SP.Z O.O.",
+    "fullName": "ALFA GROUP SP.Z O.O.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 739,
+    "name": "ALFA GROUP SP.Z O.O.",
+    "fullName": "ALFA GROUP SP.Z O.O.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 743,
+    "name": "Alfa Group sp z o.o.",
+    "fullName": "Alfa Group sp z o.o.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 744,
+    "name": "ALFA GROUP SP Z O.O.",
+    "fullName": "ALFA GROUP SP Z O.O.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 747,
+    "name": "Alfa Group sp z o.o.",
+    "fullName": "Alfa Group sp z o.o.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 748,
+    "name": "ALFA GROUP SP Z O.O.",
+    "fullName": "ALFA GROUP SP Z O.O.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 760,
+    "name": "ALFA GROUP SP.Z O.O.",
+    "fullName": "ALFA GROUP SP.Z O.O.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 761,
+    "name": "ALFA GROUP SP.Z O.O.",
+    "fullName": "ALFA GROUP SP.Z O.O.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 763,
+    "name": "ALFA GROUP SP.Z O.O.",
+    "fullName": "ALFA GROUP SP.Z O.O.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 764,
+    "name": "Alfa Group sp z o.o.",
+    "fullName": "Alfa Group sp z o.o.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 765,
+    "name": "ALFA GROUP SP Z O.O.",
+    "fullName": "ALFA GROUP SP Z O.O.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 770,
+    "name": "Alfa Group sp z o.o.",
+    "fullName": "Alfa Group sp z o.o.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 771,
+    "name": "ALFA GROUP SP Z O.O.",
+    "fullName": "ALFA GROUP SP Z O.O.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 772,
+    "name": "ALFA GROUP SP.Z O.O.",
+    "fullName": "ALFA GROUP SP.Z O.O.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 773,
+    "name": "ALFA GROUP SP.Z O.O.",
+    "fullName": "ALFA GROUP SP.Z O.O.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 777,
+    "name": "Alfa Group sp z o.o.",
+    "fullName": "Alfa Group sp z o.o.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 778,
+    "name": "ALFA GROUP SP Z O.O.",
+    "fullName": "ALFA GROUP SP Z O.O.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 780,
+    "name": "Alpha Polish Logistics Propco S.a r.l. 7R",
+    "fullName": "Alpha Polish Logistics Propco S.a r.l.",
+    "nipRaw": "5263921906",
+    "country": "LUKSEMBURG",
+    "city": "Luxembourg",
+    "reason": "foreign",
+    "detail": "podmiot zagraniczny (Państwo: LUKSEMBURG)"
+  },
+  {
+    "sourceId": 782,
+    "name": "Alfa Group sp z o.o.",
+    "fullName": "Alfa Group sp z o.o.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 783,
+    "name": "ALFA GROUP SP Z O.O.",
+    "fullName": "ALFA GROUP SP Z O.O.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 785,
+    "name": "ALFA GROUP SP.Z O.O.",
+    "fullName": "ALFA GROUP SP.Z O.O.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 789,
+    "name": "ALFA GROUP SP.Z O.O.",
+    "fullName": "ALFA GROUP SP.Z O.O.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 796,
+    "name": "Alfa Group sp z o.o.",
+    "fullName": "Alfa Group sp z o.o.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 797,
+    "name": "ALFA GROUP SP Z O.O.",
+    "fullName": "ALFA GROUP SP Z O.O.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 805,
+    "name": "Beata Jaworska",
+    "fullName": "Beata Jaworska",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 807,
+    "name": "ALFA GROUP SP.Z O.O.",
+    "fullName": "ALFA GROUP SP.Z O.O.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 808,
+    "name": "ALFA GROUP SP.Z O.O.",
+    "fullName": "ALFA GROUP SP.Z O.O.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 813,
+    "name": "ALFA GROUP SP.Z O.O.",
+    "fullName": "ALFA GROUP SP.Z O.O.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 815,
+    "name": "ALFA GROUP SP.Z O.O.",
+    "fullName": "ALFA GROUP SP.Z O.O.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 818,
+    "name": "ALFA GROUP SP.Z O.O.",
+    "fullName": "ALFA GROUP SP.Z O.O.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 819,
+    "name": "ALFA GROUP SP.Z O.O.",
+    "fullName": "ALFA GROUP SP.Z O.O.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 824,
+    "name": "ALFA GROUP SP.Z O.O.",
+    "fullName": "ALFA GROUP SP.Z O.O.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 826,
+    "name": "ALFA GROUP SP.Z O.O.",
+    "fullName": "ALFA GROUP SP.Z O.O.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 828,
+    "name": "ALFA GROUP SP.Z O.O.",
+    "fullName": "ALFA GROUP SP.Z O.O.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 830,
+    "name": "Alfa Group sp z o.o.",
+    "fullName": "Alfa Group sp z o.o.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 831,
+    "name": "ALFA GROUP SP Z O.O.",
+    "fullName": "ALFA GROUP SP Z O.O.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 835,
+    "name": "Alfa Group sp z o.o.",
+    "fullName": "Alfa Group sp z o.o.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 836,
+    "name": "ALFA GROUP SP Z O.O.",
+    "fullName": "ALFA GROUP SP Z O.O.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  },
+  {
+    "sourceId": 838,
+    "name": "ALFA GROUP SP.Z O.O.",
+    "fullName": "ALFA GROUP SP.Z O.O.",
+    "nipRaw": "",
+    "country": "POLSKA",
+    "city": "",
+    "reason": "no_nip",
+    "detail": "brak NIP-u w pliku"
+  }
+]

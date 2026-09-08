@@ -22,6 +22,7 @@
     "imapflow": "^1.4.6",
     "mailparser": "^3.9.14",
     "nodemailer": "^9.0.3",
+    "sharp": "^0.35.4",
     "xlsx": "^0.18.5",
     "zod": "^4.4.3"
   },

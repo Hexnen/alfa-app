@@ -1,8 +1,25 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AlertTriangle, Archive, ArchiveRestore, Pencil, Plus } from "lucide-react";
+import {
+  AlertTriangle,
+  Archive,
+  ArchiveRestore,
+  ArrowDown,
+  ArrowUp,
+  ChevronsUpDown,
+  Pencil,
+  Plus,
+  X,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { usePerms } from "@/auth/permissions";
 import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
 import { tip } from "@/components/ui/tooltip";
@@ -10,6 +27,7 @@ import { isPriceStale, priceAgeLabel } from "@/lib/price-age";
 import {
   servicesApi,
   SERVICE_CATEGORIES,
+  SERVICE_SYSTEMS,
   type Service,
   type ServiceInput,
 } from "@/lib/api";
@@ -24,12 +42,61 @@ import {
   fmtPln,
 } from "@/components/warehouse/warehouseShared";
 import { fmtRelative, fmtTimestamp, pillClass } from "@/lib/calendar-labels";
+import { cn } from "@/lib/utils";
 
 const alertError = (err: unknown, fallback: string) =>
   window.alert(err instanceof Error ? err.message : fallback);
 
-const selectClass =
-  "flex h-10 rounded-md border border-input bg-background px-3 py-2 text-sm";
+/** Kolumny, po których da się sortować katalog usług. */
+type ServiceSortKey =
+  | "name"
+  | "category"
+  | "system"
+  | "unit"
+  | "cost"
+  | "price"
+  | "margin"
+  | "created"
+  | "updated";
+
+/**
+ * Domyślny kierunek sortowania kolumny — kwoty, marże i daty ludzie czytają od
+ * największej wartości (najnowsze/najdroższe u góry), teksty alfabetycznie
+ * (jak w kartotece obiektów).
+ */
+const DEFAULT_DIR: Record<ServiceSortKey, "asc" | "desc"> = {
+  name: "asc",
+  category: "asc",
+  system: "asc",
+  unit: "asc",
+  cost: "desc",
+  price: "desc",
+  margin: "desc",
+  created: "desc",
+  updated: "desc",
+};
+
+/** Filtr ceny: wszystkie / tylko wycenione / tylko z zerową ceną. */
+type ValueMode = "all" | "with" | "without";
+
+/** Filtr archiwum — zastępuje dawny przełącznik „Pokaż zarchiwizowane”. */
+type StatusMode = "active" | "archived" | "all";
+
+/** Wartość w selekcie oznaczająca „usługi bez wpisanego systemu”. */
+const NO_SYSTEM = "__none__";
+
+/** Kwota z pola tekstowego — przecinek jak kropka, śmieci traktujemy jak brak filtra. */
+function parseAmount(raw: string): number | undefined {
+  const n = parseFloat(raw.replace(",", "."));
+  return Number.isFinite(n) ? n : undefined;
+}
+
+/** Data z bazy na liczbę do porównań; brak lub śmieć = wartość pusta (NULLS LAST). */
+function parseDate(raw: string | null | undefined): number | null {
+  if (!raw) return null;
+  const t = Date.parse(raw);
+  return Number.isFinite(t) ? t : null;
+}
 
 /**
  * Komórka ze stawką. Na czerwono, gdy ceny nikt nie potwierdził od roku —
@@ -67,8 +134,20 @@ export function Uslugi() {
   const [services, setServices] = useState<Service[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
-  const [categoryFilter, setCategoryFilter] = useState("");
-  const [showInactive, setShowInactive] = useState(false);
+  // Filtry i sortowanie liczymy po stronie klienta — `servicesApi.list()` i tak
+  // zwraca cały katalog (kilkadziesiąt pozycji), więc nie ma po co dokładać
+  // parametrów do API. Z tego samego powodu widełki kwot idą bez debounce'u:
+  // nie ma żądania do odciążenia, a lista przelicza się w tym samym renderze
+  // co wpisana cyfra.
+  const [categoryFilter, setCategoryFilter] = useState("all");
+  const [systemFilter, setSystemFilter] = useState("all");
+  const [unitFilter, setUnitFilter] = useState("all");
+  const [statusMode, setStatusMode] = useState<StatusMode>("active");
+  const [valueMode, setValueMode] = useState<ValueMode>("all");
+  const [minInput, setMinInput] = useState("");
+  const [maxInput, setMaxInput] = useState("");
+  const [sort, setSort] = useState<ServiceSortKey>("name");
+  const [dir, setDir] = useState<"asc" | "desc">("asc");
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<Service | null>(null);
 
@@ -89,22 +168,189 @@ export function Uslugi() {
     load();
   }, [load]);
 
+  /** Jednostki do selecta — wolne pole tekstowe, więc listę budujemy z danych. */
+  const units = useMemo(
+    () =>
+      Array.from(
+        new Set(services.map((s) => s.unit.trim()).filter((u) => u !== ""))
+      ).sort((a, b) => a.localeCompare(b, "pl")),
+    [services]
+  );
+
+  /** Jeden przebieg: filtry + sortowanie. */
   const visible = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return services
-      .filter((s) => showInactive || s.active)
-      .filter((s) => !categoryFilter || s.category === categoryFilter)
-      .filter(
-        (s) =>
-          !q ||
-          s.name.toLowerCase().includes(q) ||
-          (s.description ?? "").toLowerCase().includes(q)
-      )
-      .sort(
-        (a, b) =>
-          a.position - b.position || a.name.localeCompare(b.name, "pl")
-      );
-  }, [services, search, categoryFilter, showInactive]);
+    const min = parseAmount(minInput);
+    const max = parseAmount(maxInput);
+
+    const list = services.filter((s) => {
+      if (statusMode === "active" && !s.active) return false;
+      if (statusMode === "archived" && s.active) return false;
+      if (
+        q &&
+        ![s.name, s.description, s.unit].some((v) =>
+          (v ?? "").toLowerCase().includes(q)
+        )
+      ) {
+        return false;
+      }
+      if (categoryFilter !== "all" && s.category !== categoryFilter) return false;
+      if (systemFilter !== "all") {
+        if (systemFilter === NO_SYSTEM ? s.system !== null : s.system !== systemFilter) {
+          return false;
+        }
+      }
+      if (unitFilter !== "all" && s.unit.trim() !== unitFilter) return false;
+      // Cena 0 zł = pozycja jeszcze niewyceniona (np. świeżo dodana usługa),
+      // więc filtr „bez ceny” łapie i zero, i brak.
+      const value = s.price ?? 0;
+      if (valueMode === "with" && value <= 0) return false;
+      if (valueMode === "without" && value > 0) return false;
+      if (min !== undefined && value < min) return false;
+      if (max !== undefined && value > max) return false;
+      return true;
+    });
+
+    const mul = dir === "asc" ? 1 : -1;
+    const text = (s: Service) =>
+      sort === "name"
+        ? s.name
+        : sort === "category"
+          ? SERVICE_CATEGORY_LABEL[s.category]
+          : sort === "system"
+            ? // Usługa uniwersalna (kreska w tabeli) nie ma nazwy systemu,
+              // więc idzie na koniec jak pusty tekst.
+              (s.system ? SERVICE_SYSTEM_LABEL[s.system] : "")
+            : s.unit;
+    /** Liczba do sortowania; `null` = w tabeli jest kreska, czyli wartość pusta. */
+    const number = (s: Service): number | null => {
+      switch (sort) {
+        case "cost":
+          return s.cost;
+        case "price":
+          return s.price;
+        case "margin":
+          return s.marginPct;
+        case "created":
+          return parseDate(s.createdAt);
+        default:
+          // „Zmienił”: tabela pokazuje kreskę, dopóki nikt nie ruszył pozycji
+          // od utworzenia — traktujemy to jak brak wartości.
+          return s.updatedAt && s.updatedAt !== s.createdAt
+            ? parseDate(s.updatedAt)
+            : null;
+      }
+    };
+
+    const numeric =
+      sort === "cost" ||
+      sort === "price" ||
+      sort === "margin" ||
+      sort === "created" ||
+      sort === "updated";
+
+    // Puste teksty i brak wartości lądują na końcu w OBU kierunkach (jak NULLS
+    // LAST w sortowaniu obiektów) — inaczej „sortuj po marży” zaczynałoby się od
+    // pozycji bez kosztu. Remis rozstrzyga nazwa, żeby kolejność była stabilna.
+    const compare = (a: Service, b: Service): number => {
+      if (numeric) {
+        const av = number(a);
+        const bv = number(b);
+        if (av === null || bv === null) {
+          if (av === null && bv === null) return 0;
+          return av !== null ? -1 : 1;
+        }
+        return (av - bv) * mul;
+      }
+      const as = text(a).trim();
+      const bs = text(b).trim();
+      if (!as || !bs) {
+        if (!as && !bs) return 0;
+        return as ? -1 : 1;
+      }
+      return as.localeCompare(bs, "pl") * mul;
+    };
+
+    return list.sort((a, b) => compare(a, b) || a.name.localeCompare(b.name, "pl"));
+  }, [
+    services,
+    search,
+    categoryFilter,
+    systemFilter,
+    unitFilter,
+    statusMode,
+    valueMode,
+    minInput,
+    maxInput,
+    sort,
+    dir,
+  ]);
+
+  /** Klik w nagłówek: ta sama kolumna odwraca kierunek, nowa startuje od swojego domyślnego. */
+  const toggleSort = (key: ServiceSortKey) => {
+    if (sort === key) {
+      setDir((d) => (d === "asc" ? "desc" : "asc"));
+      return;
+    }
+    setSort(key);
+    setDir(DEFAULT_DIR[key]);
+  };
+
+  const filtersActive =
+    search !== "" ||
+    categoryFilter !== "all" ||
+    systemFilter !== "all" ||
+    unitFilter !== "all" ||
+    statusMode !== "active" ||
+    valueMode !== "all" ||
+    minInput !== "" ||
+    maxInput !== "";
+
+  const clearFilters = () => {
+    setSearch("");
+    setCategoryFilter("all");
+    setSystemFilter("all");
+    setUnitFilter("all");
+    setStatusMode("active");
+    setValueMode("all");
+    setMinInput("");
+    setMaxInput("");
+  };
+
+  /** Nagłówek klikalny — strzałka pokazuje kolumnę i kierunek sortowania. */
+  const SortHeader = ({
+    label,
+    sortKey,
+    align = "left",
+    title,
+  }: {
+    label: string;
+    sortKey: ServiceSortKey;
+    align?: "left" | "right";
+    title?: string;
+  }) => {
+    const activeCol = sort === sortKey;
+    const Icon = !activeCol ? ChevronsUpDown : dir === "asc" ? ArrowUp : ArrowDown;
+    return (
+      <th className={cn("px-3 py-2 font-medium", align === "right" ? "text-right" : "text-left")}>
+        <button
+          type="button"
+          data-testid={`uslugi-sort-${sortKey}`}
+          onClick={() => toggleSort(sortKey)}
+          aria-label={`Sortuj po: ${label}`}
+          title={title}
+          className={cn(
+            "inline-flex items-center gap-1 rounded px-1 -mx-1 transition-colors hover:text-foreground",
+            align === "right" && "flex-row-reverse",
+            activeCol ? "text-foreground" : "text-muted-foreground"
+          )}
+        >
+          {label}
+          <Icon className={cn("h-3.5 w-3.5", !activeCol && "opacity-40")} />
+        </button>
+      </th>
+    );
+  };
 
   const handleSubmit = async (data: ServiceInput) => {
     if (editing) {
@@ -163,27 +409,64 @@ export function Uslugi() {
           onChange={(e) => setSearch(e.target.value)}
           className="max-w-xs"
         />
-        <select
-          className={selectClass}
-          value={categoryFilter}
-          onChange={(e) => setCategoryFilter(e.target.value)}
-        >
-          <option value="">Wszystkie kategorie</option>
-          {SERVICE_CATEGORIES.map((k) => (
-            <option key={k} value={k}>
-              {SERVICE_CATEGORY_LABEL[k]}
-            </option>
-          ))}
-        </select>
-        <label className="flex items-center gap-2 text-sm">
-          <input
-            type="checkbox"
-            checked={showInactive}
-            onChange={(e) => setShowInactive(e.target.checked)}
-            className="h-4 w-4 accent-primary"
-          />
-          Pokaż zarchiwizowane
-        </label>
+        <Select value={categoryFilter} onValueChange={setCategoryFilter}>
+          <SelectTrigger className="w-[190px]" data-testid="uslugi-filter-category">
+            <SelectValue placeholder="Kategoria" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">Wszystkie kategorie</SelectItem>
+            {SERVICE_CATEGORIES.map((k) => (
+              <SelectItem key={k} value={k}>
+                {SERVICE_CATEGORY_LABEL[k]}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+
+        {/* System jest opcjonalny (usługa może być uniwersalna), więc obok listy
+            systemów jest osobna pozycja na pozycje bez przypisania. */}
+        <Select value={systemFilter} onValueChange={setSystemFilter}>
+          <SelectTrigger className="w-[190px]" data-testid="uslugi-filter-system">
+            <SelectValue placeholder="System" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">Wszystkie systemy</SelectItem>
+            {SERVICE_SYSTEMS.map((k) => (
+              <SelectItem key={k} value={k}>
+                {SERVICE_SYSTEM_LABEL[k]}
+              </SelectItem>
+            ))}
+            <SelectItem value={NO_SYSTEM}>Bez systemu</SelectItem>
+          </SelectContent>
+        </Select>
+
+        {/* Jednostki biorą się z tego, co ktoś wpisał w katalogu — to pole
+            tekstowe z podpowiedziami, a nie słownik. */}
+        <Select value={unitFilter} onValueChange={setUnitFilter}>
+          <SelectTrigger className="w-[150px]" data-testid="uslugi-filter-unit">
+            <SelectValue placeholder="Jednostka" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">Wszystkie jednostki</SelectItem>
+            {units.map((u) => (
+              <SelectItem key={u} value={u}>
+                {u}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+
+        <Select value={statusMode} onValueChange={(v) => setStatusMode(v as StatusMode)}>
+          <SelectTrigger className="w-[190px]" data-testid="uslugi-filter-status">
+            <SelectValue placeholder="Status" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="active">Tylko aktualne</SelectItem>
+            <SelectItem value="archived">Tylko zarchiwizowane</SelectItem>
+            <SelectItem value="all">Aktualne i archiwum</SelectItem>
+          </SelectContent>
+        </Select>
+
         {editable && (
           <Button
             className="ml-auto"
@@ -197,23 +480,80 @@ export function Uslugi() {
         )}
       </div>
 
+      {/* Druga linia filtrów: cena sprzedaży — tryb i widełki kwot. */}
+      <div className="flex flex-wrap items-center gap-2">
+        <Select value={valueMode} onValueChange={(v) => setValueMode(v as ValueMode)}>
+          <SelectTrigger className="w-[200px]" data-testid="uslugi-filter-value-mode">
+            <SelectValue placeholder="Cena" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">Cena: wszystkie</SelectItem>
+            <SelectItem value="with">Tylko wycenione</SelectItem>
+            <SelectItem value="without">Tylko bez ceny</SelectItem>
+          </SelectContent>
+        </Select>
+        <div className="flex items-center gap-1 text-sm text-muted-foreground">
+          <span>Cena od</span>
+          <Input
+            type="number"
+            min="0"
+            step="50"
+            inputMode="decimal"
+            className="w-28 tabular-nums"
+            data-testid="uslugi-filter-min"
+            value={minInput}
+            onChange={(e) => setMinInput(e.target.value)}
+          />
+          <span>do</span>
+          <Input
+            type="number"
+            min="0"
+            step="50"
+            inputMode="decimal"
+            className="w-28 tabular-nums"
+            data-testid="uslugi-filter-max"
+            value={maxInput}
+            onChange={(e) => setMaxInput(e.target.value)}
+          />
+          <span>zł netto</span>
+        </div>
+        {filtersActive && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={clearFilters}
+            data-testid="uslugi-filters-clear"
+          >
+            <X className="h-4 w-4 mr-1" />
+            Wyczyść filtry
+          </Button>
+        )}
+      </div>
+
       <Card>
         <CardContent className="p-0">
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="border-b bg-muted/50 text-left text-xs text-muted-foreground">
                 <tr>
-                  <th className="px-3 py-2 font-medium">Usługa</th>
-                  <th className="px-3 py-2 font-medium">Kategoria</th>
-                  <th className="px-3 py-2 font-medium">System</th>
-                  <th className="px-3 py-2 font-medium">Jedn.</th>
-                  <th className="px-3 py-2 text-right font-medium">Koszt</th>
-                  <th className="px-3 py-2 text-right font-medium">Cena</th>
-                  <th className="px-3 py-2 text-right font-medium">
-                    Marża / narzut
-                  </th>
-                  <th className="px-3 py-2 font-medium">Utworzył</th>
-                  <th className="px-3 py-2 font-medium">Zmienił</th>
+                  <SortHeader label="Usługa" sortKey="name" />
+                  <SortHeader label="Kategoria" sortKey="category" />
+                  <SortHeader label="System" sortKey="system" />
+                  <SortHeader label="Jedn." sortKey="unit" />
+                  <SortHeader label="Koszt" sortKey="cost" align="right" />
+                  <SortHeader label="Cena" sortKey="price" align="right" />
+                  <SortHeader
+                    label="Marża / narzut"
+                    sortKey="margin"
+                    align="right"
+                    title="Sortowanie po marży procentowej; pozycje bez kosztu lub ceny idą na koniec"
+                  />
+                  <SortHeader label="Utworzył" sortKey="created" />
+                  <SortHeader
+                    label="Zmienił"
+                    sortKey="updated"
+                    title="Pozycje nieruszane od utworzenia idą na koniec"
+                  />
                   {editable && (
                     <th className="px-3 py-2 text-right font-medium">Akcje</th>
                   )}
@@ -235,8 +575,9 @@ export function Uslugi() {
                       colSpan={editable ? 10 : 9}
                       className="px-3 py-8 text-center text-muted-foreground"
                     >
-                      Katalog usług jest pusty. Dodaj pierwszą pozycję, np.
-                      „Montaż kamery IP".
+                      {filtersActive
+                        ? "Brak usług dla wybranych filtrów"
+                        : "Katalog usług jest pusty. Dodaj pierwszą pozycję, np. „Montaż kamery IP”."}
                     </td>
                   </tr>
                 ) : (

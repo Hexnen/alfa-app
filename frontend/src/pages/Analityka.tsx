@@ -8,8 +8,8 @@
  * rentowność obiektów, ale nie wynagrodzenia handlowców. Wspólny jest tylko
  * pasek narzędzi: zakres, szukajka i odświeżenie.
  */
-import { useMemo, useState } from "react";
-import { Navigate, useParams } from "react-router-dom";
+import { useEffect, useMemo, useState } from "react";
+import { Navigate, useParams, useSearchParams } from "react-router-dom";
 import { RefreshCw, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -22,7 +22,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { usePerms } from "@/auth/permissions";
-import type { AnalyticsScope, CostWindow } from "@/lib/api";
+import type { AnalyticsScope, AnalyticsService, CostWindow } from "@/lib/api";
+import { ServiceToggle } from "@/components/analytics";
 import { KontrahenciView } from "@/components/analytics/views/KontrahenciView";
 import { ObiektyView } from "@/components/analytics/views/ObiektyView";
 import { HandlowcyView } from "@/components/analytics/views/HandlowcyView";
@@ -72,6 +73,18 @@ export function AnalitykaRedirect() {
   return <Navigate to={target ? `/analityka/${target}` : "/"} replace />;
 }
 
+/** Dozwolone wartości przekroju — cokolwiek innego w URL-u czytamy jako „oba". */
+const SERVICES: AnalyticsService[] = ["zdv", "ofi", "all"];
+
+/** Pamięć ostatniego wyboru — patrz komentarz przy efekcie w `Analityka`. */
+const SERVICE_STORAGE_KEY = "analityka.service";
+
+function parseService(raw: string | null): AnalyticsService {
+  return SERVICES.includes(raw as AnalyticsService)
+    ? (raw as AnalyticsService)
+    : "all";
+}
+
 export function Analityka() {
   const { tab } = useParams<{ tab: string }>();
   const { canView } = usePerms();
@@ -89,8 +102,55 @@ export function Analityka() {
   // wystarczy że mają go w zależnościach efektu.
   const [reloadKey, setReloadKey] = useState(0);
 
+  /**
+   * Linia usługowa mieszka w URL-u, a nie w stanie komponentu — z trzech powodów:
+   * przeżywa przejście między podzakładkami (te są osobnymi adresami, więc stan
+   * lokalny powłoki i tak by przetrwał, ale odświeżenie strony już nie), przeżywa
+   * F5, i daje się wysłać linkiem („zobacz marże na OFI”). Domyślnie „all", więc
+   * goły adres bez parametru zachowuje się jak przed wprowadzeniem przełącznika.
+   */
+  const [searchParams, setSearchParams] = useSearchParams();
+  const service = parseService(searchParams.get("service"));
+  const setService = (next: AnalyticsService) => {
+    // Pamięć aktualizujemy OD RAZU, także dla „Oba": inaczej wybór „all" znika
+    // z adresu, efekt niżej widzi brak parametru i przywraca poprzednie „ofi"
+    // — kliknięcie „Oba" nic nie zmieniało.
+    try {
+      window.localStorage.setItem(SERVICE_STORAGE_KEY, next);
+    } catch {
+      /* prywatne okno / zablokowany storage — wybór i tak jest w adresie */
+    }
+    const sp = new URLSearchParams(searchParams);
+    // „Oba" to domyślna wartość — nie zaśmiecamy nią adresu.
+    if (next === "all") sp.delete("service");
+    else sp.set("service", next);
+    setSearchParams(sp, { replace: true });
+  };
+
+  /**
+   * Podzakładki w sidebarze prowadzą pod GOŁY adres (`/analityka/obiekty`), więc
+   * samo trzymanie wyboru w query gubiłoby go przy każdej zmianie zakładki —
+   * a wtedy trzy widoki tej samej strony mówiłyby o różnych liniach usługowych.
+   * Ostatni wybór pamiętamy więc w sesji przeglądarki i wstawiamy z powrotem do
+   * adresu, gdy ten przyszedł bez parametru. „Oba" niczego nie przywraca: to
+   * wartość domyślna, więc gołe wejście na stronę ma wyglądać tak jak zawsze.
+   */
+  useEffect(() => {
+    const raw = searchParams.get("service");
+    if (raw === null) {
+      const remembered = parseService(
+        window.localStorage.getItem(SERVICE_STORAGE_KEY)
+      );
+      if (remembered !== "all") setService(remembered);
+    } else {
+      window.localStorage.setItem(SERVICE_STORAGE_KEY, parseService(raw));
+    }
+    // `setService` jest domknięciem nad bieżącym query — zależnością jest ono samo.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
+
   const fallback = useMemo(() => firstVisibleTab(canView), [canView]);
-  const viewProps = { scope, costWindow, search, reloadKey };
+  const viewProps = { scope, costWindow, service, search, reloadKey };
 
   // Walidacja PO wszystkich hookach — inaczej ich liczba zmieniałaby się
   // między renderami.
@@ -101,6 +161,10 @@ export function Analityka() {
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-3">
+        {/* Przekrój usługowy stoi PRZED zakresem: mówi, o jakiej części firmy
+            w ogóle jest ta strona, a dopiero potem o jakich jej obiektach. */}
+        <ServiceToggle value={service} onChange={setService} />
+
         <Select
           value={scope}
           onValueChange={(v) => setScope(v as AnalyticsScope)}

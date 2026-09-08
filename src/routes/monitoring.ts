@@ -14,8 +14,22 @@ import {
   getDwgJob,
 } from "../services/dwg-import.js";
 import { readFile } from "node:fs/promises";
+import { bodyLimit } from "hono/body-limit";
 
 const app = new Hono();
+
+/**
+ * Sufit dla ciał stanu projektu (autozapis designera i snapshoty): stan niesie
+ * zdjęcia/podkłady w base64, więc 2 MB z globalnego limitu (src/routes/index.ts)
+ * to za mało — ale bez sufitu jeden PUT zapisywał do bazy dowolną ilość danych.
+ * Globalny limiter wpuszcza te trasy do klasy 30 MB; ten jest jawnym
+ * ograniczeniem na miejscu, żeby przestawienie tamtego nie otworzyło ich bez limitu.
+ */
+const STATE_MAX_BYTES = 30 * 1024 * 1024;
+const stateBodyLimit = bodyLimit({
+  maxSize: STATE_MAX_BYTES,
+  onError: (c) => c.json({ success: false, error: "Stan projektu jest za duży (limit 30 MB)" }, 413),
+});
 
 // Podsumowanie stanu projektu do listy (bez odsyłania pełnego JSON-a)
 function withCounts(p: MonitoringProject) {

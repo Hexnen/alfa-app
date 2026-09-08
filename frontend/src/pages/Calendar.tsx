@@ -26,7 +26,7 @@ import type {
   EventInput,
   EventMountArg,
 } from "@fullcalendar/core";
-import type { EventResizeDoneArg } from "@fullcalendar/interaction";
+import type { EventReceiveArg, EventResizeDoneArg } from "@fullcalendar/interaction";
 import {
   Activity,
   AlertCircle,
@@ -59,6 +59,7 @@ import {
   Loader2,
   MapPin,
   MousePointerClick,
+  Paperclip,
   Pencil,
   Plus,
   RefreshCw,
@@ -104,6 +105,8 @@ import {
   type CalendarSeriesScope,
   type CompanyTravel,
   type Technician,
+  type WeatherBrief,
+  WEATHER_BATCH_MAX,
 } from "@/lib/api";
 import {
   ACTIVITY_ACTION_META,
@@ -134,6 +137,7 @@ import {
   fmtShort,
   fmtTimestamp,
   parseLocal,
+  pluralPl,
   techShort,
   timestampDayKey,
   toDateStr,
@@ -158,6 +162,7 @@ import {
   RealizationMark,
 } from "@/components/CalendarEventBadges";
 import { NotesBadge } from "@/components/CalendarEventNotes";
+import { WeatherMark, WeatherPreviewRow } from "@/components/CalendarWeather";
 import { FilterSets } from "@/components/calendar/FilterSets";
 import { RoutePlanner } from "@/components/calendar/RoutePlanner";
 import { Tooltip, applyTip, blockTooltips, hideTooltip, tip } from "@/components/ui/tooltip";
@@ -346,8 +351,54 @@ const isFitViewport = () =>
 const typeColor = (t: CalendarEventType) =>
   `hsl(var(${EVENT_TYPE_META[t]?.cssVar ?? "--cal-biuro"}))`;
 
+// --- Pogoda ---------------------------------------------------------------
+// Okno prognozy Open-Meteo używane przez backend: 2 dni wstecz, 15 dni w przód.
+const WEATHER_PAST_DAYS = 2;
+const WEATHER_FUTURE_DAYS = 15;
+
+/** Data przesunięta o `days` dni od `base`, jako "YYYY-MM-DD" (czas lokalny). */
+const shiftedDay = (base: Date, days: number): string => {
+  const d = new Date(base.getFullYear(), base.getMonth(), base.getDate() + days);
+  return toDateStr(d);
+};
+
+/** Czy dzień startu wydarzenia mieści się w oknie prognozy (poza nim backend zwraca null). */
+function inWeatherWindow(startAt: string, today: Date): boolean {
+  const day = startAt.slice(0, 10);
+  return day >= shiftedDay(today, -WEATHER_PAST_DAYS) && day <= shiftedDay(today, WEATHER_FUTURE_DAYS);
+}
+
+/** Wydarzenia, dla których w ogóle warto pytać o pogodę (urlop nigdy jej nie ma). */
+const weatherApplies = (ev: CalendarEvent, today: Date): boolean =>
+  ev.type !== "urlop" && !ev.deletedAt && inWeatherWindow(ev.startAt, today);
+
+/**
+ * Sygnatura wydarzenia dla pogody: wszystko, co wpływa na prognozę (termin + miejsce).
+ * Klucz musi być sygnaturą, a nie samym id — po przeniesieniu wydarzenia, zmianie
+ * godzin, adresu albo obiektu stary brief opisuje NIEISTNIEJĄCY już termin i miejsce.
+ */
+const weatherSig = (ev: CalendarEvent): string =>
+  `${ev.id}|${ev.startAt}|${ev.endAt}|${ev.allDay}|${ev.location ?? ""}|${ev.objectId ?? ""}`;
+
+/** Ile razy ponawiamy batch dla tej samej sygnatury, zanim odpuścimy (offline itp.). */
+const WEATHER_MAX_TRIES = 3;
+/** Odstęp ponowienia po nieudanej próbie (jeden timer na cały kalendarz). */
+const WEATHER_RETRY_MS = 60_000;
+
+/** Wpis rejestru zapytań o pogodę — per wydarzenie. */
+interface WeatherAsk {
+  /** Sygnatura, dla której pytaliśmy; jej zmiana unieważnia brief. */
+  sig: string;
+  /** Ile razy poszło zapytanie dla tej sygnatury. */
+  tries: number;
+  /** Backend dał ostateczną odpowiedź (brief albo trwały brak) — nie pytamy więcej. */
+  settled: boolean;
+  /** Zapytanie w locie — nie dublujemy go przy kolejnym przeliczeniu listy. */
+  inFlight: boolean;
+}
+
 /** Mapowanie CalendarEvent → EventInput FullCalendar. */
-function toFcEvent(ev: CalendarEvent, now: Date): EventInput {
+function toFcEvent(ev: CalendarEvent, now: Date, wx?: WeatherBrief | null): EventInput {
   return {
     id: String(ev.id),
     title: ev.title,
@@ -364,7 +415,9 @@ function toFcEvent(ev: CalendarEvent, now: Date): EventInput {
     // decyduje globalne `editable` (uprawnienie edit), per-event true by je obeszło.
     // Klucz musi być NIEOBECNY: FullCalendar przepuszcza `editable: undefined` przez Boolean() → false.
     ...(ev.deletedAt ? { editable: false } : {}),
-    extendedProps: { ev },
+    // `wx` w danych zdarzenia (nie w domknięciu): pogoda dolatuje po wydarzeniach,
+    // a FullCalendar odświeża treść kafelka dopiero, gdy zmienią się jego dane.
+    extendedProps: { ev, wx: wx ?? null },
   };
 }
 
@@ -451,12 +504,16 @@ function renderEventContent(arg: EventContentArg) {
     ...(protoKind ? { "data-protocol": protoKind } : {}),
     ...(realKind ? { "data-realization": realKind } : {}),
   };
+  // Pogoda przychodzi osobnym batchem — siedzi w danych zdarzenia, więc kafelek
+  // odświeża się sam, gdy prognoza dojedzie (FullCalendar recyklinguje DOM).
+  const wx = (arg.event.extendedProps.wx as WeatherBrief | null | undefined) ?? null;
   const marks = ev ? (
     <>
       <BillingMark billing={ev.billing} className="cal-ev-mark" />
       <ProtocolMark event={ev} className="cal-ev-mark" />
       <QuoteMark event={ev} className="cal-ev-mark" />
       <RealizationMark event={ev} className="cal-ev-mark" />
+      <WeatherMark brief={wx} compact className="cal-ev-weather" />
     </>
   ) : null;
 
@@ -470,6 +527,7 @@ function renderEventContent(arg: EventContentArg) {
         {sub && <span className="cal-list-sub">{sub}</span>}
         {ev && (
           <span className="cal-list-badges">
+            <WeatherMark brief={wx} className="cal-list-weather" />
             <BillingBadge billing={ev.billing} compact />
             <ProtocolBadge event={ev} compact />
             <QuoteBadge event={ev} compact />
@@ -753,6 +811,135 @@ export function Calendar() {
     loadEvents();
   }, [loadEvents]);
 
+  // --- Pogoda dla widocznych wydarzeń ---
+  // Jeden batch na porcję nowych id (nie n zapytań na n kafelków). Kalendarz
+  // renderuje się bez czekania — błąd batcha znaczy tylko „brak znaczników”.
+  const [weather, setWeather] = useState<Record<number, WeatherBrief | null>>({});
+  /**
+   * Rejestr zapytań: id → { sygnatura, próby }. Kluczem stanu jest SYGNATURA, nie id —
+   * po przesunięciu wydarzenia pytamy o nie ponownie, a stary brief znika od razu
+   * (żeby nowy termin nie dostał pogody starego).
+   */
+  const weatherAskedRef = useRef<Map<number, WeatherAsk>>(new Map());
+  /** Tik ponowienia — jeden wspólny timer, bez pętli (limit `WEATHER_MAX_TRIES` na sygnaturę). */
+  const [weatherRetryTick, setWeatherRetryTick] = useState(0);
+  const weatherTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleWeatherRetry = useCallback(() => {
+    if (weatherTimerRef.current != null) return;
+    weatherTimerRef.current = setTimeout(() => {
+      weatherTimerRef.current = null;
+      setWeatherRetryTick((n) => n + 1);
+    }, WEATHER_RETRY_MS);
+  }, []);
+  useEffect(
+    () => () => {
+      if (weatherTimerRef.current != null) clearTimeout(weatherTimerRef.current);
+      weatherTimerRef.current = null;
+    },
+    []
+  );
+
+  useEffect(() => {
+    const today = new Date();
+    const asked = weatherAskedRef.current;
+    const alive = new Set<number>();
+    const ids: number[] = [];
+    /** Wpisy w `weather`, które przestały opisywać swoje wydarzenie — do skasowania. */
+    const stale: number[] = [];
+
+    for (const e of allEvents) {
+      alive.add(e.id);
+      // Urlop / usunięte / poza oknem prognozy — pogody nie ma i mieć nie będzie.
+      if (!weatherApplies(e, today)) {
+        if (asked.delete(e.id)) stale.push(e.id);
+        continue;
+      }
+      const sig = weatherSig(e);
+      const cur = asked.get(e.id);
+      if (!cur || cur.sig !== sig) {
+        // Nowe wydarzenie albo zmieniony termin/miejsce — pytamy od nowa.
+        asked.set(e.id, { sig, tries: 0, settled: false, inFlight: false });
+        if (cur) stale.push(e.id);
+        ids.push(e.id);
+      } else if (!cur.settled && !cur.inFlight && cur.tries < WEATHER_MAX_TRIES) {
+        ids.push(e.id); // poprzednia próba nie dała ostatecznej odpowiedzi
+      }
+    }
+    // Wydarzenia, których nie ma już na liście (usunięte, poza zakresem/filtrem).
+    for (const id of [...asked.keys()]) {
+      if (!alive.has(id)) {
+        asked.delete(id);
+        stale.push(id);
+      }
+    }
+
+    if (stale.length) {
+      setWeather((prev) => {
+        let changed = false;
+        const next = { ...prev };
+        for (const id of stale) {
+          if (id in next) {
+            delete next[id];
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+    }
+    if (!ids.length) return;
+
+    const chunks: number[][] = [];
+    for (let i = 0; i < ids.length; i += WEATHER_BATCH_MAX) {
+      chunks.push(ids.slice(i, i + WEATHER_BATCH_MAX));
+    }
+    for (const chunk of chunks) {
+      // Sygnatury z chwili wysyłki: odpowiedź na nieaktualną sygnaturę (wydarzenie
+      // przeniesione w międzyczasie) jest w całości odrzucana.
+      const sent = new Map<number, string>();
+      for (const id of chunk) {
+        const cur = asked.get(id);
+        if (!cur) continue;
+        cur.inFlight = true;
+        cur.tries += 1;
+        sent.set(id, cur.sig);
+      }
+      calendarApi
+        .weather(chunk)
+        .then((res) => {
+          const items = res.data?.items ?? {};
+          // Starszy backend nie zna `retry` — wtedy każda odpowiedź jest ostateczna.
+          const retry = new Set(res.data?.retry ?? []);
+          for (const [id, sig] of sent) {
+            const cur = asked.get(id);
+            if (!cur || cur.sig !== sig) continue;
+            cur.inFlight = false;
+            cur.settled = !retry.has(id);
+          }
+          setWeather((prev) => {
+            let changed = false;
+            const next = { ...prev };
+            for (const [key, brief] of Object.entries(items)) {
+              const id = Number(key);
+              if (retry.has(id)) continue; // wynik tymczasowy — nie zapisujemy „braku”
+              if (asked.get(id)?.sig !== sent.get(id)) continue; // odpowiedź na stary termin
+              next[id] = brief;
+              changed = true;
+            }
+            return changed ? next : prev;
+          });
+          if (retry.size) scheduleWeatherRetry();
+        })
+        .catch(() => {
+          // Endpointu jeszcze nie ma / offline — spróbujemy jeszcze raz (limit prób pilnuje `tries`).
+          for (const [id, sig] of sent) {
+            const cur = asked.get(id);
+            if (cur && cur.sig === sig) cur.inFlight = false;
+          }
+          scheduleWeatherRetry();
+        });
+    }
+  }, [allEvents, weatherRetryTick, scheduleWeatherRetry]);
+
   // Błąd ładowania → toast z „Ponów” (raz per błąd).
   const lastErrRef = useRef<string | null>(null);
   useEffect(() => {
@@ -772,7 +959,7 @@ export function Calendar() {
   // Widmo propozycji asystenta (karta / hover slotu): event tła + klasy konfliktów na siatce.
   const [assistantPreview, setAssistantPreview] = useState<AssistantPreview>(null);
   const fcEvents = useMemo(() => {
-    const base = events.map((e) => toFcEvent(e, now));
+    const base = events.map((e) => toFcEvent(e, now, weather[e.id]));
     const g = assistantPreview;
     if (!g) return base;
     const conflict = new Set(g.conflictIds ?? []);
@@ -821,7 +1008,7 @@ export function Calendar() {
       extendedProps: { ghost: true },
     });
     return base;
-  }, [events, now, assistantPreview, view]);
+  }, [events, now, assistantPreview, view, weather]);
   const visibleCount = useMemo(() => events.filter((e) => !e.deletedAt).length, [events]);
   /** Ile wydarzeń chowa 5-dniowy tydzień (start w sobotę/niedzielę). */
   const weekendHidden = useMemo(() => {
@@ -1412,8 +1599,11 @@ export function Calendar() {
     );
   };
 
-  /** Drag&drop / resize → PATCH move. Przy błędzie cofamy zmianę w siatce. */
-  const handleMove = async (arg: EventDropArg | EventResizeDoneArg) => {
+  /**
+   * Drag&drop / resize / awaryjne `eventReceive` → PATCH move. Przy błędzie cofamy zmianę
+   * w siatce i przywracamy poprzedni termin na liście.
+   */
+  const handleMove = async (arg: EventDropArg | EventResizeDoneArg | EventReceiveArg) => {
     const ev = freshEvent(arg.event);
     if (!ev || !editable) {
       arg.revert();
@@ -1432,16 +1622,19 @@ export function Calendar() {
       else end.setHours(end.getHours() + 1);
     }
     setPreview(null);
+    const startAt = allDay ? toDateStr(start) : toDateTimeStr(start);
+    const endAt = allDay ? toDateStr(end) : toDateTimeStr(end);
+    // Optymistycznie przepisujemy termin od razu: siatka już pokazuje wydarzenie w nowym
+    // miejscu, a bez tego znacznik pogody wisiałby ze starym terminem aż do `loadEvents`
+    // (zmiana sygnatury kasuje stary brief i uruchamia zapytanie o nowy).
+    setAllEvents((prev) => prev.map((e) => (e.id === ev.id ? { ...e, startAt, endAt, allDay } : e)));
     try {
-      await calendarApi.move(ev.id, {
-        startAt: allDay ? toDateStr(start) : toDateTimeStr(start),
-        endAt: allDay ? toDateStr(end) : toDateTimeStr(end),
-        allDay,
-      });
-      announce(`Przeniesiono „${ev.title}” na ${fmtShort(allDay ? toDateStr(start) : toDateTimeStr(start), allDay)}`);
+      await calendarApi.move(ev.id, { startAt, endAt, allDay });
+      announce(`Przeniesiono „${ev.title}” na ${fmtShort(startAt, allDay)}`);
       await loadEvents();
     } catch (err) {
       arg.revert();
+      setAllEvents((prev) => prev.map((e) => (e.id === ev.id ? ev : e)));
       notifyError(err, "Nie udało się przesunąć wydarzenia");
     }
   };
@@ -1902,6 +2095,7 @@ export function Calendar() {
       open={dialogOpen}
       mode={dialogMode}
       event={dialogEvent}
+      weather={dialogEvent ? weather[dialogEvent.id] : null}
       prefill={dialogPrefill}
       onClose={() => {
         assistantSavedRef.current = null;
@@ -2237,6 +2431,7 @@ export function Calendar() {
               {!loadedOnce && <CalendarSkeleton columns={4} />}
               <CalendarBoard
                 events={events}
+                weather={weather}
                 groupBy={boardGroup}
                 editable={editable}
                 loading={loading}
@@ -2325,6 +2520,16 @@ export function Calendar() {
                 select={handleSelect}
                 eventDrop={handleMove}
                 eventResize={handleMove}
+                // FullCalendar porównuje ViewContext upuszczenia z kontekstem komponentu, a ten
+                // dostaje NOWĄ tożsamość przy każdym przeliczeniu opcji (czyli przy każdym
+                // renderze tej strony — handlery to świeże domknięcia). Gdy cokolwiek przerysuje
+                // kalendarz w TRAKCIE przeciągania (pasek dojazdu spod kursora, batch pogody),
+                // `receivingContext !== initialContext` i zamiast `eventDrop` lecą
+                // `eventRemove` + `eventAdd`/`eventReceive`: kafelek zostaje w nowym miejscu,
+                // ale PATCH /move nigdy nie wychodzi i po odświeżeniu termin wraca stary.
+                // Aplikacja nie ma zewnętrznych źródeł przeciągania, więc `eventReceive` może
+                // znaczyć wyłącznie „to było zwykłe przeniesienie” — obsługujemy je tak samo.
+                eventReceive={handleMove}
                 datesSet={handleDatesSet}
                 noEventsContent={() => (
                   <EmptyState
@@ -2422,6 +2627,7 @@ export function Calendar() {
             preview.ev.objectId ? () => navigate(`/objects/${preview.ev.objectId}`) : undefined
           }
           onStatus={(s) => void setStatus(preview.ev, s)}
+          weather={weather[preview.ev.id]}
         />
       )}
 
@@ -2767,6 +2973,7 @@ function EventPreview({
   onEdit,
   onGoToObject,
   onStatus,
+  weather,
 }: {
   state: PreviewState;
   editable: boolean;
@@ -2774,6 +2981,8 @@ function EventPreview({
   onEdit: () => void;
   onGoToObject?: () => void;
   onStatus: (s: CalendarEventStatus) => void;
+  /** Skrót pogody z batcha kalendarza (ten sam, co znacznik na kafelku); brak → bez wiersza. */
+  weather?: WeatherBrief | null;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{ left: number; top: number }>({ left: state.rect.left, top: state.rect.top });
@@ -2810,6 +3019,11 @@ function EventPreview({
     };
   }, [ev.id, inlineLast, notesCount]);
   const lastNote = inlineLast ?? (fetchedLast?.id === ev.id && notesCount ? fetchedLast.note : null);
+  // Notatka może być SAMYMI załącznikami (pusty tekst) — wtedy zamiast pustej
+  // linii „autor:" pokazujemy, ile plików doszło.
+  const lastNoteText = (lastNote?.text ?? "").replace(/\s+/g, " ").trim();
+  const lastNoteFiles = lastNote?.attachments?.length ?? 0;
+  const lastNoteLine = lastNoteText || (lastNoteFiles ? pluralPl(lastNoteFiles, "załącznik", "załączniki", "załączników") : "");
 
   useLayoutEffect(() => {
     const el = ref.current;
@@ -2912,6 +3126,8 @@ function EventPreview({
             </dd>
           </div>
         )}
+        {/* Pogoda: ten sam brief, co znacznik na kafelku — bez prognozy wiersza nie ma. */}
+        <WeatherPreviewRow brief={weather} />
         {ev.realization && (
           <div className="flex gap-2" data-testid="preview-realization">
             <dt className="w-4 shrink-0 text-muted-foreground"><Receipt className="h-3.5 w-3.5" aria-label="Realizacja" /></dt>
@@ -2944,12 +3160,13 @@ function EventPreview({
             <dd className="line-clamp-2 text-muted-foreground">{ev.description}</dd>
           </div>
         )}
-        {lastNote && (
+        {lastNote && lastNoteLine && (
           <div className="flex gap-2" data-testid="preview-last-note">
             <dt className="w-4 shrink-0 text-amber-600 dark:text-amber-400"><StickyNote className="h-3.5 w-3.5" aria-label="Ostatnia notatka" /></dt>
-            <dd className="min-w-0 truncate" {...tip(lastNote.text.replace(/\s+/g, " "))}>
+            <dd className="min-w-0 truncate" {...tip(lastNoteLine)}>
               <span className="text-muted-foreground">{lastNote.userLabel || (lastNote.source === "assistant" ? "Asystent" : "—")}:</span>{" "}
-              {lastNote.text.replace(/\s+/g, " ")}
+              {!lastNoteText && <Paperclip className="mr-0.5 inline h-3 w-3 align-[-1px] text-muted-foreground" aria-hidden />}
+              {lastNoteLine}
             </dd>
           </div>
         )}

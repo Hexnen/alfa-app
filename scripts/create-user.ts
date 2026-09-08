@@ -31,9 +31,10 @@ if (existing) {
   process.exit(0);
 }
 
+const passwordHash = await hashPassword(password);
 const row = db
   .insert(users)
-  .values({ email: login, passwordHash: hashPassword(password), displayName: login, role })
+  .values({ email: login, passwordHash, displayName: login, role })
   .returning()
   .get();
 console.log(`✅ Utworzono konto "${login}" (#${row.id}, role=${role}).`);

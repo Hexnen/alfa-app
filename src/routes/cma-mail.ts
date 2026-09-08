@@ -1,5 +1,6 @@
 import { Hono } from "hono";
-import { desc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, like, or, sql } from "drizzle-orm";
+import type { SQL } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
 import type { ApiResponse } from "../types/index.js";
 import {
@@ -244,22 +245,98 @@ app.post("/check-now", async (c) => {
   }
 });
 
+/** Dozwolone wartości kolumn `status` i `direction` (enumy ze schematu cma_mail_log). */
+const LOG_STATUSES = ["ok", "skipped", "error"] as const;
+const LOG_DIRECTIONS = ["import", "send"] as const;
+type LogStatus = (typeof LOG_STATUSES)[number];
+type LogDirection = (typeof LOG_DIRECTIONS)[number];
+
+/**
+ * Sortowanie historii poczty. `status` i `direction` układamy CASE-em, bo kolejność
+ * alfabetyczna wartości z bazy ("error", "ok", "skipped") nic użytkownikowi nie mówi —
+ * status ma naturalną kolejność wagi (udało się → pominięto → błąd), a kierunek
+ * kolejność przepływu (najpierw import, potem wysyłka). Ten sam wzorzec, co CASE
+ * na statusie umowy w routes/contracts.ts.
+ */
+const LOG_SORT_COLUMNS = {
+  createdAt: sql`${schema.cmaMailLog.createdAt}`,
+  status: sql`case ${schema.cmaMailLog.status} when 'ok' then 0 when 'skipped' then 1 when 'error' then 2 else 3 end`,
+  direction: sql`case ${schema.cmaMailLog.direction} when 'import' then 0 when 'send' then 1 else 2 end`,
+  subject: sql`lower(coalesce(${schema.cmaMailLog.subject}, ''))`,
+} as const;
+
+export type CmaMailLogSortKey = keyof typeof LOG_SORT_COLUMNS;
+
+function isLogSortKey(v: string): v is CmaMailLogSortKey {
+  return Object.prototype.hasOwnProperty.call(LOG_SORT_COLUMNS, v);
+}
+
 // Mail operations log (paginated, newest first)
 app.get("/log", async (c) => {
-  const page = parseInt(c.req.query("page") || "1");
-  const pageSize = parseInt(c.req.query("pageSize") || "20");
+  const page = Math.max(1, parseInt(c.req.query("page") || "1") || 1);
+  const pageSize = Math.min(200, Math.max(1, parseInt(c.req.query("pageSize") || "20") || 20));
   const offset = (page - 1) * pageSize;
+
+  const search = c.req.query("search");
+  const statusRaw = c.req.query("status");
+  const status: LogStatus | undefined =
+    statusRaw && (LOG_STATUSES as readonly string[]).includes(statusRaw)
+      ? (statusRaw as LogStatus)
+      : undefined;
+  const directionRaw = c.req.query("direction");
+  const directionFilter: LogDirection | undefined =
+    directionRaw && (LOG_DIRECTIONS as readonly string[]).includes(directionRaw)
+      ? (directionRaw as LogDirection)
+      : undefined;
+  const sortRaw = c.req.query("sort") || "createdAt";
+  const sort: CmaMailLogSortKey = isLogSortKey(sortRaw) ? sortRaw : "createdAt";
+  // Domyślnie NAJNOWSZE wpisy na górze — brak parametru znaczy tu „desc", a nie „asc".
+  const dir = c.req.query("dir") === "asc" ? "asc" : "desc";
+
+  // Warunki do tablicy i jedno `and(...)`: kolejne `.where()` w drizzle nadpisuje
+  // poprzednie, więc status razem z szukajką filtrowałby wyłącznie po ostatnim.
+  const conditions: SQL[] = [];
+  if (search) {
+    conditions.push(
+      or(
+        like(schema.cmaMailLog.subject, `%${search}%`),
+        like(schema.cmaMailLog.fileName, `%${search}%`)
+      )!
+    );
+  }
+  if (status !== undefined) conditions.push(eq(schema.cmaMailLog.status, status));
+  if (directionFilter !== undefined) {
+    conditions.push(eq(schema.cmaMailLog.direction, directionFilter));
+  }
+  const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+
+  // Wpisy bez tematu (np. log wysyłki) na koniec listy w OBU kierunkach — inaczej
+  // sortowanie po temacie zaczynałoby się od pustych komórek.
+  const NULLS_LAST: Partial<Record<CmaMailLogSortKey, SQL>> = {
+    subject: sql`case when ${schema.cmaMailLog.subject} is null or ${schema.cmaMailLog.subject} = '' then 1 else 0 end`,
+  };
+  const column = LOG_SORT_COLUMNS[sort];
+  const orderDir = dir === "desc" ? desc : asc;
+  // Tie-break po id malejąco: id rośnie z każdym wpisem, więc przy tej samej sekundzie
+  // (log potrafi zapisać kilka wierszy naraz) najnowszy jest na górze — tak jak dotąd.
+  const idTieBreak = desc(schema.cmaMailLog.id);
+  const orderBy = NULLS_LAST[sort]
+    ? [NULLS_LAST[sort]!, orderDir(column), idTieBreak]
+    : [orderDir(column), idTieBreak];
 
   const results = await db
     .select()
     .from(schema.cmaMailLog)
-    .orderBy(desc(schema.cmaMailLog.createdAt), desc(schema.cmaMailLog.id))
+    .where(whereClause)
+    .orderBy(...orderBy)
     .limit(pageSize)
     .offset(offset);
 
+  // Licznik MUSI respektować TE SAME filtry — inaczej paginacja pokazuje złe „total".
   const countResult = await db
     .select({ count: sql<number>`count(*)` })
-    .from(schema.cmaMailLog);
+    .from(schema.cmaMailLog)
+    .where(whereClause);
   const total = countResult[0].count;
 
   return c.json({
@@ -269,6 +346,8 @@ app.get("/log", async (c) => {
     page,
     pageSize,
     totalPages: Math.ceil(total / pageSize),
+    sort,
+    dir,
   });
 });
 

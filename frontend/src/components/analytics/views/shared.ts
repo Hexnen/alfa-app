@@ -16,6 +16,7 @@ import { pct, plnFull } from "@/components/analytics";
 import {
   errStatus,
   type AnalyticsScope,
+  type AnalyticsService,
   type CostWindow,
   type PersonnelInfo,
 } from "@/lib/api";
@@ -39,15 +40,22 @@ export type LoadState = "loading" | "ready" | "forbidden" | "error";
  * a przy okazji odpada jeden render na każdą zmianę filtra.
  */
 export function useAnalyticsResource<T>(
-  load: (scope: AnalyticsScope, costWindow: CostWindow) => Promise<{ data?: T }>,
+  load: (
+    scope: AnalyticsScope,
+    costWindow: CostWindow,
+    service: AnalyticsService
+  ) => Promise<{ data?: T }>,
   scope: AnalyticsScope,
   costWindow: CostWindow,
+  service: AnalyticsService,
   reloadKey: number
 ): { data: T | null; state: LoadState } {
   // Okno kosztu osobowego jest częścią klucza żądania, a nie tylko parametrem:
   // po jego zmianie wracają INNE liczby, więc odpowiedź na poprzednie okno nie
   // może podmienić danych bieżącego (i widok ma wtedy pokazać „ładowanie”).
-  const key = `${scope}|${costWindow}|${reloadKey}`;
+  // Przekrój usługowy też jest częścią klucza — po jego zmianie wracają inne
+  // liczby, więc odpowiedź na poprzedni przekrój nie może podmienić bieżącego.
+  const key = `${scope}|${costWindow}|${service}|${reloadKey}`;
   const [result, setResult] = useState<{
     key: string;
     data: T | null;
@@ -56,7 +64,7 @@ export function useAnalyticsResource<T>(
 
   useEffect(() => {
     let alive = true;
-    load(scope, costWindow)
+    load(scope, costWindow, service)
       .then((res) => {
         if (alive) setResult({ key, data: res.data ?? null, state: "ready" });
       })
@@ -71,7 +79,7 @@ export function useAnalyticsResource<T>(
     return () => {
       alive = false;
     };
-  }, [load, scope, costWindow, key]);
+  }, [load, scope, costWindow, service, key]);
 
   if (result?.key !== key) return { data: null, state: "loading" };
   return { data: result.data, state: result.state };
@@ -321,6 +329,8 @@ export interface AnalyticsViewProps {
   scope: AnalyticsScope;
   /** Okno uśredniania kosztu osobowego (1 / 3 / 12 mies.) z paska narzędzi. */
   costWindow: CostWindow;
+  /** Linia usługowa z paska narzędzi: ZDV / OFI / oba. */
+  service: AnalyticsService;
   search: string;
   reloadKey: number;
 }

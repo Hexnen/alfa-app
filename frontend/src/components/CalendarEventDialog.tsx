@@ -4,6 +4,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type DragEvent as ReactDragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from "react";
@@ -19,12 +20,14 @@ import {
   ChevronRight,
   CircleCheck,
   Clock,
+  CloudSun,
   ExternalLink,
   FileCheck2,
   FileText,
   History,
   Loader2,
   MapPin,
+  Paperclip,
   Pencil,
   Receipt,
   Repeat,
@@ -86,6 +89,7 @@ import {
   type Realization,
   type Technician,
   type TechnicianAvailability,
+  type WeatherBrief,
 } from "@/lib/api";
 import {
   ACTIVITY_FIELD_LABELS,
@@ -117,6 +121,7 @@ import {
   fmtTimestamp,
   notesLabel,
   parseLocal,
+  pluralPl,
   protocolBadgeClass,
   protocolBadgeKind,
   protocolHref,
@@ -136,7 +141,8 @@ import {
 } from "@/lib/calendar-labels";
 import { travelLine, travelSourceLabel, useTravel } from "@/lib/travel";
 import { cn } from "@/lib/utils";
-import { CalendarEventNotes } from "@/components/CalendarEventNotes";
+import { CalendarEventNotes, type CalendarEventNotesHandle } from "@/components/CalendarEventNotes";
+import { WeatherSection } from "@/components/CalendarWeather";
 import { tip } from "@/components/ui/tooltip";
 
 export type CalendarDialogMode = "create" | "edit" | "view";
@@ -161,6 +167,11 @@ interface CalendarEventDialogProps {
   mode: CalendarDialogMode;
   /** Wydarzenie do edycji/podglądu (null przy tworzeniu). */
   event?: CalendarEvent | null;
+  /**
+   * Skrót pogody z listy kalendarza — sekcja „Pogoda” pokazuje go od razu,
+   * zanim dociągnie pełną prognozę. Bez niego sekcja i tak działa (dociąga sama).
+   */
+  weather?: WeatherBrief | null;
   /** Wstępne wartości przy tworzeniu (zakres z kliknięcia w siatkę, obiekt). */
   prefill?: CalendarEventPrefill | null;
   /** Wywołane po zapisie (create/update) — rodzic odświeża dane. */
@@ -231,6 +242,20 @@ interface FormState {
 
 type FieldKey = "title" | "start" | "end" | "technicians" | "recUntil" | "recCount";
 type FieldErrors = Partial<Record<FieldKey, string>>;
+
+/**
+ * Jedno pytanie na całą „niezapisaną pracę”: szkic notatki i/lub zmiany w formularzu.
+ * `intent` mówi, co użytkownik chciał zrobić, gdy guard wszedł mu w drogę.
+ */
+interface DraftPrompt {
+  intent: "save" | "close" | "status";
+  /** Docelowy status dla `intent === "status"` (szybkie akcje w podglądzie). */
+  status?: CalendarEventStatus;
+  /** Podsumowanie szkicu notatki (null = szkicu nie ma, pytamy tylko o zmiany formularza). */
+  note: { text: boolean; files: number } | null;
+  /** Czy formularz ma niezapisane zmiany (istotne tylko przy zamykaniu). */
+  dirty: boolean;
+}
 
 /** Domyślny czas trwania nowego wydarzenia (minuty). */
 const DEFAULT_DURATION_MIN = 180;
@@ -411,6 +436,7 @@ function Section({
   onToggle,
   children,
   id,
+  keepMounted,
 }: {
   icon: typeof Clock;
   title: string;
@@ -420,6 +446,12 @@ function Section({
   onToggle?: () => void;
   children: ReactNode;
   id: string;
+  /**
+   * Zwinięcie tylko ukrywa treść (`hidden`) zamiast ją odmontowywać — sekcja notatek
+   * musi przeżyć zwinięcie ze szkicem (tekst, wybrane pliki) i zachować `ref` dla
+   * guardów zapisu/zamknięcia.
+   */
+  keepMounted?: boolean;
 }) {
   const collapsible = typeof open === "boolean" && !!onToggle;
   const head = (
@@ -456,8 +488,8 @@ function Section({
           {head}
         </div>
       )}
-      {(!collapsible || open) && (
-        <div id={`${id}-body`} className="mt-2 space-y-3">
+      {(!collapsible || open || keepMounted) && (
+        <div id={`${id}-body`} hidden={collapsible && !open} className="mt-2 space-y-3">
           {children}
         </div>
       )}
@@ -1587,6 +1619,7 @@ export function CalendarEventDialog({
   onClose,
   mode,
   event,
+  weather,
   prefill,
   onSaved,
   onDeleted,
@@ -1656,9 +1689,83 @@ export function CalendarEventDialog({
   const toggleSec = (k: keyof typeof openSec) =>
     setOpenSec((s) => ({ ...s, [k]: !s[k] }));
 
+  // --- Drag & drop plików na całe okno → załączniki w kompozytorze notatki ---
+  const notesRef = useRef<CalendarEventNotesHandle>(null);
+  /** Te same warunki, na jakich kompozytor notatek dostaje `canEdit`. */
+  const dropEnabled = !!event && !event.deletedAt && (isEdit || (readOnly && !!onEdit));
+  const dragDepth = useRef(0);
+  const [dragOver, setDragOver] = useState(false);
+  /** Pliki z dropu czekają, aż sekcja notatek się rozwinie i komponent zamontuje. */
+  const [droppedFiles, setDroppedFiles] = useState<File[] | null>(null);
+  const hasFiles = (e: ReactDragEvent) => Array.from(e.dataTransfer?.types ?? []).includes("Files");
+  const onDragEnter = (e: ReactDragEvent) => {
+    if (!dropEnabled || !hasFiles(e)) return;
+    e.preventDefault();
+    dragDepth.current += 1;
+    if (!dragOver) setDragOver(true);
+  };
+  const onDragOver = (e: ReactDragEvent) => {
+    if (!dropEnabled || !hasFiles(e)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  };
+  const onDragLeave = (e: ReactDragEvent) => {
+    if (!dropEnabled || !hasFiles(e)) return;
+    dragDepth.current = Math.max(0, dragDepth.current - 1);
+    if (dragDepth.current === 0) setDragOver(false);
+  };
+  const onDrop = (e: ReactDragEvent) => {
+    if (!dropEnabled) return;
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    dragDepth.current = 0;
+    setDragOver(false);
+    const files = Array.from(e.dataTransfer.files ?? []);
+    if (files.length === 0) return;
+    setOpenSec((s) => (s.journal ? s : { ...s, journal: true }));
+    setDroppedFiles(files);
+  };
+  useEffect(() => {
+    if (!droppedFiles) return;
+    const handle = notesRef.current;
+    if (!handle) return; // sekcja jeszcze zwinięta — efekt odpali się po jej rozwinięciu
+    handle.addFiles(droppedFiles);
+    setDroppedFiles(null);
+    document.getElementById("sec-journal-body")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [droppedFiles, openSec.journal]);
+  useEffect(() => {
+    if (!open) {
+      dragDepth.current = 0;
+      setDragOver(false);
+      setDroppedFiles(null);
+      setHasNoteDraft(false);
+    }
+  }, [open]);
+  const dropProps = dropEnabled ? { onDragEnter, onDragOver, onDragLeave, onDrop } : {};
+  const dropOverlay = dropEnabled && dragOver && (
+    <div
+      className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-lg border-2 border-dashed border-primary bg-background/85 backdrop-blur-[1px]"
+      data-testid="event-drop-overlay"
+      aria-hidden
+    >
+      <div className="flex flex-col items-center gap-2 text-center">
+        <span className="flex h-12 w-12 items-center justify-center rounded-full bg-primary/10 text-primary">
+          <Paperclip className="h-6 w-6" />
+        </span>
+        <p className="text-sm font-medium">Upuść pliki, aby dodać notatkę z załącznikiem</p>
+        <p className="text-xs text-muted-foreground">Obrazy, PDF, dokumenty — maks. 15 plików po 5 MB</p>
+      </div>
+    </div>
+  );
+
   const [scopeFor, setScopeFor] = useState<"save" | "delete" | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [confirmClose, setConfirmClose] = useState(false);
+  /** Pytanie o niewysłany szkic notatki i/lub niezapisany formularz (jedno na wszystkie przypadki). */
+  const [prompt, setPrompt] = useState<DraftPrompt | null>(null);
+  const [promptBusy, setPromptBusy] = useState(false);
+  /** Czy kompozytor notatek ma szkic — badge „szkic” przy zwiniętej sekcji. */
+  const [hasNoteDraft, setHasNoteDraft] = useState(false);
 
   const dirty = useMemo(
     () => !readOnly && (JSON.stringify(form) !== JSON.stringify(initialRef.current) || firstNote.trim() !== ""),
@@ -2060,23 +2167,56 @@ export function CalendarEventDialog({
     [form, isEdit, event, onSaved, onClose, firstNote]
   );
 
-  const handleSubmit = () => {
-    if (readOnly || saving) return;
-    const errs = validate();
-    setFieldErrors(errs);
-    const first = (Object.keys(errs) as FieldKey[])[0];
-    if (first) {
-      setError(null);
-      if (first === "recUntil" || first === "recCount")
-        setOpenSec((s) => ({ ...s, repeat: true }));
-      focusField(first);
-      return;
-    }
+  /** Właściwy zapis (po walidacji i po rozstrzygnięciu szkicu notatki). */
+  const continueSave = useCallback(() => {
     if (isEdit && event?.seriesId) {
       setScopeFor("save");
       return;
     }
     void doSave("this");
+  }, [isEdit, event, doSave]);
+
+  /** Walidacja + fokus na pierwszym błędnym polu. `true` = można zapisywać. */
+  const validateAndFocus = (): boolean => {
+    const errs = validate();
+    setFieldErrors(errs);
+    const first = (Object.keys(errs) as FieldKey[])[0];
+    if (!first) return true;
+    setError(null);
+    if (first === "recUntil" || first === "recCount") setOpenSec((s) => ({ ...s, repeat: true }));
+    focusField(first);
+    return false;
+  };
+
+  /** Rozwija sekcję notatek i przewija do niej (błąd wysyłki, żeby było widać komunikat). */
+  const revealJournal = () => {
+    setOpenSec((s) => (s.journal ? s : { ...s, journal: true }));
+    window.setTimeout(
+      () => document.getElementById("sec-journal-body")?.scrollIntoView({ block: "nearest", behavior: "smooth" }),
+      0
+    );
+  };
+
+  /**
+   * Guard niezapisanej pracy: szkic notatki (zapis/zamknięcie/szybki status) i — przy
+   * zamykaniu — zmiany w formularzu. `true` = pokazaliśmy pytanie, akcja wstrzymana.
+   */
+  const guardDraft = (intent: DraftPrompt["intent"], status?: CalendarEventStatus): boolean => {
+    const summary = notesRef.current?.draftSummary();
+    const note = summary && (summary.text || summary.files > 0) ? summary : null;
+    // Przy zapisie i szybkim statusie zmiany formularza i tak trafiają na serwer — pytamy tylko o notatkę.
+    const formDirty = intent === "close" && dirty;
+    if (!note && !formDirty) return false;
+    setPrompt({ intent, status, note, dirty: formDirty });
+    return true;
+  };
+
+  const handleSubmit = () => {
+    if (readOnly || saving) return;
+    if (!validateAndFocus()) return;
+    // Niewysłany szkic w kompozytorze notatki (tryb edycji; w „create” notatka idzie z formularzem).
+    if (guardDraft("save")) return;
+    continueSave();
   };
 
   const doDelete = useCallback(
@@ -2121,12 +2261,96 @@ export function CalendarEventDialog({
     }
   };
 
-  /** Zamknięcie z ochroną niezapisanych zmian. */
-  const requestClose = useCallback(() => {
+  /** Tryb podglądu: szybka akcja statusu przez guard (mogła czekać niewysłana notatka). */
+  const requestQuickStatus = (status: CalendarEventStatus) => {
+    if (!event || quickStatusBusy) return;
+    if (guardDraft("status", status)) return;
+    void quickStatus(status);
+  };
+
+  /** Zamknięcie z ochroną niezapisanych zmian i niewysłanego szkicu notatki. */
+  const requestClose = () => {
     if (saving) return;
-    if (dirty) setConfirmClose(true);
-    else onClose();
-  }, [dirty, saving, onClose]);
+    if (guardDraft("close")) return;
+    onClose();
+  };
+
+  /**
+   * Rozstrzygnięcie pytania: „send” wysyła szkic notatki i dopiero potem wykonuje pierwotną
+   * akcję; „discard” czyści szkic (a przy zamykaniu porzuca też zmiany formularza).
+   * Błąd wysyłki zostawia użytkownika w dialogu — komunikat pokazuje kompozytor.
+   */
+  const resolvePrompt = async (choice: "send" | "discard") => {
+    if (!prompt || promptBusy) return;
+    const { intent, status, note, dirty: formDirty } = prompt;
+    if (choice === "send" && note) {
+      setPromptBusy(true);
+      try {
+        await notesRef.current?.submitDraft();
+      } catch {
+        setPrompt(null);
+        setPromptBusy(false);
+        revealJournal();
+        return;
+      }
+      setPromptBusy(false);
+    } else if (choice === "discard" && note) {
+      notesRef.current?.discardDraft();
+    }
+    setPrompt(null);
+    if (intent === "save") {
+      continueSave();
+      return;
+    }
+    if (intent === "status") {
+      if (status) void quickStatus(status);
+      return;
+    }
+    // Zamknięcie: „Dodaj notatkę i zapisz” przy zmianach w formularzu zapisuje wydarzenie
+    // (dialog zamknie się po udanym zapisie); w pozostałych przypadkach po prostu zamykamy.
+    if (choice === "send" && formDirty) {
+      if (validateAndFocus()) continueSave();
+      return;
+    }
+    onClose();
+  };
+
+  // Ostatnie pytanie zostaje w refie, żeby napisy nie zmieniały się w trakcie animacji zamykania.
+  const lastPromptRef = useRef<DraftPrompt | null>(null);
+  if (prompt) lastPromptRef.current = prompt;
+  const shownPrompt = prompt ?? lastPromptRef.current;
+  const promptTexts = (() => {
+    const note = shownPrompt?.note ?? null;
+    if (!note) {
+      return {
+        title: "Odrzucić niezapisane zmiany?",
+        description: "Formularz ma zmiany, które nie zostały zapisane. Zamknięcie je utraci.",
+        cancel: "Wróć do edycji",
+        discard: "Odrzuć zmiany",
+        send: "",
+      };
+    }
+    const what = [note.text ? "tekst" : null, note.files ? pluralPl(note.files, "plik", "pliki", "plików") : null]
+      .filter(Boolean)
+      .join(", ");
+    const closing = shownPrompt?.intent === "close";
+    if (closing && shownPrompt?.dirty) {
+      return {
+        title: "Niezapisane zmiany i notatka",
+        description: `Masz niezapisane zmiany w wydarzeniu i niewysłaną notatkę${what ? ` (${what})` : ""}. Co zrobić?`,
+        cancel: "Anuluj",
+        discard: "Odrzuć wszystko",
+        send: "Dodaj notatkę i zapisz",
+      };
+    }
+    return {
+      title: "Niezapisana notatka",
+      description: `Masz niewysłaną notatkę${what ? ` (${what})` : ""}. Co zrobić?`,
+      cancel: "Anuluj",
+      discard: "Odrzuć notatkę",
+      send: closing ? "Dodaj notatkę i zamknij" : "Dodaj notatkę i zapisz",
+    };
+  })();
 
   const onKeyDown = (e: ReactKeyboardEvent<HTMLElement>) => {
     if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
@@ -2291,7 +2515,7 @@ export function CalendarEventDialog({
               size="sm"
               variant="outline"
               disabled={!!quickStatusBusy}
-              onClick={() => void quickStatus("confirmed")}
+              onClick={() => requestQuickStatus("confirmed")}
             >
               {quickStatusBusy === "confirmed" ? (
                 <Loader2 className="mr-1 h-4 w-4 animate-spin" />
@@ -2307,7 +2531,7 @@ export function CalendarEventDialog({
               size="sm"
               variant="outline"
               disabled={!!quickStatusBusy}
-              onClick={() => void quickStatus("done")}
+              onClick={() => requestQuickStatus("done")}
             >
               {quickStatusBusy === "done" ? (
                 <Loader2 className="mr-1 h-4 w-4 animate-spin" />
@@ -2353,6 +2577,19 @@ export function CalendarEventDialog({
               <MapPin className="h-3.5 w-3.5" /> Lokalizacja
             </dt>
             <dd>{event.location || <span className="text-muted-foreground">—</span>}</dd>
+            {/* Pogoda dla dnia i miejsca wydarzenia (nie dotyczy urlopu). */}
+            <dt className="flex items-center gap-1.5 text-muted-foreground">
+              <CloudSun className="h-3.5 w-3.5" /> Pogoda
+            </dt>
+            <dd>
+              <WeatherSection
+                eventId={event.id}
+                brief={weather}
+                startAt={event.startAt}
+                endAt={event.endAt}
+                allDay={event.allDay}
+              />
+            </dd>
           </>
         )}
         {billingApplies(event.type) && (
@@ -2492,6 +2729,7 @@ export function CalendarEventDialog({
       </dl>
       <Section id="sec-journal" icon={StickyNote} title={`Notatki (${notesCount})`}>
         <CalendarEventNotes
+          ref={notesRef}
           eventId={event.id}
           initialNotes={notes}
           canEdit={!!onEdit && !event.deletedAt}
@@ -2652,6 +2890,21 @@ export function CalendarEventDialog({
               </span>
               <p className="text-sm">{travelText}</p>
               {travelSource && <p className="text-[11px] text-muted-foreground">{travelSource}</p>}
+            </div>
+          )}
+          {/* Pogoda — tylko dla zapisanego wydarzenia (punkt liczy backend z zapisanych danych). */}
+          {event && (
+            <div className="space-y-0.5">
+              <span className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
+                <CloudSun className="h-3.5 w-3.5" /> Pogoda
+              </span>
+              <WeatherSection
+                eventId={event.id}
+                brief={weather}
+                startAt={event.startAt}
+                endAt={event.endAt}
+                allDay={event.allDay}
+              />
             </div>
           )}
         </Section>
@@ -3388,13 +3641,30 @@ export function CalendarEventDialog({
           title={`Notatki (${notesCount})`}
           open={openSec.journal}
           onToggle={() => toggleSec("journal")}
-          summary={notesCount ? notesLabel(notesCount) : "brak"}
+          // Zwinięcie tylko ukrywa kompozytor — szkic (tekst, pliki) i `notesRef` przeżywają.
+          keepMounted
+          summary={
+            <>
+              {hasNoteDraft && (
+                <span
+                  className="mr-1 inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-1.5 py-px text-[10px] font-semibold text-amber-800 dark:text-amber-200"
+                  data-testid="note-draft-badge"
+                  title="Niewysłana notatka czeka w kompozytorze"
+                >
+                  <StickyNote className="h-3 w-3" aria-hidden /> szkic
+                </span>
+              )}
+              {notesCount ? notesLabel(notesCount) : "brak"}
+            </>
+          }
         >
           <CalendarEventNotes
+            ref={notesRef}
             eventId={event.id}
             initialNotes={notes}
             canEdit={!event.deletedAt}
             onCountChange={handleNotesCount}
+            onDraftChange={setHasNoteDraft}
           />
         </Section>
       ) : mode === "create" ? (
@@ -3544,11 +3814,13 @@ export function CalendarEventDialog({
               requestClose();
             }
           }}
-          className="flex h-fit min-w-0 flex-col overflow-hidden rounded-lg border bg-background shadow-sm lg:h-full lg:min-h-0"
+          className="relative flex h-fit min-w-0 flex-col overflow-hidden rounded-lg border bg-background shadow-sm lg:h-full lg:min-h-0"
+          {...dropProps}
         >
           {header}
           {scrollBody}
           {footer}
+          {dropOverlay}
         </aside>
       ) : (
         <Dialog open={open} onOpenChange={(o) => !o && requestClose()}>
@@ -3560,34 +3832,53 @@ export function CalendarEventDialog({
               "sm:h-auto sm:max-h-[92vh] sm:max-w-2xl sm:rounded-lg",
               "motion-reduce:animate-none motion-reduce:transition-none"
             )}
+            {...dropProps}
           >
             {header}
             {scrollBody}
             {footer}
+            {dropOverlay}
           </DialogContent>
         </Dialog>
       )}
 
-      {/* Niezapisane zmiany */}
-      <AlertDialog open={confirmClose} onOpenChange={setConfirmClose}>
-        <AlertDialogContent className="motion-reduce:animate-none">
+      {/* Niewysłany szkic notatki i/lub niezapisany formularz — jedno pytanie na wszystkie ścieżki */}
+      <AlertDialog open={prompt !== null} onOpenChange={(o) => !o && !promptBusy && setPrompt(null)}>
+        <AlertDialogContent
+          className="motion-reduce:animate-none"
+          data-testid={shownPrompt?.note ? "note-draft-prompt" : "confirm-close-prompt"}
+        >
           <AlertDialogHeader>
-            <AlertDialogTitle>Odrzucić niezapisane zmiany?</AlertDialogTitle>
-            <AlertDialogDescription>
-              Formularz ma zmiany, które nie zostały zapisane. Zamknięcie je utraci.
-            </AlertDialogDescription>
+            <AlertDialogTitle>{promptTexts.title}</AlertDialogTitle>
+            <AlertDialogDescription>{promptTexts.description}</AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Wróć do edycji</AlertDialogCancel>
-            <AlertDialogAction
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              onClick={() => {
-                setConfirmClose(false);
-                onClose();
-              }}
+            <AlertDialogCancel disabled={promptBusy} data-testid="note-draft-cancel">
+              {promptTexts.cancel}
+            </AlertDialogCancel>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={promptBusy}
+              className={cn(!shownPrompt?.note && "bg-destructive text-destructive-foreground hover:bg-destructive/90")}
+              onClick={() => void resolvePrompt("discard")}
+              data-testid="note-draft-discard"
             >
-              Odrzuć zmiany
-            </AlertDialogAction>
+              {promptTexts.discard}
+            </Button>
+            {shownPrompt?.note && (
+              <AlertDialogAction
+                disabled={promptBusy}
+                onClick={(e) => {
+                  e.preventDefault();
+                  void resolvePrompt("send");
+                }}
+                data-testid="note-draft-send"
+              >
+                {promptBusy && <Loader2 className="mr-1 h-4 w-4 animate-spin" />}
+                {promptTexts.send}
+              </AlertDialogAction>
+            )}
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

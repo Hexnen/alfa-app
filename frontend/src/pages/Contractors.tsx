@@ -24,21 +24,30 @@ import {
   Building2,
   Archive,
   ArchiveRestore,
+  ArrowDown,
+  ArrowUp,
+  ChevronsUpDown,
+  ChevronLeft,
+  ChevronRight,
+  X,
 } from "lucide-react";
 import {
   getContractors,
   getObjects,
   getSalespeople,
   salespersonName,
+  getCompanies,
+  type Company,
   type Salesperson,
   createContractor,
   updateContractor,
   deleteContractor,
   type Contractor,
   type ContractorInput,
+  type ContractorSortKey,
   type ObjectWithContractor,
 } from "@/lib/api";
-import { formatCurrency, objectServicesLabel, statusLabels } from "@/lib/utils";
+import { cn, formatCurrency, objectServicesLabel, statusLabels } from "@/lib/utils";
 
 const statusColors: Record<string, "warning" | "info" | "success" | "secondary"> = {
   pending: "warning",
@@ -47,19 +56,62 @@ const statusColors: Record<string, "warning" | "info" | "success" | "secondary">
   inactive: "secondary",
 };
 
+/** Filtr sumy abonamentów portfela: wszyscy / tylko z abonamentem / tylko bez. */
+type ValueMode = "all" | "with" | "without";
+
+/**
+ * Filtr kosztu miesięcznego: wszyscy / tylko z uzupełnionym / tylko bez.
+ * „Z uzupełnionym” to kontrahent, który ma CHOĆ JEDEN obiekt z wpisanym kosztem —
+ * koszt 0 zł jest uzupełnioną informacją, a brak wpisu znaczy „nikt nie policzył”.
+ */
+type CostMode = "all" | "with" | "without";
+
+/** Domyślny kierunek sortowania kolumny — kwoty i liczniki ludzie czytają od największych. */
+const DEFAULT_DIR: Record<ContractorSortKey, "asc" | "desc"> = {
+  name: "asc",
+  city: "asc",
+  salesperson: "asc",
+  objects: "desc",
+  value: "desc",
+  cost: "desc",
+  profit: "desc",
+  created: "desc",
+};
+
+/** Kartoteka ma setki kontrahentów — lista chodzi po stronach, jak w module technicznym. */
+const PAGE_SIZE = 50;
+
 export function Contractors() {
   const navigate = useNavigate();
   const { canEdit } = usePerms();
   const editable = canEdit("contractors");
   const [contractors, setContractors] = useState<Contractor[]>([]);
-  const [totals, setTotals] = useState({ objects: 0, value: 0 });
+  const [totals, setTotals] = useState({ objects: 0, value: 0, contractors: 0 });
+  const [page, setPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
   const [tabCounts, setTabCounts] = useState({ active: 0, archived: 0 });
   const [loading, setLoading] = useState(true);
+
+  // Filtry tekstowe trzymamy osobno od tych wysyłanych do API — wpisywanie w pole
+  // nie może strzelać żądaniem na każdą literę (debounce niżej).
+  const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
+  const [minInput, setMinInput] = useState("");
+  const [maxInput, setMaxInput] = useState("");
+  const [range, setRange] = useState<{ min?: number; max?: number }>({});
+
   /** Zakładka: kontrahenci bieżący albo archiwalni (flaga `active`). */
   const [view, setView] = useState<"active" | "archived">("active");
   const [salespeople, setSalespeople] = useState<Salesperson[]>([]);
+  const [companies, setCompanies] = useState<Company[]>([]);
   const [salespersonFilter, setSalespersonFilter] = useState<number | "none" | undefined>(undefined);
+  const [companyFilter, setCompanyFilter] = useState<number | "none" | undefined>(undefined);
+  const [valueMode, setValueMode] = useState<ValueMode>("all");
+  const [costMode, setCostMode] = useState<CostMode>("all");
+
+  const [sort, setSort] = useState<ContractorSortKey>("name");
+  const [dir, setDir] = useState<"asc" | "desc">("asc");
+
   const [formOpen, setFormOpen] = useState(false);
   const [editingContractor, setEditingContractor] = useState<Contractor | null>(
     null
@@ -74,6 +126,47 @@ export function Contractors() {
   const [objects, setObjects] = useState<ObjectWithContractor[]>([]);
   const [objectsLoading, setObjectsLoading] = useState(false);
 
+  // Debounce pól tekstowych (szukajka i widełki kwot).
+  useEffect(() => {
+    const t = setTimeout(() => setSearch(searchInput.trim()), 300);
+    return () => clearTimeout(t);
+  }, [searchInput]);
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      const num = (v: string) => {
+        const n = parseFloat(v.replace(",", "."));
+        return Number.isFinite(n) ? n : undefined;
+      };
+      setRange({ min: num(minInput), max: num(maxInput) });
+    }, 300);
+    return () => clearTimeout(t);
+  }, [minInput, maxInput]);
+
+  /**
+   * Zmiana zakładki, filtra albo sortowania wraca na pierwszą stronę — inaczej po
+   * wejściu na stronę 5 „Archiwalnych" zakładka „Aktualni" świeciłaby pustką.
+   * Przestawiamy jeszcze W TRAKCIE renderu (a nie w efekcie), żeby nie poszło
+   * zbędne żądanie o starą stronę z nowym filtrem.
+   */
+  const filtersKey = [
+    search,
+    view,
+    salespersonFilter ?? "",
+    companyFilter ?? "",
+    range.min ?? "",
+    range.max ?? "",
+    valueMode,
+    costMode,
+    sort,
+    dir,
+  ].join("|");
+  const [prevFiltersKey, setPrevFiltersKey] = useState(filtersKey);
+  if (prevFiltersKey !== filtersKey) {
+    setPrevFiltersKey(filtersKey);
+    setPage(1);
+  }
+
   const loadContractors = useCallback(async () => {
     setLoading(true);
     try {
@@ -81,24 +174,47 @@ export function Contractors() {
         search,
         active: view === "active" ? "1" : "0",
         salespersonId: salespersonFilter,
-        pageSize: 100,
+        companyId: companyFilter,
+        minValue: range.min,
+        maxValue: range.max,
+        hasValue: valueMode === "with" ? "1" : valueMode === "without" ? "0" : undefined,
+        hasCost: costMode === "with" ? "1" : costMode === "without" ? "0" : undefined,
+        sort,
+        dir,
+        page,
+        pageSize: PAGE_SIZE,
       });
       setContractors(res.data);
       setTotals({
         objects: res.totalObjects ?? 0,
         value: res.totalMonthlyValue ?? 0,
+        contractors: res.total ?? res.data.length,
       });
+      setTotalPages(Math.max(1, res.totalPages ?? 1));
       setTabCounts({ active: res.activeCount ?? 0, archived: res.archivedCount ?? 0 });
     } catch (error) {
       console.error("Error loading contractors:", error);
     } finally {
       setLoading(false);
     }
-  }, [search, view, salespersonFilter]);
+  }, [
+    search,
+    view,
+    salespersonFilter,
+    companyFilter,
+    range.min,
+    range.max,
+    valueMode,
+    costMode,
+    sort,
+    dir,
+    page,
+  ]);
 
   useEffect(() => {
     loadContractors();
   }, [loadContractors]);
+
 
   // Wejście z zakładki „Handlowcy”: /contractors?salespersonId=3
   useEffect(() => {
@@ -107,12 +223,28 @@ export function Contractors() {
     if (salespersonId) {
       setSalespersonFilter(salespersonId === "none" ? "none" : parseInt(salespersonId));
     }
+    const companyId = params.get("companyId");
+    if (companyId) {
+      setCompanyFilter(companyId === "none" ? "none" : parseInt(companyId));
+    }
+    // `?hasValue=0` / `?hasCost=0` — wejście z kafelka analityki („uzupełnij koszty”).
+    // Bez tego odczytu lista otwierałaby się nieprzefiltrowana i użytkownik dostawałby
+    // całą kartotekę zamiast braków (ta sama zasada, co na liście obiektów).
+    const hasValue = params.get("hasValue");
+    if (hasValue === "0") setValueMode("without");
+    else if (hasValue === "1") setValueMode("with");
+    const hasCost = params.get("hasCost");
+    if (hasCost === "0") setCostMode("without");
+    else if (hasCost === "1") setCostMode("with");
   }, []);
 
   useEffect(() => {
     getSalespeople()
       .then((res) => setSalespeople(res.data ?? []))
       .catch(() => setSalespeople([]));
+    getCompanies()
+      .then((res) => setCompanies(res.data ?? []))
+      .catch(() => setCompanies([]));
   }, []);
 
   const loadObjects = useCallback(async () => {
@@ -143,6 +275,35 @@ export function Contractors() {
     }
     return map;
   }, [objects]);
+
+  /** Klik w nagłówek: ta sama kolumna odwraca kierunek, nowa startuje od swojego domyślnego. */
+  const toggleSort = (key: ContractorSortKey) => {
+    if (sort === key) {
+      setDir((d) => (d === "asc" ? "desc" : "asc"));
+      return;
+    }
+    setSort(key);
+    setDir(DEFAULT_DIR[key]);
+  };
+
+  const filtersActive =
+    search !== "" ||
+    salespersonFilter !== undefined ||
+    companyFilter !== undefined ||
+    valueMode !== "all" ||
+    costMode !== "all" ||
+    minInput !== "" ||
+    maxInput !== "";
+
+  const clearFilters = () => {
+    setSearchInput("");
+    setSalespersonFilter(undefined);
+    setCompanyFilter(undefined);
+    setValueMode("all");
+    setCostMode("all");
+    setMinInput("");
+    setMaxInput("");
+  };
 
   const handleCreate = async (data: ContractorInput) => {
     if (!editable) return;
@@ -199,16 +360,48 @@ export function Contractors() {
     setEditingContractor(null);
   };
 
+  /** Nagłówek klikalny — strzałka pokazuje kolumnę i kierunek sortowania. */
+  const SortHeader = ({
+    label,
+    sortKey,
+    align = "left",
+  }: {
+    label: string;
+    sortKey: ContractorSortKey;
+    align?: "left" | "right";
+  }) => {
+    const active = sort === sortKey;
+    const Icon = !active ? ChevronsUpDown : dir === "asc" ? ArrowUp : ArrowDown;
+    return (
+      <th className={cn("py-3 px-2 font-medium", align === "right" ? "text-right" : "text-left")}>
+        <button
+          type="button"
+          data-testid={`contractors-sort-${sortKey}`}
+          onClick={() => toggleSort(sortKey)}
+          aria-label={`Sortuj po: ${label}`}
+          className={cn(
+            "inline-flex items-center gap-1 rounded px-1 -mx-1 transition-colors hover:text-foreground",
+            align === "right" && "flex-row-reverse",
+            active ? "text-foreground" : "text-muted-foreground"
+          )}
+        >
+          {label}
+          <Icon className={cn("h-3.5 w-3.5", !active && "opacity-40")} />
+        </button>
+      </th>
+    );
+  };
+
   return (
     <div className="space-y-3">
       {!editable && <ReadOnlyBanner className="mb-4" />}
-      <div className="flex flex-wrap items-center gap-4">
-        <div className="relative flex-1 max-w-sm">
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="relative flex-1 min-w-[200px] max-w-sm">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <Input
             placeholder="Szukaj kontrahenta..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
             className="pl-10"
           />
         </div>
@@ -247,21 +440,107 @@ export function Contractors() {
           <span>Widok rozwinięty</span>
         </label>
 
-        <p className="text-sm text-muted-foreground" data-testid="contractors-summary">
-          {contractors.length}{" "}
-          {contractors.length === 1 ? "kontrahent" : "kontrahentów"} ·{" "}
-          {totals.objects} {totals.objects === 1 ? "obiekt" : "obiektów"} ·{" "}
-          {formatCurrency(totals.value)} / mies. ·{" "}
-          {/* Jedno zdanie o konwencji na ekran — abonamenty i koszty są bez VAT. */}
-          kwoty netto (bez VAT)
-        </p>
-
         {editable && (
           <Button className="ml-auto" onClick={() => setFormOpen(true)}>
             <Plus className="h-4 w-4 mr-2" />
             Nowy kontrahent
           </Button>
         )}
+      </div>
+
+      {/* Druga linia filtrów: spółka i sumy abonamentów — tryby i widełki kwot. */}
+      <div className="flex flex-wrap items-center gap-2">
+        <Select
+          value={companyFilter === undefined ? "all" : String(companyFilter)}
+          onValueChange={(v) =>
+            setCompanyFilter(v === "all" ? undefined : v === "none" ? "none" : parseInt(v))
+          }
+        >
+          <SelectTrigger className="w-[180px]" data-testid="contractors-filter-company">
+            <SelectValue placeholder="Spółka" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">Wszystkie spółki</SelectItem>
+            <SelectItem value="none">Bez spółki</SelectItem>
+            {companies.map((co) => (
+              <SelectItem key={co.id} value={String(co.id)}>
+                {co.name}
+                {!co.active ? " (archiwalna)" : ""}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+
+        <Select value={valueMode} onValueChange={(v) => setValueMode(v as ValueMode)}>
+          <SelectTrigger className="w-[200px]" data-testid="contractors-filter-value-mode">
+            <SelectValue placeholder="Wartosc" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">Wartość: wszystkie</SelectItem>
+            <SelectItem value="with">Tylko z abonamentem</SelectItem>
+            <SelectItem value="without">Tylko bez abonamentu</SelectItem>
+          </SelectContent>
+        </Select>
+
+        {/* Filtr kosztu MUSI być widoczny, a nie tylko wczytany z URL-a: wejście
+            z kafelka analityki zawęża listę do braków i użytkownik ma prawo
+            wiedzieć, dlaczego nie widzi całej kartoteki. */}
+        <Select value={costMode} onValueChange={(v) => setCostMode(v as CostMode)}>
+          <SelectTrigger className="w-[220px]" data-testid="contractors-filter-cost-mode">
+            <SelectValue placeholder="Koszt" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">Koszt: wszystkie</SelectItem>
+            <SelectItem value="with">Tylko z uzupełnionym kosztem</SelectItem>
+            <SelectItem value="without">Tylko bez uzupełnionego kosztu</SelectItem>
+          </SelectContent>
+        </Select>
+        <div className="flex items-center gap-1 text-sm text-muted-foreground">
+          <span>Kwota od</span>
+          <Input
+            type="number"
+            min="0"
+            step="50"
+            inputMode="decimal"
+            className="w-28 tabular-nums"
+            data-testid="contractors-filter-min"
+            value={minInput}
+            onChange={(e) => setMinInput(e.target.value)}
+          />
+          <span>do</span>
+          <Input
+            type="number"
+            min="0"
+            step="50"
+            inputMode="decimal"
+            className="w-28 tabular-nums"
+            data-testid="contractors-filter-max"
+            value={maxInput}
+            onChange={(e) => setMaxInput(e.target.value)}
+          />
+          <span>zł/mies.</span>
+        </div>
+        {filtersActive && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={clearFilters}
+            data-testid="contractors-filters-clear"
+          >
+            <X className="h-4 w-4 mr-1" />
+            Wyczyść filtry
+          </Button>
+        )}
+        <p className="ml-auto text-sm text-muted-foreground" data-testid="contractors-summary">
+          {/* Liczymy CAŁY wynik filtrowania, a nie wczytaną stronę — obok stoją
+              sumy obiektów i abonamentów z całego wyniku i muszą się zgadzać. */}
+          {totals.contractors}{" "}
+          {totals.contractors === 1 ? "kontrahent" : "kontrahentów"} ·{" "}
+          {totals.objects} {totals.objects === 1 ? "obiekt" : "obiektów"} ·{" "}
+          {formatCurrency(totals.value)} / mies. ·{" "}
+          {/* Jedno zdanie o konwencji na ekran — abonamenty i koszty są bez VAT. */}
+          kwoty netto (bez VAT)
+        </p>
       </div>
 
       <Tabs value={view} onValueChange={(v) => setView(v as "active" | "archived")}>
@@ -281,25 +560,30 @@ export function Contractors() {
             <div className="text-center py-8">Ladowanie...</div>
           ) : contractors.length === 0 ? (
             <div className="text-center py-8 text-muted-foreground">
-              {view === "archived" ? "Brak archiwalnych kontrahentów" : "Brak kontrahentow"}
+              {filtersActive
+                ? "Brak kontrahentów dla wybranych filtrów"
+                : view === "archived"
+                  ? "Brak archiwalnych kontrahentów"
+                  : "Brak kontrahentow"}
             </div>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full">
                 <thead>
                   <tr className="border-b">
-                    <th className="text-left py-3 px-2 font-medium">Nazwa</th>
+                    <SortHeader label="Nazwa" sortKey="name" />
+                    {/* NIP, telefon i osoba kontaktowa to dane kontaktowe — nie ma
+                        po czym ich sensownie porządkować, więc nagłówki zostają
+                        zwykłe (tak jak kolumna „Usługi" na liście obiektów). */}
                     <th className="text-left py-3 px-2 font-medium">NIP</th>
-                    <th className="text-left py-3 px-2 font-medium">Miasto</th>
+                    <SortHeader label="Miasto" sortKey="city" />
                     <th className="text-left py-3 px-2 font-medium">Telefon</th>
                     <th className="text-left py-3 px-2 font-medium">
                       Osoba kontaktowa
                     </th>
-                    <th className="text-left py-3 px-2 font-medium">Handlowiec</th>
-                    <th className="text-right py-3 px-2 font-medium">Obiekty</th>
-                    <th className="text-right py-3 px-2 font-medium">
-                      Abonament
-                    </th>
+                    <SortHeader label="Handlowiec" sortKey="salesperson" />
+                    <SortHeader label="Obiekty" sortKey="objects" align="right" />
+                    <SortHeader label="Abonament" sortKey="value" align="right" />
                     <th className="text-right py-3 px-2 font-medium">Akcje</th>
                   </tr>
                 </thead>
@@ -621,6 +905,30 @@ export function Contractors() {
           )}
         </CardContent>
       </Card>
+
+      {totalPages > 1 && (
+        <div className="flex items-center justify-end gap-2" data-testid="contractors-pagination">
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={page <= 1}
+            onClick={() => setPage((p) => Math.max(1, p - 1))}
+          >
+            <ChevronLeft className="h-4 w-4" /> Poprzednia
+          </Button>
+          <span className="text-sm text-muted-foreground">
+            Strona {page} z {totalPages}
+          </span>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={page >= totalPages}
+            onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+          >
+            Następna <ChevronRight className="h-4 w-4" />
+          </Button>
+        </div>
+      )}
 
       <ContractorForm
         // Remount przy każdym otwarciu — inaczej stan formularza (w tym dane

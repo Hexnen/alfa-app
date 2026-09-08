@@ -691,7 +691,16 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
             ...(e.series ? { series: { id: e.series.id, freq: e.series.freq, interval: e.series.interval } } : {}),
             notesCount: e.notesCount,
             // Dziennik: ostatnie 10 notatek (najstarsza pierwsza), tekst przycięty do 300 znaków.
-            notes: loadNotes(db, eventId).slice(-GET_EVENT_NOTES).map((n) => ({ userLabel: n.userLabel, createdAt: n.createdAt, text: clip(n.text, NOTE_CLIP) })),
+            // `attachments` = liczba plików; notatka może być SAMYMI załącznikami (pusty
+            // tekst), więc bez tej liczby asystent widziałby ją jako pustą.
+            notes: loadNotes(db, eventId)
+              .slice(-GET_EVENT_NOTES)
+              .map((n) => ({
+                userLabel: n.userLabel,
+                createdAt: n.createdAt,
+                text: clip(n.text, NOTE_CLIP),
+                ...(n.attachments.length ? { attachments: n.attachments.length } : {}),
+              })),
           },
         };
       },

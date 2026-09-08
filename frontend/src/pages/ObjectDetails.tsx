@@ -291,6 +291,10 @@ export function ObjectDetails() {
   const setupCost = object.setupCost ?? null;
   // Przychód miesięczny = abonament + dzierżawa sprzętu (klient płaci obie pozycje).
   const monthlyRevenue = (object.monthlyValue ?? 0) + (object.monthlyRental ?? 0);
+  // Pusty abonament i pusta dzierżawa to „nieuzupełnione”, a nie 0 zł — tak samo
+  // jak przy koszcie niżej. Bez tego obiekt bez kwot chwalił się „0,00 zł
+  // przychodu” obok kreski w koszcie, jakby przychód ktoś ustalił na zero.
+  const hasRevenue = object.monthlyValue != null || object.monthlyRental != null;
   const monthlyProfit = monthlyCost === null ? null : monthlyRevenue - monthlyCost;
   const marginPct =
     monthlyProfit === null || !monthlyRevenue
@@ -367,7 +371,11 @@ export function ObjectDetails() {
                   Przychód miesięczny
                 </dt>
                 <dd className="font-medium">
-                  {formatCurrency(monthlyRevenue)}
+                  {hasRevenue ? (
+                    formatCurrency(monthlyRevenue)
+                  ) : (
+                    <span className="text-muted-foreground">—</span>
+                  )}
                   {object.monthlyRental ? (
                     <div className="text-xs font-normal text-muted-foreground">
                       abonament {formatCurrency(object.monthlyValue)} + dzierżawa{" "}

@@ -21,6 +21,7 @@ import {
   type AnalyticsObjectRow,
   type AnalyticsObjectsData,
   type AnalyticsScope,
+  type AnalyticsService,
   type CostWindow,
 } from "@/lib/api";
 import {
@@ -41,6 +42,7 @@ import {
   monthsLabel,
   pct,
   plnFull,
+  serviceTag,
 } from "@/components/analytics";
 import {
   aggregate,
@@ -60,8 +62,11 @@ import {
   SortHeader,
 } from "./parts";
 
-const load = (scope: AnalyticsScope, costWindow: CostWindow) =>
-  getAnalyticsObjects({ scope, costWindow });
+const load = (
+  scope: AnalyticsScope,
+  costWindow: CostWindow,
+  service: AnalyticsService
+) => getAnalyticsObjects({ scope, costWindow, service });
 
 /**
  * Usługi wiersza analityki w kształcie, jakim posługuje się reszta frontu.
@@ -126,6 +131,7 @@ function paybackBand(months: number): { color: string; label: string } {
 export function ObiektyView({
   scope,
   costWindow,
+  service,
   search,
   reloadKey,
 }: AnalyticsViewProps) {
@@ -134,6 +140,7 @@ export function ObiektyView({
     load,
     scope,
     costWindow,
+    service,
     reloadKey
   );
   const [sort, setSort] = useState<SortKey>("revenue");
@@ -372,13 +379,13 @@ export function ObiektyView({
     <div className="space-y-3">
       <KpiRow>
         <KpiTile
-          label="Przychód mies."
+          label={`Przychód mies.${serviceTag(service)}`}
           value={plnFull(agg.revenue)}
           sub={`${agg.objects} ${agg.objects === 1 ? "obiekt" : "obiektów"}`}
           tip="Suma abonamentów miesięcznych widocznych obiektów"
         />
         <KpiTile
-          label="Koszt mies."
+          label={`Koszt mies.${serviceTag(service)}`}
           value={hasCostData ? plnFull(agg.cost) : DASH}
           // Rozbicie w podpisie, bo suma sama w sobie nie mówi, czy obiekt
           // kosztuje ludźmi, czy sprzętem — a to inne dźwignie.
@@ -391,7 +398,7 @@ export function ObiektyView({
           coverage={coverageProps}
         />
         <KpiTile
-          label="Zysk mies."
+          label={`Zysk mies.${serviceTag(service)}`}
           value={hasCostData ? plnFull(agg.profit) : DASH}
           tone={!hasCostData ? "neutral" : agg.profit >= 0 ? "good" : "bad"}
           sub={hasCostData ? "przychód − koszt" : "uzupełnij koszty, żeby policzyć"}
@@ -399,7 +406,7 @@ export function ObiektyView({
           coverage={coverageProps}
         />
         <KpiTile
-          label="Marża"
+          label={`Marża${serviceTag(service)}`}
           value={<MarginGauge value={hasCostData ? agg.margin : null} size="lg" />}
           sub={hasCostData ? "zysk / przychód" : "nieznana bez kosztów"}
           tip="Zysk podzielony przez przychód. Bez kosztów marża jest nieznana, a nie stuprocentowa."
@@ -423,7 +430,7 @@ export function ObiektyView({
         />
       </KpiRow>
 
-      <PersonnelFootnote personnel={data.personnel} />
+      <PersonnelFootnote personnel={data.personnel} service={service} />
 
       <div className="grid gap-3 xl:grid-cols-2">
         <ChartCard

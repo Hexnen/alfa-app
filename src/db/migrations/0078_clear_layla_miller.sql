@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX `hr_office_payroll_employee_month_company_uidx` ON `hr_office_payroll` (`employee_id`,`year`,`month`,`company`);

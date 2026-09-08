@@ -1,20 +1,139 @@
 import { Hono } from "hono";
 import { db, schema } from "../db/index.js";
-import { eq, and, like, or, sql, desc } from "drizzle-orm";
+import { eq, and, like, or, sql, asc, desc } from "drizzle-orm";
+import type { SQL } from "drizzle-orm";
 import type { OrderInput, ApiResponse } from "../types/index.js";
-import { createOrderFromInput } from "../services/orders.js";
+import {
+  createOrderFromInput,
+  ORDER_STATUSES,
+  parseOrderInput,
+  parseOrderPatch,
+  parseOrderStatus,
+} from "../services/orders.js";
+import { isValidationError } from "../lib/validate.js";
 
 const app = new Hono();
+
+/** Body żądania → 400 z komunikatem, gdy JSON jest niepoprawny albo nie jest obiektem. */
+async function readJson(c: { req: { json(): Promise<unknown> } }): Promise<unknown> {
+  try {
+    return await c.req.json();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Sortowanie listy zleceń. `status` układamy CASE-em, bo alfabetyczne sortowanie
+ * wartości z bazy ("cancelled", "completed"…) nie ma dla użytkownika sensu — status
+ * ma naturalną kolejność obsługi (nowe → w trakcie → zakończone → anulowane).
+ *
+ * Płatnik i obiekt sortują się po tym, co lista POKAZUJE: aktualna nazwa z kartoteki,
+ * a gdy zlecenie nie jest z nią powiązane — migawka wpisana przy przyjęciu zlecenia.
+ *
+ * Nie ma klucza po kolumnie „Techniczne": to zbiór znaczników (kamery, megafony),
+ * a nie jedna wartość — nagłówek zostaje nieklikalny (jak „Usługi" na liście obiektów).
+ */
+const SORT_COLUMNS = {
+  number: sql`lower(${schema.orders.orderNumber})`,
+  status: sql`case ${schema.orders.status} when 'new' then 0 when 'in_progress' then 1 when 'completed' then 2 when 'cancelled' then 3 else 4 end`,
+  requester: sql`lower(${schema.orders.requesterName})`,
+  object: sql`lower(coalesce(${schema.objects.name}, ${schema.orders.objectName}, ''))`,
+  payer: sql`lower(coalesce(${schema.contractors.name}, ${schema.orders.payerName}, ''))`,
+  created: sql`${schema.orders.createdAt}`,
+} as const;
+
+export type OrderSortKey = keyof typeof SORT_COLUMNS;
+
+function isSortKey(v: string): v is OrderSortKey {
+  return Object.prototype.hasOwnProperty.call(SORT_COLUMNS, v);
+}
+
+/** Data „YYYY-MM-DD" z query stringa; cokolwiek innego → undefined (filtr się nie nakłada). */
+function dateParam(raw: string | undefined): string | undefined {
+  if (raw === undefined || !/^\d{4}-\d{2}-\d{2}$/.test(raw.trim())) return undefined;
+  return raw.trim();
+}
 
 // Get all orders with optional search (with joined contractor and object data)
 app.get("/", async (c) => {
   const search = c.req.query("search");
-  const status = c.req.query("status");
-  const page = parseInt(c.req.query("page") || "1");
-  const pageSize = parseInt(c.req.query("pageSize") || "20");
+  const statusRaw = c.req.query("status");
+  // "none" = zlecenia bez płatnika z kartoteki (klient spoza bazy kontrahentów).
+  const payerParam = c.req.query("payerContractorId");
+  // "1" = tylko montaże kamer, "0" = tylko pozostałe; brak parametru = wszystkie.
+  const camera = c.req.query("camera");
+  // Zakres daty przyjęcia zlecenia (kolumna „Data" na liście).
+  const createdFrom = dateParam(c.req.query("createdFrom"));
+  const createdTo = dateParam(c.req.query("createdTo"));
+  const sortRaw = c.req.query("sort") || "created";
+  const sort: OrderSortKey = isSortKey(sortRaw) ? sortRaw : "created";
+  // Domyślnie najnowsze zlecenia na górze — lista dokumentów wpływających.
+  const dir = c.req.query("dir") === "asc" ? "asc" : "desc";
+  const page = Math.max(1, parseInt(c.req.query("page") || "1") || 1);
+  const pageSize = Math.min(200, Math.max(1, parseInt(c.req.query("pageSize") || "20") || 20));
   const offset = (page - 1) * pageSize;
 
-  let query = db
+  // Warunki zbieramy do tablicy i składamy jednym `and(...)`: drugie `.where()`
+  // w drizzle NADPISUJE pierwsze, więc `search+status` filtrowało tylko po statusie.
+  // Warunki BEZ statusu trzymamy osobno — z nich liczymy kafelki „Nowe / W trakcie /
+  // Zakończone", żeby pokazywały rozkład przy bieżących filtrach, a nie w całej bazie
+  // (wzorzec liczników zakładek z listy obiektów).
+  const baseConditions: SQL[] = [];
+  if (search) {
+    baseConditions.push(
+      or(
+        like(schema.orders.orderNumber, `%${search}%`),
+        like(schema.orders.requesterName, `%${search}%`),
+        // Migawka z formularza ORAZ aktualna nazwa z kartoteki — lista pokazuje tę
+        // drugą, więc szukanie po niej musi działać (zlecenie powiązane z kontrahentem
+        // wyświetlało „ASILI”, a szukajka znajdowała je tylko po „Płatnik Beta”).
+        like(schema.orders.payerName, `%${search}%`),
+        like(schema.orders.objectName, `%${search}%`),
+        like(schema.contractors.name, `%${search}%`),
+        like(schema.objects.name, `%${search}%`)
+      )!
+    );
+  }
+  if (payerParam === "none") {
+    baseConditions.push(sql`${schema.orders.payerContractorId} is null`);
+  } else if (payerParam) {
+    const pid = parseInt(payerParam);
+    if (Number.isInteger(pid)) baseConditions.push(eq(schema.orders.payerContractorId, pid));
+  }
+  if (camera === "1") {
+    baseConditions.push(sql`${schema.orders.isCameraInstallation} = 1`);
+  } else if (camera === "0") {
+    baseConditions.push(sql`coalesce(${schema.orders.isCameraInstallation}, 0) = 0`);
+  }
+  // `created_at` bywa zapisany dwojako: `datetime('now')` z domyślnej wartości kolumny
+  // („YYYY-MM-DD HH:MM:SS") i `toISOString()` z aplikacji („YYYY-MM-DDTHH:MM:SS.sssZ").
+  // Pierwsze 10 znaków to w obu przypadkach ta sama data, więc porównujemy je wprost,
+  // zamiast liczyć na to, że `date()` przełknie każdy z formatów.
+  if (createdFrom !== undefined) {
+    baseConditions.push(sql`substr(${schema.orders.createdAt}, 1, 10) >= ${createdFrom}`);
+  }
+  if (createdTo !== undefined) {
+    baseConditions.push(sql`substr(${schema.orders.createdAt}, 1, 10) <= ${createdTo}`);
+  }
+  const baseClause = baseConditions.length > 0 ? and(...baseConditions) : undefined;
+
+  const conditions: SQL[] = [...baseConditions];
+  // Nieznany status nie nakłada filtru (jak nieznany klucz sortowania w /objects).
+  if (statusRaw && (ORDER_STATUSES as readonly string[]).includes(statusRaw)) {
+    conditions.push(eq(schema.orders.status, statusRaw as (typeof ORDER_STATUSES)[number]));
+  }
+  const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+
+  const column = SORT_COLUMNS[sort];
+  const direction = dir === "desc" ? desc : asc;
+  // Tie-break po numerze zlecenia (jest unikalny), żeby kolejność była powtarzalna
+  // między stronami paginacji — przy sortowaniu po dacie kilka zleceń z tego samego
+  // dnia potrafi inaczej ułożyć się na każdej stronie.
+  const numberTieBreak = asc(sql`lower(${schema.orders.orderNumber})`);
+  const orderBy = [direction(column), numberTieBreak];
+
+  const results = await db
     .select({
       order: schema.orders,
       contractor: schema.contractors,
@@ -22,41 +141,38 @@ app.get("/", async (c) => {
     })
     .from(schema.orders)
     .leftJoin(schema.contractors, eq(schema.orders.payerContractorId, schema.contractors.id))
-    .leftJoin(schema.objects, eq(schema.orders.objectId, schema.objects.id));
+    .leftJoin(schema.objects, eq(schema.orders.objectId, schema.objects.id))
+    .where(whereClause)
+    .orderBy(...orderBy)
+    .limit(pageSize)
+    .offset(offset);
 
-  if (search) {
-    query = query.where(
-      or(
-        like(schema.orders.orderNumber, `%${search}%`),
-        like(schema.orders.requesterName, `%${search}%`),
-        like(schema.orders.payerName, `%${search}%`),
-        like(schema.orders.objectName, `%${search}%`)
-      )
-    ) as typeof query;
-  }
-
-  if (status) {
-    query = query.where(eq(schema.orders.status, status as "new" | "in_progress" | "completed" | "cancelled")) as typeof query;
-  }
-
-  const results = await query.orderBy(desc(schema.orders.createdAt)).limit(pageSize).offset(offset);
-
-  let countQuery = db.select({ count: sql<number>`count(*)` }).from(schema.orders);
-  if (search) {
-    countQuery = countQuery.where(
-      or(
-        like(schema.orders.orderNumber, `%${search}%`),
-        like(schema.orders.requesterName, `%${search}%`),
-        like(schema.orders.payerName, `%${search}%`),
-        like(schema.orders.objectName, `%${search}%`)
-      )
-    ) as typeof countQuery;
-  }
-  if (status) {
-    countQuery = countQuery.where(eq(schema.orders.status, status as "new" | "in_progress" | "completed" | "cancelled")) as typeof countQuery;
-  }
-  const countResult = await countQuery;
+  // `total` z TYM SAMYM where I TYMI SAMYMI złączeniami — inaczej paginacja po filtrze
+  // pokazuje złą liczbę stron, a szukajka sięgająca kartoteki wywraca się na nieznanej
+  // kolumnie. Złączenia są 1:1 (klucze główne), więc nie zmieniają liczby wierszy.
+  const countResult = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(schema.orders)
+    .leftJoin(schema.contractors, eq(schema.orders.payerContractorId, schema.contractors.id))
+    .leftJoin(schema.objects, eq(schema.orders.objectId, schema.objects.id))
+    .where(whereClause);
   const total = countResult[0].count;
+
+  // Rozkład statusów przy WSZYSTKICH filtrach poza samym statusem — kafelki nad listą
+  // liczyły dotąd wyłącznie wczytaną stronę (10 pozycji), więc „Nowe: 3" znaczyło
+  // „3 na tej stronie", a nie „3 w całym wyniku".
+  const statusRows = await db
+    .select({
+      total: sql<number>`count(*)`,
+      new: sql<number>`sum(case when ${schema.orders.status} = 'new' then 1 else 0 end)`,
+      inProgress: sql<number>`sum(case when ${schema.orders.status} = 'in_progress' then 1 else 0 end)`,
+      completed: sql<number>`sum(case when ${schema.orders.status} = 'completed' then 1 else 0 end)`,
+      cancelled: sql<number>`sum(case when ${schema.orders.status} = 'cancelled' then 1 else 0 end)`,
+    })
+    .from(schema.orders)
+    .leftJoin(schema.contractors, eq(schema.orders.payerContractorId, schema.contractors.id))
+    .leftJoin(schema.objects, eq(schema.orders.objectId, schema.objects.id))
+    .where(baseClause);
 
   // Map results to include current contractor/object names
   const orders = results.map((r) => ({
@@ -80,6 +196,17 @@ app.get("/", async (c) => {
     page,
     pageSize,
     totalPages: Math.ceil(total / pageSize),
+    sort,
+    dir,
+    // Liczby liczone BEZ filtra statusu — kafelki mają pokazywać rozkład zleceń
+    // przy bieżącym zawężeniu listy, a `statusTotal` jest ich sumą.
+    statusTotal: statusRows[0].total ?? 0,
+    statusCounts: {
+      new: statusRows[0].new ?? 0,
+      in_progress: statusRows[0].inProgress ?? 0,
+      completed: statusRows[0].completed ?? 0,
+      cancelled: statusRows[0].cancelled ?? 0,
+    },
   });
 });
 
@@ -108,7 +235,16 @@ app.get("/:id", async (c) => {
 
 // Create order with optional contractor and object creation (ATOMIC TRANSACTION)
 app.post("/", async (c) => {
-  const body = await c.req.json<OrderInput>();
+  // Ten sam walidator, co publiczny formularz ZDW: typy, długości, enumy.
+  let body: OrderInput;
+  try {
+    body = parseOrderInput(await readJson(c));
+  } catch (err) {
+    if (isValidationError(err)) {
+      return c.json<ApiResponse<null>>({ success: false, error: err.message }, 400);
+    }
+    throw err;
+  }
 
   try {
     const result = await createOrderFromInput(body);
@@ -146,9 +282,11 @@ app.post("/", async (c) => {
 // Update order
 app.put("/:id", async (c) => {
   const id = parseInt(c.req.param("id"));
-  const body = await c.req.json<
-    Partial<OrderInput> & { expectedUpdatedAt?: string }
-  >();
+  const raw = await readJson(c);
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return c.json<ApiResponse<null>>({ success: false, error: "Nieprawidłowe dane" }, 400);
+  }
+  const { expectedUpdatedAt, ...rest } = raw as Record<string, unknown>;
 
   // Check if order exists
   const existing = await db
@@ -169,9 +307,7 @@ app.put("/:id", async (c) => {
   // A missing token is rejected (428) instead of degrading to eq(id) — that
   // degrade path let two concurrent editors silently overwrite each other
   // (last-writer-wins), which is exactly the race this guard exists to close.
-  const { expectedUpdatedAt, ...fields } = body;
-
-  if (!expectedUpdatedAt) {
+  if (typeof expectedUpdatedAt !== "string" || !expectedUpdatedAt) {
     return c.json<ApiResponse<null>>(
       {
         success: false,
@@ -179,6 +315,20 @@ app.put("/:id", async (c) => {
       },
       428
     );
+  }
+
+  // Jawna lista pól + walidacja typów/enumów/FK — spread body do `.set()` pozwalał
+  // nadpisać `id`, `orderNumber`, `createdAt` i wpisać dowolny tekst w `status`.
+  // Flagi tworzenia (`createContractor`, `createObject`, `contractor*`, `object*`)
+  // z formularza edycji są ignorowane — PUT nie zakłada nowych kartotek.
+  let fields: ReturnType<typeof parseOrderPatch>;
+  try {
+    fields = parseOrderPatch(rest);
+  } catch (err) {
+    if (isValidationError(err)) {
+      return c.json<ApiResponse<null>>({ success: false, error: err.message }, 400);
+    }
+    throw err;
   }
 
   const result = await db
@@ -241,10 +391,11 @@ app.delete("/:id", async (c) => {
 // Update order status
 app.patch("/:id/status", async (c) => {
   const id = parseInt(c.req.param("id"));
-  const { status, expectedUpdatedAt } = await c.req.json<{
-    status: string;
-    expectedUpdatedAt?: string;
-  }>();
+  const raw = await readJson(c);
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return c.json<ApiResponse<null>>({ success: false, error: "Nieprawidłowe dane" }, 400);
+  }
+  const { status: statusRaw, expectedUpdatedAt } = raw as Record<string, unknown>;
 
   const existing = await db
     .select()
@@ -259,10 +410,21 @@ app.patch("/:id/status", async (c) => {
     );
   }
 
+  // Status tylko ze słownika — kolumna ma enum w schema.ts, ale SQLite go nie egzekwuje.
+  let status: ReturnType<typeof parseOrderStatus>;
+  try {
+    status = parseOrderStatus(statusRaw);
+  } catch (err) {
+    if (isValidationError(err)) {
+      return c.json<ApiResponse<null>>({ success: false, error: err.message }, 400);
+    }
+    throw err;
+  }
+
   // Optimistic concurrency guard (see PUT /:id) — the client MUST send the
   // updatedAt it read; a missing token is rejected (428) instead of degrading
   // to eq(id), so the last-writer-wins path cannot be reached.
-  if (!expectedUpdatedAt) {
+  if (typeof expectedUpdatedAt !== "string" || !expectedUpdatedAt) {
     return c.json<ApiResponse<null>>(
       {
         success: false,
@@ -275,7 +437,7 @@ app.patch("/:id/status", async (c) => {
   const result = await db
     .update(schema.orders)
     .set({
-      status: status as "new" | "in_progress" | "completed" | "cancelled",
+      status,
       updatedAt: new Date().toISOString(),
     })
     .where(

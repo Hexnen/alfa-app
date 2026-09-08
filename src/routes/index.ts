@@ -32,11 +32,59 @@ import assistantRoutes from "./assistant.js";
 import calendarRoutes, { calendarPublicRoutes } from "./calendar.js";
 import activityRoutes from "./activity.js";
 import analyticsRoutes from "./analytics.js";
-import { requireAuth, requireAssistantAccess, tabPermissionGuard } from "../middleware/auth.js";
+import { requireAuth, requireAssistantAccess, tabPermissionGuard, getUser } from "../middleware/auth.js";
+import { canView } from "../lib/auth/permissions.js";
 import { db, schema } from "../db/index.js";
-import { sql, eq } from "drizzle-orm";
+import { sql, eq, type SQL } from "drizzle-orm";
+import type { SQLiteTable } from "drizzle-orm/sqlite-core";
+import { bodyLimit } from "hono/body-limit";
 
 const api = new Hono();
+
+// ---------------------------------------------------------------------------
+// Limit rozmiaru ciała żądania
+// ---------------------------------------------------------------------------
+const MB = 1024 * 1024;
+/** Domyślny sufit dla JSON-ów formularzy i drobnych uploadów. */
+const BODY_LIMIT_DEFAULT = 2 * MB;
+/** Import raportów XLS (CMA, rejestr obiektów) — przykładowy dzienny raport ma ~1,4 MB. */
+const BODY_LIMIT_XLS_IMPORT = 20 * MB;
+/** Stan projektu designera (zdjęcia w base64), snapshoty, DWG. */
+const BODY_LIMIT_DESIGNER = 30 * MB;
+/** Notatki wydarzeń z załącznikami: 15 plików × 5 MB + narzut multipart (src/lib/calendar-attachments.ts). */
+const BODY_LIMIT_NOTE_ATTACHMENTS = 80 * MB;
+
+/**
+ * Sufit zależny od trasy: trasy dużych ciał są wyliczone jawnie, reszta dostaje
+ * 2 MB. Bez tego zalogowany użytkownik mógł wysłać 20 MB JSON-u do
+ * PUT /monitoring/:id/data (zapisywało się w całości do bazy), a każda trasa
+ * przyjmowała ciało dowolnej długości. Upload DWG ma własną kontrolę rozmiaru
+ * w src/routes/monitoring.ts — tutaj tylko wpuszczamy go do tej klasy.
+ */
+function bodyLimitFor(path: string, method: string): number {
+  if (/^\/monitoring\/\d+\/(data|snapshots|dwg-import)$/.test(path) && method !== "GET") {
+    return BODY_LIMIT_DESIGNER;
+  }
+  if (/^\/monitoring\/snapshots\/\d+$/.test(path) && method === "PUT") return BODY_LIMIT_DESIGNER;
+  if (/^\/calendar\/events\/\d+\/notes$/.test(path) && method === "POST") return BODY_LIMIT_NOTE_ATTACHMENTS;
+  if (path === "/cma/reports/import" || path === "/monitored-objects/import") {
+    return BODY_LIMIT_XLS_IMPORT;
+  }
+  return BODY_LIMIT_DEFAULT;
+}
+
+api.use("*", async (c, next) => {
+  const path = c.req.path.replace(/^\/api/, "");
+  const maxSize = bodyLimitFor(path, c.req.method.toUpperCase());
+  return bodyLimit({
+    maxSize,
+    onError: (ctx) =>
+      ctx.json(
+        { success: false, error: `Żądanie jest za duże (limit ${Math.round(maxSize / MB)} MB).` },
+        413
+      ),
+  })(c, next);
+});
 
 // --- AUTH (rejestracja / logowanie / sesja) — publiczne ---
 // Musi być zamontowane PRZED api.use("*", requireAuth): w Hono middleware
@@ -89,100 +137,91 @@ api.route("/activity", activityRoutes);
 // rejestru, więc wystarczy zalogowana sesja (limit zapytań w samej trasie).
 api.route("/company-lookup", companyLookupRoutes);
 
-// Dashboard statistics
+/*
+ * Dashboard statistics. Dashboard ma każdy zalogowany, ale liczby pochodzą
+ * z modułów, do których nie każdy ma wgląd: liczniki obiektów i miesięczny
+ * przychód to zakładka `objects`, kontrahenci — `contractors`, umowy —
+ * `contracts`, zlecenia — `orders`. Sekcje bez uprawnienia wracają jako `null`
+ * (kształt odpowiedzi jest STAŁY — front czyta `stats.objectsByStatus.pending`
+ * bez sprawdzania, więc brak klucza wywaliłby stronę; `null || 0` renderuje
+ * zero). Użytkownik z pustymi uprawnieniami dostaje same `null`e, bez kwot.
+ */
+async function count(table: SQLiteTable, where?: SQL): Promise<number> {
+  const [r] = await db.select({ count: sql<number>`count(*)` }).from(table).where(where);
+  return r.count;
+}
+
 api.get("/stats", async (c) => {
-  const [contractorsCount] = await db
-    .select({ count: sql<number>`count(*)` })
-    .from(schema.contractors);
+  const user = getUser(c);
+  const sees = (tab: string) => canView(user, tab);
+  const seesObjects = sees("objects");
+  const seesOrders = sees("orders");
 
-  const [objectsCount] = await db
-    .select({ count: sql<number>`count(*)` })
-    .from(schema.objects);
+  const contractors = sees("contractors") ? await count(schema.contractors) : null;
+  const contracts = sees("contracts") ? await count(schema.contracts) : null;
 
-  const [contractsCount] = await db
-    .select({ count: sql<number>`count(*)` })
-    .from(schema.contracts);
+  let objects: number | null = null;
+  let objectsByStatus: Record<"pending" | "inProgress" | "active", number | null> = {
+    pending: null,
+    inProgress: null,
+    active: null,
+  };
+  let objectsByDepartment: Record<"sales" | "technical" | "accounting", number | null> = {
+    sales: null,
+    technical: null,
+    accounting: null,
+  };
+  let monthlyRevenue: number | null = null;
+  if (seesObjects) {
+    const o = schema.objects;
+    objects = await count(o);
+    objectsByStatus = {
+      pending: await count(o, eq(o.status, "pending")),
+      inProgress: await count(o, eq(o.status, "in_progress")),
+      active: await count(o, eq(o.status, "active")),
+    };
+    objectsByDepartment = {
+      sales: await count(o, eq(o.department, "sales")),
+      technical: await count(o, eq(o.department, "technical")),
+      accounting: await count(o, eq(o.department, "accounting")),
+    };
+    // Przychód miesięczny = abonament + dzierżawa sprzętu (obie kwoty płatne co miesiąc).
+    const [monthlyValueSum] = await db
+      .select({
+        sum: sql<number>`COALESCE(sum(COALESCE(monthly_value, 0) + COALESCE(monthly_rental, 0)), 0)`,
+      })
+      .from(o)
+      .where(eq(o.status, "active"));
+    monthlyRevenue = monthlyValueSum.sum;
+  }
 
-  const [pendingObjects] = await db
-    .select({ count: sql<number>`count(*)` })
-    .from(schema.objects)
-    .where(eq(schema.objects.status, "pending"));
-
-  const [inProgressObjects] = await db
-    .select({ count: sql<number>`count(*)` })
-    .from(schema.objects)
-    .where(eq(schema.objects.status, "in_progress"));
-
-  const [activeObjects] = await db
-    .select({ count: sql<number>`count(*)` })
-    .from(schema.objects)
-    .where(eq(schema.objects.status, "active"));
-
-  const [salesDeptObjects] = await db
-    .select({ count: sql<number>`count(*)` })
-    .from(schema.objects)
-    .where(eq(schema.objects.department, "sales"));
-
-  const [technicalDeptObjects] = await db
-    .select({ count: sql<number>`count(*)` })
-    .from(schema.objects)
-    .where(eq(schema.objects.department, "technical"));
-
-  const [accountingDeptObjects] = await db
-    .select({ count: sql<number>`count(*)` })
-    .from(schema.objects)
-    .where(eq(schema.objects.department, "accounting"));
-
-  // Przychód miesięczny = abonament + dzierżawa sprzętu (obie kwoty płatne co miesiąc).
-  const [monthlyValueSum] = await db
-    .select({
-      sum: sql<number>`COALESCE(sum(COALESCE(monthly_value, 0) + COALESCE(monthly_rental, 0)), 0)`,
-    })
-    .from(schema.objects)
-    .where(eq(schema.objects.status, "active"));
-
-  const [ordersCount] = await db
-    .select({ count: sql<number>`count(*)` })
-    .from(schema.orders);
-
-  const [newOrders] = await db
-    .select({ count: sql<number>`count(*)` })
-    .from(schema.orders)
-    .where(eq(schema.orders.status, "new"));
-
-  const [inProgressOrders] = await db
-    .select({ count: sql<number>`count(*)` })
-    .from(schema.orders)
-    .where(eq(schema.orders.status, "in_progress"));
-
-  const [completedOrders] = await db
-    .select({ count: sql<number>`count(*)` })
-    .from(schema.orders)
-    .where(eq(schema.orders.status, "completed"));
+  let orders: number | null = null;
+  let ordersByStatus: Record<"new" | "inProgress" | "completed", number | null> = {
+    new: null,
+    inProgress: null,
+    completed: null,
+  };
+  if (seesOrders) {
+    const o = schema.orders;
+    orders = await count(o);
+    ordersByStatus = {
+      new: await count(o, eq(o.status, "new")),
+      inProgress: await count(o, eq(o.status, "in_progress")),
+      completed: await count(o, eq(o.status, "completed")),
+    };
+  }
 
   return c.json({
     success: true,
     data: {
-      contractors: contractorsCount.count,
-      objects: objectsCount.count,
-      contracts: contractsCount.count,
-      orders: ordersCount.count,
-      ordersByStatus: {
-        new: newOrders.count,
-        inProgress: inProgressOrders.count,
-        completed: completedOrders.count,
-      },
-      objectsByStatus: {
-        pending: pendingObjects.count,
-        inProgress: inProgressObjects.count,
-        active: activeObjects.count,
-      },
-      objectsByDepartment: {
-        sales: salesDeptObjects.count,
-        technical: technicalDeptObjects.count,
-        accounting: accountingDeptObjects.count,
-      },
-      monthlyRevenue: monthlyValueSum.sum,
+      contractors,
+      objects,
+      contracts,
+      orders,
+      ordersByStatus,
+      objectsByStatus,
+      objectsByDepartment,
+      monthlyRevenue,
     },
   });
 });

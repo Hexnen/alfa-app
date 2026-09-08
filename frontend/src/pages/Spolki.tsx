@@ -1,9 +1,16 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { CompanyForm, type EmployerMarkupGlobals } from "@/components/CompanyForm";
 import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
@@ -11,13 +18,17 @@ import { usePerms } from "@/auth/permissions";
 import {
   Archive,
   ArchiveRestore,
+  ArrowDown,
+  ArrowUp,
   Building2,
+  ChevronsUpDown,
   Loader2,
   Pencil,
   Plus,
   Search,
   ShieldCheck,
   Trash2,
+  X,
 } from "lucide-react";
 import {
   adminCompanyApi,
@@ -30,7 +41,40 @@ import {
   type Company,
   type CompanyInput,
 } from "@/lib/api";
-import { formatCurrency } from "@/lib/utils";
+import { cn, formatCurrency } from "@/lib/utils";
+
+/** Kolumny, po których da się sortować listę spółek. */
+type CompanySortKey = "name" | "fullName" | "nip" | "vat" | "objects" | "value" | "contracts";
+
+/**
+ * Domyślny kierunek sortowania kolumny — kwoty i liczniki ludzie czytają od
+ * największej wartości, teksty alfabetycznie (jak w kartotece obiektów).
+ */
+const DEFAULT_DIR: Record<CompanySortKey, "asc" | "desc"> = {
+  name: "asc",
+  fullName: "asc",
+  nip: "asc",
+  vat: "asc",
+  objects: "desc",
+  value: "desc",
+  contracts: "desc",
+};
+
+/** Filtr wartości miesięcznej: wszystkie / tylko z abonamentem / tylko bez. */
+type ValueMode = "all" | "with" | "without";
+
+/**
+ * Filtr statusu VAT. Wartości „Czynny”/„Zwolniony”/„Niezarejestrowany” to dokładnie
+ * te, które backend zapisuje z wykazu MF (`normalizeStatus` w `lib/mf-whitelist.ts`);
+ * „unchecked” to spółki, których nikt jeszcze nie sprawdził (pusty `vatStatus`).
+ */
+type VatFilter = "all" | "Czynny" | "Zwolniony" | "Niezarejestrowany" | "unchecked";
+
+/** Kwota z pola tekstowego — przecinek jak kropka, śmieci traktujemy jak brak filtra. */
+function parseAmount(raw: string): number | undefined {
+  const n = parseFloat(raw.replace(",", "."));
+  return Number.isFinite(n) ? n : undefined;
+}
 
 /**
  * Spółki grupy — słownik wspólny z kadrami. Nazwy pochodzą z arkusza WYNAGRODZENIA
@@ -46,6 +90,16 @@ export function Spolki() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [view, setView] = useState<"active" | "archived">("active");
+  // Filtry i sortowanie liczymy po stronie klienta — `getCompanies()` i tak zwraca
+  // cały słownik (kilkanaście spółek), więc nie ma po co dokładać parametrów do API.
+  // Z tego samego powodu widełki kwot idą bez debounce'u: nie ma żądania do
+  // odciążenia, a lista przelicza się w tym samym renderze co wpisana cyfra.
+  const [vatFilter, setVatFilter] = useState<VatFilter>("all");
+  const [valueMode, setValueMode] = useState<ValueMode>("all");
+  const [minInput, setMinInput] = useState("");
+  const [maxInput, setMaxInput] = useState("");
+  const [sort, setSort] = useState<CompanySortKey>("name");
+  const [dir, setDir] = useState<"asc" | "desc">("asc");
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<Company | null>(null);
   /** Id spółki, dla której trwa sprawdzenie w wykazie MF. */
@@ -106,17 +160,143 @@ export function Spolki() {
       .filter(Boolean)
       .join(" · ");
 
-  const matches = (c: Company) => {
+  /**
+   * Jeden przebieg: filtry + sortowanie. Liczniki na zakładkach biorą się z tej
+   * samej listy, więc „Aktualne (3)” zawsze zgadza się z tym, co widać w tabeli.
+   */
+  const visible = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return true;
-    return [c.name, c.fullName, c.nip, c.notes]
-      .filter(Boolean)
-      .some((v) => String(v).toLowerCase().includes(q));
-  };
+    const min = parseAmount(minInput);
+    const max = parseAmount(maxInput);
 
-  const visible = rows.filter(matches);
+    const list = rows.filter((c) => {
+      if (
+        q &&
+        ![c.name, c.fullName, c.nip, c.notes]
+          .filter(Boolean)
+          .some((v) => String(v).toLowerCase().includes(q))
+      ) {
+        return false;
+      }
+      if (vatFilter !== "all") {
+        const status = (c.vatStatus ?? "").trim();
+        if (vatFilter === "unchecked" ? status !== "" : status !== vatFilter) return false;
+      }
+      // Abonament 0 zł = spółka bez obiektów z ceną; tabela pokazuje tu kreskę,
+      // więc filtr „bez abonamentu” łapie i zero, i brak.
+      const value = c.objectsMonthlyValue ?? 0;
+      if (valueMode === "with" && value <= 0) return false;
+      if (valueMode === "without" && value > 0) return false;
+      if (min !== undefined && value < min) return false;
+      if (max !== undefined && value > max) return false;
+      return true;
+    });
+
+    const mul = dir === "asc" ? 1 : -1;
+    const text = (c: Company) =>
+      (sort === "name"
+        ? c.name
+        : sort === "fullName"
+          ? c.fullName
+          : sort === "nip"
+            ? c.nip
+            : c.vatStatus) ?? "";
+    const number = (c: Company) =>
+      sort === "objects"
+        ? (c.objectsCount ?? 0)
+        : sort === "value"
+          ? (c.objectsMonthlyValue ?? 0)
+          : (c.contractsCount ?? 0);
+
+    // Puste teksty i brak kwoty lądują na końcu w OBU kierunkach (jak NULLS LAST
+    // w sortowaniu obiektów) — inaczej „sortuj po NIP-ie” zaczynałoby się od
+    // spółek bez NIP-u. Remis rozstrzyga nazwa, żeby kolejność była stabilna.
+    const compare = (a: Company, b: Company): number => {
+      if (sort === "objects" || sort === "value" || sort === "contracts") {
+        const av = number(a);
+        const bv = number(b);
+        // Liczniki obiektów i umów pokazujemy jako „0” (to informacja), więc
+        // tylko brak kwoty abonamentu jest traktowany jak wartość pusta.
+        if (sort === "value" && (!av || !bv)) {
+          if (!av && !bv) return 0;
+          return av ? -1 : 1;
+        }
+        return (av - bv) * mul;
+      }
+      const as = text(a).trim();
+      const bs = text(b).trim();
+      if (!as || !bs) {
+        if (!as && !bs) return 0;
+        return as ? -1 : 1;
+      }
+      return as.localeCompare(bs, "pl") * mul;
+    };
+
+    return list.sort((a, b) => compare(a, b) || a.name.localeCompare(b.name, "pl"));
+  }, [rows, search, vatFilter, valueMode, minInput, maxInput, sort, dir]);
+
   const active = visible.filter((c) => c.active);
   const archived = visible.filter((c) => !c.active);
+
+  /** Klik w nagłówek: ta sama kolumna odwraca kierunek, nowa startuje od swojego domyślnego. */
+  const toggleSort = (key: CompanySortKey) => {
+    if (sort === key) {
+      setDir((d) => (d === "asc" ? "desc" : "asc"));
+      return;
+    }
+    setSort(key);
+    setDir(DEFAULT_DIR[key]);
+  };
+
+  const filtersActive =
+    search !== "" ||
+    vatFilter !== "all" ||
+    valueMode !== "all" ||
+    minInput !== "" ||
+    maxInput !== "";
+
+  const clearFilters = () => {
+    setSearch("");
+    setVatFilter("all");
+    setValueMode("all");
+    setMinInput("");
+    setMaxInput("");
+  };
+
+  /** Nagłówek klikalny — strzałka pokazuje kolumnę i kierunek sortowania. */
+  const SortHeader = ({
+    label,
+    sortKey,
+    align = "left",
+    title,
+  }: {
+    label: string;
+    sortKey: CompanySortKey;
+    align?: "left" | "right";
+    title?: string;
+  }) => {
+    const activeCol = sort === sortKey;
+    const Icon = !activeCol ? ChevronsUpDown : dir === "asc" ? ArrowUp : ArrowDown;
+    return (
+      <th className={cn("py-3 px-2 font-medium", align === "right" ? "text-right" : "text-left")}>
+        <button
+          type="button"
+          data-testid={`spolki-sort-${sortKey}`}
+          onClick={() => toggleSort(sortKey)}
+          aria-label={`Sortuj po: ${label}`}
+          title={title}
+          className={cn(
+            "inline-flex items-center gap-1 rounded px-1 -mx-1 transition-colors hover:text-foreground",
+            align === "right" && "flex-row-reverse",
+            activeCol ? "text-foreground" : "text-muted-foreground"
+          )}
+        >
+          {label}
+          <Icon className={cn("h-3.5 w-3.5", !activeCol && "opacity-40")} />
+        </button>
+      </th>
+    );
+  };
 
   const handleCreate = async (data: CompanyInput) => {
     await createCompany(data);
@@ -188,7 +368,11 @@ export function Spolki() {
   const renderTable = (list: Company[], emptyText: string) => {
     if (loading) return <div className="py-10 text-center text-muted-foreground">Ładowanie…</div>;
     if (list.length === 0) {
-      return <div className="py-10 text-center text-muted-foreground">{emptyText}</div>;
+      return (
+        <div className="py-10 text-center text-muted-foreground">
+          {filtersActive ? "Brak spółek dla wybranych filtrów" : emptyText}
+        </div>
+      );
     }
     const sum = totals(list);
     return (
@@ -196,18 +380,18 @@ export function Spolki() {
         <table className="w-full">
           <thead>
             <tr className="border-b">
-              <th className="text-left py-3 px-2 font-medium">Spółka</th>
-              <th className="text-left py-3 px-2 font-medium">Pełna nazwa</th>
-              <th className="text-left py-3 px-2 font-medium">NIP</th>
-              <th className="text-left py-3 px-2 font-medium">VAT (wykaz MF)</th>
-              <th className="text-right py-3 px-2 font-medium">Obiekty</th>
-              <th className="text-right py-3 px-2 font-medium">Abonament</th>
-              <th
-                className="text-right py-3 px-2 font-medium"
+              <SortHeader label="Spółka" sortKey="name" />
+              <SortHeader label="Pełna nazwa" sortKey="fullName" />
+              <SortHeader label="NIP" sortKey="nip" />
+              <SortHeader label="VAT (wykaz MF)" sortKey="vat" />
+              <SortHeader label="Obiekty" sortKey="objects" align="right" />
+              <SortHeader label="Abonament" sortKey="value" align="right" />
+              <SortHeader
+                label="Umowy (kadry)"
+                sortKey="contracts"
+                align="right"
                 title="Umowy w module Kadry → Wynagrodzenia wskazujące na tę spółkę"
-              >
-                Umowy (kadry)
-              </th>
+              />
               <th className="text-right py-3 px-2 font-medium">Akcje</th>
             </tr>
           </thead>
@@ -383,8 +567,8 @@ export function Spolki() {
   return (
     <div className="space-y-3">
       {!editable && <ReadOnlyBanner className="mb-4" />}
-      <div className="flex flex-wrap items-center gap-4">
-        <div className="relative flex-1 max-w-sm">
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="relative flex-1 min-w-[200px] max-w-sm">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <Input
             placeholder="Szukaj spółki..."
@@ -393,15 +577,82 @@ export function Spolki() {
             className="pl-10"
           />
         </div>
-        <p className="text-sm text-muted-foreground">
-          Ten sam słownik, co spółki w Kadrach → Wynagrodzenia
-        </p>
+
+        {/* Etykiety takie same jak plakietki w tabeli — „Niezarejestrowany” z wykazu
+            MF czytamy jako „Brak w wykazie VAT”, bo dla spółek komandytowych grupy
+            to normalny stan, a nie błąd. */}
+        <Select value={vatFilter} onValueChange={(v) => setVatFilter(v as VatFilter)}>
+          <SelectTrigger className="w-[220px]" data-testid="spolki-filter-vat">
+            <SelectValue placeholder="Status VAT" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">Wszystkie statusy VAT</SelectItem>
+            <SelectItem value="Czynny">VAT czynny</SelectItem>
+            <SelectItem value="Zwolniony">VAT zwolniony</SelectItem>
+            <SelectItem value="Niezarejestrowany">Brak w wykazie VAT</SelectItem>
+            <SelectItem value="unchecked">Niesprawdzone</SelectItem>
+          </SelectContent>
+        </Select>
+
         {editable && (
           <Button className="ml-auto" onClick={() => setFormOpen(true)}>
             <Plus className="h-4 w-4 mr-2" />
             Nowa spółka
           </Button>
         )}
+      </div>
+
+      {/* Druga linia filtrów: abonament z obiektów spółki — tryb i widełki kwot. */}
+      <div className="flex flex-wrap items-center gap-2">
+        <Select value={valueMode} onValueChange={(v) => setValueMode(v as ValueMode)}>
+          <SelectTrigger className="w-[200px]" data-testid="spolki-filter-value-mode">
+            <SelectValue placeholder="Wartość" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">Wartość: wszystkie</SelectItem>
+            <SelectItem value="with">Tylko z abonamentem</SelectItem>
+            <SelectItem value="without">Tylko bez abonamentu</SelectItem>
+          </SelectContent>
+        </Select>
+        <div className="flex items-center gap-1 text-sm text-muted-foreground">
+          <span>Kwota od</span>
+          <Input
+            type="number"
+            min="0"
+            step="50"
+            inputMode="decimal"
+            className="w-28 tabular-nums"
+            data-testid="spolki-filter-min"
+            value={minInput}
+            onChange={(e) => setMinInput(e.target.value)}
+          />
+          <span>do</span>
+          <Input
+            type="number"
+            min="0"
+            step="50"
+            inputMode="decimal"
+            className="w-28 tabular-nums"
+            data-testid="spolki-filter-max"
+            value={maxInput}
+            onChange={(e) => setMaxInput(e.target.value)}
+          />
+          <span>zł/mies.</span>
+        </div>
+        {filtersActive && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={clearFilters}
+            data-testid="spolki-filters-clear"
+          >
+            <X className="h-4 w-4 mr-1" />
+            Wyczyść filtry
+          </Button>
+        )}
+        <p className="ml-auto text-sm text-muted-foreground">
+          Ten sam słownik, co spółki w Kadrach → Wynagrodzenia
+        </p>
       </div>
 
       <Tabs value={view} onValueChange={(v) => setView(v as "active" | "archived")}>

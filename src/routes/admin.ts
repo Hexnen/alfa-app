@@ -11,6 +11,7 @@ import {
   findUserById,
   findUserByEmail,
   publicUser,
+  revokeCalendarToken,
 } from "../lib/auth/users.js";
 import { TABS } from "../lib/auth/permissions.js";
 
@@ -55,7 +56,7 @@ admin.post("/users", async (c) => {
   const role = body.role === "admin" ? "admin" : "user";
   let user;
   try {
-    user = createUserFull({
+    user = await createUserFull({
       email,
       password,
       displayName,
@@ -144,7 +145,18 @@ admin.put("/users/:id/password", async (c) => {
   if (password.length < 6 || password.length > 200) {
     return c.json({ success: false, error: "Hasło: min. 6 znaków." }, 400);
   }
-  setUserPassword(id, password);
+  await setUserPassword(id, password);
+  return c.json({ success: true });
+});
+
+// Unieważnienie tokenu subskrypcji ICS cudzego konta (gdy link do kalendarza
+// wyciekł). Reset hasła robi to samo przy okazji, ale tu nie ruszamy ani hasła,
+// ani sesji — użytkownik dalej pracuje, tylko feed przestaje działać.
+admin.delete("/users/:id/calendar-token", (c) => {
+  const id = Number(c.req.param("id"));
+  if (!revokeCalendarToken(id)) {
+    return c.json({ success: false, error: "Nie znaleziono użytkownika." }, 404);
+  }
   return c.json({ success: true });
 });
 

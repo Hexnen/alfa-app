@@ -16,6 +16,7 @@ import {
   type AnalyticsSalespeopleData,
   type AnalyticsSalespersonRow,
   type AnalyticsScope,
+  type AnalyticsService,
   type CostWindow,
 } from "@/lib/api";
 import {
@@ -34,6 +35,7 @@ import {
   WaterfallChart,
   pct,
   plnFull,
+  serviceTag,
 } from "@/components/analytics";
 import {
   cmpNullLast,
@@ -46,8 +48,11 @@ import {
 } from "./shared";
 import { PersonnelFootnote, ResourceNotice, SortHeader } from "./parts";
 
-const load = (scope: AnalyticsScope, costWindow: CostWindow) =>
-  getAnalyticsSalespeople({ scope, costWindow });
+const load = (
+  scope: AnalyticsScope,
+  costWindow: CostWindow,
+  service: AnalyticsService
+) => getAnalyticsSalespeople({ scope, costWindow, service });
 
 /**
  * Koszt własny handlowca to też koszt, więc dostaje odcień tej samej barwy co
@@ -118,6 +123,7 @@ function roiOf(r: AnalyticsSalespersonRow): number | null {
 export function HandlowcyView({
   scope,
   costWindow,
+  service,
   search,
   reloadKey,
 }: AnalyticsViewProps) {
@@ -126,6 +132,7 @@ export function HandlowcyView({
     load,
     scope,
     costWindow,
+    service,
     reloadKey
   );
   const [sort, setSort] = useState<SortKey>("profit");
@@ -388,13 +395,13 @@ export function HandlowcyView({
     <div className="space-y-3">
       <KpiRow>
         <KpiTile
-          label="Przychód portfeli"
+          label={`Przychód portfeli${serviceTag(service)}`}
           value={plnFull(team.revenue)}
           sub={`${rows.length} ${rows.length === 1 ? "handlowiec" : "handlowców"} · ${team.objects} obiektów`}
           tip="Suma abonamentów obiektów przypisanych do handlowców (wraz z portfelem bez opiekuna)"
         />
         <KpiTile
-          label="Koszt obiektów"
+          label={`Koszt obiektów${serviceTag(service)}`}
           value={hasCostData ? plnFull(team.objectsCost) : DASH}
           sub={
             hasCostData
@@ -417,7 +424,7 @@ export function HandlowcyView({
           tip="Prowizja policzona ze stawki handlowca i przychodu jego portfela"
         />
         <KpiTile
-          label="Zysk netto"
+          label={`Zysk netto${serviceTag(service)}`}
           value={hasAnyCost ? plnFull(team.netProfit) : DASH}
           tone={hasAnyCost ? (team.netProfit >= 0 ? "good" : "bad") : "neutral"}
           sub={
@@ -432,7 +439,7 @@ export function HandlowcyView({
           coverage={coverageProps}
         />
         <KpiTile
-          label="Marża netto"
+          label={`Marża netto${serviceTag(service)}`}
           value={<MarginGauge value={netMargin} size="lg" />}
           sub={hasAnyCost ? "zysk netto / przychód" : "nieznana bez kosztów"}
           tip="Zysk po wszystkich potrąceniach podzielony przez przychód portfeli"
@@ -440,7 +447,7 @@ export function HandlowcyView({
         />
       </KpiRow>
 
-      <PersonnelFootnote personnel={data.personnel} />
+      <PersonnelFootnote personnel={data.personnel} service={service} />
 
       <ChartCard
         title="Od przychodu do zysku"

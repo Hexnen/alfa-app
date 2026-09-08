@@ -25,7 +25,8 @@ import {
 } from "../db/schema.js";
 import { logActivity, logFieldDiffs, userLabelOf, type ActivityUser, type DbOrTx, type Tx } from "./activity-log.js";
 import { onEventCreated, onEventDeleted, onEventRestored, onEventUpdated } from "./calendar-realizations.js";
-import { noteOfRow, type Note } from "./calendar-queries.js";
+import { noteOfRow, noteWithAttachments, type Note } from "./calendar-queries.js";
+import { attachmentOfRow, type StoredAttachment } from "./calendar-attachments.js";
 import { expandOccurrences, describeRule, shiftLocal, diffMinutes, type RecurrenceRule } from "./calendar-recurrence.js";
 import { ApiError, BILLING_HIDDEN_TYPES, BILLING_LABELS, STATUS_LABELS, TYPE_LABELS } from "./calendar-labels.js";
 
@@ -666,10 +667,13 @@ function noteSummary(text: string, max = 120): string {
   return t.length > max ? `${t.slice(0, max - 1)}…` : t;
 }
 
-/** Walidacja treści notatki (trim, 1–CALENDAR_NOTE_MAX znaków). Rzuca ApiError. */
-export function parseNoteText(raw: unknown): string {
+/**
+ * Walidacja treści notatki (trim, 1–CALENDAR_NOTE_MAX znaków). Rzuca ApiError.
+ * `allowEmpty` — notatka z samymi załącznikami może mieć pustą treść.
+ */
+export function parseNoteText(raw: unknown, allowEmpty = false): string {
   const s = typeof raw === "string" ? raw.trim() : "";
-  if (!s) throw new ApiError(400, "Treść notatki jest wymagana");
+  if (!s && !allowEmpty) throw new ApiError(400, "Treść notatki jest wymagana");
   if (s.length > CALENDAR_NOTE_MAX) throw new ApiError(400, `Notatka jest za długa (max ${CALENDAR_NOTE_MAX} znaków)`);
   return s;
 }
@@ -689,6 +693,8 @@ export interface AddNoteInput {
   ctx: MutationCtx;
   /** Domyślnie "user"; asystent → "assistant" (etykieta „Asystent (kto zatwierdził)”). */
   source?: CalendarNoteSource;
+  /** Pliki już zapisane na dysku (src/lib/calendar-attachments.ts storeUploads) — tu tylko wiersze. */
+  attachments?: StoredAttachment[];
 }
 
 /** Dodaje notatkę do wydarzenia (event musi istnieć i nie być usunięty). */
@@ -696,7 +702,8 @@ export function addNote(tx: DbOrTx, input: AddNoteInput): Note {
   const ev = getEventRow(tx, input.eventId);
   if (!ev) throw new ApiError(404, "Wydarzenie nie istnieje");
   if (ev.deletedAt) throw new ApiError(409, "Wydarzenie jest usunięte — najpierw je przywróć");
-  const text = parseNoteText(input.text);
+  const attachments = input.attachments ?? [];
+  const text = parseNoteText(input.text, attachments.length > 0);
   const source = input.source ?? "user";
   const who = userLabelOf(input.ctx.user);
   const userLabel = source === "assistant" ? `Asystent${who ? ` (${who})` : ""}` : source === "system" ? "System" : who;
@@ -705,11 +712,15 @@ export function addNote(tx: DbOrTx, input: AddNoteInput): Note {
     .values({ eventId: ev.id, userId: input.ctx.user.id, userLabel, source, text })
     .returning()
     .get();
+  const attRows = attachments.length
+    ? tx.insert(schema.calendarNoteAttachments).values(attachments.map((a) => ({ ...a, noteId: row.id }))).returning().all()
+    : [];
+  const attInfo = attachments.length ? `${text ? " " : ""}(załączniki: ${attachments.length})` : "";
   logActivity(tx, {
     entityType: CALENDAR_ENTITY, entityId: ev.id, objectId: ev.objectId, user: input.ctx.user, summarySuffix: input.ctx.summarySuffix,
-    action: "note_added", field: "note", newValue: row.id, summary: `Dodano notatkę: ${noteSummary(text)}`,
+    action: "note_added", field: "note", newValue: row.id, summary: `Dodano notatkę: ${noteSummary(text)}${attInfo}`,
   });
-  return noteOfRow(row);
+  return noteOfRow(row, attRows.map(attachmentOfRow));
 }
 
 /** Edycja treści notatki (autor lub admin). */
@@ -717,8 +728,9 @@ export function updateNote(tx: DbOrTx, noteId: number, rawText: unknown, ctx: Mu
   const note = getNoteRow(tx, noteId);
   if (!note || note.deletedAt) throw new ApiError(404, "Notatka nie istnieje");
   if (!canManageNote(note, ctx.user)) throw new ApiError(403, "Tylko autor notatki lub administrator może ją edytować");
-  const text = parseNoteText(rawText);
-  if (text === note.text) return noteOfRow(note);
+  const current = noteWithAttachments(tx, note);
+  const text = parseNoteText(rawText, current.attachments.length > 0);
+  if (text === note.text) return current;
   const ev = getEventRow(tx, note.eventId);
   const after = tx
     .update(schema.calendarEventNotes)
@@ -730,7 +742,7 @@ export function updateNote(tx: DbOrTx, noteId: number, rawText: unknown, ctx: Mu
     entityType: CALENDAR_ENTITY, entityId: note.eventId, objectId: ev?.objectId ?? null, user: ctx.user, summarySuffix: ctx.summarySuffix,
     action: "note_updated", field: "note", oldValue: noteSummary(note.text), newValue: noteSummary(text), summary: `Zmieniono notatkę: ${noteSummary(text)}`,
   });
-  return noteOfRow(after);
+  return noteOfRow(after, current.attachments);
 }
 
 /** Soft delete notatki (autor lub admin). */

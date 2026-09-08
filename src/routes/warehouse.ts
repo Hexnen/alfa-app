@@ -1,6 +1,6 @@
 import { Hono, type Context } from "hono";
 import { db, schema } from "../db/index.js";
-import { eq, and, asc, desc, sql, ne } from "drizzle-orm";
+import { eq, and, asc, desc, sql, ne, getTableColumns } from "drizzle-orm";
 import type { ApiResponse } from "../types/index.js";
 import type {
   NewWarehouseItem,
@@ -10,6 +10,7 @@ import type {
 import { getUser } from "../middleware/auth.js";
 import { getCompanyConfig } from "../lib/company-config.js";
 import { pricingFor } from "../lib/margin.js";
+import { parseMoney } from "../lib/money.js";
 
 const app = new Hono();
 
@@ -31,6 +32,21 @@ const EPS = 1e-9;
 const DOC_TYPES = ["PZ", "WZ", "RW", "MM"] as const;
 type DocType = (typeof DOC_TYPES)[number];
 const WAREHOUSE_TYPES = ["main", "vehicle", "employee", "site", "other"] as const;
+/**
+ * Jednostki, w których ilość MUSI być całkowita — nie da się przyjąć 2,5 sztuki
+ * ani wydać pół kompletu. Metry, kilogramy itp. zostają ułamkowe. Lista
+ * porównywana po lower/trim; ta sama lista po stronie frontu
+ * (frontend/src/components/warehouse/warehouseShared.ts, INTEGER_UNITS).
+ */
+const INTEGER_UNITS = new Set([
+  "szt", "szt.", "sztuka", "sztuki",
+  "kpl", "kpl.", "komplet",
+  "para", "pary",
+  "op", "op.", "opak", "opak.", "opakowanie",
+]);
+function isIntegerUnit(unit: string): boolean {
+  return INTEGER_UNITS.has(unit.trim().toLowerCase());
+}
 const MAX_INVOICE_DATA = 10 * 1024 * 1024; // 10 MB (ZDEKODOWANE bajty załącznika)
 const MAX_PHOTO_DATA = 1024 * 1024; // 1 MB (ZDEKODOWANE bajty; front skaluje do ≤800px)
 const IMAGE_DATA_URL_RE = /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/;
@@ -145,24 +161,17 @@ function parseItemBody(body: Record<string, unknown>): {
 
   // Ceny: puste pole = NULL, czyli „nieznana cena zakupu" / „licz cenę sprzedaży
   // z narzutu". Zero jest wartością dozwoloną (towar powierzony, gratis od
-  // dostawcy), więc `|| null` byłoby błędem — stąd jawne sprawdzenie pustki.
-  const money = (
-    raw: unknown,
-    label: string
-  ): { value?: number | null; error?: string } => {
-    if (raw === undefined || raw === null || raw === "") return { value: null };
-    const v = typeof raw === "string" ? Number(raw.replace(",", ".")) : Number(raw);
-    if (!Number.isFinite(v) || v < 0)
-      return { error: `${label} musi być liczbą nieujemną` };
-    return { value: Math.round(v * 100) / 100 };
-  };
-
-  const purchase = money(body.purchasePrice, "Cena zakupu");
+  // dostawcy), więc `|| null` byłoby błędem — parseMoney rozróżnia pustkę od zera.
+  const purchase = parseMoney(body.purchasePrice, "Cena zakupu");
   if (purchase.error) return { error: purchase.error };
-  const sale = money(body.salePrice, "Cena sprzedaży");
+  const sale = parseMoney(body.salePrice, "Cena sprzedaży");
   if (sale.error) return { error: sale.error };
 
-  let photoData: string | null = null;
+  // Zdjęcie: `undefined` = pole NIEPRZYSŁANE (PUT zostawia obecne zdjęcie —
+  // lista towarów już go nie niesie, więc formularz, który go jeszcze nie
+  // doczytał, nie może go skasować); `null`/"" = jawne „usuń zdjęcie".
+  let photoData: string | null | undefined =
+    body.photoData === undefined ? undefined : null;
   if (typeof body.photoData === "string" && body.photoData) {
     // Format przed rozmiarem — licznik bajtów zakłada payload po przecinku.
     if (!IMAGE_DATA_URL_RE.test(body.photoData)) {
@@ -188,8 +197,8 @@ function parseItemBody(body: Record<string, unknown>): {
         typeof body.manufacturer === "string" && body.manufacturer.trim()
           ? body.manufacturer.trim()
           : null,
-      purchasePrice: purchase.value ?? null,
-      salePrice: sale.value ?? null,
+      purchasePrice: purchase.value,
+      salePrice: sale.value,
       unit: unitRaw || "szt",
       description:
         typeof body.description === "string" && body.description.trim()
@@ -206,12 +215,17 @@ function parseItemBody(body: Record<string, unknown>): {
   };
 }
 
+const SKU_TAKEN = "SKU już istnieje (wielkość liter nie ma znaczenia)";
+
 /**
- * Konflikt SKU z innym towarem: komunikat 400 albo null, gdy SKU wolne.
+ * Konflikt SKU z innym towarem: komunikat 409 albo null, gdy SKU wolne.
+ * Porównanie BEZ rozróżniania wielkości liter — „kam-1" i „KAM-1" to ten sam
+ * kod z etykiety, a UNIQUE w SQLite jest case-sensitive i by je przepuścił.
  * Używane jako pre-check (ładny komunikat) i ponownie w catchu po złapaniu
  * wyścigu (UNIQUE constraint) — wtedy re-query pokazuje kolidujący wiersz.
  */
 async function skuConflict(sku: string, selfId?: number): Promise<string | null> {
+  const sameSku = sql`lower(${schema.warehouseItems.sku}) = lower(${sku})`;
   const dup = await db
     .select({
       name: schema.warehouseItems.name,
@@ -220,17 +234,14 @@ async function skuConflict(sku: string, selfId?: number): Promise<string | null>
     .from(schema.warehouseItems)
     .where(
       selfId === undefined
-        ? eq(schema.warehouseItems.sku, sku)
-        : and(
-            eq(schema.warehouseItems.sku, sku),
-            ne(schema.warehouseItems.id, selfId)
-          )
+        ? sameSku
+        : and(sameSku, ne(schema.warehouseItems.id, selfId))
     )
     .limit(1);
   if (dup.length === 0) return null;
   return dup[0].isArchived
     ? `Zarchiwizowany towar "${dup[0].name}" ma ten SKU — przywróć go zamiast tworzyć nowy`
-    : "Towar o tym SKU już istnieje";
+    : SKU_TAKEN;
 }
 
 /** Czy błąd z SQLite to naruszenie UNIQUE na warehouse_items.sku (wyścig z pre-checkiem). */
@@ -306,10 +317,27 @@ function priceChanged(
 // Do każdego wiersza doklejamy wyliczone pola cenowe — cena sprzedaży z narzutu
 // oraz marża i narzut. Liczymy tutaj, a nie w bazie, żeby zmiana globalnego
 // narzutu od razu objęła cały katalog (patrz src/lib/margin.ts).
+// Kolumny kartoteki BEZ zdjęcia + flaga `hasPhoto`. Zdjęcie (data-URL do 1 MB)
+// leci osobno z GET /items/:id/photo — lista towarów z pięcioma zdjęciami
+// ważyła 6 MB na każde odświeżenie.
+const { photoData: _photoColumn, ...ITEM_COLUMNS_NO_PHOTO } = getTableColumns(
+  schema.warehouseItems
+);
+const ITEM_LIST_COLUMNS = {
+  ...ITEM_COLUMNS_NO_PHOTO,
+  hasPhoto: sql<boolean>`${schema.warehouseItems.photoData} IS NOT NULL`.mapWith(Boolean),
+};
+
+/** Pojedynczy wiersz (po INSERT/UPDATE) w tym samym kształcie co lista. */
+function itemWithoutPhoto<T extends { photoData: string | null }>(row: T) {
+  const { photoData, ...rest } = row;
+  return { ...rest, hasPhoto: photoData !== null };
+}
+
 app.get("/items", async (c) => {
   const includeArchived = c.req.query("includeArchived") === "1";
   const rows = await db
-    .select()
+    .select(ITEM_LIST_COLUMNS)
     .from(schema.warehouseItems)
     .where(
       includeArchived ? undefined : eq(schema.warehouseItems.isArchived, false)
@@ -352,6 +380,25 @@ app.get("/pricing-config", async (c) => {
  * wpisaną na próbę i jeszcze nikt jej nie zaakceptował. Endpoint niczego nie
  * zapisuje — decyzję o nadpisaniu ceny w kartotece podejmuje człowiek.
  */
+/**
+ * Zdjęcie towaru — doczytywane leniwie (otwarcie formularza / podglądu),
+ * bo lista celowo go nie niesie. Kształt jak załącznik faktury
+ * (GET /documents/:id/invoice): JSON z data-URL, który front wstawia w <img src>.
+ */
+app.get("/items/:id/photo", async (c) => {
+  const id = parseInt(c.req.param("id"));
+  if (!Number.isInteger(id) || id <= 0)
+    return jsonError(c, 400, "Nieprawidłowy identyfikator towaru");
+  const rows = await db
+    .select({ photoData: schema.warehouseItems.photoData })
+    .from(schema.warehouseItems)
+    .where(eq(schema.warehouseItems.id, id))
+    .limit(1);
+  if (rows.length === 0) return jsonError(c, 404, "Nie znaleziono towaru");
+  if (!rows[0].photoData) return jsonError(c, 404, "Towar nie ma zdjęcia");
+  return c.json({ success: true, data: { photoData: rows[0].photoData } });
+});
+
 app.get("/items/:id/last-purchase", async (c) => {
   const id = parseInt(c.req.param("id"));
   if (!Number.isInteger(id) || id <= 0)
@@ -377,7 +424,14 @@ app.get("/items/:id/last-purchase", async (c) => {
         sql`${schema.warehouseDocumentItems.unitPrice} IS NOT NULL`
       )
     )
-    .orderBy(desc(schema.warehouseDocuments.confirmedAt))
+    // „Ostatnie" = z najpóźniejszą DATĄ DOKUMENTU, nie najpóźniej kliknięte:
+    // PZ wpisane z datą wsteczną (faktura znaleziona po miesiącu) nie może
+    // przebić późniejszej dostawy tylko dlatego, że zatwierdzono je dziś.
+    // confirmed_at rozstrzyga remis w obrębie tego samego dnia.
+    .orderBy(
+      desc(schema.warehouseDocuments.issuedAt),
+      desc(schema.warehouseDocuments.confirmedAt)
+    )
     .limit(1);
 
   return c.json({ success: true, data: rows[0] ?? null });
@@ -391,7 +445,7 @@ app.post("/items", async (c) => {
 
   if (data.sku) {
     const conflict = await skuConflict(data.sku);
-    if (conflict) return jsonError(c, 400, conflict);
+    if (conflict) return jsonError(c, 409, conflict);
   }
 
   const user = getUser(c);
@@ -404,6 +458,7 @@ app.post("/items", async (c) => {
       .insert(schema.warehouseItems)
       .values({
         ...data,
+        photoData: data.photoData ?? null,
         createdBy: user?.email ?? null,
         priceUpdatedAt: hasPrice ? nowISO() : null,
       } as NewWarehouseItem)
@@ -413,7 +468,7 @@ app.post("/items", async (c) => {
       {
         success: true,
         data: {
-          ...result[0],
+          ...itemWithoutPhoto(result[0]),
           createdByLabel: label(result[0].createdBy),
           updatedByLabel: label(result[0].updatedBy),
         },
@@ -423,13 +478,9 @@ app.post("/items", async (c) => {
     );
   } catch (err) {
     // Wyścig z równoległym zapisem tego samego SKU — pre-check przeszedł,
-    // INSERT dostał UNIQUE; mapujemy na ten sam 400 co pre-check.
+    // INSERT dostał UNIQUE; mapujemy na ten sam 409 co pre-check.
     if (data.sku && isSkuUniqueViolation(err)) {
-      return jsonError(
-        c,
-        400,
-        (await skuConflict(data.sku)) ?? "Towar o tym SKU już istnieje"
-      );
+      return jsonError(c, 409, (await skuConflict(data.sku)) ?? SKU_TAKEN);
     }
     throw err;
   }
@@ -451,7 +502,7 @@ app.put("/items/:id", async (c) => {
 
   if (data.sku) {
     const conflict = await skuConflict(data.sku, id);
-    if (conflict) return jsonError(c, 400, conflict);
+    if (conflict) return jsonError(c, 409, conflict);
   }
 
   const isArchived =
@@ -460,6 +511,8 @@ app.put("/items/:id", async (c) => {
       : Boolean(body.isArchived);
 
   const user = getUser(c);
+  // Zdjęcie nieprzysłane = zostaje (patrz parseItemBody).
+  const { photoData: newPhoto, ...dataNoPhoto } = data;
 
   try {
     const result = db.transaction((tx) => {
@@ -483,7 +536,8 @@ app.put("/items/:id", async (c) => {
       return tx
         .update(schema.warehouseItems)
         .set({
-          ...data,
+          ...dataNoPhoto,
+          ...(newPhoto === undefined ? {} : { photoData: newPhoto }),
           isArchived,
           updatedBy: user?.email ?? null,
           ...(stampPrice ? { priceUpdatedAt: nowISO() } : {}),
@@ -497,7 +551,7 @@ app.put("/items/:id", async (c) => {
     return c.json({
       success: true,
       data: {
-        ...result,
+        ...itemWithoutPhoto(result),
         createdByLabel: label(result.createdBy),
         updatedByLabel: label(result.updatedBy),
       },
@@ -506,12 +560,48 @@ app.put("/items/:id", async (c) => {
   } catch (err) {
     if (err instanceof ApiError) return jsonError(c, err.status, err.message);
     if (data.sku && isSkuUniqueViolation(err)) {
-      return jsonError(
-        c,
-        400,
-        (await skuConflict(data.sku, id)) ?? "Towar o tym SKU już istnieje"
-      );
+      return jsonError(c, 409, (await skuConflict(data.sku, id)) ?? SKU_TAKEN);
     }
+    throw err;
+  }
+});
+
+/**
+ * Przywrócenie z archiwum — lustro DELETE: zmienia WYŁĄCZNIE flagę archiwum
+ * (+ stempel edycji). Wcześniej front robił to PUT-em z odtworzonym body i po
+ * drodze gubił ceny, producenta i wiek ceny — pełna podmiana kartoteki to nie
+ * jest narzędzie do przestawienia jednego bitu.
+ */
+app.post("/items/:id/restore", async (c) => {
+  const id = parseInt(c.req.param("id"));
+  const user = getUser(c);
+  try {
+    const result = db.transaction((tx) => {
+      const cur = tx
+        .select()
+        .from(schema.warehouseItems)
+        .where(eq(schema.warehouseItems.id, id))
+        .get();
+      if (!cur) throw new ApiError(404, "Nie znaleziono towaru");
+      if (!cur.isArchived) return cur;
+      return tx
+        .update(schema.warehouseItems)
+        .set({
+          isArchived: false,
+          updatedBy: user?.email ?? null,
+          updatedAt: nowISO(),
+        })
+        .where(eq(schema.warehouseItems.id, id))
+        .returning()
+        .get();
+    });
+    return c.json({
+      success: true,
+      data: itemWithoutPhoto(result),
+      message: "Towar przywrócony z archiwum",
+    });
+  } catch (err) {
+    if (err instanceof ApiError) return jsonError(c, err.status, err.message);
     throw err;
   }
 });
@@ -644,6 +734,36 @@ function assertWarehouseArchivableSync(tx: Tx, warehouseId: number) {
   }
 }
 
+/**
+ * NIEZMIENNIK: jest najwyżej JEDEN aktywny magazyn typu `main`. Produkcja
+ * miała dwa (seed dev doszył swój obok „Magazynu głównego") — migracja
+ * 0077 to sprzątnęła, a tu pilnujemy, żeby nie wróciło. W odróżnieniu od
+ * puli CMA (hr.ts, `clearOtherPools`) NIE zdejmujemy typu z poprzedniego po
+ * cichu: „main" to nie flaga, a przestawienie cudzego magazynu na „inny" bez
+ * pytania byłoby gorsze niż odmowa — użytkownik ma najpierw zmienić typ
+ * starego, potem nowego. Wywoływać W transakcji razem z zapisem.
+ */
+function assertSingleMainSync(tx: Tx, selfId?: number) {
+  const other = tx
+    .select({ id: schema.warehouses.id, name: schema.warehouses.name })
+    .from(schema.warehouses)
+    .where(
+      and(
+        eq(schema.warehouses.type, "main"),
+        eq(schema.warehouses.isArchived, false),
+        selfId === undefined ? undefined : ne(schema.warehouses.id, selfId)
+      )
+    )
+    .limit(1)
+    .get();
+  if (other) {
+    throw new ApiError(
+      409,
+      `Magazyn główny już istnieje („${other.name}") — może być tylko jeden; zmień najpierw typ tamtego magazynu`
+    );
+  }
+}
+
 // Lista magazynów (magazyn główny seedowany przy starcie aplikacji — src/index.ts)
 app.get("/warehouses", async (c) => {
   const rows = await db
@@ -662,12 +782,16 @@ app.post("/warehouses", async (c) => {
   const parentError = await validateParent(data.parentId ?? null);
   if (parentError) return jsonError(c, 400, parentError);
 
-  const result = await db
-    .insert(schema.warehouses)
-    .values(data as NewWarehouse)
-    .returning();
-
-  return c.json({ success: true, data: result[0], message: "Magazyn dodany" }, 201);
+  try {
+    const result = db.transaction((tx) => {
+      if (data.type === "main") assertSingleMainSync(tx);
+      return tx.insert(schema.warehouses).values(data as NewWarehouse).returning().get();
+    });
+    return c.json({ success: true, data: result, message: "Magazyn dodany" }, 201);
+  } catch (err) {
+    if (err instanceof ApiError) return jsonError(c, err.status, err.message);
+    throw err;
+  }
 });
 
 // Edycja magazynu
@@ -721,6 +845,9 @@ app.put("/warehouses/:id", async (c) => {
       if (isArchived && !cur.isArchived) {
         assertWarehouseArchivableSync(tx, id);
       }
+      // Drugi aktywny „main" nie może powstać ani przez zmianę typu, ani
+      // przez przywrócenie z archiwum magazynu, który był główny.
+      if (data.type === "main" && !isArchived) assertSingleMainSync(tx, id);
       return tx
         .update(schema.warehouses)
         .set({ ...data, isArchived })
@@ -818,10 +945,11 @@ function parseDocItems(raw: unknown): { items?: DocItemInput[]; error?: string }
       return { error: `Pozycja nr ${i + 1}: ilość musi być liczbą większą od zera` };
     let unitPrice: number | null = null;
     if (e.unitPrice !== undefined && e.unitPrice !== null && e.unitPrice !== "") {
-      const p = Number(e.unitPrice);
-      if (!Number.isFinite(p) || p < 0)
-        return { error: `Pozycja nr ${i + 1}: cena jednostkowa musi być liczbą nieujemną` };
-      unitPrice = p;
+      const p = parseMoney(e.unitPrice, `Pozycja nr ${i + 1}: cena jednostkowa`);
+      if (p.error) return { error: p.error };
+      // parseMoney zaokrągla do grosza — 403,666666 z faktury dzielonej przez
+      // ilość nie ma prawa trafić do historii cen ani do „Przepisz z ostatniego PZ".
+      unitPrice = p.value ?? null;
     }
     items.push({ itemId, quantity, unitPrice });
   }
@@ -939,14 +1067,21 @@ function validateDocRefsSync(tx: Tx, head: DocHeadInput, items: DocItemInput[]) 
       .get();
     if (!wh) throw new ApiError(400, `Nie znaleziono magazynu o ID ${whId}`);
   }
-  for (const it of items) {
+  items.forEach((it, i) => {
     const item = tx
-      .select({ id: schema.warehouseItems.id })
+      .select({ id: schema.warehouseItems.id, unit: schema.warehouseItems.unit })
       .from(schema.warehouseItems)
       .where(eq(schema.warehouseItems.id, it.itemId))
       .get();
     if (!item) throw new ApiError(400, `Nie znaleziono towaru o ID ${it.itemId}`);
-  }
+    // Sztuki i komplety nie dzielą się — 2,5 szt to literówka, nie dostawa.
+    if (isIntegerUnit(item.unit) && !Number.isInteger(it.quantity)) {
+      throw new ApiError(
+        400,
+        `Pozycja nr ${i + 1}: ilość w jednostce „${item.unit}" musi być liczbą całkowitą (podano ${fmtQty(it.quantity)})`
+      );
+    }
+  });
 }
 
 /** Ruch magazynowy: wpis do ledgera + upsert cache stanów (jedna transakcja). */

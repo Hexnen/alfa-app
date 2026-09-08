@@ -19,6 +19,7 @@ import {
 } from "../utils/hr-calc.js";
 import { fetchObjectCatalog } from "../lib/object-catalog.js";
 import { departmentLabel, getCompanyConfig } from "../lib/company-config.js";
+import { officeRowTotals } from "../lib/hr-office-total.js";
 
 const app = new Hono();
 
@@ -86,12 +87,33 @@ function parseNumericFields<K extends string>(
   return { data };
 }
 
+/** Zakres roku, jaki w ogóle ma sens w ewidencji — reszta to literówka, nie data. */
+const YEAR_MIN = 2000;
+const YEAR_MAX = 2100;
+
+const isValidYear = (y: number | null): y is number =>
+  y != null && Number.isInteger(y) && y >= YEAR_MIN && y <= YEAR_MAX;
+const isValidMonth = (m: number | null): m is number =>
+  m != null && Number.isInteger(m) && m >= 1 && m <= 12;
+
+const YEAR_MONTH_ERROR = `Nieprawidłowy rok/miesiąc (rok ${YEAR_MIN}–${YEAR_MAX}, miesiąc 1–12, liczby całkowite)`;
+
+/**
+ * Rok i miesiąc z query stringa. POMINIĘTY parametr = bieżący (wygoda dla
+ * wywołań bez kontekstu), ale parametr PODANY musi być poprawny — inaczej 400.
+ * Wcześniej `parseInt(...) || bieżący`: `month=0`, `month=abc` czy `year=0`
+ * po cichu zwracały bieżący miesiąc i klient dostawał dane INNEGO okresu niż
+ * ten, o który pytał, z kodem 200. `month=1.9` czytał się jako styczeń.
+ */
 function yearMonth(c: {
   req: { query: (k: string) => string | undefined };
-}): { year: number; month: number } {
+}): { year: number; month: number } | { error: string } {
   const now = new Date();
-  const year = parseInt(c.req.query("year") ?? "") || now.getFullYear();
-  const month = parseInt(c.req.query("month") ?? "") || now.getMonth() + 1;
+  const rawYear = c.req.query("year");
+  const rawMonth = c.req.query("month");
+  const year = isBlank(rawYear) ? now.getFullYear() : toNum(rawYear);
+  const month = isBlank(rawMonth) ? now.getMonth() + 1 : toNum(rawMonth);
+  if (!isValidYear(year) || !isValidMonth(month)) return { error: YEAR_MONTH_ERROR };
   return { year, month };
 }
 
@@ -554,8 +576,32 @@ app.put("/objects/:id/mapping", async (c) => {
   });
 });
 
+/**
+ * Usunięcie pozycji kadrowej. FK `hr_hours.object_id` jest ON DELETE SET NULL,
+ * więc kasowanie NIE usuwa godzin — po cichu ODPINA je od posterunku, a wpisy
+ * lądują w „bez przypisania" i w koszcie ogólnym firmy. Dlatego, tak samo jak
+ * przy działach, pozycja z godzinami wymaga świadomego potwierdzenia
+ * (`?force=1`), inaczej 409 z liczbą wpisów.
+ */
 app.delete("/objects/:id", async (c) => {
   const id = parseInt(c.req.param("id"));
+  const force = c.req.query("force") === "1";
+  if (!force) {
+    const [used] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(schema.hrHours)
+      .where(eq(schema.hrHours.objectId, id));
+    const rowsUsing = Number(used?.count ?? 0);
+    if (rowsUsing > 0) {
+      return c.json<ApiResponse<null>>(
+        {
+          success: false,
+          error: `Obiekt ma przypisane godziny (wpisów: ${rowsUsing}). Usunięcie odepnie je od obiektu — potwierdź operację.`,
+        },
+        409,
+      );
+    }
+  }
   const result = await db
     .delete(schema.hrObjects)
     .where(eq(schema.hrObjects.id, id))
@@ -884,9 +930,15 @@ app.delete("/departments/:id", async (c) => {
 
 // ==================== NORMY GODZIN ====================
 
+/** 31 dni × 24 h — więcej godzin w miesiącu fizycznie nie ma. */
+const MAX_MONTH_HOURS = 744;
+
 app.get("/norms", async (c) => {
-  const now = new Date();
-  const year = parseInt(c.req.query("year") ?? "") || now.getFullYear();
+  const rawYear = c.req.query("year");
+  const year = isBlank(rawYear) ? new Date().getFullYear() : toNum(rawYear);
+  if (!isValidYear(year)) {
+    return c.json<ApiResponse<null>>({ success: false, error: YEAR_MONTH_ERROR }, 400);
+  }
   const rows = await db
     .select()
     .from(schema.hrMonthNorms)
@@ -902,9 +954,18 @@ app.put("/norms", async (c) => {
   const month = toNum(body.month);
   const workNorm = toNum(body.workNorm);
   const contractNorm = toNum(body.contractNorm);
-  if (!year || !month || month < 1 || month > 12 || workNorm == null || contractNorm == null) {
+  if (!isValidYear(year) || !isValidMonth(month) || workNorm == null || contractNorm == null) {
     return c.json<ApiResponse<null>>(
       { success: false, error: "Wymagane: rok, miesiąc (1-12), norma pracy i zlecenia" },
+      400,
+    );
+  }
+  // Norma jest MIANOWNIKIEM stawki godzinowej (kwota / norma) — zero albo liczba
+  // ujemna dawały stawkę nieskończoną lub ujemną i psuły cały miesiąc wypłat.
+  // Sufit: 31 dni × 24 h = 744 — więcej godzin miesiąc nie ma.
+  if (workNorm <= 0 || contractNorm <= 0 || workNorm > MAX_MONTH_HOURS || contractNorm > MAX_MONTH_HOURS) {
+    return c.json<ApiResponse<null>>(
+      { success: false, error: `Norma godzin musi być większa od 0 i nie większa niż ${MAX_MONTH_HOURS}` },
       400,
     );
   }
@@ -937,19 +998,65 @@ app.put("/norms", async (c) => {
 
 // ==================== GODZINY ====================
 
+/** Czy wiersz o tym id istnieje — zapytanie po PK, wołane synchronicznie jak `departmentNameById`. */
+function rowExists(
+  table: typeof schema.hrEmployees | typeof schema.hrObjects | typeof schema.hrDepartments,
+  id: number,
+): boolean {
+  return db.select({ id: table.id }).from(table).where(eq(table.id, id)).get() != null;
+}
+
+/**
+ * Identyfikator z body: liczba całkowita dodatnia wskazująca ISTNIEJĄCY wiersz.
+ * Istnienie sprawdzamy sami, a nie przez FK: naruszenie klucza obcego to 500
+ * z komunikatem SQLite, a klient wysłał po prostu złe dane — należy mu się 400
+ * z nazwą pola. Puste/null → null (pole opcjonalne), o obowiązkowości decyduje
+ * wywołujący.
+ */
+function refId(
+  raw: unknown,
+  table: typeof schema.hrEmployees | typeof schema.hrObjects | typeof schema.hrDepartments,
+  label: string,
+): { id: number | null; error?: string } {
+  if (isBlank(raw)) return { id: null };
+  const n = toNum(raw);
+  if (n == null || !Number.isInteger(n) || n <= 0) {
+    return { id: null, error: `${label}: nieprawidłowy identyfikator` };
+  }
+  if (!rowExists(table, n)) return { id: null, error: `${label}: nie istnieje (odśwież listę)` };
+  return { id: n };
+}
+
+/** Etykiety pól liczbowych wpisu godzin — do komunikatów 400 z nazwą pola. */
+const HOURS_LABELS = {
+  nightHours: "Godziny nocne",
+  workedHours: "Godziny",
+  uwHours: "Urlop (godz.)",
+  l4Hours: "L4 (godz.)",
+  maxHours: "Godziny maks.",
+  deductions: "Potrącenia",
+  bonuses: "Dodatki",
+} as const;
+
 function parseHours(body: Record<string, unknown>): {
   data?: Partial<NewHrHours>;
   error?: string;
 } {
-  const employeeId = toNum(body.employeeId);
+  const emp = refId(body.employeeId, schema.hrEmployees, "Pracownik");
+  if (emp.error) return { error: emp.error };
+  if (emp.id == null) return { error: "Pracownik jest wymagany" };
+  const employeeId = emp.id;
   const year = toNum(body.year);
   const month = toNum(body.month);
-  if (!employeeId) return { error: "Pracownik jest wymagany" };
-  if (!year || !month || month < 1 || month > 12) {
-    return { error: "Nieprawidłowy rok/miesiąc" };
-  }
-  const objectId = toNum(body.objectId);
-  const departmentId = toNum(body.departmentId);
+  // Całkowite i w zakresie: `month = 5.5` czy `year = 2020.7` zapisywały się
+  // dosłownie i taki wiersz nie pasował do żadnego miesiąca w GET /hours.
+  if (!isValidYear(year) || !isValidMonth(month)) return { error: YEAR_MONTH_ERROR };
+  const obj = refId(body.objectId, schema.hrObjects, "Obiekt");
+  if (obj.error) return { error: obj.error };
+  const dep = refId(body.departmentId, schema.hrDepartments, "Dział");
+  if (dep.error) return { error: dep.error };
+  const objectId = obj.id;
+  const departmentId = dep.id;
   // Rozłączność przypisania (patrz komentarz przy `hrHours.objectId` w schemacie).
   // Front wysyła OBA klucze przy każdym zapisie (jeden zawsze null), więc oba
   // wypełnione naraz to błąd programu, a nie pomyłka użytkownika — nie zerujemy
@@ -961,16 +1068,18 @@ function parseHours(body: Record<string, unknown>): {
   // Pola liczbowe opcjonalne: puste → null, „12h" → 400 z nazwą pola — ta sama
   // zasada, co dla `departmentId` i `sortOrder`; wcześniej te pola zerowały się
   // po cichu i zapis wracał 201.
-  const nums = parseNumericFields(body, {
-    nightHours: "Godziny nocne",
-    workedHours: "Godziny",
-    uwHours: "Urlop (godz.)",
-    l4Hours: "L4 (godz.)",
-    maxHours: "Godziny maks.",
-    deductions: "Potrącenia",
-    bonuses: "Dodatki",
-  });
+  const nums = parseNumericFields(body, HOURS_LABELS);
   if (nums.error || !nums.data) return { error: nums.error };
+  // Godziny nie bywają ujemne — `-8` to literówka, a zapisana zaniżałaby sumę
+  // miesiąca i (przy UoP) fakt godzin do wypłaty. Kwoty (potrącenia/dodatki)
+  // zostawiamy bez ograniczenia znaku: korekta „na minus" bywa zamierzona.
+  const hourFields = ["nightHours", "workedHours", "uwHours", "l4Hours", "maxHours"] as const;
+  for (const key of hourFields) {
+    const v = nums.data[key];
+    if (v != null && v < 0) {
+      return { error: `${HOURS_LABELS[key]}: godziny nie mogą być ujemne` };
+    }
+  }
   return {
     data: {
       employeeId,
@@ -989,7 +1098,9 @@ function parseHours(body: Record<string, unknown>): {
 }
 
 app.get("/hours", async (c) => {
-  const { year, month } = yearMonth(c);
+  const ym = yearMonth(c);
+  if ("error" in ym) return c.json<ApiResponse<null>>({ success: false, error: ym.error }, 400);
+  const { year, month } = ym;
   const rows = await db
     .select({
       hours: schema.hrHours,
@@ -1096,72 +1207,93 @@ const carryOverPairKey = (r: {
 // Idempotentny: ponowne wywołanie niczego nie dubluje. Uprawnienie edycji
 // egzekwuje tabPermissionGuard (zapis na /hr/* wymaga poziomu "edit"),
 // tak samo jak dla POST /hours.
+//
+// CO SIĘ PRZENOSI, a co nie:
+//  - wiersz BEZ godzin (wypracowane, UW i L4 wszystkie puste/zero) — nie: to
+//    najczęściej sam stub z poprzedniego carry-over, którego nikt nie wypełnił;
+//    kopiowany dalej mnożyłby się miesiąc w miesiąc,
+//  - wiersz „nic" (bez obiektu i bez działu) — nie: nie ma czego potwierdzać,
+//  - wiersz na pozycji/dziale `active = 0` — nie: zdezaktywowane znika z listy
+//    wyboru, więc stub wskazywałby coś, czego w selekcie nie ma.
+// Całość w JEDNEJ synchronicznej transakcji: odczyt istniejących par i INSERT
+// są atomowe, więc dwa carry-over odpalone naraz z dwóch kart nie zdublują
+// wierszy (drugi widzi już wstawki pierwszego).
 app.post("/hours/carry-over", async (c) => {
   const body = await c.req.json<Record<string, unknown>>();
   const year = toNum(body.year);
   const month = toNum(body.month);
-  if (!year || year < 2000 || year > 2100 || !month || month < 1 || month > 12) {
-    return c.json<ApiResponse<null>>(
-      { success: false, error: "Nieprawidłowy rok/miesiąc" },
-      400,
-    );
+  if (!isValidYear(year) || !isValidMonth(month)) {
+    return c.json<ApiResponse<null>>({ success: false, error: YEAR_MONTH_ERROR }, 400);
   }
   const prevYear = month === 1 ? year - 1 : year;
   const prevMonth = month === 1 ? 12 : month - 1;
 
-  // Wpisy poprzedniego miesiąca — tylko aktywni pracownicy
-  const prevRows = await db
-    .select({ hours: schema.hrHours })
-    .from(schema.hrHours)
-    .innerJoin(
-      schema.hrEmployees,
-      eq(schema.hrHours.employeeId, schema.hrEmployees.id),
-    )
-    .where(
-      and(
-        eq(schema.hrHours.year, prevYear),
-        eq(schema.hrHours.month, prevMonth),
-        eq(schema.hrEmployees.active, true),
-      ),
-    );
+  const inserted = db.transaction((tx) => {
+    // Wpisy poprzedniego miesiąca — tylko aktywni pracownicy, tylko aktywne
+    // przypisania (LEFT JOIN, bo wiersz wskazuje obiekt ALBO dział).
+    const prevRows = tx
+      .select({
+        hours: schema.hrHours,
+        objectActive: schema.hrObjects.active,
+        departmentActive: schema.hrDepartments.active,
+      })
+      .from(schema.hrHours)
+      .innerJoin(schema.hrEmployees, eq(schema.hrHours.employeeId, schema.hrEmployees.id))
+      .leftJoin(schema.hrObjects, eq(schema.hrHours.objectId, schema.hrObjects.id))
+      .leftJoin(schema.hrDepartments, eq(schema.hrHours.departmentId, schema.hrDepartments.id))
+      .where(
+        and(
+          eq(schema.hrHours.year, prevYear),
+          eq(schema.hrHours.month, prevMonth),
+          eq(schema.hrEmployees.active, true),
+        ),
+      )
+      .all();
 
-  // Dedup: pary (pracownik, przypisanie) już obecne w miesiącu docelowym
-  const existing = await db
-    .select({
-      employeeId: schema.hrHours.employeeId,
-      objectId: schema.hrHours.objectId,
-      departmentId: schema.hrHours.departmentId,
-    })
-    .from(schema.hrHours)
-    .where(and(eq(schema.hrHours.year, year), eq(schema.hrHours.month, month)));
-  const seen = new Set(existing.map(carryOverPairKey));
+    // Dedup: pary (pracownik, przypisanie) już obecne w miesiącu docelowym
+    const existing = tx
+      .select({
+        employeeId: schema.hrHours.employeeId,
+        objectId: schema.hrHours.objectId,
+        departmentId: schema.hrHours.departmentId,
+      })
+      .from(schema.hrHours)
+      .where(and(eq(schema.hrHours.year, year), eq(schema.hrHours.month, month)))
+      .all();
+    const seen = new Set(existing.map(carryOverPairKey));
 
-  const toInsert: NewHrHours[] = [];
-  for (const { hours: prev } of prevRows) {
-    const key = carryOverPairKey(prev);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    toInsert.push({
-      employeeId: prev.employeeId,
-      objectId: prev.objectId,
-      departmentId: prev.departmentId,
-      objectUncertain: true,
-      year,
-      month,
-      nightHours: null,
-      workedHours: null,
-      uwHours: null,
-      l4Hours: null,
-      maxHours: null,
-      deductions: null,
-      bonuses: null,
-      notes: "",
-    });
-  }
-  if (toInsert.length > 0) {
-    await db.insert(schema.hrHours).values(toInsert);
-  }
-  return c.json({ success: true, data: { inserted: toInsert.length } });
+    const toInsert: NewHrHours[] = [];
+    for (const { hours: prev, objectActive, departmentActive } of prevRows) {
+      if (prev.objectId == null && prev.departmentId == null) continue;
+      if (prev.objectId != null && objectActive === false) continue;
+      if (prev.departmentId != null && departmentActive === false) continue;
+      const hasHours =
+        (prev.workedHours ?? 0) > 0 || (prev.uwHours ?? 0) > 0 || (prev.l4Hours ?? 0) > 0;
+      if (!hasHours) continue;
+      const key = carryOverPairKey(prev);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      toInsert.push({
+        employeeId: prev.employeeId,
+        objectId: prev.objectId,
+        departmentId: prev.departmentId,
+        objectUncertain: true,
+        year,
+        month,
+        nightHours: null,
+        workedHours: null,
+        uwHours: null,
+        l4Hours: null,
+        maxHours: null,
+        deductions: null,
+        bonuses: null,
+        notes: "",
+      });
+    }
+    if (toInsert.length > 0) tx.insert(schema.hrHours).values(toInsert).run();
+    return toInsert.length;
+  });
+  return c.json({ success: true, data: { inserted } });
 });
 
 app.delete("/hours/:id", async (c) => {
@@ -1411,7 +1543,9 @@ async function computeMonth(year: number, month: number) {
 }
 
 app.get("/payroll", async (c) => {
-  const { year, month } = yearMonth(c);
+  const ym = yearMonth(c);
+  if ("error" in ym) return c.json<ApiResponse<null>>({ success: false, error: ym.error }, 400);
+  const { year, month } = ym;
   const data = await computeMonth(year, month);
   return c.json({ success: true, data });
 });
@@ -1492,14 +1626,14 @@ function parseOffice(body: Record<string, unknown>): {
   data?: Partial<NewHrOfficePayroll>;
   error?: string;
 } {
-  const employeeId = toNum(body.employeeId);
+  const emp = refId(body.employeeId, schema.hrEmployees, "Pracownik");
+  if (emp.error) return { error: emp.error };
+  if (emp.id == null) return { error: "Pracownik jest wymagany" };
+  const employeeId = emp.id;
   const year = toNum(body.year);
   const month = toNum(body.month);
-  if (!employeeId) return { error: "Pracownik jest wymagany" };
-  if (!year || !month || month < 1 || month > 12) {
-    return { error: "Nieprawidłowy rok/miesiąc" };
-  }
-  const nums = parseNumericFields(body, {
+  if (!isValidYear(year) || !isValidMonth(month)) return { error: YEAR_MONTH_ERROR };
+  const labels = {
     etatHours: "Godziny etatu",
     uwL4: "UW/L4",
     deductions: "Potrącenia",
@@ -1509,8 +1643,17 @@ function parseOffice(body: Record<string, unknown>): {
     amount: "Kwota",
     rorBase: "Podstawa ROR",
     cashOverride: "Gotówka (nadpisanie)",
-  });
+  } as const;
+  const nums = parseNumericFields(body, labels);
   if (nums.error || !nums.data) return { error: nums.error };
+  // Wszystko tu jest godzinami albo kwotami do WYPŁATY — ujemna „podstawa ROR"
+  // czy ujemna kwota nie ma interpretacji (potrącenia są kolumną samą w sobie,
+  // dodatnią). Na produkcji nie ma ani jednego ujemnego wiersza; `-3000` to
+  // literówka, która zaniżyłaby koszt biura, nie korekta.
+  for (const key of Object.keys(labels) as Array<keyof typeof labels>) {
+    const v = nums.data[key];
+    if (v != null && v < 0) return { error: `${labels[key]}: wartość nie może być ujemna` };
+  }
   return {
     data: {
       employeeId,
@@ -1523,25 +1666,16 @@ function parseOffice(body: Record<string, unknown>): {
   };
 }
 
-// Kwota i gotówka wyliczane, gdy nie podano ręcznie:
-// kwota = godziny do księgowej × stawka; gotówka = kwota − podstawa ROR
+// Kwota, gotówka i koszt całkowity wiersza biura — formuła wspólna z kosztem
+// osobowym w analityce: src/lib/hr-office-total.ts (tam też semantyka kolumn).
 function withOfficeComputed(row: typeof schema.hrOfficePayroll.$inferSelect) {
-  const amountComputed =
-    row.amount ??
-    (row.hoursForAccounting != null && row.rate != null
-      ? round2(row.hoursForAccounting * row.rate)
-      : null);
-  const cash =
-    row.cashOverride ??
-    (amountComputed != null && row.rorBase != null && amountComputed > row.rorBase
-      ? round2(amountComputed - row.rorBase)
-      : null);
-  const total = round2((row.rorBase ?? 0) + (cash ?? 0));
-  return { ...row, amountComputed, cash, total };
+  return { ...row, ...officeRowTotals(row) };
 }
 
 app.get("/office", async (c) => {
-  const { year, month } = yearMonth(c);
+  const ym = yearMonth(c);
+  if ("error" in ym) return c.json<ApiResponse<null>>({ success: false, error: ym.error }, 400);
+  const { year, month } = ym;
   const rows = await db
     .select({
       office: schema.hrOfficePayroll,
@@ -1566,19 +1700,55 @@ app.get("/office", async (c) => {
   return c.json({ success: true, data });
 });
 
+/**
+ * UPSERT po kluczu (pracownik, rok, miesiąc, SPÓŁKA) — ten sam wzorzec, co
+ * `PUT /payroll`. Wcześniej goły INSERT: dwa kliknięcia „Dodaj" (albo dwie karty)
+ * dawały dwa wiersze i `officeTotal` w podsumowaniu liczył pensję podwójnie.
+ * Spółka MUSI być w kluczu: osoba z etatem w dwóch spółkach ma legalnie dwa
+ * wiersze na miesiąc (na produkcji: Jaworski Sławomir, ALFA ETAT + CONTROL ETAT).
+ * Od migracji 0078 pilnuje tego też UNIQUE w bazie — transakcja jest po to,
+ * żeby wyścig kończył się aktualizacją, a nie 500 z SQLite.
+ * Odpowiedź: 201 gdy powstał nowy wiersz, 200 gdy zaktualizowano istniejący.
+ */
 app.post("/office", async (c) => {
   const body = await c.req.json<Record<string, unknown>>();
   const { data, error } = parseOffice(body);
   if (error || !data) {
     return c.json<ApiResponse<null>>({ success: false, error }, 400);
   }
-  const result = await db
-    .insert(schema.hrOfficePayroll)
-    .values(data as NewHrOfficePayroll)
-    .returning();
+  const values = data as NewHrOfficePayroll;
+  const outcome = db.transaction((tx) => {
+    const existing = tx
+      .select({ id: schema.hrOfficePayroll.id })
+      .from(schema.hrOfficePayroll)
+      .where(
+        and(
+          eq(schema.hrOfficePayroll.employeeId, values.employeeId),
+          eq(schema.hrOfficePayroll.year, values.year),
+          eq(schema.hrOfficePayroll.month, values.month),
+          eq(schema.hrOfficePayroll.company, values.company ?? ""),
+        ),
+      )
+      .get();
+    if (existing) {
+      const [row] = tx
+        .update(schema.hrOfficePayroll)
+        .set({ ...values, updatedAt: new Date().toISOString() })
+        .where(eq(schema.hrOfficePayroll.id, existing.id))
+        .returning()
+        .all();
+      return { created: false as const, row };
+    }
+    const [row] = tx.insert(schema.hrOfficePayroll).values(values).returning().all();
+    return { created: true as const, row };
+  });
   return c.json(
-    { success: true, data: withOfficeComputed(result[0]), message: "Wpis dodany" },
-    201,
+    {
+      success: true,
+      data: withOfficeComputed(outcome.row),
+      message: outcome.created ? "Wpis dodany" : "Wpis zaktualizowany",
+    },
+    outcome.created ? 201 : 200,
   );
 });
 
@@ -1646,7 +1816,9 @@ app.delete("/office/:id", async (c) => {
 // ==================== PODSUMOWANIE MIESIĄCA ====================
 
 app.get("/summary", async (c) => {
-  const { year, month } = yearMonth(c);
+  const ym = yearMonth(c);
+  if ("error" in ym) return c.json<ApiResponse<null>>({ success: false, error: ym.error }, 400);
+  const { year, month } = ym;
   const [payroll, hoursRows, officeRows] = await Promise.all([
     computeMonth(year, month),
     db
@@ -1675,6 +1847,15 @@ app.get("/summary", async (c) => {
     (r) => r.faktGodziny != null && r.faktGodziny > 0 && r.kwotaGlowna == null,
   ).length;
   const pendingBonus = payroll.filter((r) => r.bonusPending).length;
+  // Liczba WIERSZY do uzupełnienia, nie suma dwóch liczników: umowa bez kwoty
+  // i jednocześnie z dodatkiem do przeliczenia to jeden brak, nie dwa. Kafel
+  // „Braki" pokazuje tę liczbę, a filtr tabeli „Braki (jak na kaflu)" ma dać
+  // dokładnie tyle wierszy.
+  const gaps = payroll.filter(
+    (r) =>
+      (r.faktGodziny != null && r.faktGodziny > 0 && r.kwotaGlowna == null) ||
+      r.bonusPending,
+  ).length;
 
   const office = officeRows.map(withOfficeComputed);
   const officeTotal = office.reduce((s, r) => s + r.total, 0);
@@ -1693,6 +1874,7 @@ app.get("/summary", async (c) => {
       wyplaty: round2(przelew + gotowka),
       missingMain, // wiersze z godzinami, ale bez kwoty od księgowości
       pendingBonus, // dodatki "do przeliczenia"
+      gaps, // wiersze z którymkolwiek z powyższych braków (bez podwójnego liczenia)
       officeTotal: round2(officeTotal),
       officeCount: office.length,
     },

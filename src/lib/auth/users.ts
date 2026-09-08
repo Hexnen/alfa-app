@@ -42,12 +42,9 @@ export function listUsers(): PublicUser[] {
   return db.select().from(users).all().map(publicUser);
 }
 
-export function createUser(email: string, password: string, displayName: string): User {
-  return db
-    .insert(users)
-    .values({ email, passwordHash: hashPassword(password), displayName })
-    .returning()
-    .get();
+export async function createUser(email: string, password: string, displayName: string): Promise<User> {
+  const passwordHash = await hashPassword(password);
+  return db.insert(users).values({ email, passwordHash, displayName }).returning().get();
 }
 
 export interface CreateUserInput {
@@ -59,12 +56,13 @@ export interface CreateUserInput {
 }
 
 /** Tworzy konto z pełnym zestawem pól (dla panelu admina). */
-export function createUserFull(input: CreateUserInput): User {
+export async function createUserFull(input: CreateUserInput): Promise<User> {
+  const passwordHash = await hashPassword(input.password);
   return db
     .insert(users)
     .values({
       email: input.email,
-      passwordHash: hashPassword(input.password),
+      passwordHash,
       displayName: input.displayName,
       role: input.role === "admin" ? "admin" : "user",
       permissions: JSON.stringify(sanitizePermissions(input.permissions)),
@@ -121,19 +119,34 @@ export function updateUser(
   return { ok: false, reason: findUserById(id) ? "conflict" : "notfound" };
 }
 
-export function setUserPassword(id: number, password: string): void {
+export async function setUserPassword(id: number, password: string): Promise<void> {
   // Reset hasła i unieważnienie sesji muszą pójść razem — inaczej użytkownik
   // z aktywnym tokenem pozostaje zalogowany (getSessionUser uwierzytelnia po
   // tokenie, nie po haśle). Robimy to w jednej synchronicznej transakcji, żeby
   // równoległe żądanie nie zobaczyło nowego hasła przy wciąż żywej sesji.
-  // Hash liczymy PRZED otwarciem transakcji — scryptSync trwa ~50-100ms, a
+  // Hash liczymy PRZED otwarciem transakcji — scrypt trwa ~50-100ms, a
   // trzymanie blokady zapisu przez cały czas haszowania serializowałoby resety
   // i blokowało zewnętrznych piszących (backup/CLI) na czas obliczeń.
-  const passwordHash = hashPassword(password);
+  //
+  // Token ICS też leci: to trzecia „sesja" tego konta (feed kalendarza czyta po
+  // nim bez hasła), więc reset hasła po przejęciu konta zostawiałby
+  // napastnikowi działający feed z wydarzeniami i urlopami. Użytkownik
+  // wygeneruje nowy jednym klikiem w kalendarzu.
+  const passwordHash = await hashPassword(password);
   db.transaction((tx) => {
-    tx.update(users).set({ passwordHash }).where(eq(users.id, id)).run();
+    tx.update(users).set({ passwordHash, calendarToken: null }).where(eq(users.id, id)).run();
     tx.delete(sessions).where(eq(sessions.userId, id)).run();
   });
+}
+
+/**
+ * Unieważnia token subskrypcji ICS — feed przestaje działać natychmiast.
+ * Dla admina: gdy link do kalendarza wyciekł, a resetu hasła nie chcemy.
+ * Zwraca false, gdy użytkownika nie ma.
+ */
+export function revokeCalendarToken(id: number): boolean {
+  const res = db.update(users).set({ calendarToken: null }).where(eq(users.id, id)).run();
+  return res.changes > 0;
 }
 
 export function deleteUser(id: number): void {
