@@ -7,9 +7,12 @@
  * ?variant=client|internal) — front tylko pokazuje gotowy HTML. Dzięki temu późniejsza
  * wysyłka nodemailerem wyśle dokładnie to, co człowiek zobaczył w tym oknie.
  *
- * HTML renderujemy w `<iframe srcDoc sandbox="">`: mail ma własne, inline'owe style
- * i nie może przeciec do arkusza aplikacji (ani odwrotnie), a pusty `sandbox`
- * odcina skrypty i nawigację z wnętrza ramki.
+ * HTML renderujemy w `<iframe srcDoc sandbox="allow-same-origin">`: mail ma własne,
+ * inline'owe style i nie może przeciec do arkusza aplikacji (ani odwrotnie).
+ * `allow-same-origin` jest potrzebne wyłącznie po to, żeby awaryjne kopiowanie
+ * (zaznaczenie treści ramki + `execCommand("copy")`) miało dostęp do
+ * `contentDocument`. Skryptów NIE dopuszczamy (brak `allow-scripts`), więc mail
+ * dalej jest tylko obrazkiem — nic z jego wnętrza się nie wykona.
  *
  * Na razie WYŁĄCZNIE podgląd — przycisk „Wyślij” jest zablokowany.
  */
@@ -23,7 +26,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Copy, Check, ExternalLink, Mail, Send } from "lucide-react";
+import { ClipboardCopy, Check, ExternalLink, Mail, Send } from "lucide-react";
 import {
   getOrderMailPreview,
   type Order,
@@ -40,14 +43,75 @@ interface Props {
 /** Podpowiedź, gdy wdrożenie nie ma ustawionej skrzynki zespołu. */
 const NO_INTERNAL_RECIPIENT = "(nie skonfigurowano — ORDER_INTERNAL_MAIL_TO)";
 
+/** Który przycisk ma przez chwilę pokazywać „Skopiowano”. */
+type CopyTarget = "mail" | "subject" | "recipients";
+
+/**
+ * Przygotowuje HTML pod wklejenie do Outlooka/Worda.
+ *
+ * Outlook wkleja tylko fragment — `<head>` (a więc i `<title>`) ignoruje, więc
+ * podanie mu całego dokumentu nic nie daje, a bywa, że psuje. Style szablonu są
+ * inline'owe, żaden nie siedzi w `<head>`, więc przy zejściu do `<body>` nic nie
+ * ginie. Dodatkowo zdejmujemy ukryty preheader z początku body: w mailu jest
+ * niewidoczny (`display:none`), ale Word potrafi go pokazać jako pierwszą linijkę.
+ */
+function toPasteHtml(fullHtml: string): string {
+  try {
+    const doc = new DOMParser().parseFromString(fullHtml, "text/html");
+    const body = doc.body;
+    if (!body) return fullHtml;
+    // Zdejmujemy z początku body komentarze i puste teksty (szablon ma tam
+    // komentarz opisujący preheader) oraz sam ukryty preheader.
+    for (let node = body.firstChild; node; node = body.firstChild) {
+      if (node.nodeType === Node.COMMENT_NODE) {
+        node.remove();
+        continue;
+      }
+      if (node.nodeType === Node.TEXT_NODE && !node.textContent?.trim()) {
+        node.remove();
+        continue;
+      }
+      const el = node.nodeType === Node.ELEMENT_NODE ? (node as Element) : null;
+      const style = (el?.getAttribute("style") ?? "").replace(/\s+/g, "");
+      if (!el || !style.includes("display:none")) break;
+      el.remove();
+    }
+    const inner = body.innerHTML.trim();
+    return inner || fullHtml;
+  } catch {
+    // DOMParser nie powinien rzucać, ale wolimy skopiować cokolwiek niż nic.
+    return fullHtml;
+  }
+}
+
 export function OrderMailPreviewDialog({ order, open, onClose }: Props) {
   const [variant, setVariant] = useState<OrderMailVariant>("client");
   const [preview, setPreview] = useState<OrderMailPreview | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState<CopyTarget | null>(null);
+  // Błędy akcji ze stopki lecą osobno: `error` zastępuje podgląd, a nieudane
+  // kopiowanie nie jest powodem, żeby zabierać człowiekowi mail z ekranu.
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const frameRef = useRef<HTMLIFrameElement | null>(null);
+  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const orderId = order?.id ?? null;
+
+  useEffect(
+    () => () => {
+      if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+    },
+    [],
+  );
+
+  const flashCopied = useCallback((target: CopyTarget) => {
+    setActionError(null);
+    setCopied(target);
+    if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+    copiedTimerRef.current = setTimeout(() => setCopied(null), 2000);
+  }, []);
 
   // Cache per wariant trzymamy w ref, a nie w stanie: przełączanie zakładek
   // tam i z powrotem nie ma odpytywać backendu, ale sam cache nie jest niczym,
@@ -80,15 +144,17 @@ export function OrderMailPreviewDialog({ order, open, onClose }: Props) {
       if (cached) {
         setPreview(cached);
         setError(null);
+        setActionError(null);
         setLoading(false);
-        setCopied(false);
+        setCopied(null);
         return;
       }
 
       setLoading(true);
       setError(null);
+      setActionError(null);
       setPreview(null);
-      setCopied(false);
+      setCopied(null);
       try {
         const res = await getOrderMailPreview(orderId, variant);
         if (cancelled) return;
@@ -116,7 +182,7 @@ export function OrderMailPreviewDialog({ order, open, onClose }: Props) {
     if (!preview) return;
     const win = window.open("", "_blank", "width=900,height=1100");
     if (!win) {
-      setError("Przeglądarka zablokowała nowe okno — zezwól na wyskakujące okna.");
+      setActionError("Przeglądarka zablokowała nowe okno — zezwól na wyskakujące okna.");
       return;
     }
     win.document.write(preview.html);
@@ -124,16 +190,83 @@ export function OrderMailPreviewDialog({ order, open, onClose }: Props) {
     win.focus();
   }, [preview]);
 
-  const copyHtml = useCallback(async () => {
-    if (!preview) return;
+  /**
+   * Awaryjne kopiowanie bogatego tekstu: zaznaczamy zawartość ramki z podglądem
+   * i wołamy `execCommand("copy")` w JEJ dokumencie. Zaznaczenie niesie ze sobą
+   * formatowanie, więc do Outlooka trafia to samo co przez ClipboardItem.
+   * Potrzebne tam, gdzie nie ma `ClipboardItem` (starszy Firefox) albo strona
+   * chodzi po http bez bezpiecznego kontekstu — tam `navigator.clipboard` nie żyje.
+   */
+  const copyBySelectingFrame = useCallback((): boolean => {
+    const frame = frameRef.current;
+    const doc = frame?.contentDocument;
+    const win = frame?.contentWindow;
+    if (!frame || !doc?.body || !win) return false;
+
+    const selection = win.getSelection?.();
+    if (!selection) return false;
+
+    const active = document.activeElement as HTMLElement | null;
     try {
-      await navigator.clipboard.writeText(preview.html);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      const range = doc.createRange();
+      range.selectNodeContents(doc.body);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      // Bez fokusa w ramce przeglądarka kopiuje zaznaczenie strony (czyli nic).
+      win.focus();
+      const ok = doc.execCommand("copy");
+      selection.removeAllRanges();
+      return ok;
     } catch {
-      setError("Schowek jest niedostępny — skopiuj HTML z nowej karty.");
+      return false;
+    } finally {
+      active?.focus?.();
     }
-  }, [preview]);
+  }, []);
+
+  /** Główna akcja: mail w schowku jako sformatowana treść (text/html + text/plain). */
+  const copyForOutlook = useCallback(async () => {
+    if (!preview) return;
+    setActionError(null);
+
+    const html = toPasteHtml(preview.html);
+    const plain = preview.text || "";
+
+    try {
+      if (typeof ClipboardItem !== "undefined" && navigator.clipboard?.write) {
+        await navigator.clipboard.write([
+          new ClipboardItem({
+            "text/html": new Blob([html], { type: "text/html" }),
+            "text/plain": new Blob([plain], { type: "text/plain" }),
+          }),
+        ]);
+        flashCopied("mail");
+        return;
+      }
+    } catch {
+      // Odmowa uprawnień albo brak gestu — próbujemy jeszcze zaznaczeniem.
+    }
+
+    if (copyBySelectingFrame()) {
+      flashCopied("mail");
+      return;
+    }
+    setActionError("Nie udało się skopiować — otwórz w nowej karcie i użyj Ctrl+A, Ctrl+C.");
+  }, [preview, copyBySelectingFrame, flashCopied]);
+
+  /** Drobiazgi do pól nagłówka Outlooka — zwykły tekst wystarczy. */
+  const copyPlain = useCallback(
+    async (value: string, target: CopyTarget) => {
+      if (!value) return;
+      try {
+        await navigator.clipboard.writeText(value);
+        flashCopied(target);
+      } catch {
+        setActionError("Schowek jest niedostępny w tej przeglądarce.");
+      }
+    },
+    [flashCopied],
+  );
 
   // Wariant wewnętrzny bez skonfigurowanej skrzynki nie może podstawić adresu
   // klienta — pokazujemy wprost, czego brakuje w konfiguracji wdrożenia.
@@ -142,6 +275,10 @@ export function OrderMailPreviewDialog({ order, open, onClose }: Props) {
       ? preview?.to || null
       : preview?.to || order?.requesterEmail || null;
   const recipientMissingHint = variant === "internal" && !recipient;
+
+  // Outlook przyjmuje w polu „Do” listę rozdzieloną średnikami — dokładnie w tej
+  // postaci wkładamy do schowka adresata razem z DW.
+  const recipientsForOutlook = [recipient, preview?.cc].filter(Boolean).join("; ");
 
   return (
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
@@ -197,6 +334,9 @@ export function OrderMailPreviewDialog({ order, open, onClose }: Props) {
                 <span className="text-slate-400">Temat:</span>{" "}
                 <span className="text-slate-700">{preview?.subject || "—"}</span>
               </div>
+              <div className="text-xs text-slate-400 pt-1" data-testid="zlecenia-mail-preview-hint">
+                Wklej w Outlooku: Nowa wiadomość → Ctrl+V w treści (format HTML zostaje zachowany).
+              </div>
             </div>
           </DialogDescription>
         </DialogHeader>
@@ -220,42 +360,81 @@ export function OrderMailPreviewDialog({ order, open, onClose }: Props) {
           )}
           {!loading && !error && preview && (
             <iframe
+              ref={frameRef}
               title="Podgląd maila"
               srcDoc={preview.html}
-              sandbox=""
+              sandbox="allow-same-origin"
               className="w-full h-full bg-white border border-slate-200 rounded"
               data-testid="zlecenia-mail-preview-frame"
             />
           )}
         </div>
 
-        <div className="shrink-0 flex flex-wrap items-center justify-end gap-2 px-6 py-4 border-t border-slate-200 bg-white">
-          <Button
-            variant="outline"
-            onClick={openInNewTab}
-            disabled={!preview}
-            data-testid="zlecenia-mail-preview-newtab"
-          >
-            <ExternalLink className="w-4 h-4 mr-2" />
-            Otwórz w nowej karcie
-          </Button>
-          <Button
-            variant="outline"
-            onClick={copyHtml}
-            disabled={!preview}
-            data-testid="zlecenia-mail-preview-copy"
-          >
-            {copied ? <Check className="w-4 h-4 mr-2 text-green-600" /> : <Copy className="w-4 h-4 mr-2" />}
-            {copied ? "Skopiowano" : "Kopiuj HTML"}
-          </Button>
-          {/* Wysyłka jeszcze nie istnieje — przycisk stoi, żeby było widać, dokąd to zmierza. */}
-          <Button disabled title="Wysyłka wkrótce" data-testid="zlecenia-mail-preview-send">
-            <Send className="w-4 h-4 mr-2" />
-            Wyślij
-          </Button>
-          <Button variant="ghost" onClick={onClose} data-testid="zlecenia-mail-preview-close">
-            Zamknij
-          </Button>
+        <div className="shrink-0 border-t border-slate-200 bg-white px-6 py-4 space-y-2">
+          {actionError && (
+            <div className="text-xs text-red-600" data-testid="zlecenia-mail-preview-copy-error">
+              {actionError}
+            </div>
+          )}
+
+          {/* Osobno drobiazgi do nagłówka wiadomości — Outlook chce je w polach,
+              nie w treści, więc lądują w schowku jako czysty tekst. Trzymamy je
+              w osobnym rzędzie, bo razem z resztą nie mieszczą się w oknie. */}
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs text-slate-400">Do pól nagłówka:</span>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void copyPlain(preview?.subject ?? "", "subject")}
+              disabled={!preview?.subject}
+              data-testid="zlecenia-mail-preview-copy-subject"
+            >
+              {copied === "subject" ? <Check className="w-3.5 h-3.5 mr-1.5 text-green-600" /> : null}
+              {copied === "subject" ? "Skopiowano ✓" : "Kopiuj temat"}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void copyPlain(recipientsForOutlook, "recipients")}
+              disabled={!recipientsForOutlook}
+              data-testid="zlecenia-mail-preview-copy-to"
+            >
+              {copied === "recipients" ? <Check className="w-3.5 h-3.5 mr-1.5 text-green-600" /> : null}
+              {copied === "recipients" ? "Skopiowano ✓" : "Kopiuj adresata"}
+            </Button>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <Button
+              variant="outline"
+              onClick={openInNewTab}
+              disabled={!preview}
+              data-testid="zlecenia-mail-preview-newtab"
+            >
+              <ExternalLink className="w-4 h-4 mr-2" />
+              Otwórz w nowej karcie
+            </Button>
+            <Button
+              onClick={() => void copyForOutlook()}
+              disabled={!preview}
+              data-testid="zlecenia-mail-preview-copy"
+            >
+              {copied === "mail" ? (
+                <Check className="w-4 h-4 mr-2" />
+              ) : (
+                <ClipboardCopy className="w-4 h-4 mr-2" />
+              )}
+              {copied === "mail" ? "Skopiowano ✓" : "Kopiuj do Outlooka"}
+            </Button>
+            {/* Wysyłka jeszcze nie istnieje — przycisk stoi, żeby było widać, dokąd to zmierza. */}
+            <Button disabled title="Wysyłka wkrótce" data-testid="zlecenia-mail-preview-send">
+              <Send className="w-4 h-4 mr-2" />
+              Wyślij
+            </Button>
+            <Button variant="ghost" onClick={onClose} data-testid="zlecenia-mail-preview-close">
+              Zamknij
+            </Button>
+          </div>
         </div>
       </DialogContent>
     </Dialog>
