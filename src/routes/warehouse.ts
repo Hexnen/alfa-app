@@ -1,16 +1,26 @@
 import { Hono, type Context } from "hono";
 import { db, schema } from "../db/index.js";
-import { eq, and, asc, desc, sql, ne, getTableColumns } from "drizzle-orm";
+import { eq, and, asc, desc, sql, ne, inArray, getTableColumns } from "drizzle-orm";
 import type { ApiResponse } from "../types/index.js";
 import type {
   NewWarehouseItem,
   NewWarehouse,
   WarehouseDocument,
+  WarehouseItemSource,
 } from "../db/schema.js";
 import { getUser } from "../middleware/auth.js";
 import { getCompanyConfig } from "../lib/company-config.js";
 import { pricingFor } from "../lib/margin.js";
 import { parseMoney } from "../lib/money.js";
+import {
+  parseShopPageInput,
+  ShopImportInputError,
+  MAX_PHOTO_DATA,
+  SHOP_IMPORT_NO_FILE,
+  SHOP_IMPORT_BAD_FILE,
+  type ShopImportInput,
+} from "../lib/shop-import-service.js";
+import sharp from "sharp";
 
 const app = new Hono();
 
@@ -48,7 +58,6 @@ function isIntegerUnit(unit: string): boolean {
   return INTEGER_UNITS.has(unit.trim().toLowerCase());
 }
 const MAX_INVOICE_DATA = 10 * 1024 * 1024; // 10 MB (ZDEKODOWANE bajty załącznika)
-const MAX_PHOTO_DATA = 1024 * 1024; // 1 MB (ZDEKODOWANE bajty; front skaluje do ≤800px)
 const IMAGE_DATA_URL_RE = /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/;
 // Dozwolone typy MIME załącznika faktury — prefiks sprawdzany osobno od
 // payloadu, żeby nie puszczać regexu po całym (wielomegabajtowym) stringu.
@@ -211,6 +220,11 @@ function parseItemBody(body: Record<string, unknown>): {
         typeof body.barcode === "string" && body.barcode.trim()
           ? body.barcode.trim()
           : null,
+      // Symbol producenta (MPN) — klucz dopasowania przy imporcie ze sklepu.
+      manufacturerCode:
+        typeof body.manufacturerCode === "string" && body.manufacturerCode.trim()
+          ? body.manufacturerCode.trim()
+          : null,
     },
   };
 }
@@ -345,12 +359,20 @@ app.get("/items", async (c) => {
     .orderBy(asc(schema.warehouseItems.name));
   const { values } = getCompanyConfig();
   const userLabel = userLabelByEmail();
-  const data = rows.map((r) => ({
-    ...r,
-    ...pricingFor(r, values.warehouseMarkup),
-    createdByLabel: userLabel(r.createdBy),
-    updatedByLabel: userLabel(r.updatedBy),
-  }));
+  const shopsByItem = sourceShopsByItem();
+  const data = rows.map((r) => {
+    const shops = shopsByItem.get(r.id) ?? [];
+    return {
+      ...r,
+      ...pricingFor(r, values.warehouseMarkup),
+      createdByLabel: userLabel(r.createdBy),
+      updatedByLabel: userLabel(r.updatedBy),
+      // Lista pokazuje tylko LICZBĘ i nazwy sklepów (badge „🛒 n” z tipem) —
+      // ceny/stany źródeł doczytuje formularz z GET /items/:id/sources.
+      sourcesCount: shops.length,
+      sourceShops: shops,
+    };
+  });
   return c.json({ success: true, data });
 });
 
@@ -399,6 +421,81 @@ app.get("/items/:id/photo", async (c) => {
   return c.json({ success: true, data: { photoData: rows[0].photoData } });
 });
 
+/**
+ * To samo zdjęcie, ale jako SUROWE BAJTY obrazu — do `<img src>` w tabeli.
+ *
+ * Po co druga trasa obok `/photo`: miniatura w liście ma być zwykłym obrazkiem,
+ * który przeglądarka pobierze leniwie i zapamięta w cache'u. Data-URL w JSON-ie
+ * tego nie daje (każde odświeżenie listy = ponowny transfer base64 przez
+ * JavaScript). Uprawnienia działają tak samo, bo trasa siedzi pod `/warehouse`,
+ * a sesja jest w ciasteczku — `<img>` wysyła je same z siebie.
+ *
+ * `size=thumb` (domyślnie) → 96×96 JPEG, `size=full` → bajty bez zmian.
+ */
+app.get("/items/:id/photo/raw", async (c) => {
+  const id = parseInt(c.req.param("id"));
+  if (!Number.isInteger(id) || id <= 0)
+    return jsonError(c, 400, "Nieprawidłowy identyfikator towaru");
+  const size = c.req.query("size") === "full" ? "full" : "thumb";
+
+  const rows = await db
+    .select({
+      photoData: schema.warehouseItems.photoData,
+      updatedAt: schema.warehouseItems.updatedAt,
+    })
+    .from(schema.warehouseItems)
+    .where(eq(schema.warehouseItems.id, id))
+    .limit(1);
+  if (rows.length === 0) return jsonError(c, 404, "Nie znaleziono towaru");
+  const dataUrl = rows[0].photoData;
+  if (!dataUrl) return jsonError(c, 404, "Towar nie ma zdjęcia");
+
+  /*
+   * ETag ze stempla edycji + rozmiaru: podmiana zdjęcia zmienia `updated_at`,
+   * więc stary obrazek nie zostanie w cache'u, a miniatura i pełne zdjęcie
+   * nie mogą się nawzajem podmienić pod tym samym tagiem.
+   */
+  // Same cyfry ze stempla: „2026-09-10 09:13:33” ma w środku SPACJĘ, a ETag
+  // ze spacją to proszenie się o kłopoty u pośredników i w klientach HTTP.
+  const etag = `"wi-${id}-${size}-${rows[0].updatedAt.replace(/\D/g, "")}"`;
+  if (c.req.header("if-none-match") === etag) {
+    // 304 MUSI powtórzyć ETag i politykę cache'owania — inaczej przeglądarka
+    // przy następnym żądaniu nie ma czym warunkować.
+    c.header("ETag", etag);
+    c.header("Cache-Control", "private, max-age=3600");
+    return c.body(null, 304);
+  }
+
+  const comma = dataUrl.indexOf(",");
+  const mime = dataUrl.slice(5, dataUrl.indexOf(";"));
+  const raw = Buffer.from(dataUrl.slice(comma + 1), "base64");
+  if (raw.length === 0) return jsonError(c, 404, "Towar nie ma zdjęcia");
+
+  let body: Buffer = raw;
+  let type = mime || "image/jpeg";
+  if (size === "thumb") {
+    try {
+      body = await sharp(raw, { failOn: "error" })
+        .resize(96, 96, { fit: "cover" })
+        .jpeg({ quality: 75 })
+        .toBuffer();
+      type = "image/jpeg";
+    } catch {
+      // Uszkodzony obraz w bazie nie ma wywalać listy towarów — oddajemy
+      // oryginalne bajty i niech przeglądarka zdecyduje, co z nimi zrobi.
+      body = raw;
+      type = mime || "image/jpeg";
+    }
+  }
+
+  c.header("Content-Type", type);
+  c.header("Cache-Control", "private, max-age=3600");
+  c.header("ETag", etag);
+  // Uint8Array, nie Buffer: c.body chce BodyInit, a Buffer z Node bywa
+  // widziany jako niekompatybilny typ w TS.
+  return c.body(new Uint8Array(body));
+});
+
 app.get("/items/:id/last-purchase", async (c) => {
   const id = parseInt(c.req.param("id"));
   if (!Number.isInteger(id) || id <= 0)
@@ -442,6 +539,8 @@ app.post("/items", async (c) => {
   const body = await c.req.json<Record<string, unknown>>();
   const { data, error } = parseItemBody(body);
   if (error || !data) return jsonError(c, 400, error ?? "Błędne dane");
+  const { sources, error: sourcesError } = parseSourcesBody(body.sources);
+  if (sourcesError) return jsonError(c, 400, sourcesError);
 
   if (data.sku) {
     const conflict = await skuConflict(data.sku);
@@ -454,23 +553,31 @@ app.post("/items", async (c) => {
   const hasPrice = data.purchasePrice !== null || data.salePrice !== null;
 
   try {
-    const result = await db
-      .insert(schema.warehouseItems)
-      .values({
-        ...data,
-        photoData: data.photoData ?? null,
-        createdBy: user?.email ?? null,
-        priceUpdatedAt: hasPrice ? nowISO() : null,
-      } as NewWarehouseItem)
-      .returning();
+    // Towar i jego źródła w JEDNEJ transakcji — kartoteka założona z importu
+    // bez zapisanego źródła byłaby towarem, którego nie da się odświeżyć,
+    // a użytkownik i tak zobaczyłby „zapisano".
+    const row = db.transaction((tx) => {
+      const created = tx
+        .insert(schema.warehouseItems)
+        .values({
+          ...data,
+          photoData: data.photoData ?? null,
+          createdBy: user?.email ?? null,
+          priceUpdatedAt: hasPrice ? nowISO() : null,
+        } as NewWarehouseItem)
+        .returning()
+        .get();
+      if (sources) replaceItemSourcesSync(tx, created.id, sources);
+      return created;
+    });
     const label = userLabelByEmail();
     return c.json(
       {
         success: true,
         data: {
-          ...itemWithoutPhoto(result[0]),
-          createdByLabel: label(result[0].createdBy),
-          updatedByLabel: label(result[0].updatedBy),
+          ...itemWithoutPhoto(row),
+          createdByLabel: label(row.createdBy),
+          updatedByLabel: label(row.updatedBy),
         },
         message: "Towar dodany",
       },
@@ -499,6 +606,8 @@ app.put("/items/:id", async (c) => {
   const body = await c.req.json<Record<string, unknown>>();
   const { data, error } = parseItemBody(body);
   if (error || !data) return jsonError(c, 400, error ?? "Błędne dane");
+  const { sources, error: sourcesError } = parseSourcesBody(body.sources);
+  if (sourcesError) return jsonError(c, 400, sourcesError);
 
   if (data.sku) {
     const conflict = await skuConflict(data.sku, id);
@@ -533,7 +642,7 @@ app.put("/items/:id", async (c) => {
       // Porównanie ze stanem odczytanym W TEJ transakcji, nie z `existing`
       // sprzed niej — równoległy zapis mógł już zmienić cenę.
       const stampPrice = priceChanged(cur, data);
-      return tx
+      const updated = tx
         .update(schema.warehouseItems)
         .set({
           ...dataNoPhoto,
@@ -546,6 +655,9 @@ app.put("/items/:id", async (c) => {
         .where(eq(schema.warehouseItems.id, id))
         .returning()
         .get();
+      // `sources` nieprzysłane = nie ruszamy źródeł (patrz parseSourcesBody).
+      if (sources) replaceItemSourcesSync(tx, id, sources);
+      return updated;
     });
     const label = userLabelByEmail();
     return c.json({
@@ -629,6 +741,461 @@ app.delete("/items/:id", async (c) => {
     return c.json({ success: true, data: result, message: "Towar zarchiwizowany" });
   } catch (err) {
     if (err instanceof ApiError) return jsonError(c, err.status, err.message);
+    throw err;
+  }
+});
+
+// ============================================================
+// ŹRÓDŁA TOWARU — sklepy dostawców (warehouse_item_sources)
+//
+// Jeden wiersz = „ten towar kupujemy w tym sklepie, pod tym kodem, ostatnio
+// za tyle”. UNIQUE (item_id, shop) w bazie sprawia, że import zapisanej strony
+// produktu jest ODŚWIEŻENIEM źródła, nie zakładaniem duplikatu.
+// ============================================================
+
+/**
+ * Domena sklepu: małe litery, cyfry, kropka, myślnik. Bez schematu, bez ścieżki,
+ * bez „www.” — `shop` jest KLUCZEM tożsamości źródła (UNIQUE z item_id), więc
+ * „samal.pl”, „www.samal.pl” i „https://samal.pl/” muszą sprowadzać się
+ * do jednej wartości, inaczej ten sam sklep wpadłby do bazy trzy razy.
+ */
+const SHOP_RE = /^[a-z0-9.-]{3,80}$/;
+/**
+ * Surowy zrzut z parsera trzymany „na wszelki wypadek” (diagnostyka „skąd ta
+ * cena”). 64 KB to dużo dla listy atrybutów i mało dla kogoś, kto chciałby
+ * użyć kartoteki jako składu na cudze dane — HTML strony ma megabajty.
+ */
+const MAX_SOURCE_RAW_JSON = 64 * 1024;
+const MAX_SOURCE_URL = 2000;
+const MAX_SOURCE_TEXT = 200;
+
+/** Nazwa sklepu → klucz `shop`, albo null gdy nie da się jej sprowadzić do domeny. */
+function normalizeShop(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  let s = raw.trim().toLowerCase();
+  if (!s) return null;
+  // Wybaczamy wklejony adres („https://www.samal.pl/produkt/…”) — bierzemy host.
+  s = s.replace(/^[a-z]+:\/\//, "");
+  s = s.split("/")[0];
+  s = s.replace(/^www\./, "");
+  s = s.replace(/:\d+$/, "");
+  return SHOP_RE.test(s) ? s : null;
+}
+
+/** Przycięty tekst albo null (puste = „nie podano”, nie pusty string w bazie). */
+function trimOrNull(raw: unknown, max: number): string | null {
+  if (typeof raw !== "string") return null;
+  const s = raw.trim();
+  return s ? s.slice(0, max) : null;
+}
+
+/** Dane jednego źródła gotowe do zapisu (bez `itemId` — dokłada je wywołujący). */
+type SourceFields = {
+  shop: string;
+  shopLabel: string | null;
+  productUrl: string | null;
+  supplierCode: string | null;
+  supplierProductId: string | null;
+  lastPriceNet: number | null;
+  lastPriceGross: number | null;
+  vatRate: number | null;
+  currency: string;
+  lastStock: number | null;
+  loggedIn: boolean;
+  rawJson: string | null;
+  fetchedAt: string;
+};
+
+/**
+ * Walidacja jednego źródła. `shopOverride` podaje trasa `PUT …/sources/:shop`,
+ * gdzie sklep jest w adresie, a nie w ciele.
+ *
+ * Semantyka POLA NIEPRZYSŁANEGO to tu świadomie „null”, a nie „zostaw jak było”:
+ * źródło jest małym, spójnym zestawem („cena netto + brutto + VAT + stan z tego
+ * samego odczytu”), więc scalanie po polach dałoby wiersz z ceną z dziś i stanem
+ * z zeszłego miesiąca. Jedyny wyjątek to `fetchedAt`, które przy braku wartości
+ * znaczy „odczytano teraz”.
+ */
+function parseSourceFields(
+  raw: unknown,
+  label: string,
+  shopOverride?: string
+): { data?: SourceFields; error?: string } {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { error: `${label}: oczekiwano obiektu ze danymi źródła` };
+  }
+  const body = raw as Record<string, unknown>;
+
+  const shop = shopOverride ?? normalizeShop(body.shop);
+  if (!shop) {
+    return {
+      error: `${label}: nieprawidłowa domena sklepu (oczekiwano np. „samal.pl”)`,
+    };
+  }
+
+  const net = parseMoney(body.lastPriceNet, `${label}: cena netto`);
+  if (net.error) return { error: net.error };
+  const gross = parseMoney(body.lastPriceGross, `${label}: cena brutto`);
+  if (gross.error) return { error: gross.error };
+  const vat = parseMoney(body.vatRate, `${label}: stawka VAT`);
+  if (vat.error) return { error: vat.error };
+  // `?? null` nie jest ozdobą: w typie `parseMoney` gałąź błędu ma `error: string`,
+  // a puste `""` jest falsy — po `if (error)` TypeScript nie zwęża unii do końca
+  // i `value` zostaje z `undefined`. Źródło ma pola wprost `number | null`.
+  const vatRate = vat.value ?? null;
+  if (vatRate !== null && vatRate > 100) {
+    return { error: `${label}: stawka VAT nie może przekraczać 100%` };
+  }
+
+  // Stan magazynowy to ILOŚĆ, nie kwota — własna walidacja, bez zaokrąglania
+  // do grosza (sklepy podają „17 szt.”, ale bywa też 12,5 m przewodu).
+  let lastStock: number | null = null;
+  if (body.lastStock !== undefined && body.lastStock !== null && body.lastStock !== "") {
+    const v = Number(body.lastStock);
+    if (!Number.isFinite(v) || v < 0) {
+      return { error: `${label}: stan w sklepie musi być liczbą nieujemną` };
+    }
+    lastStock = v;
+  }
+
+  if (body.loggedIn !== undefined && typeof body.loggedIn !== "boolean") {
+    return { error: `${label}: pole „zalogowany” musi być wartością logiczną` };
+  }
+
+  let currency = "PLN";
+  if (body.currency !== undefined && body.currency !== null && body.currency !== "") {
+    const cur = typeof body.currency === "string" ? body.currency.trim().toUpperCase() : "";
+    if (!/^[A-Z]{3}$/.test(cur)) {
+      return { error: `${label}: nieprawidłowy kod waluty (oczekiwano np. „PLN”)` };
+    }
+    currency = cur;
+  }
+
+  // `raw` przychodzi jako OBIEKT (zrzut z parsera) — serializujemy sami, żeby
+  // do bazy nie trafił string udający JSON, którego nikt nie sparsuje.
+  let rawJson: string | null = null;
+  if (body.raw !== undefined && body.raw !== null) {
+    try {
+      rawJson = JSON.stringify(body.raw);
+    } catch {
+      return { error: `${label}: nie udało się zserializować danych diagnostycznych` };
+    }
+    if (rawJson === undefined) rawJson = null;
+    if (rawJson && Buffer.byteLength(rawJson, "utf8") > MAX_SOURCE_RAW_JSON) {
+      return { error: `${label}: dane diagnostyczne są za duże (limit 64 KB)` };
+    }
+  }
+
+  let fetchedAt = nowISO();
+  if (typeof body.fetchedAt === "string" && body.fetchedAt.trim()) {
+    const t = Date.parse(body.fetchedAt);
+    if (!Number.isFinite(t)) {
+      return { error: `${label}: nieprawidłowa data odczytu` };
+    }
+    fetchedAt = body.fetchedAt.trim();
+  }
+
+  return {
+    data: {
+      shop,
+      shopLabel: trimOrNull(body.shopLabel, MAX_SOURCE_TEXT),
+      productUrl: trimOrNull(body.productUrl, MAX_SOURCE_URL),
+      supplierCode: trimOrNull(body.supplierCode, MAX_SOURCE_TEXT),
+      supplierProductId: trimOrNull(body.supplierProductId, MAX_SOURCE_TEXT),
+      lastPriceNet: net.value ?? null,
+      lastPriceGross: gross.value ?? null,
+      vatRate,
+      currency,
+      lastStock,
+      loggedIn: body.loggedIn === true,
+      rawJson,
+      fetchedAt,
+    },
+  };
+}
+
+/**
+ * `body.sources` z POST/PUT `/items`.
+ *
+ * `undefined` = pole NIEPRZYSŁANE → nie ruszamy źródeł (formularz, który ich
+ * jeszcze nie doczytał, nie może ich skasować — ta sama zasada co przy zdjęciu).
+ * Tablica = PEŁNA PODMIANA zbioru: co jest na liście, zostaje zapisane, czego
+ * na niej nie ma, znika.
+ */
+function parseSourcesBody(raw: unknown): {
+  sources?: SourceFields[];
+  error?: string;
+} {
+  if (raw === undefined) return {};
+  if (!Array.isArray(raw)) return { error: "Pole „sources” musi być tablicą" };
+  if (raw.length > 20) return { error: "Za dużo źródeł (limit 20 sklepów na towar)" };
+  const out: SourceFields[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < raw.length; i++) {
+    const { data, error } = parseSourceFields(raw[i], `Źródło ${i + 1}`);
+    if (error || !data) return { error: error ?? "Błędne dane źródła" };
+    // Dwa wiersze tego samego sklepu rozbiłyby się o UNIQUE w bazie z brzydkim
+    // komunikatem — łapiemy to tutaj, zanim pójdzie INSERT.
+    if (seen.has(data.shop)) {
+      return { error: `Sklep „${data.shop}” powtarza się w źródłach` };
+    }
+    seen.add(data.shop);
+    out.push(data);
+  }
+  return { sources: out };
+}
+
+/**
+ * Podmiana CAŁEGO zbioru źródeł towaru — wywoływane W TEJ SAMEJ transakcji,
+ * co zapis kartoteki. Gdyby to był osobny endpoint wołany po zapisie towaru,
+ * błąd sieci między jednym a drugim żądaniem zostawiłby towar z cenami z nowej
+ * strony i źródłami ze starej.
+ */
+function replaceItemSourcesSync(tx: Tx, itemId: number, sources: SourceFields[]) {
+  const existing = tx
+    .select({ id: schema.warehouseItemSources.id, shop: schema.warehouseItemSources.shop })
+    .from(schema.warehouseItemSources)
+    .where(eq(schema.warehouseItemSources.itemId, itemId))
+    .all();
+  const byShop = new Map(existing.map((r) => [r.shop, r.id]));
+
+  for (const s of sources) {
+    const id = byShop.get(s.shop);
+    if (id === undefined) {
+      tx.insert(schema.warehouseItemSources).values({ ...s, itemId }).run();
+    } else {
+      tx.update(schema.warehouseItemSources)
+        .set({ ...s, updatedAt: nowISO() })
+        .where(eq(schema.warehouseItemSources.id, id))
+        .run();
+    }
+  }
+
+  const keep = new Set(sources.map((s) => s.shop));
+  const drop = existing.filter((r) => !keep.has(r.shop)).map((r) => r.id);
+  if (drop.length > 0) {
+    tx.delete(schema.warehouseItemSources)
+      .where(inArray(schema.warehouseItemSources.id, drop))
+      .run();
+  }
+}
+
+/**
+ * Sklepy per towar do listy kartotek — JEDNO zapytanie po całej tabeli źródeł
+ * i grupowanie w JS, nie podzapytanie na wiersz (N+1 przy 500 towarach; ten sam
+ * wzorzec co `userLabelByEmail`).
+ */
+function sourceShopsByItem(): Map<number, string[]> {
+  const rows = db
+    .select({
+      itemId: schema.warehouseItemSources.itemId,
+      shop: schema.warehouseItemSources.shop,
+      shopLabel: schema.warehouseItemSources.shopLabel,
+    })
+    .from(schema.warehouseItemSources)
+    .orderBy(asc(schema.warehouseItemSources.shop))
+    .all();
+  const map = new Map<number, string[]>();
+  for (const r of rows) {
+    const list = map.get(r.itemId);
+    // Etykieta („SAMAL”) czyta się lepiej w tipie niż domena; domena jest
+    // fallbackiem, bo `shop_label` jest opcjonalne.
+    const label = r.shopLabel || r.shop;
+    if (list) list.push(label);
+    else map.set(r.itemId, [label]);
+  }
+  return map;
+}
+
+/**
+ * Źródło w kształcie zwracanym na front: BEZ `rawJson` (bywa dziesiątki KB,
+ * a formularz go nie używa). Z `?raw=1` dokładamy `raw` — już sparsowany,
+ * żeby front nie musiał robić drugiego `JSON.parse` na łańcuchu z bazy.
+ */
+function sourceForApi(row: WarehouseItemSource, withRaw: boolean) {
+  const { rawJson, ...rest } = row;
+  if (!withRaw) return rest;
+  let raw: unknown = null;
+  if (rawJson) {
+    try {
+      raw = JSON.parse(rawJson);
+    } catch {
+      raw = null; // uszkodzony zrzut nie ma wywalać podglądu źródła
+    }
+  }
+  return { ...rest, raw };
+}
+
+/** Źródła towaru (formularz doczytuje je przy otwarciu edycji). */
+app.get("/items/:id/sources", async (c) => {
+  const id = parseInt(c.req.param("id"));
+  if (!Number.isInteger(id) || id <= 0)
+    return jsonError(c, 400, "Nieprawidłowy identyfikator towaru");
+  const item = await db
+    .select({ id: schema.warehouseItems.id })
+    .from(schema.warehouseItems)
+    .where(eq(schema.warehouseItems.id, id))
+    .limit(1);
+  if (item.length === 0) return jsonError(c, 404, "Nie znaleziono towaru");
+
+  const withRaw = c.req.query("raw") === "1";
+  const rows = await db
+    .select()
+    .from(schema.warehouseItemSources)
+    .where(eq(schema.warehouseItemSources.itemId, id))
+    .orderBy(asc(schema.warehouseItemSources.shop));
+  return c.json({ success: true, data: rows.map((r) => sourceForApi(r, withRaw)) });
+});
+
+/**
+ * Zapis JEDNEGO źródła („Odśwież z pliku” przy istniejącym towarze).
+ * Sklep jest w adresie, bo to on identyfikuje wiersz — trasa jest idempotentna:
+ * ten sam PUT dwa razy daje jeden wiersz z nowszym `fetched_at`.
+ */
+app.put("/items/:id/sources/:shop", async (c) => {
+  const id = parseInt(c.req.param("id"));
+  if (!Number.isInteger(id) || id <= 0)
+    return jsonError(c, 400, "Nieprawidłowy identyfikator towaru");
+  const shop = normalizeShop(c.req.param("shop"));
+  if (!shop)
+    return jsonError(c, 400, 'Nieprawidłowa domena sklepu (oczekiwano np. „samal.pl”)');
+
+  const body = await c.req.json<Record<string, unknown>>().catch(() => ({}));
+  const { data, error } = parseSourceFields(body, "Źródło", shop);
+  if (error || !data) return jsonError(c, 400, error ?? "Błędne dane źródła");
+
+  try {
+    const row = db.transaction((tx) => {
+      const item = tx
+        .select({ id: schema.warehouseItems.id })
+        .from(schema.warehouseItems)
+        .where(eq(schema.warehouseItems.id, id))
+        .get();
+      if (!item) throw new ApiError(404, "Nie znaleziono towaru");
+      const cur = tx
+        .select({ id: schema.warehouseItemSources.id })
+        .from(schema.warehouseItemSources)
+        .where(
+          and(
+            eq(schema.warehouseItemSources.itemId, id),
+            eq(schema.warehouseItemSources.shop, shop)
+          )
+        )
+        .get();
+      if (!cur) {
+        return tx
+          .insert(schema.warehouseItemSources)
+          .values({ ...data, itemId: id })
+          .returning()
+          .get();
+      }
+      return tx
+        .update(schema.warehouseItemSources)
+        .set({ ...data, updatedAt: nowISO() })
+        .where(eq(schema.warehouseItemSources.id, cur.id))
+        .returning()
+        .get();
+    });
+    return c.json({
+      success: true,
+      data: sourceForApi(row, false),
+      message: "Źródło zapisane",
+    });
+  } catch (err) {
+    if (err instanceof ApiError) return jsonError(c, err.status, err.message);
+    throw err;
+  }
+});
+
+/** Usunięcie źródła. Po `sourceId`, ale ZAWSZE w kontekście towaru z adresu. */
+app.delete("/items/:id/sources/:sourceId", async (c) => {
+  const id = parseInt(c.req.param("id"));
+  const sourceId = parseInt(c.req.param("sourceId"));
+  if (!Number.isInteger(id) || id <= 0 || !Number.isInteger(sourceId) || sourceId <= 0)
+    return jsonError(c, 400, "Nieprawidłowy identyfikator");
+
+  // Warunek na item_id, a nie samo id: obce źródło ma dać 404, a nie ciche
+  // usunięcie wiersza z cudzej kartoteki.
+  const row = db
+    .delete(schema.warehouseItemSources)
+    .where(
+      and(
+        eq(schema.warehouseItemSources.id, sourceId),
+        eq(schema.warehouseItemSources.itemId, id)
+      )
+    )
+    .returning()
+    .get();
+  if (!row) return jsonError(c, 404, "Nie znaleziono źródła");
+  return c.json({ success: true, data: { id: sourceId }, message: "Źródło usunięte" });
+});
+
+// ============================================================
+// IMPORT TOWARU Z ZAPISANEJ STRONY SKLEPU
+//
+// Trasa NICZEGO NIE ZAPISUJE — zwraca propozycję, którą człowiek przegląda
+// w formularzu i zapisuje zwykłym POST/PUT `/items`. Dzięki temu nie ma trzeciej
+// ścieżki zapisu kartoteki (i trzeciego miejsca do pominięcia nowego pola).
+// ============================================================
+
+/**
+ * Parsowanie zapisanej strony produktu.
+ *
+ * Dwa wejścia, bo dwa scenariusze: multipart (użytkownik robi Ctrl+S
+ * w przeglądarce i wrzuca plik) oraz JSON `{html, url}` (wtyczka przeglądarki,
+ * która zna prawdziwy adres strony). Rozróżniamy po content-type.
+ *
+ * Sam rdzeń (parsowanie → propozycje → dopasowanie → zdjęcie) mieszka
+ * w src/lib/shop-import-service.ts, bo woła go też `POST /api/plugin/import`
+ * (wtyczka, Bearer, bez sesji). Tutaj zostaje wyłącznie rozbiór ŻĄDANIA HTTP.
+ */
+app.post("/import/parse", async (c) => {
+  const ctype = (c.req.header("content-type") ?? "").toLowerCase();
+  let input: ShopImportInput;
+
+  if (ctype.includes("application/json")) {
+    const body = await c.req.json<Record<string, unknown>>().catch(() => null);
+    const html = typeof body?.html === "string" ? body.html : "";
+    const url = typeof body?.url === "string" && body.url.trim() ? body.url.trim() : undefined;
+    // Puste/nie-JSON ciało leci do serwisu jako pusty html — jeden komunikat
+    // („Brak treści strony…”) zamiast dwóch rozjeżdżających się kopii.
+    input = { kind: "html", html, url };
+  } else {
+    let file: File;
+    let urlHint: string | undefined;
+    try {
+      const body = await c.req.parseBody();
+      const uploaded = body["file"];
+      if (!uploaded || typeof uploaded === "string")
+        return jsonError(c, 400, SHOP_IMPORT_NO_FILE);
+      file = uploaded as File;
+      const u = body["url"];
+      if (typeof u === "string" && u.trim()) urlHint = u.trim();
+    } catch {
+      return jsonError(c, 400, SHOP_IMPORT_NO_FILE);
+    }
+    const fileName = file.name || "produkt.html";
+    // Zapisane strony bywają bez rozszerzenia w nazwie, ale wtedy przeglądarka
+    // podaje typ — wystarczy jedno z dwóch.
+    const okName = /\.(html?|htm)$/i.test(fileName);
+    const okMime = (file.type || "").toLowerCase().startsWith("text/html");
+    if (!okName && !okMime) return jsonError(c, 400, SHOP_IMPORT_BAD_FILE);
+    input = {
+      kind: "bytes",
+      bytes: Buffer.from(await file.arrayBuffer()),
+      url: urlHint,
+      fileName,
+    };
+  }
+
+  try {
+    // `?fetchImage=0` — podgląd i testy bez wychodzenia do sklepu po zdjęcie.
+    const data = await parseShopPageInput(input, {
+      fetchImage: c.req.query("fetchImage") !== "0",
+    });
+    return c.json({ success: true, data });
+  } catch (err) {
+    if (err instanceof ShopImportInputError) return jsonError(c, 400, err.message);
     throw err;
   }
 });

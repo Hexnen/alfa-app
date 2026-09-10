@@ -29,6 +29,11 @@ export {
   type StackedRow,
   type StackedSegment,
 } from "./StackedBarChart";
+export {
+  ServiceTimelineChart,
+  type ServiceTimelineChartProps,
+  type ServiceTimelinePoint,
+} from "./ServiceTimelineChart";
 export { MarginGauge, type MarginGaugeProps, type MarginGaugeSize } from "./MarginGauge";
 export {
   ScatterQuadrant,

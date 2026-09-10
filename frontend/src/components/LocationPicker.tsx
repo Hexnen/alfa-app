@@ -1,13 +1,16 @@
 import { useEffect, useRef, useState } from "react";
+import {
+  isDirectInput,
+  parseCoords,
+  resolveMapsLink,
+  reverseGeocode,
+  toMapsUrl,
+} from "@/lib/maps-url";
+import { loadLeaflet } from "@/lib/leaflet-loader";
 
 // Leaflet is loaded from the unpkg CDN at runtime (no npm dependency — keeps the
 // standalone public form working), so the global `L` has no bundled types.
 declare const L: any;
-
-const LEAFLET_CSS = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
-const LEAFLET_JS = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
-const LEAFLET_CSS_ID = "leaflet-cdn-css";
-const LEAFLET_JS_ID = "leaflet-cdn-js";
 
 const DEFAULT_CENTER: [number, number] = [52.07, 19.48]; // środek Polski
 const DEFAULT_ZOOM = 6;
@@ -15,117 +18,8 @@ const DEFAULT_ZOOM = 6;
 /** Remembers the user's base-layer choice (streets ⇄ satellite) across sessions. */
 const MAP_LAYER_KEY = "mapLayerPref";
 
-interface LatLng {
-  lat: number;
-  lng: number;
-}
-
-/** Injects Leaflet CSS + JS from the CDN once, resolving when `window.L` exists. */
-function loadLeaflet(): Promise<void> {
-  return new Promise((resolve) => {
-    if (typeof window !== "undefined" && (window as any).L) {
-      resolve();
-      return;
-    }
-    // CSS (idempotent via guard id)
-    if (!document.getElementById(LEAFLET_CSS_ID)) {
-      const link = document.createElement("link");
-      link.id = LEAFLET_CSS_ID;
-      link.rel = "stylesheet";
-      link.href = LEAFLET_CSS;
-      document.head.appendChild(link);
-    }
-    // JS (idempotent via guard id)
-    const existing = document.getElementById(LEAFLET_JS_ID) as
-      | HTMLScriptElement
-      | null;
-    if (existing) {
-      if ((window as any).L) resolve();
-      else existing.addEventListener("load", () => resolve());
-      return;
-    }
-    const script = document.createElement("script");
-    script.id = LEAFLET_JS_ID;
-    script.src = LEAFLET_JS;
-    script.async = true;
-    script.addEventListener("load", () => resolve());
-    document.head.appendChild(script);
-  });
-}
-
-/** Build the canonical Google Maps URL we persist in objectLocationUrl. */
-function toMapsUrl(lat: number, lng: number): string {
-  return `https://www.google.com/maps?q=${lat},${lng}`;
-}
-
-/**
- * Parse coordinates from either a Google Maps URL or a bare "lat, lng" string.
- * Handles @lat,lng · ?q=lat,lng / q=lat,lng · !3dlat!4dlng · /place/.../@lat,lng.
- */
-function parseCoords(raw: string): LatLng | null {
-  if (!raw) return null;
-  const value = raw.trim();
-
-  const inRange = (lat: number, lng: number) =>
-    Number.isFinite(lat) &&
-    Number.isFinite(lng) &&
-    lat >= -90 &&
-    lat <= 90 &&
-    lng >= -180 &&
-    lng <= 180;
-
-  // !3d<lat>!4d<lng>
-  const bang = value.match(/!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/);
-  if (bang) {
-    const lat = parseFloat(bang[1]);
-    const lng = parseFloat(bang[2]);
-    if (inRange(lat, lng)) return { lat, lng };
-  }
-
-  // @<lat>,<lng>  (covers /place/.../@lat,lng too)
-  const at = value.match(/@(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)/);
-  if (at) {
-    const lat = parseFloat(at[1]);
-    const lng = parseFloat(at[2]);
-    if (inRange(lat, lng)) return { lat, lng };
-  }
-
-  // /maps/search/<lat>,+<lng>  ·  /place/<lat>,<lng>  ·  /dir/<lat>,<lng>
-  const path = value.match(
-    /\/(?:search|place|dir)\/(-?\d+(?:\.\d+)?),\+?\s*(-?\d+(?:\.\d+)?)/
-  );
-  if (path) {
-    const lat = parseFloat(path[1]);
-    const lng = parseFloat(path[2]);
-    if (inRange(lat, lng)) return { lat, lng };
-  }
-
-  // q=<lat>,<lng>  (?q= or &q=)
-  const q = value.match(/[?&]q=(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)/);
-  if (q) {
-    const lat = parseFloat(q[1]);
-    const lng = parseFloat(q[2]);
-    if (inRange(lat, lng)) return { lat, lng };
-  }
-
-  // Bare "lat, lng"
-  const bare = value.match(/^(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)$/);
-  if (bare) {
-    const lat = parseFloat(bare[1]);
-    const lng = parseFloat(bare[2]);
-    if (inRange(lat, lng)) return { lat, lng };
-  }
-
-  return null;
-}
-
-/**
- * True when the raw text is something we can place directly — coordinates or an
- * http(s) link (Google Maps) — rather than a free-text address to geocode.
- */
-function isDirectInput(raw: string): boolean {
-  return parseCoords(raw) != null || /^https?:\/\//i.test(raw.trim());
-}
+// `parseCoords` / `isDirectInput` / `toMapsUrl` mieszkają w @/lib/maps-url —
+// tego samego rozpoznawania używa kartoteka obiektu i formularz zlecenia.
 
 interface NominatimResult {
   lat: string;
@@ -133,62 +27,9 @@ interface NominatimResult {
   display_name: string;
 }
 
-/** Format a Polish street line: prepend „ul." unless a type word is present. */
-function polishStreet(road: string, house: string): string {
-  const name = road.trim();
-  if (!name) return "";
-  const hasType =
-    /^(ul\.|ulica|al\.|aleja|aleje|pl\.|plac|rondo|os\.|osiedle|bulwar|skwer|park|droga|szosa|trakt|wybrzeże)\b/i.test(
-      name
-    );
-  const withType = hasType ? name : "ul. " + name;
-  return house ? `${withType} ${house}` : withType;
-}
-
-/**
- * Reverse-geocode a pin into a normal Polish address via Nominatim.
- * `address` is the full „ul. nazwa numer, miasto, województwo" form;
- * `city` is kept separately for the CRM's city column.
- */
-async function reverseGeocode(
-  lat: number,
-  lng: number
-): Promise<{ address: string; city: string } | null> {
-  const url =
-    "https://nominatim.openstreetmap.org/reverse?format=json&zoom=18&accept-language=pl&lat=" +
-    lat +
-    "&lon=" +
-    lng;
-  try {
-    const res = await fetch(url, { headers: { Accept: "application/json" } });
-    const data = await res.json();
-    const a = data?.address ?? {};
-    const road =
-      a.road || a.pedestrian || a.footway || a.path || a.cycleway || "";
-    const house = a.house_number || "";
-    const city =
-      a.city ||
-      a.town ||
-      a.village ||
-      a.municipality ||
-      a.hamlet ||
-      a.county ||
-      "";
-    // Nominatim returns e.g. „województwo mazowieckie" — keep just „mazowieckie".
-    const voivodeship = (a.state || "").replace(/^województwo\s+/i, "");
-
-    const street =
-      polishStreet(road, house) ||
-      (typeof data?.display_name === "string"
-        ? data.display_name.split(",")[0].trim()
-        : "");
-
-    const address = [street, city, voivodeship].filter(Boolean).join(", ");
-    return { address, city };
-  } catch {
-    return null;
-  }
-}
+// `polishStreet` / `reverseGeocode` przeniosły się do @/lib/maps-url — tej samej
+// zamiany pinezki na polski adres używa kartoteka obiektu (podpowiedź „Adres
+// z pinezki”), więc parser stoi w jednym miejscu.
 
 export interface LocationPickerProps {
   /** Controlled value — the objectLocationUrl (canonical Google Maps URL). */
@@ -252,8 +93,10 @@ export function LocationPicker({
       if (my !== reverseSeq.current) return;
       setAddrLoading(false);
       if (!res) return;
-      setResolvedAddr(res);
-      onAddressRef.current?.(res.address, res.city);
+      // `display` = „ulica, miasto, województwo” — dokładnie ta linia, którą
+      // komponent oddawał dotąd jako `address`.
+      setResolvedAddr({ address: res.display, city: res.city });
+      onAddressRef.current?.(res.display, res.city);
     });
   };
 
@@ -460,47 +303,27 @@ export function LocationPicker({
   };
 
   const applyPaste = async () => {
-    // Fast path: the value already carries coordinates (@lat,lng, q=, bare…).
-    const coords = parseCoords(search);
-    if (coords) {
-      setPasteError(null);
-      setPin(coords.lat, coords.lng, { center: true });
-      setSearch(`${coords.lat}, ${coords.lng}`);
-      setSearchOpen(false);
-      return;
-    }
-
-    // Short links (maps.app.goo.gl / goo.gl / g.co) carry no coordinates — they
-    // must be expanded server-side (the browser can't follow them cross-origin).
+    // `resolveMapsLink` sam wybiera drogę: współrzędne wprost z tekstu (@lat,lng,
+    // q=, „lat, lng”) albo — dla krótkich linków — rozwinięcie po stronie serwera.
+    // Spinner zapalamy tylko w tym drugim przypadku, bo parser jest natychmiastowy.
     const value = search.trim();
-    if (/^https?:\/\//i.test(value)) {
-      setResolving(true);
-      setPasteError(null);
-      try {
-        const res = await fetch(
-          `/api/public/resolve-location?url=${encodeURIComponent(value)}`
-        );
-        const json = await res.json();
-        if (res.ok && json?.success && json.data) {
-          setPin(json.data.lat, json.data.lng, { center: true });
-          setSearch(`${json.data.lat}, ${json.data.lng}`);
-          setSearchOpen(false);
-          return;
-        }
-        setPasteError(
-          json?.error ?? "Nie udało się odczytać pinezki z tego linku."
-        );
-      } catch {
-        setPasteError("Nie udało się połączyć, aby rozpoznać link.");
-      } finally {
-        setResolving(false);
-      }
-      return;
+    const needsServer = parseCoords(value) == null;
+    setPasteError(null);
+    if (needsServer) setResolving(true);
+    try {
+      const hit = await resolveMapsLink(value);
+      setPin(hit.lat, hit.lng, { center: true });
+      setSearch(`${hit.lat}, ${hit.lng}`);
+      setSearchOpen(false);
+    } catch (e) {
+      setPasteError(
+        e instanceof Error
+          ? e.message
+          : "Nie udało się odczytać pinezki z tego linku."
+      );
+    } finally {
+      if (needsServer) setResolving(false);
     }
-
-    setPasteError(
-      "Nie rozpoznano współrzędnych. Wklej link Google Maps lub „szer, dł”."
-    );
   };
 
   // --- Theming --------------------------------------------------------------

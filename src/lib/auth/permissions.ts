@@ -41,6 +41,14 @@ export const TABS: TabDef[] = [
   // Słownik działów firmy (handlowy, księgowość, CMA…) — rodzeństwo Obiektów.
   { key: "kadry/dzialy", label: "Działy", group: "Kadry" },
   { key: "kadry/normy", label: "Normy", group: "Kadry" },
+  // Handlowy — moduł pracy handlowca (lejek szans, jego kalendarz i aktywności).
+  // Klucz `handlowcy` z grupy „Ogólne” to co innego: SŁOWNIK opiekunów handlowych
+  // (stawki, prowizje, przypisania) i zostaje bez zmian.
+  { key: "handlowy/pulpit", label: "Pulpit", group: "Handlowy" },
+  { key: "handlowy/leady", label: "Leady", group: "Handlowy" },
+  { key: "handlowy/kontakty", label: "Kontakty", group: "Handlowy" },
+  { key: "handlowy/aktywnosci", label: "Aktywności", group: "Handlowy" },
+  { key: "handlowy/kalendarz", label: "Kalendarz", group: "Handlowy" },
   // CMA
   { key: "cma/raporty", label: "Raporty", group: "CMA" },
   { key: "cma/trendy", label: "Trendy", group: "CMA" },
@@ -48,6 +56,10 @@ export const TABS: TabDef[] = [
   // Mapowanie rejestru monitoringu na kartotekę obiektów. Własny klucz, bo to
   // ekran edycji powiązań, a nie kolejny raport — nadaje się osobno.
   { key: "cma/obiekty", label: "Obiekty", group: "CMA" },
+  // Firmy grup interwencyjnych, warunki per obiekt i rejestr podjazdów
+  // (/cma/grupy-interwencyjne). Własny klucz: to dane handlowe podwykonawców
+  // (stawki, umowy), a nie kolejny raport z monitoringu.
+  { key: "cma/grupy-interwencyjne", label: "Grupy interwencyjne", group: "CMA" },
   { key: "cma/ustawienia", label: "Ustawienia", group: "CMA" },
   // Techniczny
   { key: "technical/realizacje", label: "Realizacje", group: "Techniczny" },
@@ -75,6 +87,8 @@ export const TABS: TabDef[] = [
   { key: "technical/projekty", label: "Projekty", group: "Techniczny" },
   { key: "technical/szablony", label: "Szablony", group: "Techniczny" },
   { key: "technical/magazyn", label: "Magazyn", group: "Techniczny" },
+  // Biblioteka instrukcji i dokumentacji sprzętu oraz usług (/technical/manuale).
+  { key: "technical/manuale", label: "Manuale", group: "Techniczny" },
   { key: "technical/kalendarz", label: "Kalendarz", group: "Techniczny" },
   // OFI
   { key: "ofi", label: "OFI", group: "OFI" },

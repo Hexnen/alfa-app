@@ -76,6 +76,11 @@ import type { HrContract, HrHours, HrPayroll } from "../db/schema.js";
 import { buildHoursAggregates, computePayroll } from "../utils/hr-calc.js";
 import { getCompanyConfig } from "./company-config.js";
 import { officeRowTotals } from "./hr-office-total.js";
+import {
+  flagsFromServicesInRange,
+  monthBounds,
+  type ServicePeriodLike,
+} from "./object-services.js";
 
 /** Okno uśredniania w miesiącach: ostatni pełny / średnia z 3 / średnia z 12. */
 export type CostWindow = 1 | 3 | 12;
@@ -192,6 +197,16 @@ export interface CmaAllocationInfo {
    * działów pilnuje, że flagę nosi jeden dział naraz.
    */
   poolPositions: number;
+}
+
+/** Mianownik podziału puli CMA w JEDNYM miesiącu okna. */
+interface CmaDenominator {
+  /** Suma jednostek dozorowanych obiektów w tym miesiącu. */
+  units: number;
+  /** Obiekty z niezerową wagą — po nich rozdziela się pula tego miesiąca. */
+  entries: Array<{ id: number; units: number }>;
+  /** Obiekty z usługą kamer, ale bez podanej liczby — zaniżają swój udział. */
+  missingCameraCount: number;
 }
 
 export interface PersonnelCostResult {
@@ -456,8 +471,8 @@ function computeWindow(window: CostWindow, now = new Date()): WindowComputation 
     .from(schema.hrDepartments)
     .all();
   // Usługi obiektów — jedno zapytanie na całe okno, poza pętlą miesięcy: kartoteka
-  // nie zmienia się w trakcie liczenia, a mianownik CMA jest ten sam dla wszystkich
-  // miesięcy okna (dzielimy DZISIEJSZY stan usług, nie stan sprzed roku).
+  // nie zmienia się w trakcie liczenia. To flagi NA DZIŚ; służą jako mianownik
+  // wyłącznie dla obiektów bez ani jednego wiersza okresu (patrz `periodsByObject`).
   const objectRows = db
     .select({
       id: schema.objects.id,
@@ -469,6 +484,71 @@ function computeWindow(window: CostWindow, now = new Date()): WindowComputation 
     })
     .from(schema.objects)
     .all();
+
+  /*
+   * OKRESY USŁUG — mianownik CMA liczony PER MIESIĄC, a nie „dzisiejszym stanem".
+   *
+   * Do września 2026 dwunastomiesięczny koszt centrum dzielił się DZISIEJSZYMI
+   * kamerami: obiekt podłączony trzy miesiące temu dostawał udział także za
+   * dziewięć miesięcy, w których centrum go nie dozorowało, a obiekt odłączony
+   * pół roku temu znikał z mianownika także z miesięcy, w których jeszcze był.
+   * Od czasu tabeli `object_services` (migracja 0084) znamy prawdziwe daty, więc
+   * każdy miesiąc okna dzieli swoją pulę po usługach aktywnych W TYM MIESIĄCU.
+   *
+   * Jedno zapytanie o CAŁĄ tabelę (kilkaset wierszy), tak samo jak `objectRows`:
+   * filtrowanie po oknie zaoszczędziłoby kilkanaście wierszy, a kosztowałoby
+   * drugą definicję „okres nachodzi na okno".
+   *
+   * Obiekty BEZ ani jednego wiersza (D3: skrypty, seedy, dane sprzed migracji)
+   * liczą się z flag `objects.has_*` w każdym miesiącu okna — tak jak przed tą
+   * zmianą. Nie mamy o nich historii i cisza nie znaczy „usługi nie było".
+   */
+  const periodRows = db
+    .select({
+      objectId: schema.objectServices.objectId,
+      service: schema.objectServices.service,
+      startDate: schema.objectServices.startDate,
+      endDate: schema.objectServices.endDate,
+      cameraCount: schema.objectServices.cameraCount,
+    })
+    .from(schema.objectServices)
+    .all();
+  const periodsByObject = new Map<number, ServicePeriodLike[]>();
+  for (const r of periodRows) {
+    const list = periodsByObject.get(r.objectId);
+    if (list) list.push(r);
+    else periodsByObject.set(r.objectId, [r]);
+  }
+
+  /** Mianownik CMA w konkretnym miesiącu: kto dozorowany, z jaką wagą i czego brakuje. */
+  const cmaDenominatorFor = (month: MonthKey): CmaDenominator => {
+    const { from, to } = monthBounds(month.year, month.month);
+    const entries: Array<{ id: number; units: number }> = [];
+    let units = 0;
+    let missingCameraCount = 0;
+    for (const o of objectRows) {
+      // Status bierzemy BIEŻĄCY — historii statusów kartoteka nie trzyma, więc
+      // obiekt zarchiwizowany dziś nie wnosi jednostek także do dawnych miesięcy.
+      // To ta sama zasada, co przed zmianą; okresy usług dokładają do niej
+      // wyłącznie wiedzę o tym, KIEDY usługa faktycznie była świadczona.
+      if (!(CMA_DENOMINATOR_STATUSES as readonly string[]).includes(o.status)) continue;
+      const periods = periodsByObject.get(o.id);
+      const s: ObjectServices = periods
+        ? flagsFromServicesInRange(periods, from, to)
+        : {
+            hasSswin: o.hasSswin,
+            hasCameras: o.hasCameras,
+            cameraCount: o.cameraCount,
+            hasVideoreception: o.hasVideoreception,
+          };
+      const u = serviceUnits(s);
+      if (s.hasCameras && s.cameraCount == null) missingCameraCount++;
+      if (u <= 0) continue;
+      units += u;
+      entries.push({ id: o.id, units: u });
+    }
+    return { units, entries, missingCameraCount };
+  };
 
   // Narzuty składkowe: ustawienia firmy + nadpisania spółek, wczytane raz na okno.
   const markups = buildMarkupResolver();
@@ -517,8 +597,14 @@ function computeWindow(window: CostWindow, now = new Date()): WindowComputation 
   /** Miesiące z wierszami, ale bez kwot — czekają na księgową. */
   const skippedMonths: MonthKey[] = [];
   let cmaPoolCost = 0; // suma zł z okna, która trafiła na pozycje puli CMA
+  /** objects.id → suma udziałów w puli CMA z całego okna (dzielone per miesiąc). */
+  const cmaTotals = new Map<number, number>();
+  /** Mianownik OSTATNIEGO policzonego miesiąca — z niego robi się blok `cma`. */
+  let lastDenominator: CmaDenominator = { units: 0, entries: [], missingCameraCount: 0 };
   let mappedHours = 0;
   let cmaHours = 0;
+  /** Godziny CMA z miesięcy, w których pula miała się na co podzielić. */
+  let cmaHoursAllocated = 0;
   let allHours = 0;
   // Audyt składek: ile wierszy poszło którą ścieżką i jaki wyszedł narzut wypadkowy.
   const byForm = emptyByForm();
@@ -651,6 +737,8 @@ function computeWindow(window: CostWindow, now = new Date()): WindowComputation 
     }
 
     // --- godziny pracownika w tym miesiącu, w rozbiciu na pozycje kadrowe
+    /** Godziny centrum W TYM MIESIĄCU — patrz `cmaHoursAllocated` niżej. */
+    let monthCmaHours = 0;
     const hoursByEmployee = new Map<
       number,
       { total: number; perObject: Map<number, number>; cma: number }
@@ -681,6 +769,7 @@ function computeWindow(window: CostWindow, now = new Date()): WindowComputation 
           // Godziny centrum monitorowania — nie wiadomo jeszcze, na które obiekty
           // pójdą, bo to zależy od podziału po jednostkach. Zbieramy do puli.
           cmaHours += worked;
+          monthCmaHours += worked;
           entry.cma += worked;
         }
         // Dział spoza puli (handlowy, księgowość, zarząd) — koszt ogólny firmy,
@@ -696,6 +785,8 @@ function computeWindow(window: CostWindow, now = new Date()): WindowComputation 
     }
 
     // --- alokacja proporcjonalna
+    /** Pula centrum ZA TEN MIESIĄC — dzieli się po usługach aktywnych w nim. */
+    let monthCmaCost = 0;
     for (const [employeeId, cost] of costByEmployee) {
       if (cost === 0) continue;
       const entry = hoursByEmployee.get(employeeId);
@@ -707,7 +798,29 @@ function computeWindow(window: CostWindow, now = new Date()): WindowComputation 
       }
       // Ta sama proporcja godzin, tylko odbiorcą jest pula, a nie obiekt: dyżurny
       // z połową godzin na CMA oddaje centrum połowę swojego kosztu.
-      if (entry.cma > 0) cmaPoolCost += (cost * entry.cma) / entry.total;
+      if (entry.cma > 0) monthCmaCost += (cost * entry.cma) / entry.total;
+    }
+    cmaPoolCost += monthCmaCost;
+
+    /*
+     * --- podział puli TEGO MIESIĄCA po jednostkach dozorowanych W TYM MIESIĄCU
+     *
+     * Mianownik liczymy w każdym użytym miesiącu, także gdy pula wyszła zerowa:
+     * z ostatniego z nich robi się blok audytowy `cma` (units / perUnit / braki
+     * liczby kamer), a ten ma opisywać stan NAJBLIŻSZY dzisiejszemu, nie średnią
+     * z roku — użytkownik porównuje go z kolumną „jednostki" w tabeli obiektów,
+     * a ta pokazuje dzisiejsze usługi.
+     */
+    const denominator = cmaDenominatorFor(m);
+    lastDenominator = denominator;
+    if (denominator.units > 0) {
+      cmaHoursAllocated += monthCmaHours;
+      if (monthCmaCost > 0) {
+        const perUnitThisMonth = monthCmaCost / denominator.units;
+        for (const e of denominator.entries) {
+          add(cmaTotals, e.id, perUnitThisMonth * e.units);
+        }
+      }
     }
   }
 
@@ -719,32 +832,41 @@ function computeWindow(window: CostWindow, now = new Date()): WindowComputation 
     for (const [id, total] of employeeTotals) byEmployeeId.set(id, round2(total / monthsUsed));
   }
 
-  /* --- podział puli CMA po dozorowanych jednostkach ------------------------ */
+  /* --- pula CMA: średnia miesięczna z udziałów policzonych PER MIESIĄC ------
+   *
+   * Sam podział dzieje się w pętli miesięcy wyżej (każdy miesiąc dzieli swoją
+   * pulę po SWOICH jednostkach); tutaj zostaje już tylko uśrednienie po liczbie
+   * miesięcy okna — dokładnie tak samo, jak przy alokacji wprost z godzin.
+   */
   const pool = monthsUsed > 0 ? round2(cmaPoolCost / monthsUsed) : 0;
-  // Do mianownika wchodzą TYLKO dozorowane statusy. Wagę pojedynczego obiektu —
-  // także archiwalnego, żeby front mógł pokazać, dlaczego udziału nie dostał —
-  // liczy się z tych samych pól tą samą funkcją `serviceUnits()`.
-  const inDenominator: Array<{ id: number; units: number }> = [];
-  let units = 0;
-  let objectsMissingCameraCount = 0;
-  for (const o of objectRows) {
-    if (!(CMA_DENOMINATOR_STATUSES as readonly string[]).includes(o.status)) continue;
-    const u = serviceUnits(o);
-    // Brak liczby kamer zgłaszamy tylko dla obiektów z mianownika — przy archiwalnym
-    // nikogo to już nie boli, a licznik ma pokazywać dane DO UZUPEŁNIENIA.
-    if (o.hasCameras && o.cameraCount == null) objectsMissingCameraCount++;
-    if (u <= 0) continue;
-    units += u;
-    inDenominator.push({ id: o.id, units: u });
+  const cmaShareByObjectId = new Map<number, number>();
+  if (monthsUsed > 0) {
+    for (const [id, total] of cmaTotals) {
+      const share = round2(total / monthsUsed);
+      // Grosze poniżej progu zaokrąglenia (obiekt dozorowany przez jeden miesiąc
+      // z dwunastu przy mikroskopijnej puli) nie mają czego opisywać — zero
+      // znaczyłoby „policzone i wyszło 0", a to nieprawda o niczym.
+      if (share !== 0) cmaShareByObjectId.set(id, share);
+    }
   }
+  /*
+   * Blok audytowy opisuje OSTATNI policzony miesiąc okna, czyli stan najbliższy
+   * dzisiejszemu — a nie średnią z roku. Powód jest interfejsowy: front stawia
+   * `perUnit` obok kolumny „jednostki", którą liczy z DZISIEJSZYCH usług obiektu
+   * (analytics.ts → `serviceUnits`), więc mianownik uśredniony po dwunastu
+   * miesiącach nie zgadzałby się z niczym, co widać na ekranie.
+   *
+   * Konsekwencja do zapamiętania: przy oknie 12 miesięcy iloczyn
+   * `perUnit × jednostki` NIE musi się równać udziałowi obiektu, którego usługi
+   * w tym roku się zmieniły — jego udział liczy się z miesięcy, w których
+   * faktycznie był dozorowany. Dla okna 1 miesiąca obie liczby są tożsame.
+   */
+  const units = lastDenominator.units;
+  const objectsMissingCameraCount = lastDenominator.missingCameraCount;
   // Zero jednostek (np. cała baza bez usług albo świeżo po migracji, gdy nikt nie
   // policzył kamer) → nie dzielimy przez zero; pula zostaje kosztem ogólnym, tak
   // jak przed wprowadzeniem tego mechanizmu, i widać to po `perUnit = 0`.
   const perUnit = units > 0 ? pool / units : 0;
-  const cmaShareByObjectId = new Map<number, number>();
-  if (perUnit !== 0) {
-    for (const o of inDenominator) cmaShareByObjectId.set(o.id, round2(perUnit * o.units));
-  }
 
   // Koszt osobowy obiektu = obie ścieżki RAZEM. Rozbicie zostaje dostępne osobno,
   // bo UI ma umieć powiedzieć, z czego ta kwota się składa.
@@ -763,7 +885,7 @@ function computeWindow(window: CostWindow, now = new Date()): WindowComputation 
       // Zaokrąglenie do groszy dopiero na wyjściu — sam podział liczy się na
       // pełnej precyzji, żeby suma udziałów nie rozjechała się z pulą.
       perUnit: round2(perUnit),
-      objectsInDenominator: inDenominator.length,
+      objectsInDenominator: lastDenominator.entries.length,
       objectsMissingCameraCount,
       poolPositions: cmaPoolIds.size,
     },
@@ -774,13 +896,12 @@ function computeWindow(window: CostWindow, now = new Date()): WindowComputation 
     hrObjectsTotal: hrObjectRows.length,
     // Godziny bez ani jednego wpisu w oknie → 0, a nie NaN: „nic nie uciekło
     // w koszt ogólny", bo nie było czego rozdzielać.
-    // Godziny CMA liczą się jako ROZDZIELONE, ale tylko wtedy, gdy pula faktycznie
-    // miała się na co podzielić — bez jednostek w mianowniku wracają do kosztu
-    // ogólnego i przypis „X% godzin poza obiektami" musi to uczciwie pokazać.
+    // Godziny CMA liczą się jako ROZDZIELONE, ale tylko z tych miesięcy, w których
+    // pula faktycznie miała się na co podzielić (`cmaHoursAllocated`) — z miesiąca
+    // bez jednostek w mianowniku wracają do kosztu ogólnego i przypis „X% godzin
+    // poza obiektami" musi to uczciwie pokazać.
     unmappedHoursShare:
-      allHours > 0
-        ? (allHours - mappedHours - (units > 0 ? cmaHours : 0)) / allHours
-        : 0,
+      allHours > 0 ? (allHours - mappedHours - cmaHoursAllocated) / allHours : 0,
     employer: {
       applied: true,
       byForm,
@@ -855,6 +976,15 @@ const FINGERPRINT_SQL = sql`select
   (select coalesce(sum(coalesce(camera_count, 0)), 0) from objects) as ob_cam,
   (select count(camera_count) from objects) as ob_cam_known,
   (select count(*) from objects where status in ('active', 'in_progress')) as ob_scope,
+  -- Okresy usług: to one, a nie flagi objects.has_*, wyznaczają mianownik CMA
+  -- w POSZCZEGÓLNYCH miesiącach okna. Edycja daty albo liczby kamer w okresie
+  -- bywa przy tym niewidoczna w tabeli objects (flagi się nie zmieniają, gdy
+  -- usługa nadal trwa), więc bez tych czterech liczników admin przesunąłby
+  -- początek okresu o rok i dostał STARY koszt — kartoteka przecież nie drgnęła.
+  (select count(*) from object_services) as os_cnt,
+  (select coalesce(max(updated_at), '') from object_services) as os_max,
+  (select coalesce(sum(coalesce(camera_count, 0)), 0) from object_services) as os_cam,
+  (select count(camera_count) from object_services) as os_cam_known,
   (select coalesce(max(updated_at), '') from hr_month_norms) as n_max,
   (select coalesce(group_concat(kv, ';'), '') from (
      select key || '=' || value as kv from app_settings

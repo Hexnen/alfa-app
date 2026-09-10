@@ -14,6 +14,7 @@ import { eq, desc, inArray } from "drizzle-orm";
 import type { ActivityLogEntry } from "../db/schema.js";
 import { isAdmin, maxLevel } from "../lib/auth/permissions.js";
 import { getUser } from "../middleware/auth.js";
+import { asDepartment, viewableDepartments } from "../lib/calendar-scope.js";
 
 const app = new Hono();
 
@@ -26,6 +27,8 @@ interface EventBrief {
   allDay: boolean;
   status: string;
   deletedAt: string | null;
+  /** Dział wydarzenia — feed odsiewa po nim wpisy spoza wglądu użytkownika. */
+  department: string;
 }
 
 /** Dołącza `event` do wpisów entity_type=calendar_event (jednym zapytaniem). */
@@ -43,6 +46,7 @@ function attachEvents(entries: ActivityLogEntry[]) {
         allDay: schema.calendarEvents.allDay,
         status: schema.calendarEvents.status,
         deletedAt: schema.calendarEvents.deletedAt,
+        department: schema.calendarEvents.department,
       })
       .from(schema.calendarEvents)
       .where(inArray(schema.calendarEvents.id, ids))
@@ -92,7 +96,13 @@ app.get("/recent", (c) => {
     .orderBy(desc(schema.activityLog.createdAt), desc(schema.activityLog.id))
     .limit(limit)
     .all();
-  return c.json({ success: true, data: attachEvents(entries) });
+  // Feed streszcza wydarzenia OBU działów, a wpuszcza go klucz technicznego kalendarza —
+  // wpisy z działu, którego użytkownik nie ogląda, wypadają (src/lib/calendar-scope.ts).
+  const departments = viewableDepartments(user);
+  const withEvents = attachEvents(entries).filter(
+    (e) => e.entityType !== "calendar_event" || e.event == null || departments.includes(asDepartment(e.event.department))
+  );
+  return c.json({ success: true, data: withEvents });
 });
 
 export default app;

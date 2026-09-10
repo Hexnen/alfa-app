@@ -33,6 +33,7 @@ import {
   type ObjectImport,
 } from "@/lib/api";
 import { pillClass, type PillTone } from "@/lib/calendar-labels";
+import { RichText } from "@/components/RichText";
 
 // Etykiety pól obiektu (klucz z API -> nagłówek raportu)
 const FIELD_LABELS: Record<string, string> = {
@@ -108,6 +109,13 @@ const DETAIL_FIELDS: (keyof MonitoredObject)[] = [
   "locationDescription",
   "objectDescription",
 ];
+
+/**
+ * Pola, w których siedzi WOLNY TEKST wpisany ręcznie w CMA — tylko one dostają
+ * formatowanie i klikalne linki. Reszta (konta, daty, godziny dojazdu) to dane
+ * słownikowe; przepuszczanie ich przez parser tylko szukałoby tam wzorców.
+ */
+const RICH_DETAIL_FIELDS = new Set<keyof MonitoredObject>(["locationDescription", "objectDescription"]);
 
 const PAGE_SIZE = 25;
 
@@ -531,7 +539,11 @@ export function TechnicalObjects() {
                       <p className="text-xs text-muted-foreground">
                         {FIELD_LABELS[field] ?? field}
                       </p>
-                      <p className="whitespace-pre-wrap text-sm">{String(value)}</p>
+                      {RICH_DETAIL_FIELDS.has(field) ? (
+                        <RichText text={String(value)} className="text-sm" compactPreviews />
+                      ) : (
+                        <p className="whitespace-pre-wrap text-sm">{String(value)}</p>
+                      )}
                     </div>
                   );
                 })}

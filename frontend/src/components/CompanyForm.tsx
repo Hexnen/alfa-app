@@ -60,6 +60,11 @@ export function CompanyForm({
     vatCheckedAt: company?.vatCheckedAt || "",
     notes: company?.notes || "",
     active: company?.active ?? true,
+    // Dane do umów — używa ich generator draftów umów (Umowy → Drafty umów).
+    contractCode: company?.contractCode || "",
+    contractName: company?.contractName || "",
+    representativeLine: company?.representativeLine || "",
+    shareCapital: company?.shareCapital || "",
   });
 
   // Narzuty trzymamy jako tekst, bo pusty input ma znaczenie („użyj globalnego”),
@@ -132,7 +137,9 @@ export function CompanyForm({
 
   return (
     <Dialog open={open} onOpenChange={onClose}>
-      <DialogContent className="sm:max-w-lg">
+      {/* Formularz urósł o sekcję „Dane do umów” — bez własnego przewijania nie
+          mieści się na niższych ekranach. */}
+      <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>{company ? "Edytuj spółkę" : "Nowa spółka"}</DialogTitle>
         </DialogHeader>
@@ -245,6 +252,72 @@ export function CompanyForm({
               value={formData.notes}
               onChange={(e) => setField("notes", e.target.value)}
             />
+          </div>
+
+          {/* Dane do umów — wchodzą wprost w treść generowanej umowy (Umowy →
+              Drafty umów). „Pełna nazwa” bywa z KRS-u, czyli WERSALIKAMI, a w
+              dokumencie ma stać ludzka wersja; reprezentant musi być w
+              dopełniaczu, bo w umowie stoi po „reprezentowaną przez”. */}
+          <div className="space-y-2 rounded-md border p-3">
+            <div>
+              <Label className="text-sm font-medium">Dane do umów (opcjonalnie)</Label>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Uzupełnij, jeśli ta spółka ma wystawiać umowy z szablonu.
+              </p>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <Label htmlFor="company-contract-code" className="text-xs">
+                  Kod do numeracji umów
+                </Label>
+                <Input
+                  id="company-contract-code"
+                  data-testid="company-contract-code"
+                  placeholder="ZDW"
+                  value={formData.contractCode ?? ""}
+                  onChange={(e) => setField("contractCode", e.target.value)}
+                />
+                <p className="text-[11px] leading-tight text-muted-foreground">
+                  Numer umowy: 12/ZDW/2026
+                </p>
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="company-contract-name" className="text-xs">
+                  Nazwa w treści umowy
+                </Label>
+                <Input
+                  id="company-contract-name"
+                  data-testid="company-contract-name"
+                  placeholder="Alfa Group Sp. z o.o."
+                  value={formData.contractName ?? ""}
+                  onChange={(e) => setField("contractName", e.target.value)}
+                />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="company-representative" className="text-xs">
+                  Reprezentant — dopełniacz
+                </Label>
+                <Input
+                  id="company-representative"
+                  data-testid="company-representative"
+                  placeholder="Sławomira Jaworskiego - Prezesa Zarządu"
+                  value={formData.representativeLine ?? ""}
+                  onChange={(e) => setField("representativeLine", e.target.value)}
+                />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="company-share-capital" className="text-xs">
+                  Kapitał zakładowy
+                </Label>
+                <Input
+                  id="company-share-capital"
+                  data-testid="company-share-capital"
+                  placeholder="50 000,00 zł"
+                  value={formData.shareCapital ?? ""}
+                  onChange={(e) => setField("shareCapital", e.target.value)}
+                />
+              </div>
+            </div>
           </div>
 
           {/* Nadpisania narzutów składek — puste pole dziedziczy wartość globalną

@@ -63,6 +63,7 @@ import { buildCalendarActions, buildCalendarTools, zChoiceAction, type ChoiceAct
 import { estimateTokens, trimHistoryToBudget } from "../lib/ai/context.js";
 import { findTechnicianForUser, listActiveTechnicians, loadEvent, type CalendarEventJson } from "../lib/calendar-queries.js";
 import { ApiError } from "../lib/calendar-labels.js";
+import { clientIdOf } from "../lib/calendar-live.js";
 import { applyChange, CHANGES_MAX, zChange, type Change } from "../lib/ai/calendarChanges.js";
 import { localNow } from "../lib/ai/freeSlots.js";
 import { canEdit } from "../lib/auth/permissions.js";
@@ -737,7 +738,7 @@ type ApplyResult = { index: number; ok: true; eventId: number; event: CalendarEv
  * Wykonuje wybrane pozycje paczki (każda we WŁASNEJ transakcji — błąd jednej nie cofa innych),
  * po każdej udanej dopisuje notatkę data-system kind:"applied". Zwraca wyniki per index.
  */
-function applyChangeBatch(chatId: number, user: User, toolCallId: string, indexes: number[], overrides: Record<number, Change>): ApplyResult[] {
+function applyChangeBatch(chatId: number, user: User, toolCallId: string, indexes: number[], overrides: Record<number, Change>, actorClientId: string | null): ApplyResult[] {
   const call = findChangesCall(chatId, toolCallId);
   if (!call) throw new ApiError(404, "Nie znaleziono paczki zmian o podanym toolCallId w tym czacie");
   const cfg = getAssistantConfig().values;
@@ -750,7 +751,7 @@ function applyChangeBatch(chatId: number, user: User, toolCallId: string, indexe
     }
     const change = overrides[index] ?? call.changes[index];
     try {
-      const { eventId, event, resolved } = applyChange(change, index, { cfg, today }, { user });
+      const { eventId, event, resolved } = applyChange(change, index, { cfg, today }, { user }, actorClientId);
       const text = `Zastosowano zmianę nr ${index + 1} — ${resolved.summary} (wydarzenie #${eventId} „${event.title}”).`;
       insertSystemNote(chatId, { kind: "applied", eventId, title: event.title, text, toolCallId, changeIndex: index });
       results.push({ index, ok: true, eventId, event, summary: resolved.summary });
@@ -806,7 +807,7 @@ app.post("/apply-changes", async (c) => {
   const overrides = parseOverrides(body.overrides);
   if (typeof overrides === "string") return c.json({ success: false, error: overrides }, 400);
   try {
-    const results = applyChangeBatch(chat.id, user, toolCallId, indexes, overrides);
+    const results = applyChangeBatch(chat.id, user, toolCallId, indexes, overrides, clientIdOf(c));
     return c.json({ success: true, data: { results } });
   } catch (e) {
     if (e instanceof ApiError) return c.json({ success: false, error: e.message }, e.status);
@@ -832,7 +833,7 @@ app.post("/apply-change", async (c) => {
   const overrides = parseOverrides(body.change != null ? { [index]: body.change } : null);
   if (typeof overrides === "string") return c.json({ success: false, error: overrides }, 400);
   try {
-    const [r] = applyChangeBatch(chat.id, user, toolCallId, [index], overrides);
+    const [r] = applyChangeBatch(chat.id, user, toolCallId, [index], overrides, clientIdOf(c));
     if (!r.ok) return c.json({ success: false, error: r.error }, 400);
     return c.json({ success: true, data: { eventId: r.eventId, event: r.event, summary: r.summary } });
   } catch (e) {

@@ -19,7 +19,8 @@
  * Czyli: przytłaczająca większość to pojedyncze punkty, a ogon jest długi i rzadki.
  */
 import { db, schema } from "../../src/db/index.js";
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { upsertServiceRowsFromFlags } from "../../src/lib/object-services.js";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import { MARKER, type Tx, assertNotSeeded, int, pickMany, runInTx, weighted } from "./shared.js";
 
 export interface ServicesCounts {
@@ -47,7 +48,11 @@ export function seedServices(outerTx?: Tx): ServicesCounts {
   // Tylko obiekty ze znacznikiem — 9 pierwotnych zostawiamy w spokoju, bo to nie
   // są dane seeda i ich reset i tak by nie posprzątał.
   const seeded = db
-    .select({ id: schema.objects.id, hasCameras: schema.objects.hasCameras })
+    .select({
+      id: schema.objects.id,
+      hasCameras: schema.objects.hasCameras,
+      createdAt: schema.objects.createdAt,
+    })
     .from(schema.objects)
     .where(sql`${schema.objects.notes} like ${`%${MARKER}%`}`)
     .all();
@@ -88,12 +93,28 @@ export function seedServices(outerTx?: Tx): ServicesCounts {
     for (const o of seeded) {
       if (o.hasCameras) {
         // `isNull` w warunku: nie nadpisujemy liczby, którą ktoś już wpisał ręcznie.
+        const count = cameraCount();
         const r = tx
           .update(schema.objects)
-          .set({ cameraCount: cameraCount() })
+          .set({ cameraCount: count })
           .where(and(eq(schema.objects.id, o.id), isNull(schema.objects.cameraCount)))
           .run();
         cameraCounts += r.changes;
+        // Liczba kamer żyje w OKRESIE usługi (`object_services`), a kolumna na
+        // obiekcie jest z niego przeliczanym cache'em — bez tego pierwszy sync
+        // przy starcie backendu skasowałby właśnie wpisaną liczbę.
+        if (r.changes > 0) {
+          tx.update(schema.objectServices)
+            .set({ cameraCount: count })
+            .where(
+              and(
+                eq(schema.objectServices.objectId, o.id),
+                eq(schema.objectServices.service, "kamery"),
+                isNull(schema.objectServices.cameraCount),
+              ),
+            )
+            .run();
+        }
       }
       // Wideorecepcja jest usługą niszową — ok. co ósmy obiekt z dozorem wizyjnym.
       if (videoIds.has(o.id)) {
@@ -103,6 +124,10 @@ export function seedServices(outerTx?: Tx): ServicesCounts {
           .where(and(eq(schema.objects.id, o.id), eq(schema.objects.hasVideoreception, false)))
           .run();
         videoreception += r.changes;
+        if (r.changes > 0) {
+          // Okres liczy się od założenia obiektu — tak samo jak reszta jego usług.
+          upsertServiceRowsFromFlags(tx, o.id, { hasVideoreception: true }, o.createdAt.slice(0, 10));
+        }
       }
     }
   });
@@ -121,6 +146,14 @@ export function resetServices(outerTx?: Tx): ServicesCounts {
   let videoreception = 0;
   runInTx(outerTx, (tx) => {
     const marked = sql`${schema.objects.notes} like ${`%${MARKER}%`}`;
+    // Id obiektów seeda POTRZEBNE PRZED zgaszeniem flag — po nich `marked` dalej
+    // działa (notatka zostaje), ale okresy kasujemy po id, bez podzapytania.
+    const markedIds = tx
+      .select({ id: schema.objects.id })
+      .from(schema.objects)
+      .where(marked)
+      .all()
+      .map((o) => o.id);
     cameraCounts = tx
       .update(schema.objects)
       .set({ cameraCount: null })
@@ -131,6 +164,28 @@ export function resetServices(outerTx?: Tx): ServicesCounts {
       .set({ hasVideoreception: false })
       .where(and(marked, eq(schema.objects.hasVideoreception, true)))
       .run().changes;
+    if (markedIds.length > 0) {
+      // Ten sam stan „sprzed" w okresach usług: liczba kamer nieustalona,
+      // wideorecepcji nie ma. Okresów kamer/SSWiN/OFI nie ruszamy — te
+      // postawił moduł `commercial` razem z obiektem.
+      tx.update(schema.objectServices)
+        .set({ cameraCount: null })
+        .where(
+          and(
+            inArray(schema.objectServices.objectId, markedIds),
+            eq(schema.objectServices.service, "kamery"),
+          ),
+        )
+        .run();
+      tx.delete(schema.objectServices)
+        .where(
+          and(
+            inArray(schema.objectServices.objectId, markedIds),
+            eq(schema.objectServices.service, "wideorecepcja"),
+          ),
+        )
+        .run();
+    }
   });
   return { cameraCounts, videoreception };
 }

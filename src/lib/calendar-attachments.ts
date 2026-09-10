@@ -1,12 +1,16 @@
 /**
- * Załączniki do notatek wydarzeń kalendarza — pliki na dysku, metadane w bazie
- * (tabela calendar_note_attachments). Ten moduł zna: limity, dozwolone typy,
- * konwersję obrazków do WebP (sharp), zapis/kasowanie plików i ochronę przed
- * path traversal. Trasy w src/routes/calendar.ts, wpis do bazy w addNote
- * (src/lib/calendar-mutations.ts).
+ * Załączniki plikowe — pliki na dysku, metadane w bazie. Ten moduł zna: limity,
+ * dozwolone typy, konwersję obrazków do WebP (sharp), zapis/kasowanie plików
+ * i ochronę przed path traversal. NIE zna encji, do której należą — dostaje
+ * „scope", czyli podkatalog w katalogu załączników.
  *
- * Układ na dysku: `<DATA_DIR>/attachments/<eventId>/<uuid>.<ext>` — katalog per wydarzenie,
- * żeby twarde usunięcie wydarzenia mogło skasować wszystko jednym `rm -r`.
+ * Konsumenci:
+ *  - notatki wydarzeń kalendarza (tabela calendar_note_attachments, scope = `<eventId>`),
+ *    trasy w src/routes/calendar.ts, wpis do bazy w addNote (src/lib/calendar-mutations.ts);
+ *  - manuale (tabela manual_attachments, scope = `manuals/<manualId>`), src/routes/manuals.ts.
+ *
+ * Układ na dysku: `<DATA_DIR>/attachments/<scope>/<uuid>.<ext>` — katalog per encja,
+ * żeby twarde usunięcie encji mogło skasować wszystko jednym `rm -r`.
  */
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
@@ -14,7 +18,7 @@ import { dirname, extname, join, resolve, sep } from "node:path";
 import sharp, { type OutputInfo } from "sharp";
 import { inArray } from "drizzle-orm";
 import { DATA_DIR, schema } from "../db/index.js";
-import type { CalendarAttachmentKind, CalendarNoteAttachment } from "../db/schema.js";
+import type { CalendarAttachmentKind, CalendarNoteAttachment, NoteAttachmentOrigin } from "../db/schema.js";
 import type { DbOrTx } from "./activity-log.js";
 import { ApiError } from "./calendar-labels.js";
 
@@ -48,6 +52,10 @@ const DOC_MIME_BY_EXT: Record<string, string> = {
   csv: "text/csv",
   txt: "text/plain",
   rtf: "application/rtf",
+  // Maile: `.msg` z Outlooka (drag&drop na kalendarz — src/lib/outlook-msg.ts)
+  // i `.eml` z klientów pocztowych. Oryginał zostaje przy notatce jako dowód treści.
+  msg: "application/vnd.ms-outlook",
+  eml: "message/rfc822",
 };
 const DOC_MIMES = new Set([...Object.values(DOC_MIME_BY_EXT), "text/rtf", "application/x-rtf"]);
 
@@ -76,6 +84,8 @@ export interface NoteAttachmentJson {
   mime: string;
   size: number;
   kind: CalendarAttachmentKind;
+  /** „upload” = plik dodany ręcznie, „msg” = wypakowany z maila (migracja 0096). */
+  origin: NoteAttachmentOrigin;
   width: number | null;
   height: number | null;
   url: string;
@@ -88,6 +98,7 @@ export function attachmentOfRow(r: CalendarNoteAttachment): NoteAttachmentJson {
     mime: r.mime,
     size: r.size,
     kind: r.kind,
+    origin: r.origin,
     width: r.width,
     height: r.height,
     url: `${ATTACHMENT_URL_PREFIX}/${r.id}`,
@@ -153,13 +164,34 @@ export function validateUploads(files: IncomingFile[]): void {
 }
 
 /**
- * Zapisuje pliki na dysk do katalogu wydarzenia. Obrazki → WebP (rotate wg EXIF, max 2560 px
- * dłuższego boku, bez powiększania). Przy błędzie w połowie sprząta już zapisane pliki
- * i rzuca dalej — wołający nie ma nic do posprzątania.
+ * Ta sama walidacja co `validateUploads`, ale dla POJEDYNCZEGO pliku i BEZ rzucania:
+ * zwraca polski powód odrzucenia albo null, gdy plik przejdzie. Używa tego
+ * wypakowywanie załączników z maila `.msg` — tam odrzucony plik ma być POMINIĘTY
+ * (mail zapisuje się dalej), a nie zamieniać całego zapisu notatki w błąd 400.
  */
-export async function storeUploads(eventId: number, files: IncomingFile[]): Promise<StoredAttachment[]> {
+export function uploadRejectReason(file: IncomingFile): string | null {
+  if (file.data.length === 0) return "pusty plik";
+  if (file.data.length > ATTACHMENT_MAX_BYTES) return "przekracza 5 MB";
+  try {
+    classify(file.name, file.mime);
+  } catch {
+    return "nieobsługiwany typ";
+  }
+  return null;
+}
+
+/**
+ * Zapisuje pliki na dysk do katalogu `scope` (podkatalog katalogu załączników:
+ * `<eventId>` dla notatek kalendarza, `manuals/<manualId>` dla manuali). Obrazki → WebP
+ * (rotate wg EXIF, max 2560 px dłuższego boku, bez powiększania). Przy błędzie w połowie
+ * sprząta już zapisane pliki i rzuca dalej — wołający nie ma nic do posprzątania.
+ */
+export async function storeUploads(scope: string | number, files: IncomingFile[]): Promise<StoredAttachment[]> {
   validateUploads(files);
-  const dir = join(ATTACHMENTS_DIR, String(eventId));
+  const scopeDir = String(scope);
+  // Scope pochodzi z kodu (id encji), nie z żądania — sprawdzamy i tak, bo koszt zerowy.
+  const dir = resolveStoredPath(scopeDir);
+  if (!dir || dir === ATTACHMENTS_DIR) throw new ApiError(400, "Nieprawidłowy katalog załączników");
   mkdirSync(dir, { recursive: true });
   const stored: StoredAttachment[] = [];
   try {
@@ -177,7 +209,7 @@ export async function storeUploads(eventId: number, files: IncomingFile[]): Prom
         } catch {
           throw new ApiError(400, `Nie udało się przetworzyć obrazka: ${original}`);
         }
-        const storedPath = `${eventId}/${randomUUID()}.webp`;
+        const storedPath = `${scopeDir}/${randomUUID()}.webp`;
         writeFileSync(join(ATTACHMENTS_DIR, storedPath), out.data);
         stored.push({
           fileName: original.replace(/\.[^.]+$/, "") + ".webp",
@@ -190,7 +222,7 @@ export async function storeUploads(eventId: number, files: IncomingFile[]): Prom
         });
       } else {
         const ext = extOf(original) || "bin";
-        const storedPath = `${eventId}/${randomUUID()}.${ext}`;
+        const storedPath = `${scopeDir}/${randomUUID()}.${ext}`;
         writeFileSync(join(ATTACHMENTS_DIR, storedPath), f.data);
         stored.push({ fileName: original, mime: cls.mime, size: f.data.length, storedPath, kind: "file", width: null, height: null });
       }
@@ -232,13 +264,22 @@ export function attachmentFilePath(storedPath: string): string | null {
 }
 
 /**
- * Usuwa cały katalog załączników wydarzenia — do wołania PO commicie twardego usunięcia
+ * Usuwa cały katalog załączników danego scope'u — do wołania PO commicie twardego
+ * usunięcia encji (wiersze znikają kaskadą FK). Nie usunie samego katalogu załączników
+ * ani niczego spoza niego.
+ */
+export function removeAttachmentDir(scope: string | number): void {
+  const dir = resolveStoredPath(String(scope));
+  if (!dir || dir === ATTACHMENTS_DIR || !dirname(dir).startsWith(ATTACHMENTS_DIR)) return;
+  rmSync(dir, { recursive: true, force: true });
+}
+
+/**
+ * Katalog załączników wydarzenia kalendarza — do wołania PO commicie twardego usunięcia
  * wydarzenia (wiersze znikają kaskadą przez calendar_event_notes). Soft delete nie rusza plików.
  */
 export function removeEventAttachmentDir(eventId: number): void {
-  const dir = resolveStoredPath(String(eventId));
-  if (!dir || dirname(dir) !== ATTACHMENTS_DIR) return;
-  rmSync(dir, { recursive: true, force: true });
+  removeAttachmentDir(eventId);
 }
 
 /**

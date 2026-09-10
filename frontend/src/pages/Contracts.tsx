@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useMemo } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
@@ -30,6 +30,7 @@ import {
   ChevronsUpDown,
   ChevronLeft,
   ChevronRight,
+  FileText,
   X,
 } from "lucide-react";
 import {
@@ -39,6 +40,7 @@ import {
   createContract,
   updateContract,
   deleteContract,
+  contractDraftsApi,
   type ContractorCatalogEntry,
   type ContractSortKey,
   type ContractWithDetails,
@@ -46,9 +48,14 @@ import {
   type ContractInput,
   type ObjectWithContractor,
 } from "@/lib/api";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn, contractStatusLabels, formatCurrency, formatDate } from "@/lib/utils";
 import { usePerms } from "@/auth/permissions";
 import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
+import { ContractDraftsPanel } from "@/components/contracts/ContractDraftsPanel";
+import { ContractTemplatesPanel } from "@/components/contracts/ContractTemplatesPanel";
+import { DocxPreview } from "@/components/contracts/DocxPreview";
+import { SplitLayout } from "@/components/contracts/SplitLayout";
 
 const statusColors: Record<string, "default" | "success" | "secondary" | "destructive"> = {
   draft: "secondary",
@@ -78,7 +85,18 @@ const DEFAULT_DIR: Record<ContractSortKey, "asc" | "desc"> = {
 /** Umów bywa tyle, co obiektów — lista chodzi po stronach, jak w Obiektach i Kontrahentach. */
 const PAGE_SIZE = 50;
 
-export function Contracts() {
+/**
+ * Panel „Rejestr umów” — zawarte umowy z numerem, okresem i wartością.
+ * Baner „tylko do odczytu” siedzi nad zakładkami, w `Contracts` niżej.
+ *
+ * Filtry, sortowanie i paginacja są tu od czasu, gdy była to cała strona
+ * `/contracts`, i zostały nietknięte. Dołożone jest ZAZNACZENIE wiersza:
+ * kliknięta umowa pokazuje po prawej swój dokument, o ile jakiś ma — czyli
+ * gdy powstała z draftu („Przenieś do rejestru”). Umowy wpisane ręcznie
+ * dokumentu nie mają i nigdy nie miały; podgląd mówi to wprost, zamiast
+ * udawać, że plik się nie wczytał.
+ */
+function ContractsRegisterPanel() {
   const navigate = useNavigate();
   const { canEdit } = usePerms();
   const editable = canEdit("contracts");
@@ -109,6 +127,9 @@ export function Contracts() {
 
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
+
+  /** Zaznaczony wiersz — to jego dokument widać w prawej kolumnie. */
+  const [selectedId, setSelectedId] = useState<number | null>(null);
 
   const [formOpen, setFormOpen] = useState(false);
   const [editingContract, setEditingContract] = useState<Contract | null>(null);
@@ -241,6 +262,20 @@ export function Contracts() {
     loadContracts();
   }, [loadContracts]);
 
+  /**
+   * Zaznaczenie trzyma się wybranej umowy, dopóki ta jest na stronie; gdy
+   * zniknie (filtr, inna strona), skacze na pierwszą Z DOKUMENTEM — pusty
+   * podgląd przy pełnej liście wyglądałby na awarię.
+   */
+  useEffect(() => {
+    setSelectedId((prev) => {
+      if (prev !== null && contracts.some((c) => c.id === prev)) return prev;
+      return (contracts.find((c) => c.draftFileUrl) ?? contracts[0])?.id ?? null;
+    });
+  }, [contracts]);
+
+  const selected = contracts.find((c) => c.id === selectedId) ?? null;
+
   useEffect(() => {
     loadObjects();
     // Komplet kartoteki, a nie pierwsza strona — filtr musi pokazywać wszystkich
@@ -283,37 +318,62 @@ export function Contracts() {
     setToInput("");
   };
 
-  /** Nagłówek klikalny — strzałka pokazuje kolumnę i kierunek sortowania. */
-  const SortHeader = ({
+  /** Sam przycisk sortowania — nagłówek kolumny albo dopisek obok niego. */
+  const SortLink = ({
     label,
     sortKey,
     align = "left",
+    className,
   }: {
     label: string;
     sortKey: ContractSortKey;
     align?: "left" | "right";
+    className?: string;
   }) => {
     const active = sort === sortKey;
     const Icon = !active ? ChevronsUpDown : dir === "asc" ? ArrowUp : ArrowDown;
     return (
-      <th className={cn("py-3 px-2 font-medium", align === "right" ? "text-right" : "text-left")}>
-        <button
-          type="button"
-          data-testid={`umowy-sort-${sortKey}`}
-          onClick={() => toggleSort(sortKey)}
-          aria-label={`Sortuj po: ${label}`}
-          className={cn(
-            "inline-flex items-center gap-1 rounded px-1 -mx-1 transition-colors hover:text-foreground",
-            align === "right" && "flex-row-reverse",
-            active ? "text-foreground" : "text-muted-foreground"
-          )}
-        >
-          {label}
-          <Icon className={cn("h-3.5 w-3.5", !active && "opacity-40")} />
-        </button>
-      </th>
+      <button
+        type="button"
+        data-testid={`umowy-sort-${sortKey}`}
+        onClick={() => toggleSort(sortKey)}
+        aria-label={`Sortuj po: ${label}`}
+        className={cn(
+          "inline-flex items-center gap-1 rounded px-1 -mx-1 transition-colors hover:text-foreground",
+          align === "right" && "flex-row-reverse",
+          active ? "text-foreground" : "text-muted-foreground",
+          className
+        )}
+      >
+        {label}
+        <Icon className={cn("h-3.5 w-3.5", !active && "opacity-40")} />
+      </button>
     );
   };
+
+  /**
+   * Nagłówek klikalny — strzałka pokazuje kolumnę i kierunek sortowania.
+   * `children` mieści DRUGIE sortowanie w tej samej komórce: przy połowie
+   * szerokości ekranu kontrahent i data zakończenia dzielą kolumnę z obiektem
+   * i datą rozpoczęcia, ale każde z nich sortuje po swojemu — dokładnie jak
+   * przed podziałem widoku.
+   */
+  const SortHeader = ({
+    label,
+    sortKey,
+    align = "left",
+    children,
+  }: {
+    label: string;
+    sortKey: ContractSortKey;
+    align?: "left" | "right";
+    children?: React.ReactNode;
+  }) => (
+    <th className={cn("py-3 px-2 font-medium", align === "right" ? "text-right" : "text-left")}>
+      <SortLink label={label} sortKey={sortKey} align={align} />
+      {children}
+    </th>
+  );
 
   const summaryLine = useMemo(() => {
     const parts = [`${summary.total} ${summary.total === 1 ? "umowa" : "umów"}`];
@@ -391,9 +451,9 @@ export function Contracts() {
     });
   };
 
-  return (
+  // Filtry idą NAD obie kolumny (szeroki pasek), lista i podgląd pod nimi.
+  const header = (
     <div className="space-y-3">
-      {!editable && <ReadOnlyBanner className="mb-4" />}
       <div className="flex flex-wrap items-center gap-2">
         <div className="relative flex-1 min-w-[200px] max-w-sm">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
@@ -537,7 +597,11 @@ export function Contracts() {
           {summaryLine}
         </p>
       </div>
+    </div>
+  );
 
+  const list = (
+    <div className="space-y-3">
       <Card>
         <CardContent className="p-2">
           {loading ? (
@@ -548,14 +612,36 @@ export function Contracts() {
             </div>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full">
+              <table className="w-full table-fixed text-sm" data-testid="umowy-rejestr-tabela">
+                {/*
+                  Stałe szerokości kolumn (`table-fixed` + colgroup), bo przy
+                  połowie ekranu automatyczny układ oddawał całe wolne miejsce
+                  kolumnom z krótką treścią, a nazwa obiektu zostawała ucięta po
+                  kilku znakach. Kolumna obiektu jest jedyną „gumową”.
+                */}
+                <colgroup>
+                  <col className="w-[132px]" />
+                  <col />
+                  <col className="w-[100px]" />
+                  <col className="w-[88px]" />
+                  <col className="w-[84px]" />
+                  <col className="w-[92px]" />
+                </colgroup>
                 <thead>
-                  <tr className="border-b">
+                  <tr className="border-b text-xs uppercase tracking-wide text-muted-foreground">
                     <SortHeader label="Nr umowy" sortKey="number" />
-                    <SortHeader label="Obiekt" sortKey="object" />
-                    <SortHeader label="Kontrahent" sortKey="contractor" />
-                    <SortHeader label="Data rozpoczecia" sortKey="start" />
-                    <SortHeader label="Data zakonczenia" sortKey="end" />
+                    <SortHeader label="Obiekt" sortKey="object">
+                      <span className="px-1">·</span>
+                      <SortLink
+                        label="kontrahent"
+                        sortKey="contractor"
+                        className="text-[10px] normal-case"
+                      />
+                    </SortHeader>
+                    <SortHeader label="Okres" sortKey="start">
+                      <span className="px-1">·</span>
+                      <SortLink label="do" sortKey="end" className="text-[10px] normal-case" />
+                    </SortHeader>
                     <SortHeader label="Wartosc" sortKey="value" align="right" />
                     <SortHeader label="Status" sortKey="status" />
                     <th className="text-right py-3 px-2 font-medium">Akcje</th>
@@ -563,56 +649,90 @@ export function Contracts() {
                 </thead>
                 <tbody>
                   {contracts.map((contract) => (
-                    <tr key={contract.id} className="border-b hover:bg-muted/50">
-                      <td className="py-3 px-2 font-medium">
-                        {contract.contractNumber}
+                    <tr
+                      key={contract.id}
+                      onClick={() => setSelectedId(contract.id)}
+                      aria-selected={contract.id === selectedId}
+                      className={cn(
+                        "cursor-pointer border-b hover:bg-muted/50",
+                        contract.id === selectedId && "bg-primary/10 hover:bg-primary/10"
+                      )}
+                      data-testid="umowy-rejestr-wiersz"
+                    >
+                      <td className="py-2 px-2 align-top font-medium">
+                        {/* `truncate` też tutaj: przy stałej szerokości kolumny
+                            długi numer wyszedłby na sąsiednią komórkę. */}
+                        <span className="flex items-center gap-1">
+                          <span className="min-w-0 truncate" title={contract.contractNumber}>
+                            {contract.contractNumber}
+                          </span>
+                          {/* Umowa z draftu ma dokument — ikona prowadzi do niego
+                              w panelu draftów (szukajka po numerze). */}
+                          {contract.draftId !== null && (
+                            <Link
+                              to={`/contracts?panel=drafty&q=${encodeURIComponent(contract.contractNumber)}`}
+                              onClick={(e) => e.stopPropagation()}
+                              title="Pokaż draft, z którego powstała ta umowa"
+                              className="text-muted-foreground hover:text-primary"
+                              data-testid="umowy-rejestr-draft-link"
+                            >
+                              <FileText className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                            </Link>
+                          )}
+                        </span>
                       </td>
-                      <td className="py-3 px-2">
+                      <td className="py-2 px-2 align-top">
                         {contract.object ? (
                           <button
-                            className="text-primary hover:underline text-left"
-                            onClick={() =>
-                              navigate(`/objects/${contract.objectId}`)
-                            }
+                            className="block w-full truncate text-primary hover:underline text-left"
+                            title={contract.object.name}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              navigate(`/objects/${contract.objectId}`);
+                            }}
                           >
                             {contract.object.name}
                           </button>
                         ) : (
                           "-"
                         )}
-                      </td>
-                      <td className="py-3 px-2">
                         {contract.contractor ? (
                           <button
-                            className="text-left hover:underline"
-                            onClick={() => setContractorFilter(contract.contractor!.id)}
+                            className="block w-full truncate text-left text-xs text-muted-foreground hover:underline"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setContractorFilter(contract.contractor!.id);
+                            }}
                             title="Pokaż tylko umowy tego kontrahenta"
                           >
                             {contract.contractor.name}
                           </button>
                         ) : (
-                          "-"
+                          <span className="block text-xs text-muted-foreground">-</span>
                         )}
                       </td>
-                      <td className="py-3 px-2">
+                      {/* Okres w jednej komórce: „od” u góry, „do” pod spodem.
+                          Umowa bez daty końca trwa do odwołania — mówimy to wprost. */}
+                      <td className="py-2 px-2 align-top whitespace-nowrap tabular-nums">
                         {formatDate(contract.startDate)}
+                        <span className="block text-xs text-muted-foreground">
+                          {contract.endDate ? `do ${formatDate(contract.endDate)}` : "bez końca"}
+                        </span>
                       </td>
-                      <td className="py-3 px-2">
-                        {formatDate(contract.endDate) || "-"}
-                      </td>
-                      <td className="py-3 px-2 text-right">
+                      <td className="py-2 px-2 align-top text-right whitespace-nowrap tabular-nums">
                         {formatCurrency(contract.value)}
                       </td>
-                      <td className="py-3 px-2">
+                      <td className="py-2 px-2 align-top">
                         <Badge variant={statusColors[contract.status]}>
                           {contractStatusLabels[contract.status]}
                         </Badge>
                       </td>
-                      <td className="py-3 px-2">
-                        <div className="flex items-center justify-end gap-2">
+                      <td className="py-2 px-2 align-top" onClick={(e) => e.stopPropagation()}>
+                        <div className="flex items-center justify-end gap-0.5">
                           <Button
                             variant="ghost"
                             size="icon"
+                            className="h-7 w-7"
                             onClick={() => navigate(`/contracts/${contract.id}`)}
                             title="Szczegoly"
                           >
@@ -623,6 +743,7 @@ export function Contracts() {
                               <Button
                                 variant="ghost"
                                 size="icon"
+                                className="h-7 w-7"
                                 onClick={() => openEditForm(contract)}
                                 title="Edytuj"
                               >
@@ -631,6 +752,7 @@ export function Contracts() {
                               <Button
                                 variant="ghost"
                                 size="icon"
+                                className="h-7 w-7"
                                 onClick={() => handleDelete(contract.id)}
                                 title="Usun"
                               >
@@ -672,6 +794,28 @@ export function Contracts() {
           </Button>
         </div>
       )}
+    </div>
+  );
+
+  const preview = (
+    <DocxPreview
+      url={selected?.draftFileUrl ?? null}
+      previewSrc={contractDraftsApi.previewUrl(selected?.draftFileUrl)}
+      fieldLegend
+      title={
+        selected ? `${selected.contractNumber}${selected.object ? ` — ${selected.object.name}` : ""}` : null
+      }
+      emptyText={
+        selected
+          ? "Ta umowa nie ma powiązanego dokumentu — umowy dodane ręcznie nie mają pliku; drafty trafiają tu przez „Przenieś do rejestru”."
+          : "Wybierz umowę z listy, aby zobaczyć podgląd"
+      }
+    />
+  );
+
+  return (
+    <>
+      <SplitLayout testid="umowy-rejestr-panel" header={header} list={list} preview={preview} />
 
       {/* Contract form dialog */}
       <Dialog open={formOpen} onOpenChange={closeForm}>
@@ -801,6 +945,71 @@ export function Contracts() {
           </form>
         </DialogContent>
       </Dialog>
+    </>
+  );
+}
+
+/**
+ * Zakładka „Umowy” — trzy panele wybierane przez `?panel=`: „Rejestr umów”
+ * (zawarte umowy jako fakt handlowy), „Drafty umów” (dokumenty wystawione dla
+ * obiektów) i „Wzory umów” (katalog szablonów, z których te dokumenty powstają).
+ * Panel siedzi w query, a nie w stanie, żeby dało się go zalinkować z sidebara
+ * i wrócić do niego przyciskiem „wstecz” (wzorzec `CmaInterventionGroups`).
+ */
+const PANELS = ["rejestr", "drafty", "wzory"] as const;
+type PanelKey = (typeof PANELS)[number];
+
+const TAB_KEY = "contracts";
+
+export function Contracts() {
+  const { canEdit } = usePerms();
+  const editable = canEdit(TAB_KEY);
+  const [params, setParams] = useSearchParams();
+  const panelParam = params.get("panel");
+  const panel: PanelKey = PANELS.includes(panelParam as PanelKey) ? (panelParam as PanelKey) : "rejestr";
+
+  const setPanel = (next: string) => {
+    const sp = new URLSearchParams(params);
+    sp.set("panel", next);
+    setParams(sp, { replace: true });
+  };
+
+  return (
+    <div className="space-y-3" data-testid="umowy-page">
+      {!editable && <ReadOnlyBanner className="mb-4" />}
+
+      <Tabs value={panel} onValueChange={setPanel}>
+        <TabsList>
+          <TabsTrigger value="rejestr" data-testid="umowy-tab-rejestr">
+            Rejestr umów
+          </TabsTrigger>
+          <TabsTrigger value="drafty" data-testid="umowy-tab-drafty">
+            Drafty umów
+          </TabsTrigger>
+          <TabsTrigger value="wzory" data-testid="umowy-tab-wzory">
+            Wzory umów
+          </TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="rejestr" className="mt-4">
+          <ContractsRegisterPanel />
+        </TabsContent>
+
+        <TabsContent value="drafty" className="mt-4">
+          {/* `templateKey` w adresie to wejście z „Wzory umów” → „Pokaż drafty”,
+              `q` — z rejestru („pokaż draft tej umowy”, szukanie po numerze).
+              Panel bierze oba tylko jako filtry POCZĄTKOWE. */}
+          <ContractDraftsPanel
+            editable={editable}
+            initialTemplateKey={params.get("templateKey")}
+            initialSearch={params.get("q")}
+          />
+        </TabsContent>
+
+        <TabsContent value="wzory" className="mt-4">
+          <ContractTemplatesPanel editable={editable} />
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }

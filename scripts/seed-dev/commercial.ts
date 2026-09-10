@@ -13,6 +13,7 @@
  */
 import { and, eq, inArray, isNull } from "drizzle-orm";
 import { db, schema } from "../../src/db/index.js";
+import { upsertServiceRowsFromFlags } from "../../src/lib/object-services.js";
 import {
   MARKER,
   type Tx,
@@ -553,7 +554,8 @@ function insertObjects(
               : status === "in_progress"
                 ? weighted([["technical", 7], ["sales", 3]] as const)
                 : weighted([["technical", 6], ["accounting", 3], ["sales", 1]] as const),
-          monthlyValue,
+          // Seed deweloperski wypełnia linię ZDW — obiekty demo są monitoringowe.
+          monthlyZdw: monthlyValue,
           // Koszty dosypujemy niżej, na całej puli naraz — inaczej nie da się
           // utrzymać dokładnych proporcji „bez kosztu" i „stratnych".
           monthlyCost: null,
@@ -582,6 +584,17 @@ function insertObjects(
   const contractorOf = new Map<number, number>();
   ids.forEach((id, i) => contractorOf.set(id, planned[i].row.contractorId));
 
+  /*
+   * OKRESY USŁUG do wstawionych obiektów. Flagi `has_*` są od września 2026
+   * cache'em przeliczanym z `object_services`, więc obiekt seeda bez wierszy
+   * pokazywałby usługi na liście, ale pustą kartę i pustą kolumnę „od kiedy”.
+   * Start okresu = data założenia obiektu: usługa nie mogła ruszyć wcześniej
+   * niż kartoteka, a ta data siedzi w oknie PERIOD razem z resztą seeda.
+   */
+  ids.forEach((id, i) => {
+    upsertServiceRowsFromFlags(tx, id, planned[i].row, planned[i].createdAt.slice(0, 10));
+  });
+
   return { ids, planned, contractorOf };
 }
 
@@ -609,7 +622,7 @@ function assignEconomics(planned: PlannedObject[]): void {
 
   // Obiekty bez abonamentu nie mają też wpisanego kosztu — nikt nie liczy kosztu
   // lokalizacji, która jeszcze nie ruszyła. Wchodzą do puli „bez kosztu".
-  const noValue = all.filter((i) => planned[i].row.monthlyValue == null);
+  const noValue = all.filter((i) => planned[i].row.monthlyZdw == null);
   const costCandidates = shuffle(all.filter((i) => !noValue.includes(i)));
   const withoutCost = new Set([...noValue, ...costCandidates.slice(0, Math.max(0, OBJECTS_WITHOUT_COST - noValue.length))]);
 
@@ -623,7 +636,7 @@ function assignEconomics(planned: PlannedObject[]): void {
 
   for (const i of all) {
     const row = planned[i].row;
-    const value = row.monthlyValue ?? 0;
+    const value = row.monthlyZdw ?? 0;
 
     if (withoutCost.has(i)) {
       row.monthlyCost = null;
@@ -935,7 +948,7 @@ export function seedCommercial(outerTx?: Tx): CommercialCounts {
       objectIds.map((id, i) => ({
         id,
         status: planned[i].row.status ?? "active",
-        monthlyValue: planned[i].row.monthlyValue ?? null,
+        monthlyValue: planned[i].row.monthlyZdw ?? null,
       })),
     );
 

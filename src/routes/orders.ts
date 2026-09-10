@@ -11,36 +11,24 @@ import {
   parseOrderStatus,
 } from "../services/orders.js";
 import { isValidationError } from "../lib/validate.js";
-import { buildOrderConfirmationMail, buildOrderInternalMail } from "../lib/order-mail.js";
+import { buildOrderConfirmationMail, buildOrderInternalMail, resolveBaseUrl } from "../lib/order-mail.js";
+import {
+  getMailConfig,
+  isEmail,
+  isMailSendingReady,
+  normalizeAddresses,
+  parseAddressList,
+} from "../lib/mail-config.js";
+import { sendMail } from "../services/mail-sender.js";
+import { logActivity } from "../lib/activity-log.js";
+import { getUser } from "../middleware/auth.js";
 
 const app = new Hono();
 
-/**
- * Absolutny adres aplikacji dla zasobów i linków wklejanych do maila (logo, CRM).
- *
- * Kolejność: `APP_PUBLIC_URL` (wdrożenie) → `Origin` (żądanie z przeglądarki) →
- * `X-Forwarded-Host` (proxy) → `Host`. Gdy nic nie da się ustalić — pusty string,
- * czyli szablon zostawi ścieżkę względną.
- *
- * `X-Forwarded-Host` MUSI iść przed `Host`: w devie front woła /api przez proxy
- * Vite z `changeOrigin: true`, które przepisuje Host na `localhost:4001` i nie
- * przesyła Origin. Bez tego kroku mail wskazywałby backend zamiast aplikacji.
+/*
+ * `resolveBaseUrl` (absolutny adres aplikacji dla logo i linków w mailu) mieszka
+ * w src/lib/order-mail.ts — korzystają z niego także maile grup interwencyjnych.
  */
-function resolveBaseUrl(c: { req: { header(name: string): string | undefined } }): string {
-  const configured = (process.env.APP_PUBLIC_URL || "").trim();
-  if (configured) return configured.replace(/\/+$/, "");
-
-  const origin = (c.req.header("origin") || "").trim();
-  if (/^https?:\/\//i.test(origin)) return origin.replace(/\/+$/, "");
-
-  // Nagłówki proxy bywają listą („a, b”) — liczy się pierwszy wpis, czyli klient.
-  const first = (name: string) => (c.req.header(name) || "").split(",")[0].trim();
-
-  const host = first("x-forwarded-host") || (c.req.header("host") || "").trim();
-  if (!host) return "";
-  const proto = first("x-forwarded-proto") || "http";
-  return `${proto}://${host}`;
-}
 
 /** Body żądania → 400 z komunikatem, gdy JSON jest niepoprawny albo nie jest obiektem. */
 async function readJson(c: { req: { json(): Promise<unknown> } }): Promise<unknown> {
@@ -68,6 +56,9 @@ const SORT_COLUMNS = {
   requester: sql`lower(${schema.orders.requesterName})`,
   object: sql`lower(coalesce(${schema.objects.name}, ${schema.orders.objectName}, ''))`,
   payer: sql`lower(coalesce(${schema.contractors.name}, ${schema.orders.payerName}, ''))`,
+  // Handlowiec prowadzący — „Nazwisko Imię”, jak w kartotece osób. Zlecenia bez
+  // opiekuna mają pusty klucz, więc lądują na jednym końcu listy w obu kierunkach.
+  salesperson: sql`lower(coalesce(${schema.salespeople.lastName} || ' ' || ${schema.salespeople.firstName}, ''))`,
   created: sql`${schema.orders.createdAt}`,
 } as const;
 
@@ -91,6 +82,10 @@ app.get("/", async (c) => {
   const payerParam = c.req.query("payerContractorId");
   // "1" = tylko montaże kamer, "0" = tylko pozostałe; brak parametru = wszystkie.
   const camera = c.req.query("camera");
+  // Lejek handlowy: „none" = zlecenia bez opiekuna, liczba = konkretny handlowiec.
+  const salespersonParam = c.req.query("salespersonId");
+  // Zlecenia z konkretnej szansy (karta szansy linkuje tu wprost).
+  const leadParam = c.req.query("leadId");
   // Zakres daty przyjęcia zlecenia (kolumna „Data" na liście).
   const createdFrom = dateParam(c.req.query("createdFrom"));
   const createdTo = dateParam(c.req.query("createdTo"));
@@ -134,6 +129,16 @@ app.get("/", async (c) => {
   } else if (camera === "0") {
     baseConditions.push(sql`coalesce(${schema.orders.isCameraInstallation}, 0) = 0`);
   }
+  if (salespersonParam === "none") {
+    baseConditions.push(sql`${schema.orders.salespersonId} is null`);
+  } else if (salespersonParam) {
+    const sid = parseInt(salespersonParam);
+    if (Number.isInteger(sid)) baseConditions.push(eq(schema.orders.salespersonId, sid));
+  }
+  if (leadParam) {
+    const lid = parseInt(leadParam);
+    if (Number.isInteger(lid)) baseConditions.push(eq(schema.orders.leadId, lid));
+  }
   // `created_at` bywa zapisany dwojako: `datetime('now')` z domyślnej wartości kolumny
   // („YYYY-MM-DD HH:MM:SS") i `toISOString()` z aplikacji („YYYY-MM-DDTHH:MM:SS.sssZ").
   // Pierwsze 10 znaków to w obu przypadkach ta sama data, więc porównujemy je wprost,
@@ -166,10 +171,17 @@ app.get("/", async (c) => {
       order: schema.orders,
       contractor: schema.contractors,
       object: schema.objects,
+      // Nazwy z lejka rozwiązuje backend: kartoteka handlowców i szanse stoją za
+      // osobnymi uprawnieniami, więc front nie ma jak dołożyć ich sam.
+      salespersonFirstName: schema.salespeople.firstName,
+      salespersonLastName: schema.salespeople.lastName,
+      leadTitle: schema.leads.title,
     })
     .from(schema.orders)
     .leftJoin(schema.contractors, eq(schema.orders.payerContractorId, schema.contractors.id))
     .leftJoin(schema.objects, eq(schema.orders.objectId, schema.objects.id))
+    .leftJoin(schema.salespeople, eq(schema.orders.salespersonId, schema.salespeople.id))
+    .leftJoin(schema.leads, eq(schema.orders.leadId, schema.leads.id))
     .where(whereClause)
     .orderBy(...orderBy)
     .limit(pageSize)
@@ -215,6 +227,12 @@ app.get("/", async (c) => {
     // Include full objects for reference
     contractor: r.contractor,
     object: r.object,
+    // Lejek handlowy: etykiety do kolumny „Handlowiec" i linku do szansy.
+    salespersonName:
+      r.salespersonLastName || r.salespersonFirstName
+        ? `${r.salespersonFirstName ?? ""} ${r.salespersonLastName ?? ""}`.trim()
+        : null,
+    leadTitle: r.leadTitle ?? null,
   }));
 
   return c.json({
@@ -242,9 +260,19 @@ app.get("/", async (c) => {
 app.get("/:id", async (c) => {
   const id = parseInt(c.req.param("id"));
 
+  // Handlowiec i tytuł szansy dochodzą złączeniem: karta zlecenia pokazuje
+  // „Szansa: <tytuł>” z linkiem, a kartoteka szans stoi za innym uprawnieniem
+  // niż zlecenia — front nie ma jak dociągnąć tych nazw sam.
   const order = await db
-    .select()
+    .select({
+      order: schema.orders,
+      salespersonFirstName: schema.salespeople.firstName,
+      salespersonLastName: schema.salespeople.lastName,
+      leadTitle: schema.leads.title,
+    })
     .from(schema.orders)
+    .leftJoin(schema.salespeople, eq(schema.orders.salespersonId, schema.salespeople.id))
+    .leftJoin(schema.leads, eq(schema.orders.leadId, schema.leads.id))
     .where(eq(schema.orders.id, id))
     .limit(1);
 
@@ -255,9 +283,19 @@ app.get("/:id", async (c) => {
     );
   }
 
-  return c.json<ApiResponse<typeof order[0]>>({
+  const row = order[0];
+  const data = {
+    ...row.order,
+    salespersonName:
+      row.salespersonLastName || row.salespersonFirstName
+        ? `${row.salespersonFirstName ?? ""} ${row.salespersonLastName ?? ""}`.trim()
+        : null,
+    leadTitle: row.leadTitle ?? null,
+  };
+
+  return c.json<ApiResponse<typeof data>>({
     success: true,
-    data: order[0],
+    data,
   });
 });
 
@@ -311,21 +349,148 @@ app.get("/:id/mail-preview", async (c) => {
   // zamiast podstawić przypadkowo adres klienta.
   // Kopia do osoby kontaktowej na obiekcie tylko wtedy, gdy to KTOŚ INNY niż
   // zlecający — inaczej ta sama osoba dostałaby wiadomość dwa razy.
+  const { values } = getMailConfig();
   const requester = (order.requesterEmail || "").trim();
   const contact = (order.contactEmail || "").trim();
   const to =
-    variant === "internal" ? (process.env.ORDER_INTERNAL_MAIL_TO || "").trim() : requester;
+    variant === "internal" ? parseAddressList(values.orderInternalTo).join(", ") : requester;
   const cc =
     variant === "internal"
       ? null
       : contact && contact.toLowerCase() !== to.toLowerCase()
         ? contact
         : null;
+  // Ukryta kopia dotyczy wyłącznie maila do KLIENTA (archiwum biura). Wewnętrzny
+  // i tak idzie do zespołu, więc dokładanie mu BCC byłoby drugą kopią tej samej treści.
+  const bcc = variant === "internal" ? "" : parseAddressList(values.orderClientBcc).join(", ");
 
-  return c.json<ApiResponse<{ subject: string; html: string; text: string; to: string; cc: string | null }>>({
+  return c.json<
+    ApiResponse<{
+      subject: string;
+      html: string;
+      text: string;
+      to: string;
+      cc: string | null;
+      bcc: string;
+      sending: { ready: boolean; reason?: string };
+    }>
+  >({
     success: true,
-    data: { ...mail, to, cc },
+    data: { ...mail, to, cc, bcc, sending: isMailSendingReady(values) },
   });
+});
+
+/**
+ * Wysyłka maila zlecenia. Treść budujemy TU, na serwerze, z tego samego szablonu
+ * co podgląd — front przysyła wyłącznie wariant i adresatów. Gdyby wysyłać HTML
+ * z przeglądarki, każdy z prawem edycji zleceń mógłby wysłać z firmowej skrzynki
+ * dowolną treść.
+ *
+ * Odpowiedź niesie wpis dziennika (`mail_log`) w OBU przypadkach — także przy
+ * błędzie (502), bo front pokazuje wtedy w historii, że próba miała miejsce.
+ * Uprawnienia załatwia `tabPermissionGuard` (POST → poziom "edit" zakładki "orders").
+ */
+app.post("/:id/mail/send", async (c) => {
+  const id = parseInt(c.req.param("id"));
+  if (!Number.isInteger(id)) {
+    return c.json<ApiResponse<null>>({ success: false, error: "Nieprawidłowy identyfikator" }, 400);
+  }
+
+  const body = (await readJson(c)) as Record<string, unknown> | undefined;
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return c.json<ApiResponse<null>>({ success: false, error: "Nieprawidłowe body" }, 400);
+  }
+
+  const variant = typeof body.variant === "string" ? body.variant : "";
+  if (variant !== "client" && variant !== "internal") {
+    return c.json<ApiResponse<null>>(
+      { success: false, error: "Nieprawidłowy wariant maila (dozwolone: client, internal)" },
+      400
+    );
+  }
+
+  const readList = (v: unknown): string[] =>
+    Array.isArray(v) ? normalizeAddresses(v) : typeof v === "string" ? normalizeAddresses(v.split(/[,;\s]+/)) : [];
+
+  const to = readList(body.to);
+  const cc = readList(body.cc);
+  const bcc = readList(body.bcc);
+
+  const bad = [...to, ...cc, ...bcc].filter((a) => !isEmail(a));
+  if (bad.length) {
+    return c.json<ApiResponse<null>>(
+      { success: false, error: `Nieprawidłowe adresy e-mail: ${bad.join(", ")}` },
+      400
+    );
+  }
+  if (!to.length) {
+    return c.json<ApiResponse<null>>({ success: false, error: "Podaj co najmniej jednego adresata" }, 400);
+  }
+
+  const rows = await db.select().from(schema.orders).where(eq(schema.orders.id, id)).limit(1);
+  if (rows.length === 0) {
+    return c.json<ApiResponse<null>>({ success: false, error: "Order not found" }, 404);
+  }
+  const order = rows[0];
+
+  const baseUrl = resolveBaseUrl(c);
+  const mail =
+    variant === "internal"
+      ? buildOrderInternalMail(order, { baseUrl })
+      : buildOrderConfirmationMail(order, { baseUrl });
+
+  const user = getUser(c);
+  const result = await sendMail({
+    to,
+    cc,
+    bcc,
+    subject: mail.subject,
+    html: mail.html,
+    text: mail.text,
+    entityType: "order",
+    entityId: id,
+    variant,
+    user,
+  });
+
+  const label = variant === "internal" ? "wewnętrzny" : "do klienta";
+  // Dziennik aktywności zlecenia dostaje NOTATKĘ o wysyłce („note_added” jest
+  // jedyną akcją z ACTIVITY_ACTIONS opisującą dopisanie zdarzenia do encji;
+  // pełne szczegóły techniczne i tak siedzą w mail_log).
+  logActivity(db, {
+    entityType: "order",
+    entityId: id,
+    user,
+    action: "note_added",
+    field: "mail",
+    newValue: result.ok ? "sent" : "failed",
+    summary: result.ok
+      ? `Wysłano mail (${label}) do ${to.join(", ")}`
+      : `Nieudana wysyłka maila (${label}) do ${to.join(", ")}: ${result.error}`,
+  });
+
+  if (!result.ok) {
+    return c.json({ success: false, error: result.error, data: result.logEntry }, 502);
+  }
+  return c.json({ success: true, data: result.logEntry });
+});
+
+/** GET /:id/mail/log → { items } — ostatnie 50 prób wysyłki dla tego zlecenia. */
+app.get("/:id/mail/log", (c) => {
+  const id = parseInt(c.req.param("id"));
+  if (!Number.isInteger(id)) {
+    return c.json<ApiResponse<null>>({ success: false, error: "Nieprawidłowy identyfikator" }, 400);
+  }
+
+  const items = db
+    .select()
+    .from(schema.mailLog)
+    .where(and(eq(schema.mailLog.entityType, "order"), eq(schema.mailLog.entityId, id)))
+    .orderBy(desc(schema.mailLog.id))
+    .limit(50)
+    .all();
+
+  return c.json({ success: true, data: { items } });
 });
 
 // Create order with optional contractor and object creation (ATOMIC TRANSACTION)
@@ -342,7 +507,8 @@ app.post("/", async (c) => {
   }
 
   try {
-    const result = await createOrderFromInput(body);
+    // Autor trafia do wpisu w dzienniku szansy („Utworzono zlecenie … z szansy”).
+    const result = await createOrderFromInput(body, { user: getUser(c) });
 
     if (!result.ok) {
       return c.json<ApiResponse<null>>(

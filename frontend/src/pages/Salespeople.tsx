@@ -21,6 +21,7 @@ import {
   ArrowUp,
   BadgeCheck,
   Building2,
+  KeyRound,
   ChevronsUpDown,
   Pencil,
   Plus,
@@ -35,6 +36,8 @@ import {
   updateSalesperson,
   deleteSalesperson,
   getHrEmployeeDirectory,
+  getAdminUsers,
+  type AdminUser,
   type HrEmployeeRef,
   type Salesperson,
   type SalespersonInput,
@@ -98,7 +101,7 @@ function sortName(s: Salesperson): string {
  */
 export function Salespeople() {
   const navigate = useNavigate();
-  const { canEdit } = usePerms();
+  const { canEdit, isAdmin } = usePerms();
   const editable = canEdit("handlowcy");
 
   const [rows, setRows] = useState<Salesperson[]>([]);
@@ -120,6 +123,12 @@ export function Salespeople() {
   const [editing, setEditing] = useState<Salesperson | null>(null);
   /** Kartoteka kadrowa — lista wyboru „Pracownik w kadrach" w formularzu. */
   const [hrEmployees, setHrEmployees] = useState<HrEmployeeRef[]>([]);
+  /**
+   * Konta użytkowników do pola „Konto w systemie". Lista chodzi po /admin/users,
+   * więc widzi ją WYŁĄCZNIE administrator — kto ma prowadzić którą kartotekę,
+   * rozstrzyga się razem z uprawnieniami, a nie w słowniku handlowców.
+   */
+  const [users, setUsers] = useState<AdminUser[]>([]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -136,6 +145,14 @@ export function Salespeople() {
   // Lista pracowników kadr jest niezależna od handlowców, więc ciągniemy ją raz.
   // Brak uprawnień do Kadr nie może wywalić widoku — wtedy pole powiązania
   // po prostu zostaje puste.
+  // Konta użytkowników ciągniemy tylko dla admina — dla reszty pole nie istnieje.
+  useEffect(() => {
+    if (!isAdmin) return;
+    getAdminUsers()
+      .then((res) => setUsers(res.data ?? []))
+      .catch(() => setUsers([]));
+  }, [isAdmin]);
+
   useEffect(() => {
     getHrEmployeeDirectory()
       .then((res) => setHrEmployees(res.data ?? []))
@@ -385,6 +402,15 @@ export function Salespeople() {
                 sortKey="hr"
                 title="Powiązanie z kartoteką kadrową — koszt takiej osoby liczy się z jej wypłat, a nie z pola „Koszt mies.”"
               />
+              {/* Konto użytkownika — po nim działa filtr „Moje" w module Handlowym
+                  i `salespersonId=me`. Kolumna jest nieklikalna: to powiązanie 0/1,
+                  a nie wartość, którą warto układać rosnąco. */}
+              <th
+                className="text-left py-3 px-2 font-medium"
+                title="Konto w systemie — po nim działa filtr „Moje” w module Handlowym"
+              >
+                Konto
+              </th>
               <SortHeader label="Kontrahenci" sortKey="contractors" align="right" />
               <SortHeader
                 label="Obiekty"
@@ -428,6 +454,19 @@ export function Salespeople() {
                     >
                       <BadgeCheck className="h-3.5 w-3.5 text-emerald-600" />
                       {s.employeeName || "powiązany"}
+                    </span>
+                  ) : (
+                    <span className="text-muted-foreground">—</span>
+                  )}
+                </td>
+                <td className="py-3 px-2">
+                  {s.userId ? (
+                    <span
+                      className="inline-flex items-center gap-1 text-xs"
+                      title={s.userEmail ?? "konto w systemie"}
+                    >
+                      <KeyRound className="h-3.5 w-3.5 text-indigo-600" />
+                      {s.userDisplayName || s.userEmail || "powiązane"}
                     </span>
                   ) : (
                     <span className="text-muted-foreground">—</span>
@@ -679,6 +718,7 @@ export function Salespeople() {
           onSubmit={editing ? handleUpdate : handleCreate}
           salesperson={editing}
           employees={hrEmployees}
+          users={isAdmin ? users : undefined}
         />
       )}
     </div>

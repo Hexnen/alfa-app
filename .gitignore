@@ -13,7 +13,8 @@ data/*.db-wal
 .env
 
 # Claude Code configuration
-.claude/
+.claude/*
+!.claude/skills/
 
 # System files
 .DS_Store
@@ -57,3 +58,6 @@ data/attachments/
 # Backupy bazy i dane źródłowe kartoteki (XLSX, wyciągi) — nigdy do repo
 data/backups/
 obiekty/
+
+# Logi wdrożeń Dokploy
+depl.txt

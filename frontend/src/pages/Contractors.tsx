@@ -14,6 +14,13 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/admin-assistant/shared";
 import { ContractorForm } from "@/components/ContractorForm";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { SalesEntitySections } from "@/components/sales/SalesEntitySections";
 import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
 import { usePerms } from "@/auth/permissions";
 import {
@@ -22,6 +29,7 @@ import {
   Pencil,
   Trash2,
   Building2,
+  Handshake,
   Archive,
   ArchiveRestore,
   ArrowDown,
@@ -83,8 +91,16 @@ const PAGE_SIZE = 50;
 
 export function Contractors() {
   const navigate = useNavigate();
-  const { canEdit } = usePerms();
+  const { canEdit, canView } = usePerms();
   const editable = canEdit("contractors");
+  /*
+   * LEJEK NA KARCIE KONTRAHENTA — w oknie, nie w rozwinięciu wiersza.
+   * Przełącznik „rozwiń" ciągnie obiekty JEDNYM żądaniem dla całej strony;
+   * szanse i kontakty tak się nie dają (filtruje się je per kontrahent), więc
+   * rozwinięcie oznaczałoby 100 zapytań na wejście. Okno pyta o jednego.
+   */
+  const [salesFor, setSalesFor] = useState<Contractor | null>(null);
+  const showSales = canView("handlowy/leady") || canView("handlowy/kontakty");
   const [contractors, setContractors] = useState<Contractor[]>([]);
   const [totals, setTotals] = useState({ objects: 0, value: 0, contractors: 0 });
   const [page, setPage] = useState(1);
@@ -594,7 +610,7 @@ export function Contractors() {
                     const active = contractor.activeObjectsCount ?? 0;
                     const value =
                       contractor.objectsMonthlyValue ??
-                      rows.reduce((a, o) => a + (o.monthlyValue ?? 0) + (o.monthlyRental ?? 0), 0);
+                      rows.reduce((a, o) => a + (o.monthlyZdw ?? 0) + (o.monthlyOfi ?? 0) + (o.monthlyRental ?? 0), 0);
                     return (
                       <Fragment key={contractor.id}>
                         <tr className="border-b hover:bg-muted/50">
@@ -669,6 +685,17 @@ export function Contractors() {
                               >
                                 <Building2 className="h-4 w-4" />
                               </Button>
+                              {showSales && (
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  onClick={() => setSalesFor(contractor)}
+                                  title="Szanse sprzedaży i osoby kontaktowe"
+                                  data-testid={`contractor-sales-${contractor.id}`}
+                                >
+                                  <Handshake className="h-4 w-4" />
+                                </Button>
+                              )}
                               {editable && (
                                 <>
                                   <Button
@@ -777,10 +804,11 @@ export function Contractors() {
                                             {statusLabels[o.status] || o.status}
                                           </Badge>
                                         </td>
-                                        {/* Przychód = abonament + dzierżawa sprzętu. */}
+                                        {/* Przychód = abonament ZDW + abonament OFI + dzierżawa. */}
                                         <td className="py-1.5 px-2 text-right tabular-nums">
                                           {formatCurrency(
-                                            (o.monthlyValue ?? 0) +
+                                            (o.monthlyZdw ?? 0) +
+                                              (o.monthlyOfi ?? 0) +
                                               (o.monthlyRental ?? 0)
                                           )}
                                         </td>
@@ -797,7 +825,8 @@ export function Contractors() {
                                             <span className="text-muted-foreground">—</span>
                                           ) : (
                                             formatCurrency(
-                                              (o.monthlyValue ?? 0) +
+                                              (o.monthlyZdw ?? 0) +
+                                                (o.monthlyOfi ?? 0) +
                                                 (o.monthlyRental ?? 0) -
                                                 o.monthlyCost
                                             )
@@ -820,7 +849,7 @@ export function Contractors() {
                                       const known = rows.length - missing;
                                       const value = rows.reduce(
                                         (a, o) =>
-                                          a + (o.monthlyValue ?? 0) + (o.monthlyRental ?? 0),
+                                          a + (o.monthlyZdw ?? 0) + (o.monthlyOfi ?? 0) + (o.monthlyRental ?? 0),
                                         0
                                       );
                                       const cost = rows.reduce(
@@ -939,6 +968,24 @@ export function Contractors() {
         onSubmit={editingContractor ? handleUpdate : handleCreate}
         contractor={editingContractor}
       />
+
+      {/* Szanse i osoby kontaktowe jednego kontrahenta. Zawartość montuje się
+          dopiero po otwarciu (`salesFor` != null), więc żadne zapytanie nie
+          wychodzi, dopóki ktoś nie kliknie ikony. */}
+      <Dialog open={salesFor !== null} onOpenChange={(o) => !o && setSalesFor(null)}>
+        <DialogContent className="max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>Sprzedaż — {salesFor?.name}</DialogTitle>
+          </DialogHeader>
+          {salesFor && (
+            <SalesEntitySections
+              contractorId={salesFor.id}
+              editable={editable}
+              className="space-y-4"
+            />
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

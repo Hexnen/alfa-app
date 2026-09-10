@@ -47,6 +47,13 @@ const FRONTEND_DIR = "./frontend/dist";
 // Allowed CORS origins. Same-origin requests (frontend served by this app)
 // don't need CORS, but extra origins can be added via CORS_ORIGINS
 // (comma-separated) without a rebuild — e.g. a separate prod domain.
+//
+// Wtyczka przeglądarki (extension/, trasy /api/plugin/*) NIE potrzebuje tu
+// wpisu: cały jej ruch idzie z service workera MV3, a taki fetch — do hosta
+// z `host_permissions` — nie podlega CORS. Gdyby kiedyś zaczął strzelać
+// z content scriptu (czyli z originu sklepu), przeglądarka zablokowałaby go
+// bez śladu w logach; poprawką jest wrócić do service workera, a nie
+// dopisywać tu domeny obcych sklepów.
 const corsOrigins = [
   "http://localhost:4000",
   "http://localhost:5173",
@@ -70,15 +77,29 @@ app.use("*", logger());
  *  - Cross-Origin-Resource-Policy wyłączone: front bywa serwowany z innego
  *    originu (lista CORS wyżej) i wczytuje zdjęcia/obrazy DWG z API przez
  *    <img>, a CORP `same-origin` blokowałoby je po cichu.
+ *
+ * Wyjątek: GET /api/manuals/attachments/:id. Podgląd manuala osadza PDF-a
+ * w <iframe> na własnej stronie, a DENY blokuje to także dla tego samego
+ * originu — dla tej JEDNEJ trasy (surowy plik, zero UI i zero akcji do
+ * wyklikania, więc clickjacking nie ma czego przejąć) zwalniamy ramkę do
+ * SAMEORIGIN / frame-ancestors 'self'. Front zawsze woła API po ścieżce
+ * względnej (`/api`, w dev przez proxy Vite), więc to naprawdę ten sam origin.
  */
-app.use(
-  "*",
-  secureHeaders({
-    xFrameOptions: "DENY",
-    contentSecurityPolicy: { frameAncestors: ["'none'"] },
-    crossOriginResourcePolicy: false,
-    referrerPolicy: "strict-origin-when-cross-origin",
-  })
+const strictHeaders = secureHeaders({
+  xFrameOptions: "DENY",
+  contentSecurityPolicy: { frameAncestors: ["'none'"] },
+  crossOriginResourcePolicy: false,
+  referrerPolicy: "strict-origin-when-cross-origin",
+});
+const sameOriginFrameHeaders = secureHeaders({
+  xFrameOptions: "SAMEORIGIN",
+  contentSecurityPolicy: { frameAncestors: ["'self'"] },
+  crossOriginResourcePolicy: false,
+  referrerPolicy: "strict-origin-when-cross-origin",
+});
+const MANUAL_ATTACHMENT_PATH = /^\/api\/manuals\/attachments\/\d+$/;
+app.use("*", (c, next) =>
+  (c.req.method === "GET" && MANUAL_ATTACHMENT_PATH.test(c.req.path) ? sameOriginFrameHeaders : strictHeaders)(c, next)
 );
 app.use(
   "*",
@@ -87,7 +108,14 @@ app.use(
     // PATCH: panel admina aktualizuje użytkowników przez PATCH /admin/users/:id;
     // bez niego preflight z innego originu (dev na :5173) odrzucał zapis.
     allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowHeaders: ["Content-Type", "Authorization"],
+    // X-Alfa-Client: identyfikator KARTY przeglądarki (src/lib/calendar-live.ts) — front
+    // dokłada go do każdego żądania, więc bez tego wpisu preflight z innego originu
+    // (dev na :5173) odrzucałby każdy zapis.
+    allowHeaders: ["Content-Type", "Authorization", "X-Alfa-Client"],
+    // X-Contract-Missing: licznik pól do uzupełnienia nad podglądem umowy
+    // (src/routes/contract-drafts.ts). Bez wystawienia nagłówka front na innym
+    // originie (dev na :4000/:5173) w ogóle by go nie zobaczył.
+    exposeHeaders: ["X-Contract-Missing"],
   })
 );
 
@@ -160,3 +188,7 @@ const { startRetentionScheduler } = await import("./lib/ai/retention.js");
 const { repairOrphanedTurns } = await import("./routes/assistant.js");
 startRetentionScheduler();
 repairOrphanedTurns();
+
+// Usługi obiektów: przeliczenie flag `has_*` z okresów (`object_services`) przy starcie i co 24 h.
+const { startObjectServicesSync } = await import("./lib/object-services-sync.js");
+startObjectServicesSync();

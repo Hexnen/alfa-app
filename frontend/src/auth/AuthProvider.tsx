@@ -7,6 +7,12 @@ export interface AuthUser {
   role: string;
   /** Mapa uprawnień per podzakładka: { [tabKey]: 'view' | 'edit' }. Admin ma pełny dostęp. */
   permissions?: Record<string, "view" | "edit">;
+  /**
+   * Handlowiec ze słownika przypięty do tego konta (`salespeople.user_id`).
+   * `null`/brak = konto bez własnego portfela — przełącznik „Moje / Wszyscy"
+   * w sekcji Handlowy chowa się, a widoki startują na „Wszyscy".
+   */
+  salespersonId?: number | null;
 }
 
 interface AuthCtx {

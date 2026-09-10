@@ -91,6 +91,111 @@ export function objectServicesLabel(o: ObjectServices, empty = "—"): string {
   return parts.length > 0 ? parts.join(" · ") : empty;
 }
 
+/**
+ * OKRESY USŁUG — ta sama usługa może wystąpić na obiekcie wiele razy (kamery
+ * 2020–2022 i znów od 2024), więc flagi `hasX` wyżej są tylko CACHE stanu na
+ * dziś, a źródłem prawdy jest lista okresów (`ObjectService[]` z api.ts).
+ *
+ * Typ jest strukturalny (a nie importowany z `./api`), bo `utils` nie zależy od
+ * warstwy sieciowej i te same helpery muszą przyjąć zarówno wiersz z API, jak
+ * i szkic z formularza (`ObjectServiceInput`, jeszcze bez `id`).
+ */
+export interface ObjectServicePeriod {
+  service: ObjectServiceKey;
+  /** YYYY-MM-DD, wymagana. */
+  startDate: string;
+  /** YYYY-MM-DD albo null/undefined = usługa trwa bezterminowo. */
+  endDate?: string | null;
+  /** Tylko kamery; null = usługa jest, ale kamer nikt nie policzył (≠ 0). */
+  cameraCount?: number | null;
+}
+
+/**
+ * Dzisiejsza data jako YYYY-MM-DD w strefie PRZEGLĄDARKI.
+ *
+ * `new Date().toISOString()` dałoby UTC, więc po polskiej 22:00 (CEST) pokazywałby
+ * już jutro i okres kończący się „dziś” wyglądałby na zakończony. Daty usług są
+ * kalendarzowe, nie chwilowe — porównujemy je jak napisy.
+ */
+export function todayIsoLocal(d: Date = new Date()): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/**
+ * Okres ZAKOŃCZONY = ma koniec wcześniejszy niż dziś. Ta sama reguła co na
+ * backendzie (`isServiceEnded` w src/lib/object-services.ts): aktywny jest okres
+ * z `endDate` pustym albo `>= dziś`, więc dzień końca jeszcze się liczy.
+ */
+export function isServicePeriodEnded(
+  p: Pick<ObjectServicePeriod, "endDate">,
+  today: string = todayIsoLocal()
+): boolean {
+  return !!p.endDate && p.endDate < today;
+}
+
+/**
+ * Okres ZAPLANOWANY = start w przyszłości. Nadal jest AKTYWNY (wlicza się do flag
+ * i analityki — literówka w roku nie może wyrzucić obiektu z raportów), UI tylko
+ * oznacza go badge'em.
+ */
+export function isServicePeriodPlanned(
+  p: Pick<ObjectServicePeriod, "startDate" | "endDate">,
+  today: string = todayIsoLocal()
+): boolean {
+  return p.startDate > today && !isServicePeriodEnded(p, today);
+}
+
+/**
+ * Jeden okres jednym napisem: „Kamery 8 · od 01.01.2024” albo
+ * „Kamery 8 · 01.01.2020 – 31.12.2022”.
+ *
+ * Kamery bez liczby to „Kamery (ilość?)” — dokładnie jak w `objectServicesLabel`,
+ * bo brak danych ma być widać, a nie udawać zera.
+ */
+export function servicePeriodLabel(p: ObjectServicePeriod): string {
+  const name =
+    p.service === "kamery"
+      ? `Kamery ${p.cameraCount ?? "(ilość?)"}`
+      : objectServiceLabels[p.service];
+  const range = p.endDate
+    ? `${formatDate(p.startDate)} – ${formatDate(p.endDate)}`
+    : `od ${formatDate(p.startDate)}`;
+  return `${name} · ${range}`;
+}
+
+/**
+ * Flagi usług „na dziś” policzone z okresów — ten sam rachunek, co
+ * `flagsFromServices` na backendzie, żeby formularz pokazywał to samo, co zapisze
+ * serwer (podgląd przed zapisem, bez rundy po sieć).
+ *
+ * `cameraCount` to suma po AKTYWNYCH okresach kamer, ale `null`, gdy choć jeden
+ * z nich nie ma liczby: suma „8 + nie wiadomo ile” nie jest ośmioma kamerami,
+ * a od tej liczby zależy waga obiektu przy podziale kosztu centrum monitorowania.
+ */
+export function activeServiceFlagsOf(
+  periods: readonly ObjectServicePeriod[],
+  today: string = todayIsoLocal()
+): Required<Pick<ObjectServices, "hasCameras" | "hasSswin" | "hasVideoreception" | "hasOfi">> & {
+  cameraCount: number | null;
+} {
+  const active = periods.filter((p) => !isServicePeriodEnded(p, today));
+  const cameras = active.filter((p) => p.service === "kamery");
+  const cameraCount =
+    cameras.length === 0
+      ? null
+      : cameras.some((p) => p.cameraCount == null)
+        ? null
+        : cameras.reduce((sum, p) => sum + (p.cameraCount ?? 0), 0);
+  return {
+    hasCameras: cameras.length > 0,
+    hasSswin: active.some((p) => p.service === "sswin"),
+    hasVideoreception: active.some((p) => p.service === "wideorecepcja"),
+    hasOfi: active.some((p) => p.service === "ofi"),
+    cameraCount,
+  };
+}
+
 export const installationTypeLabels: Record<string, string> = {
   new: "Nowa instalacja",
   takeover: "Przejęcie",

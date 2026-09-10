@@ -132,9 +132,18 @@ export async function setUserPassword(id: number, password: string): Promise<voi
   // nim bez hasła), więc reset hasła po przejęciu konta zostawiałby
   // napastnikowi działający feed z wydarzeniami i urlopami. Użytkownik
   // wygeneruje nowy jednym klikiem w kalendarzu.
+  //
+  // Z tego samego powodu leci token wtyczki magazynu: to CZWARTA „sesja"
+  // (Bearer na /api/plugin/*, bez hasła i bez cookie), a paczka z wtyczką
+  // mogła zostać na cudzym komputerze. Nowy token powstaje przy kolejnym
+  // pobraniu paczki z /technical/magazyn.
   const passwordHash = await hashPassword(password);
   db.transaction((tx) => {
-    tx.update(users).set({ passwordHash, calendarToken: null }).where(eq(users.id, id)).run();
+    tx
+      .update(users)
+      .set({ passwordHash, calendarToken: null, pluginToken: null, pluginTokenCreatedAt: null })
+      .where(eq(users.id, id))
+      .run();
     tx.delete(sessions).where(eq(sessions.userId, id)).run();
   });
 }

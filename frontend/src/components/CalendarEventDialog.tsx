@@ -14,6 +14,7 @@ import {
   ArrowRight,
   Building2,
   Calculator,
+  CalendarPlus,
   Check,
   ChevronDown,
   ChevronLeft,
@@ -24,11 +25,14 @@ import {
   ExternalLink,
   FileCheck2,
   FileText,
+  Handshake,
   History,
   Loader2,
+  Mail,
   MapPin,
   Paperclip,
   Pencil,
+  Phone,
   Receipt,
   Repeat,
   RotateCcw,
@@ -64,12 +68,14 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import {
+  availabilityAssigneeId,
   calendarApi,
+  contactsApi,
   getObjects,
+  leadsApi,
   getProtocols,
   getQuotes,
   getRealizations,
-  getTechnicians,
   type ActivityEntry,
   type CalendarBilling,
   type CalendarConflict,
@@ -81,16 +87,20 @@ import {
   type CalendarEventStatus,
   type CalendarEventType,
   type CalendarNote,
+  type CalendarNoteMailHeader,
+  type MailObjectSuggestion,
   type CalendarNoteAttachment,
   type CalendarNoteRef,
+  type ParsedMsgAttachmentMeta,
   type CalendarSeriesFreq,
   type CalendarSeriesScope,
   type ObjectWithContractor,
   type Protocol,
   type Quote,
   type Realization,
-  type Technician,
-  type TechnicianAvailability,
+  type CalendarAvailability,
+  type Contact,
+  type Lead,
   type WeatherBrief,
 } from "@/lib/api";
 import {
@@ -107,7 +117,6 @@ import {
   statusBadgeClass,
   EVENT_STATUS_ORDER,
   EVENT_TYPE_META,
-  EVENT_TYPE_ORDER,
   PROTOCOL_BADGE_META,
   QUOTE_BADGE_META,
   SERIES_FREQ_META,
@@ -144,11 +153,24 @@ import {
   toDateStr,
   toDateTimeStr,
 } from "@/lib/calendar-labels";
+import {
+  TECHNICAL_CALENDAR,
+  assigneeConflictQuery,
+  assigneeIdsInput,
+  assigneesOf,
+  type AssigneeRef,
+  type CalendarConfig,
+} from "@/lib/calendar-config";
+import { LEAD_STAGE_META } from "@/lib/sales-labels";
 import { travelLine, travelSourceLabel, useTravel } from "@/lib/travel";
 import { cn } from "@/lib/utils";
-import { CalendarEventNotes, type CalendarEventNotesHandle } from "@/components/CalendarEventNotes";
+import { CalendarEventNotes, MailNoteHeader, type CalendarEventNotesHandle } from "@/components/CalendarEventNotes";
+import { ContactPicker } from "@/components/sales/ContactPicker";
+import { LeadPicker, type LeadRef } from "@/components/sales/LeadPicker";
 import { WeatherSection } from "@/components/CalendarWeather";
 import { tip } from "@/components/ui/tooltip";
+import { RichText } from "@/components/RichText";
+import { looksLikeMailNote } from "@/lib/richtext";
 
 export type CalendarDialogMode = "create" | "edit" | "view";
 
@@ -162,8 +184,47 @@ export interface CalendarEventPrefill {
   title?: string;
   location?: string | null;
   description?: string | null;
+  /**
+   * Przypisani w dziale tego kalendarza (technicy albo handlowcy) — nazwa pola
+   * jest wspólna, bo prefill nie wie, w której konfiguracji wyląduje.
+   */
+  assigneeIds?: number[];
+  /** @deprecated Stara nazwa `assigneeIds`; czytana dla zgodności z wywołaniami sprzed refaktoru. */
   technicianIds?: number[];
   status?: CalendarEventStatus;
+  /** Dział handlowy: szansa i osoba kontaktowa („Zaplanuj następną”). */
+  leadId?: number | null;
+  contactId?: number | null;
+  /**
+   * Szkic PIERWSZEJ notatki (tylko tryb `create`): treść i pliki. Wypełnia go
+   * drag&drop maila `.msg` z Outlooka na kalendarz — treść maila idzie do notatki,
+   * a oryginalny plik zostaje jej załącznikiem. Szkic jedzie na serwer sam,
+   * zaraz po utworzeniu wydarzenia (tak jak ręcznie wpisana pierwsza notatka),
+   * więc użytkownik nie dostaje dodatkowego pytania.
+   */
+  noteDraft?: {
+    text: string;
+    files?: File[];
+    mail?: CalendarNoteMailHeader | null;
+    /** Załączniki maila (metadane bez bajtów) — chipy w szkicu; wypakuje je backend przy zapisie. */
+    attachmentsMeta?: ParsedMsgAttachmentMeta[];
+  };
+  /**
+   * Obiekty podpowiedziane po adresach z maila (backend: src/lib/mail-object-match.ts).
+   * JEDNA podpowiedź z kontaktu obiektu ustawia pole od razu; pozostałe pokazują
+   * się jako chipy pod pickerem. Ręczny wybór chowa jedno i drugie.
+   */
+  objectSuggestions?: MailObjectSuggestion[];
+}
+
+/**
+ * Podpowiedź na tyle mocna, żeby wypełnić pole obiektu bez pytania: DOKŁADNIE
+ * jedna i z kontaktu przypiętego do obiektu. Reszta zostaje propozycją do kliknięcia.
+ */
+function autoPickedObject(prefill: CalendarEventPrefill | null | undefined): MailObjectSuggestion | null {
+  if (!prefill || prefill.objectId) return null;
+  const strong = (prefill.objectSuggestions ?? []).filter((s) => s.via === "object_contact");
+  return strong.length === 1 ? strong[0] : null;
 }
 
 interface CalendarEventDialogProps {
@@ -190,7 +251,7 @@ interface CalendarEventDialogProps {
   onOpenEvent?: (id: number) => void;
   /**
    * Przejście kalendarza do dnia (klik we wzmiankę daty w notatce, gdy nie ma jeszcze
-   * kafelka). Bez propa dialog nawiguje na `/technical/kalendarz?date=…`.
+   * kafelka). Bez propa dialog nawiguje na `<cfg.baseHref>?date=…`.
    */
   onGoToDate?: (date: string) => void;
   /** Zmiana liczby notatek (zapis natychmiastowy, poza „Zapisz”) — rodzic aktualizuje licznik w kalendarzu. */
@@ -202,10 +263,35 @@ interface CalendarEventDialogProps {
   onEdit?: () => void;
   /**
    * Powłoka formularza. `modal` (domyślnie) to okno na środku, `drawer` — panel dokowany
-   * w siatce strony, który zwęża kalendarz zamiast go zasłaniać. Rodzic decyduje, kiedy
-   * szuflada ma sens (dość szeroki ekran) i osadza komponent we właściwej kolumnie.
+   * w siatce strony, który od lg zwęża kalendarz zamiast go zasłaniać. Poniżej lg ta sama
+   * szuflada sama przechodzi w nakładkę `fixed` z prawej (przyciemnienie, pułapka fokusu),
+   * więc rodzic nie musi mierzyć szerokości ekranu — wystarczy, że osadzi komponent
+   * we właściwej kolumnie siatki.
    */
   variant?: "modal" | "drawer";
+  /**
+   * Konfiguracja działu. Domyślnie techniczna — drugi konsument dialogu
+   * (`pages/ObjectDetails.tsx`) propa nie podaje i ma działać jak przed refaktorem.
+   * Wartość domyślna MUSI stać w destrukturyzacji propsów, a nie w `useMemo`,
+   * inaczej referencja zmieniałaby się przy każdym renderze.
+   */
+  config?: CalendarConfig;
+  /**
+   * „Zaplanuj następną” (dział handlowy, wydarzenie wykonane): rodzic zamyka ten
+   * dialog i otwiera nowy w trybie `create` z podanym prefillem. Bez propa
+   * przycisk się nie pokazuje — dialog nie ma jak sam otworzyć drugiego siebie.
+   */
+  onPlanNext?: (prefill: CalendarEventPrefill) => void;
+  /**
+   * Komunikat dla użytkownika po zapisie, którego dialog nie ma już gdzie pokazać
+   * (zamyka się) — np. „Pominięto załączniki: …”. Rodzic robi z tego toast.
+   */
+  onNotice?: (message: string) => void;
+  /**
+   * Zmiana stanu „niezapisane” — formularz brudny albo niewysłany szkic notatki.
+   * Rodzic używa do ostrzeżenia przed podmianą wydarzenia w panelu.
+   */
+  onDirtyChange?: (dirty: boolean) => void;
 }
 
 const plural = (n: number, one: string, few: string, many: string) => {
@@ -231,7 +317,12 @@ interface FormState {
   objectId: string;
   location: string;
   description: string;
-  technicianIds: number[];
+  /** Przypisani: technicy albo handlowcy — o tym, które pole API, decyduje `config`. */
+  assigneeIds: number[];
+  /** Dział handlowy: szansa, do której wydarzenie należy (null = wolna aktywność). */
+  leadId: number | null;
+  /** Dział handlowy: osoba kontaktowa (musi należeć do szansy albo jej kontrahenta). */
+  contactId: number | null;
   /** Rozliczenie (null = nie dotyczy); ukryte dla urlop/biuro/przygotowanie. */
   billing: CalendarBilling | null;
   /** Jawnie przypięty protokół (null = brak / protokół realizacji wyliczany przez backend). */
@@ -252,7 +343,7 @@ interface FormState {
   recCount: string;
 }
 
-type FieldKey = "title" | "start" | "end" | "technicians" | "recUntil" | "recCount" | "note";
+type FieldKey = "title" | "start" | "end" | "assignees" | "recUntil" | "recCount" | "note";
 type FieldErrors = Partial<Record<FieldKey, string>>;
 
 /**
@@ -270,7 +361,8 @@ interface DraftPrompt {
 }
 
 /** Domyślny czas trwania nowego wydarzenia (minuty). */
-const DEFAULT_DURATION_MIN = 180;
+/** Domyślny czas trwania nowego wydarzenia (min.) — używa go też drop maila na siatkę. */
+export const DEFAULT_DURATION_MIN = 180;
 
 /** Domyślny zakres: najbliższa pełna godzina, 3h (typowy wyjazd na obiekt). */
 function defaultRange(): { start: string; end: string } {
@@ -296,7 +388,8 @@ function addYears(dateStr: string, years: number): string {
 
 function buildInitial(
   event: CalendarEvent | null | undefined,
-  prefill: CalendarEventPrefill | null | undefined
+  prefill: CalendarEventPrefill | null | undefined,
+  cfg: CalendarConfig
 ): FormState {
   if (event) {
     const allDay = event.allDay;
@@ -310,7 +403,9 @@ function buildInitial(
       objectId: event.objectId ? String(event.objectId) : "",
       location: event.location ?? "",
       description: event.description ?? "",
-      technicianIds: event.technicians.map((t) => t.id),
+      assigneeIds: assigneesOf(event, cfg).map((a) => a.id),
+      leadId: event.leadId ?? null,
+      contactId: event.contactId ?? null,
       billing: event.billing ?? null,
       protocolId: event.protocolId ?? null,
       quoteId: event.quoteId ?? null,
@@ -324,7 +419,8 @@ function buildInitial(
       recCount: "",
     };
   }
-  const prefillType = prefill?.type ?? "serwis";
+  // Pierwszy typ z listy działu: „serwis” w technicznym, „spotkanie” w handlowym.
+  const prefillType = prefill?.type ?? cfg.typeOrder[0] ?? "serwis";
   const isNote = prefillType === "notatka";
   const allDay = prefillType === "urlop" || isNote ? true : (prefill?.allDay ?? false);
   const def = defaultRange();
@@ -346,10 +442,16 @@ function buildInitial(
     start,
     end,
     status: prefill?.status ?? "planned",
-    objectId: prefill?.objectId ? String(prefill.objectId) : "",
+    objectId: prefill?.objectId
+      ? String(prefill.objectId)
+      : autoPickedObject(prefill)
+        ? String(autoPickedObject(prefill)!.objectId)
+        : "",
     location: prefill?.location ?? "",
     description: prefill?.description ?? "",
-    technicianIds: prefill?.technicianIds ? [...prefill.technicianIds] : [],
+    assigneeIds: [...(prefill?.assigneeIds ?? prefill?.technicianIds ?? [])],
+    leadId: prefill?.leadId ?? null,
+    contactId: prefill?.contactId ?? null,
     billing: null,
     protocolId: null,
     quoteId: null,
@@ -364,9 +466,15 @@ function buildInitial(
   };
 }
 
-/** Konwersja stanu formularza → payload API (all-day: koniec exclusive). */
-function toInput(f: FormState): CalendarEventInput {
-  // Kafelek notatki: zawsze jeden dzień, bez techników, obiektu i dokumentów.
+/**
+ * Konwersja stanu formularza → payload API (all-day: koniec exclusive).
+ *
+ * `department` idzie w KAŻDYM zapisie, także technicznym: backend domyśla się
+ * `technical`, więc `PUT` bez tego pola na wydarzeniu handlowym wyglądałby jak
+ * próba zmiany działu i skończyłby się błędem 400.
+ */
+function toInput(f: FormState, cfg: CalendarConfig): CalendarEventInput {
+  // Kafelek notatki: zawsze jeden dzień, bez przypisanych, obiektu i dokumentów.
   if (isNoteEvent(f.type)) {
     const day = f.start.slice(0, 10);
     return {
@@ -379,13 +487,18 @@ function toInput(f: FormState): CalendarEventInput {
       allDay: true,
       status: f.status,
       objectId: null,
+      department: cfg.department,
+      // `technicianIds` jest w kontrakcie API wymagane; dla działu handlowego
+      // zostaje puste, a most dokłada właściwe pole z identyfikatorami.
       technicianIds: [],
+      ...assigneeIdsInput([], cfg),
       billing: null,
       protocolId: null,
       quoteId: null,
       realizationId: null,
       realizationOptout: false,
       noteId: f.noteId,
+      ...(cfg.features.leadPicker ? { leadId: f.leadId, contactId: f.contactId } : {}),
     };
   }
   const startAt = f.allDay ? f.start.slice(0, 10) : f.start;
@@ -401,12 +514,17 @@ function toInput(f: FormState): CalendarEventInput {
     allDay: f.allDay,
     status: f.status,
     objectId: !isUrlop && f.objectId ? Number(f.objectId) : null,
-    technicianIds: f.technicianIds,
-    billing: billingApplies(f.type) ? f.billing : null,
-    protocolId: billingApplies(f.type) ? f.protocolId : null,
-    quoteId: billingApplies(f.type) ? f.quoteId : null,
-    realizationId: realizationApplies(f.type) ? f.realizationId : null,
-    realizationOptout: realizationApplies(f.type) ? f.realizationOptout : false,
+    department: cfg.department,
+    technicianIds: [],
+    ...assigneeIdsInput(f.assigneeIds, cfg),
+    // Dokumenty techniczne (rozliczenie, protokół, wycena, realizacja) nie istnieją
+    // w dziale handlowym — flagi decydują, czy pola w ogóle wyjeżdżają na serwer.
+    billing: cfg.features.billing && billingApplies(f.type) ? f.billing : null,
+    protocolId: cfg.features.protocol && billingApplies(f.type) ? f.protocolId : null,
+    quoteId: cfg.features.quote && billingApplies(f.type) ? f.quoteId : null,
+    realizationId: cfg.features.realization && realizationApplies(f.type) ? f.realizationId : null,
+    realizationOptout: cfg.features.realization && realizationApplies(f.type) ? f.realizationOptout : false,
+    ...(cfg.features.leadPicker ? { leadId: f.leadId, contactId: f.contactId } : {}),
   };
   if (f.recFreq && !isUrlop) {
     input.recurrence = {
@@ -1363,9 +1481,17 @@ function SourceNoteCard({
       <div className="flex items-start gap-2">
         <StickyNote className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
         <div className="min-w-0 flex-1">
-          <div className="whitespace-pre-wrap break-words" data-testid="source-note-text">
-            {note.text?.trim() || <span className="text-muted-foreground">notatka bez treści (sam załącznik)</span>}
-          </div>
+          {note.text?.trim() ? (
+            <RichText
+              text={note.text}
+              mode={looksLikeMailNote(note.text) ? "mail" : "note"}
+              testId="source-note-text"
+            />
+          ) : (
+            <div className="whitespace-pre-wrap break-words" data-testid="source-note-text">
+              <span className="text-muted-foreground">notatka bez treści (sam załącznik)</span>
+            </div>
+          )}
           <div className="mt-0.5 text-xs text-muted-foreground">{noteMetaLine(note)}</div>
         </div>
       </div>
@@ -1651,6 +1777,23 @@ function useIsMobile(): boolean {
 }
 
 /**
+ * Czy ekran węższy niż lg (1024px) — szuflada nie ma wtedy gdzie się zadokować
+ * obok kalendarza i staje się nasuwaną z prawej nakładką (fixed + przyciemnienie).
+ */
+function useBelowLg(): boolean {
+  const [below, setBelow] = useState(() =>
+    typeof window !== "undefined" ? window.matchMedia("(max-width: 1023.98px)").matches : false
+  );
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 1023.98px)");
+    const on = () => setBelow(mq.matches);
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, []);
+  return below;
+}
+
+/**
  * Pole godziny: na desktopie combobox (wpisz ręcznie albo wybierz z listy co 15 min),
  * na mobile natywny <input type="time">. `durationFrom` = godzina początku — lista
  * pokazuje wtedy czas trwania przy każdej pozycji („10:00 (2 godz.)”).
@@ -1928,16 +2071,50 @@ export function CalendarEventDialog({
   onEdit,
   onNotesChanged,
   variant = "modal",
+  config: cfg = TECHNICAL_CALENDAR,
+  onPlanNext,
+  onNotice,
+  onDirtyChange,
 }: CalendarEventDialogProps) {
   const docked = variant === "drawer";
   const readOnly = mode === "view";
   const isEdit = mode === "edit" && !!event;
+  /** Poniżej lg szuflada jest nakładką: przyciemnienie, scroll-lock, pułapka fokusu. */
+  const belowLg = useBelowLg();
+  const asideRef = useRef<HTMLElement>(null);
   const navigate = useNavigate();
   /** Notatki z GET /calendar/events/:id; null = jeszcze nie wczytane (komponent notatek sam dociągnie). */
   const [notes, setNotes] = useState<CalendarNote[] | null>(null);
   const [notesCount, setNotesCount] = useState<number>(event?.notesCount ?? 0);
-  /** Tryb create: „Pierwsza notatka” wysyłana po utworzeniu wydarzenia. */
-  const [firstNote, setFirstNote] = useState("");
+  /**
+   * Tryb create: „Pierwsza notatka” wysyłana po utworzeniu wydarzenia.
+   * Startowa treść i pliki mogą przyjść z prefillu (`noteDraft`) — tak działa
+   * upuszczenie maila `.msg` na kalendarz. Dialog jest remountowany przy każdym
+   * otwarciu (klucz w CalendarPage), więc inicjalizacja stanu wystarczy.
+   */
+  const [firstNote, setFirstNote] = useState(() => prefill?.noteDraft?.text ?? "");
+  const [firstNoteFiles, setFirstNoteFiles] = useState<File[]>(() => [...(prefill?.noteDraft?.files ?? [])]);
+  /** Nagłówek maila szkicu — tylko do odczytu; z nim notatka zapisze się jako `kind='email'`. */
+  const firstNoteMail = mode === "create" ? (prefill?.noteDraft?.mail ?? null) : null;
+  const firstNoteMeta = mode === "create" ? (prefill?.noteDraft?.attachmentsMeta ?? []) : [];
+  /**
+   * „Wypakuj załączniki z maila” — domyślnie TAK: zdjęcie z maila ma być widoczne
+   * bez pobierania .msg. Backend pomija te, których nie wolno zapisać.
+   */
+  const [extractMsgAtt, setExtractMsgAtt] = useState(true);
+  /** Podpowiedź, która sama wypełniła pole obiektu (pokazujemy skąd + „Wyczyść”). */
+  const [objectHint, setObjectHint] = useState<MailObjectSuggestion | null>(() =>
+    mode === "create" ? autoPickedObject(prefill) : null
+  );
+  /** Propozycje do kliknięcia — puste, gdy obiekt już jest (z prefillu albo z podpowiedzi). */
+  const [objectSuggestions, setObjectSuggestions] = useState<MailObjectSuggestion[]>(() =>
+    mode === "create" && !prefill?.objectId && !autoPickedObject(prefill) ? (prefill?.objectSuggestions ?? []) : []
+  );
+  /** Ręczny wybór obiektu kończy podpowiadanie — i notkę, i pasek chipów. */
+  const dismissObjectSuggestions = useCallback(() => {
+    setObjectHint(null);
+    setObjectSuggestions([]);
+  }, []);
   const handleNotesCount = useCallback(
     (count: number) => {
       setNotesCount(count);
@@ -1954,7 +2131,7 @@ export function CalendarEventDialog({
     [event, onNotesChanged]
   );
 
-  const initialRef = useRef<FormState>(buildInitial(event, prefill));
+  const initialRef = useRef<FormState>(buildInitial(event, prefill, cfg));
   const [form, setForm] = useState<FormState>(initialRef.current);
   /** Protokół wybrany z listy w tej sesji edycji (podgląd przed zapisem). */
   const [pickedProtocol, setPickedProtocol] = useState<CalendarEventProtocol | null>(null);
@@ -1964,11 +2141,16 @@ export function CalendarEventDialog({
   const [pickedQuote, setPickedQuote] = useState<CalendarEventQuote | null>(null);
   /** Notatka wybrana z wyszukiwarki (typ `notatka`) — podgląd przed zapisem. */
   const [pickedNote, setPickedNote] = useState<CalendarNoteRef | null>(event?.sourceNote ?? null);
-  const [technicians, setTechnicians] = useState<Technician[]>([]);
+  /** Technicy albo handlowcy — kto, decyduje `cfg.assignees.load()`. */
+  const [assignees, setAssignees] = useState<AssigneeRef[]>([]);
+  /** Dział handlowy: szansa wybrana w tej sesji (podgląd zanim zapis wróci). */
+  const [pickedLead, setPickedLead] = useState<Lead | null>(null);
+  /** Osoby kontaktowe szansy i jej kontrahenta (zawężone przez `LeadPicker`). */
+  const [leadContacts, setLeadContacts] = useState<Contact[]>([]);
   const [objects, setObjects] = useState<ObjectWithContractor[]>([]);
   const [history, setHistory] = useState<ActivityEntry[]>([]);
   const [conflicts, setConflicts] = useState<CalendarConflict[]>([]);
-  const [availability, setAvailability] = useState<TechnicianAvailability[]>([]);
+  const [availability, setAvailability] = useState<CalendarAvailability[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
@@ -1986,7 +2168,9 @@ export function CalendarEventDialog({
     quote: mode !== "create" && !!(init.quoteId || event?.quote),
     realization: mode !== "create" && !!(init.realizationId || event?.realization || init.realizationOptout),
     journal: true,
-    firstNote: false,
+    // Szkic z prefillu (mail .msg upuszczony na kalendarz) ma być widoczny od razu —
+    // inaczej użytkownik zapisałby notatkę, której nawet nie zobaczył.
+    firstNote: mode === "create" && !!prefill?.noteDraft,
     history: false,
   });
   const toggleSec = (k: keyof typeof openSec) =>
@@ -2073,19 +2257,39 @@ export function CalendarEventDialog({
   const [hasNoteDraft, setHasNoteDraft] = useState(false);
 
   const dirty = useMemo(
-    () => !readOnly && (JSON.stringify(form) !== JSON.stringify(initialRef.current) || firstNote.trim() !== ""),
-    [form, readOnly, firstNote]
+    () =>
+      !readOnly &&
+      (JSON.stringify(form) !== JSON.stringify(initialRef.current) ||
+        firstNote.trim() !== "" ||
+        firstNoteFiles.length > 0 ||
+        !!firstNoteMail),
+    [form, readOnly, firstNote, firstNoteFiles, firstNoteMail]
   );
+
+  // Rodzic (panel w kalendarzu) musi wiedzieć o niezapisanych zmianach, żeby nie
+  // podmienić wydarzenia w panelu po cichu. Niewysłany szkic notatki liczy się tak
+  // samo jak brudny formularz — jedno i drugie ginie przy podmianie.
+  const dirtyNotifyRef = useRef(onDirtyChange);
+  useEffect(() => {
+    dirtyNotifyRef.current = onDirtyChange;
+  }, [onDirtyChange]);
+  useEffect(() => {
+    onDirtyChange?.(dirty || hasNoteDraft);
+  }, [dirty, hasNoteDraft, onDirtyChange]);
+  // Odmontowanie panelu zeruje flagę — inaczej rodzic pytałby o zmiany, których już nie ma.
+  useEffect(() => () => dirtyNotifyRef.current?.(false), []);
 
   // Słowniki
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
-    Promise.all([getTechnicians(true), getObjects({ pageSize: 1000 })])
-      .then(([tRes, oRes]) => {
+    // Kartotekę obiektów ciągniemy tylko tam, gdzie jest picker — w dziale bez
+    // niego to byłoby tysiąc wierszy pobranych po nic.
+    Promise.all([cfg.assignees.load(), cfg.features.objectPicker ? getObjects({ pageSize: 1000 }) : null])
+      .then(([aRows, oRes]) => {
         if (cancelled) return;
-        setTechnicians(tRes.data || []);
-        setObjects(oRes.data || []);
+        setAssignees(aRows || []);
+        setObjects(oRes?.data || []);
       })
       .catch(() => {
         /* słowniki opcjonalne — formularz działa bez nich */
@@ -2093,7 +2297,7 @@ export function CalendarEventDialog({
     return () => {
       cancelled = true;
     };
-  }, [open]);
+  }, [open, cfg]);
 
   // Historia
   useEffect(() => {
@@ -2124,10 +2328,12 @@ export function CalendarEventDialog({
   // Konflikty (debounce)
   const draftInput = useMemo(() => {
     if (!open || readOnly) return null;
-    if (!form.technicianIds.length || !form.start || !form.end) return null;
-    const i = toInput(form);
-    return { technicianIds: i.technicianIds, startAt: i.startAt, endAt: i.endAt };
-  }, [open, readOnly, form]);
+    if (!form.assigneeIds.length || !form.start || !form.end) return null;
+    const i = toInput(form, cfg);
+    // Kolizje pytamy o TYCH SAMYCH ludzi, których zapisujemy — nazwę parametru
+    // (`technicianIds` / `salespersonIds`) podmienia most z calendar-config.
+    return { ...assigneeConflictQuery(form.assigneeIds, cfg), startAt: i.startAt, endAt: i.endAt };
+  }, [open, readOnly, form, cfg]);
 
   useEffect(() => {
     if (!draftInput) {
@@ -2154,9 +2360,9 @@ export function CalendarEventDialog({
   // Dostępność (urlopy) w wybranym terminie
   const draftRange = useMemo(() => {
     if (!open || readOnly || !form.start || !form.end) return null;
-    const i = toInput(form);
+    const i = toInput(form, cfg);
     return { from: i.startAt, to: i.endAt };
-  }, [open, readOnly, form]);
+  }, [open, readOnly, form, cfg]);
 
   useEffect(() => {
     if (!draftRange || draftRange.to <= draftRange.from) {
@@ -2166,7 +2372,7 @@ export function CalendarEventDialog({
     let cancelled = false;
     const t = window.setTimeout(() => {
       calendarApi
-        .availability(draftRange.from, draftRange.to)
+        .availability(draftRange.from, draftRange.to, cfg.department)
         .then((res) => {
           if (!cancelled) setAvailability(res.data || []);
         })
@@ -2178,17 +2384,100 @@ export function CalendarEventDialog({
       cancelled = true;
       window.clearTimeout(t);
     };
-  }, [draftRange]);
+  }, [draftRange, cfg.department]);
+
+  // --- Szansa i osoby kontaktowe (dział handlowy) ---------------------------
+
+  /**
+   * Szansa do pokazania w pickerze. Przy edycji zapisanego wydarzenia znamy z
+   * początku tylko `leadId` + `leadTitle` z wiersza — pełny obiekt (kontrahent,
+   * właściciel) dociąga efekt niżej, a do tego czasu pokazujemy, co mamy.
+   */
+  const selectedLead: LeadRef | null = useMemo(() => {
+    if (form.leadId == null) return null;
+    if (pickedLead && pickedLead.id === form.leadId) return pickedLead;
+    if (event?.leadId === form.leadId) {
+      return { id: form.leadId, title: event.leadTitle ?? `Szansa #${form.leadId}`, stage: event.leadStage ?? null };
+    }
+    return { id: form.leadId, title: `Szansa #${form.leadId}` };
+  }, [form.leadId, pickedLead, event]);
+
+  // Pełna szansa po id — potrzebna dla kontrahenta (zawężenie kontaktów) i właściciela.
+  useEffect(() => {
+    if (!open || !cfg.features.leadPicker || form.leadId == null) return;
+    if (pickedLead?.id === form.leadId) return;
+    let cancelled = false;
+    leadsApi
+      .get(form.leadId)
+      .then((res) => {
+        if (!cancelled && res.data) setPickedLead(res.data);
+      })
+      .catch(() => {
+        /* brak dostępu do karty szansy nie blokuje edycji wydarzenia */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, cfg.features.leadPicker, form.leadId, pickedLead?.id]);
+
+  /**
+   * Kontakty szansy ORAZ jej kontrahenta — dokładnie ten zbiór, który backend
+   * przyjmuje w `contactId` (src/lib/calendar-mutations.ts). Dwa zapytania zamiast
+   * jednego, bo kontakt bywa podpięty pod klienta, a nie pod samą szansę.
+   */
+  useEffect(() => {
+    if (!open || !cfg.features.contactPicker || form.leadId == null) {
+      setLeadContacts([]);
+      return;
+    }
+    let cancelled = false;
+    const leadId = form.leadId;
+    const contractorId = pickedLead?.id === leadId ? pickedLead.contractorId : null;
+    Promise.all([
+      contactsApi.list({ leadId, pageSize: 200 }),
+      contractorId != null ? contactsApi.list({ contractorId, pageSize: 200 }) : null,
+    ])
+      .then(([byLead, byContractor]) => {
+        if (cancelled) return;
+        const merged = new Map<number, Contact>();
+        for (const c of [...(byLead.data ?? []), ...(byContractor?.data ?? [])]) merged.set(c.id, c);
+        setLeadContacts([...merged.values()]);
+      })
+      .catch(() => {
+        if (!cancelled) setLeadContacts([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, cfg.features.contactPicker, form.leadId, pickedLead]);
+
+  const selectedContact = useMemo(
+    () => (form.contactId == null ? null : (leadContacts.find((c) => c.id === form.contactId) ?? null)),
+    [leadContacts, form.contactId]
+  );
+
+  /**
+   * Dopełniacz przypisanego („technika” / „handlowca”). Polskiej odmiany nie da
+   * się złożyć z mianownika, a osobnego pola w `CalendarConfig` nie ma — wycinamy
+   * go więc z gotowego zdania walidacji urlopu, które już go zawiera.
+   */
+  const assigneeGenitive =
+    cfg.assignees.labels.leave.replace(/^.*wskazania\s+/i, "").replace(/\.\s*$/, "") ||
+    cfg.assignees.labels.one.toLowerCase();
 
   const isUrlop = form.type === "urlop";
   /** Kafelek notatki — formularz redukuje się do daty, statusu i wyboru notatki. */
   const isNote = isNoteEvent(form.type);
-  const showBilling = billingApplies(form.type);
+  // Rozliczenia, protokoły, wyceny i realizacje należą do świata techniki —
+  // w kalendarzu handlowym tych sekcji po prostu nie ma.
+  const showBilling = cfg.features.billing && billingApplies(form.type);
+  const showProtocol = cfg.features.protocol && billingApplies(form.type);
+  const showQuote = cfg.features.quote && billingApplies(form.type);
   /** Notatka źródłowa: wybrana w tej sesji albo przysłana przez backend z wydarzeniem. */
   const sourceNote = pickedNote ?? event?.sourceNote ?? null;
 
   /** Dojazd — pole informacyjne, poza FormState: nie zapisuje się z wydarzeniem. */
-  const { travel, loading: travelLoading } = useTravel(form.objectId, open && !isUrlop && !isNote);
+  const { travel, loading: travelLoading } = useTravel(form.objectId, open && cfg.features.routePlanner && !isUrlop && !isNote);
   /** Protokół widoczny w formularzu: wybrany z listy / przypięty / z realizacji (gdy nic nie przypięto). */
   const formProtocol: CalendarEventProtocol | null =
     form.protocolId != null
@@ -2235,10 +2524,11 @@ export function CalendarEventDialog({
   const realizationOptedOut = form.realizationOptout && form.realizationId == null;
 
   const onLeave = useMemo(() => {
-    const m = new Map<number, TechnicianAvailability>();
+    // Wiersz dostępności ma `technicianId` albo `salespersonId` — id czyta most.
+    const m = new Map<number, CalendarAvailability>();
     for (const a of availability) {
       const leaves = a.leaves.filter((l) => l.eventId !== event?.id);
-      if (leaves.length) m.set(a.technicianId, { ...a, leaves });
+      if (leaves.length) m.set(availabilityAssigneeId(a), { ...a, leaves });
     }
     return m;
   }, [availability, event?.id]);
@@ -2254,8 +2544,8 @@ export function CalendarEventDialog({
   const leaveMessages = useMemo(() => {
     const out: { key: string; eventId: number; text: string }[] = [];
     for (const c of leaveConflicts) {
-      for (const t of c.technicians) {
-        if (!form.technicianIds.includes(t.id)) continue;
+      for (const t of assigneesOf(c, cfg)) {
+        if (!form.assigneeIds.includes(t.id)) continue;
         out.push({
           key: `${c.id}-${t.id}`,
           eventId: c.id,
@@ -2264,12 +2554,12 @@ export function CalendarEventDialog({
       }
     }
     return out;
-  }, [leaveConflicts, form.technicianIds]);
+  }, [leaveConflicts, form.assigneeIds, cfg]);
 
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => {
     setForm((f) => ({ ...f, [k]: v }));
     setFieldErrors((e) => {
-      const key = (k === "technicianIds" ? "technicians" : k) as FieldKey;
+      const key = (k === "assigneeIds" ? "assignees" : k) as FieldKey;
       if (!(key in e)) return e;
       const n = { ...e };
       delete n[key];
@@ -2309,6 +2599,9 @@ export function CalendarEventDialog({
         next.objectId = "";
         next.location = "";
         next.recFreq = "";
+        // Urlop nie należy do żadnej szansy — to nieobecność, nie aktywność handlowa.
+        next.leadId = null;
+        next.contactId = null;
         setMultiDayPref(true);
       }
       if (!isNoteEvent(type) && isNoteEvent(f.type)) {
@@ -2325,7 +2618,9 @@ export function CalendarEventDialog({
         next.objectId = "";
         next.location = "";
         next.description = "";
-        next.technicianIds = [];
+        next.assigneeIds = [];
+        next.leadId = null;
+        next.contactId = null;
         next.recFreq = "";
         next.realizationOptout = false;
         setMultiDayPref(false);
@@ -2341,12 +2636,12 @@ export function CalendarEventDialog({
     });
   };
 
-  const toggleTechnician = (id: number) =>
+  const toggleAssignee = (id: number) =>
     set(
-      "technicianIds",
-      form.technicianIds.includes(id)
-        ? form.technicianIds.filter((x) => x !== id)
-        : [...form.technicianIds, id]
+      "assigneeIds",
+      form.assigneeIds.includes(id)
+        ? form.assigneeIds.filter((x) => x !== id)
+        : [...form.assigneeIds, id]
     );
 
   // --- Sekcja „Kiedy”: jeden wiersz Data / od → do, czas trwania zachowywany ---
@@ -2437,12 +2732,11 @@ export function CalendarEventDialog({
       return e;
     }
     if (!form.title.trim() && !isUrlop) e.title = "Podaj tytuł wydarzenia.";
-    if (isUrlop && form.technicianIds.length === 0)
-      e.technicians = "Urlop wymaga wskazania co najmniej jednego technika.";
+    if (isUrlop && form.assigneeIds.length === 0) e.assignees = cfg.assignees.labels.leave;
     if (!form.start) e.start = "Podaj początek.";
     if (!form.end) e.end = "Podaj koniec.";
     if (form.start && form.end) {
-      const i = toInput(form);
+      const i = toInput(form, cfg);
       if (parseLocal(i.endAt).getTime() <= parseLocal(i.startAt).getTime()) {
         e.end = form.allDay
           ? "Koniec nie może być wcześniejszy niż początek."
@@ -2463,7 +2757,7 @@ export function CalendarEventDialog({
       title: "cal-title",
       start: "cal-start",
       end: "cal-end",
-      technicians: "cal-tech-first",
+      assignees: "cal-assignee-first",
       recUntil: "cal-rec-until",
       recCount: "cal-rec-count",
       note: "cal-note-search",
@@ -2476,15 +2770,28 @@ export function CalendarEventDialog({
       setSaving(true);
       setError(null);
       try {
-        const input = toInput(form);
+        const input = toInput(form, cfg);
         const res = isEdit
           ? await calendarApi.update(event!.id, input, scope)
           : await calendarApi.create(input);
         let saved = res.data;
-        // Pierwsza notatka: osobne API po utworzeniu. Błąd nie cofa utworzenia — wydarzenie już istnieje.
-        if (!isEdit && saved && firstNote.trim()) {
+        // Pierwsza notatka: osobne API po utworzeniu. Błąd nie cofa utworzenia — wydarzenie już istnieje
+        // (typ „notatka” notatek nie przyjmuje — backend odpowie 400, a my to przemilczamy jak dotąd).
+        if (!isEdit && saved && (firstNote.trim() || firstNoteFiles.length > 0 || firstNoteMail)) {
           try {
-            await calendarApi.addNote(saved.id, firstNote.trim());
+            // Załączniki (oryginalny .msg) i nagłówek maila jadą tylko multipartem.
+            if (firstNoteFiles.length > 0 || firstNoteMail) {
+              const noteRes = await calendarApi.addNoteWithFiles(saved.id, firstNote.trim(), firstNoteFiles, {
+                mail: firstNoteMail,
+                // Wypakowanie ma sens tylko przy mailu — bez niego nie ma z czego.
+                extractMsgAttachments: !!firstNoteMail && extractMsgAtt,
+              });
+              // Backend pomija załączniki, których nie wolno zapisać — mówimy o tym wprost.
+              const skipped = noteRes.skippedAttachments ?? [];
+              if (skipped.length) onNotice?.(`Pominięto załączniki: ${skipped.join(", ")}`);
+            } else {
+              await calendarApi.addNote(saved.id, firstNote.trim());
+            }
             saved = { ...saved, notesCount: (saved.notesCount ?? 0) + 1 };
           } catch {
             /* notatkę można dopisać w edycji */
@@ -2498,7 +2805,7 @@ export function CalendarEventDialog({
         setSaving(false);
       }
     },
-    [form, isEdit, event, onSaved, onClose, firstNote]
+    [form, isEdit, event, onSaved, onClose, firstNote, firstNoteFiles, firstNoteMail, extractMsgAtt, onNotice]
   );
 
   /** Właściwy zapis (po walidacji i po rozstrzygnięciu szkicu notatki). */
@@ -2583,7 +2890,7 @@ export function CalendarEventDialog({
     try {
       const res = await calendarApi.update(
         event.id,
-        { ...toInput(buildInitial(event, null)), status },
+        { ...toInput(buildInitial(event, null, cfg), cfg), status },
         "this"
       );
       if (res.data) onSaved?.(res.data);
@@ -2608,6 +2915,75 @@ export function CalendarEventDialog({
     if (guardDraft("close")) return;
     onClose();
   };
+  // Handler w refie: efekty poniżej wiszą na `window` i nie mogą się przepisywać
+  // przy każdym renderze (a `requestClose` jest zwykłą funkcją z ciała komponentu).
+  const requestCloseRef = useRef(requestClose);
+  useEffect(() => {
+    requestCloseRef.current = requestClose;
+  });
+
+  // --- Szuflada: Esc, blokada przewijania i fokus ---
+
+  // Poniżej lg panel zasłania stronę, więc tło nie może się przewijać. Poprzednia
+  // wartość wraca w cleanupie — inne nakładki (arkusz filtrów) też ją ustawiają.
+  useEffect(() => {
+    if (!docked || !open || !belowLg) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, [docked, open, belowLg]);
+
+  // Esc na `window`: panel nie jest modalem Radixa, więc musi łapać klawisz także
+  // wtedy, gdy fokus siedzi w siatce kalendarza. Gdy na wierzchu stoi pytanie o szkic,
+  // pomoc albo filtry (`[role="dialog"]`/`[role="alertdialog"]`), Esc należy do nich.
+  useEffect(() => {
+    if (!docked || !open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      if (document.querySelector('[role="alertdialog"],[role="dialog"]')) return;
+      e.preventDefault();
+      requestCloseRef.current();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [docked, open]);
+
+  // Fokus na panelu po otwarciu — czytnik ekranu czyta nagłówek, a Esc i Tab działają od razu.
+  useEffect(() => {
+    if (!docked || !open) return;
+    asideRef.current?.focus({ preventScroll: true });
+  }, [docked, open]);
+
+  // Pułapka Tab tylko w nakładce; od lg panel jest częścią strony i fokus ma z niego wychodzić.
+  useEffect(() => {
+    if (!docked || !open || !belowLg) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Tab" || !asideRef.current) return;
+      // Radix ma własną pułapkę w oknach nad panelem (pytanie o szkic, prognoza, pickery) —
+      // nie wolno mu wtedy wyrywać fokusu z powrotem do panelu.
+      if (document.querySelector('[role="alertdialog"],[role="dialog"]')) return;
+      const focusables = Array.from(
+        asideRef.current.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        )
+      ).filter((el) => el.offsetParent !== null);
+      if (!focusables.length) return;
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      const active = document.activeElement as HTMLElement | null;
+      if (e.shiftKey && (active === first || !asideRef.current.contains(active))) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [docked, open, belowLg]);
 
   /**
    * Rozstrzygnięcie pytania: „send” wysyła szkic notatki i dopiero potem wykonuje pierwotną
@@ -2709,13 +3085,13 @@ export function CalendarEventDialog({
         return;
       }
       onClose();
-      navigate(`/technical/kalendarz?event=${eventId}`);
+      navigate(`${cfg.baseHref}?event=${eventId}`);
       return;
     }
     if (!date) return;
     onClose();
     if (onGoToDate) onGoToDate(date);
-    else navigate(`/technical/kalendarz?date=${date}`);
+    else navigate(`${cfg.baseHref}?date=${date}`);
   };
 
   /** „Otwórz wydarzenie źródłowe” — wydarzenie, do którego należy notatka kafelka. */
@@ -2727,7 +3103,7 @@ export function CalendarEventDialog({
       return;
     }
     onClose();
-    navigate(`/technical/kalendarz?event=${id}`);
+    navigate(`${cfg.baseHref}?event=${id}`);
   };
 
   // --- Wyliczenia do nagłówka / podsumowań ---
@@ -2743,12 +3119,12 @@ export function CalendarEventDialog({
   const travelSource = travelSourceLabel(travel, travelLoading);
   const rangeText = (() => {
     if (!form.start || !form.end) return "";
-    const i = toInput(form);
+    const i = toInput(form, cfg);
     return fmtRange(i.startAt, i.endAt, i.allDay);
   })();
   const durationText = (() => {
     if (!form.start || !form.end) return "";
-    const i = toInput(form);
+    const i = toInput(form, cfg);
     return fmtDuration(i.startAt, i.endAt, i.allDay);
   })();
 
@@ -2792,22 +3168,49 @@ export function CalendarEventDialog({
         ? "Edycja wydarzenia"
         : event?.title || "Wydarzenie";
 
-  const techList = technicians.length
-    ? technicians
-    : (event?.technicians ?? []).map(
-        (t) =>
-          ({
-            id: t.id,
-            firstName: t.firstName,
-            lastName: t.lastName,
-            active: true,
-          }) as Technician
-      );
+  /**
+   * Prefill dla „Zaplanuj następną”: ta sama szansa, ten sam handlowiec, termin
+   * przesunięty o tydzień. `null` = przycisku nie ma (nie ten dział, nie wykonane
+   * wydarzenie albo rodzic nie umie otworzyć nowego dialogu).
+   */
+  const planNextPrefill: CalendarEventPrefill | null = useMemo(() => {
+    if (!cfg.features.leadPicker || !onPlanNext) return null;
+    if (!readOnly || !event || event.status !== "done" || event.deletedAt) return null;
+    if (isNoteEvent(event.type) || event.type === "urlop") return null;
+    const shift = (v: string) =>
+      v.length > 10 ? `${addDays(v.slice(0, 10), 7)}${v.slice(10, 16)}` : addDays(v.slice(0, 10), 7);
+    return {
+      type: event.type,
+      startAt: shift(event.startAt),
+      endAt: shift(event.endAt),
+      allDay: event.allDay,
+      assigneeIds: assigneesOf(event, cfg).map((a) => a.id),
+      leadId: event.leadId ?? null,
+      contactId: event.contactId ?? null,
+      objectId: event.objectId,
+      location: event.location,
+    };
+  }, [cfg, onPlanNext, readOnly, event]);
+
+  /** Lista do wyboru: słownik działu, a zanim dojedzie — osoby już przypisane. */
+  const assigneeList: AssigneeRef[] = assignees.length
+    ? assignees
+    : event
+      ? assigneesOf(event, cfg).map((a) => ({ ...a, active: true }))
+      : [];
 
   // ---------------------------------------------------------------------------
 
   const Title = docked ? "h2" : DialogTitle;
   const Description = docked ? "p" : DialogDescription;
+  /**
+   * Podpis panelu i jego krzyżyka zależy od trybu — czytnik ekranu ma powiedzieć,
+   * co dokładnie jest otwarte i co się zamknie (panel obsługuje wszystkie trzy tryby).
+   */
+  const drawerLabel =
+    mode === "create" ? "Nowe wydarzenie" : mode === "edit" ? "Edycja wydarzenia" : "Wydarzenie";
+  const drawerCloseLabel =
+    mode === "create" ? "Zamknij nowe wydarzenie" : mode === "edit" ? "Zamknij edycję" : "Zamknij panel";
   const header = (
     <div className="relative shrink-0 border-b px-5 pb-3 pt-4 pr-12">
       <div className={cn("absolute inset-x-0 top-0 h-1", typeUi?.bar)} aria-hidden />
@@ -2849,8 +3252,8 @@ export function CalendarEventDialog({
                 : isNote
                   ? "Wybierz notatkę i dzień — kafelek tylko do niej prowadzi."
                   : isUrlop
-                    ? "Wskaż technika i termin urlopu. Tytuł jest opcjonalny."
-                    : "Typ, tytuł, termin i technicy. Reszta pod rozwijanymi sekcjami."}
+                    ? `Wskaż ${assigneeGenitive} i termin urlopu. Tytuł jest opcjonalny.`
+                    : `Typ, tytuł, termin i ${cfg.assignees.labels.many.toLowerCase()}. Reszta pod rozwijanymi sekcjami.`}
           </Description>
         </div>
       </div>
@@ -2861,7 +3264,7 @@ export function CalendarEventDialog({
           size="icon"
           className="absolute right-2 top-3 h-7 w-7"
           onClick={requestClose}
-          aria-label="Zamknij edycję"
+          aria-label={drawerCloseLabel}
         >
           <X className="h-4 w-4" />
         </Button>
@@ -2909,6 +3312,25 @@ export function CalendarEventDialog({
               Wykonane
             </Button>
           )}
+        </div>
+      )}
+      {/*
+        Reguła modułu handlowego: po wykonanej aktywności od razu planuje się
+        następną, żeby szansa nie została bez kolejnego kroku (i nie zaczęła gnić).
+        Dialog nie umie otworzyć drugiego siebie — robi to rodzic przez `onPlanNext`.
+      */}
+      {planNextPrefill && (
+        <div className="flex flex-wrap gap-2">
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            data-testid="plan-next-activity"
+            onClick={() => onPlanNext?.(planNextPrefill)}
+            {...tip("Zaplanuj kolejny krok na tej szansie (za tydzień)")}
+          >
+            <CalendarPlus className="mr-1 h-4 w-4" /> Zaplanuj następną
+          </Button>
         </div>
       )}
       <dl className="grid gap-3 text-sm sm:grid-cols-[120px_1fr]">
@@ -2961,22 +3383,69 @@ export function CalendarEventDialog({
               <MapPin className="h-3.5 w-3.5" /> Lokalizacja
             </dt>
             <dd>{event.location || <span className="text-muted-foreground">—</span>}</dd>
-            {/* Pogoda dla dnia i miejsca wydarzenia (nie dotyczy urlopu). */}
+            {/* Dojazd (szacowany) — te same dane co w formularzu, `useTravel` działa też w podglądzie. */}
+            {cfg.features.routePlanner && event.objectId != null && !!travelText && (
+              <>
+                <dt className="flex items-center gap-1.5 text-muted-foreground">
+                  <Route className="h-3.5 w-3.5" /> Dojazd
+                </dt>
+                <dd aria-live="polite">
+                  <div>{travelText}</div>
+                  {travelSource && <div className="text-[11px] text-muted-foreground">{travelSource}</div>}
+                </dd>
+              </>
+            )}
+            {/* Pogoda dla dnia i miejsca wydarzenia (nie dotyczy urlopu ani działu handlowego). */}
+            {cfg.features.weather && (
+              <>
+                <dt className="flex items-center gap-1.5 text-muted-foreground">
+                  <CloudSun className="h-3.5 w-3.5" /> Pogoda
+                </dt>
+                <dd>
+                  <WeatherSection
+                    eventId={event.id}
+                    brief={weather}
+                    startAt={event.startAt}
+                    endAt={event.endAt}
+                    allDay={event.allDay}
+                  />
+                </dd>
+              </>
+            )}
+          </>
+        )}
+        {/* Szansa i osoba kontaktowa — karta wydarzenia handlowego. */}
+        {cfg.features.leadPicker && event.leadId != null && (
+          <>
             <dt className="flex items-center gap-1.5 text-muted-foreground">
-              <CloudSun className="h-3.5 w-3.5" /> Pogoda
+              <Handshake className="h-3.5 w-3.5" /> Szansa
             </dt>
             <dd>
-              <WeatherSection
-                eventId={event.id}
-                brief={weather}
-                startAt={event.startAt}
-                endAt={event.endAt}
-                allDay={event.allDay}
-              />
+              <Link
+                to={`/handlowy/leady/${event.leadId}`}
+                onClick={onClose}
+                className="inline-flex items-center gap-1 font-medium text-primary hover:underline"
+              >
+                {event.leadTitle ?? `Szansa #${event.leadId}`}
+                <ExternalLink className="h-3.5 w-3.5" />
+              </Link>
+              {event.leadStage && (
+                <span className="ml-2 text-xs text-muted-foreground">
+                  {LEAD_STAGE_META[event.leadStage]?.label ?? event.leadStage}
+                </span>
+              )}
             </dd>
           </>
         )}
-        {billingApplies(event.type) && (
+        {cfg.features.contactPicker && event.contactId != null && (
+          <>
+            <dt className="flex items-center gap-1.5 text-muted-foreground">
+              <Users className="h-3.5 w-3.5" /> Kontakt
+            </dt>
+            <dd>{event.contactName || <span className="text-muted-foreground">—</span>}</dd>
+          </>
+        )}
+        {cfg.features.billing && billingApplies(event.type) && (
           <>
             <dt className="flex items-center gap-1.5 text-muted-foreground">
               <Wallet className="h-3.5 w-3.5" /> Rozliczenie
@@ -3058,7 +3527,7 @@ export function CalendarEventDialog({
           </>
         )}
 
-        {realizationApplies(event.type) && (
+        {cfg.features.realization && realizationApplies(event.type) && (
           <>
             <dt className="flex items-center gap-1.5 text-muted-foreground">
               <Receipt className="h-3.5 w-3.5" /> Realizacja
@@ -3087,12 +3556,12 @@ export function CalendarEventDialog({
         {!isNoteEvent(event.type) && (
           <>
             <dt className="flex items-center gap-1.5 text-muted-foreground">
-              <Users className="h-3.5 w-3.5" /> Technicy
+              <Users className="h-3.5 w-3.5" /> {cfg.assignees.labels.many}
             </dt>
             <dd>
-              {event.technicians.length ? (
+              {assigneesOf(event, cfg).length ? (
                 <div className="flex flex-wrap gap-1.5">
-                  {event.technicians.map((t) => (
+                  {assigneesOf(event, cfg).map((t) => (
                     <span
                       key={t.id}
                       className="inline-flex items-center gap-1.5 rounded-full border py-0.5 pl-0.5 pr-2.5 text-sm"
@@ -3109,8 +3578,12 @@ export function CalendarEventDialog({
             <dt className="flex items-center gap-1.5 text-muted-foreground">
               <FileText className="h-3.5 w-3.5" /> Opis
             </dt>
-            <dd className="whitespace-pre-wrap">
-              {event.description || <span className="text-muted-foreground">—</span>}
+            <dd>
+              {event.description ? (
+                <RichText text={event.description} />
+              ) : (
+                <span className="text-muted-foreground">—</span>
+              )}
             </dd>
           </>
         )}
@@ -3124,7 +3597,9 @@ export function CalendarEventDialog({
             initialNotes={notes}
             canEdit={!!onEdit && !event.deletedAt}
             onCountChange={handleNotesCount}
-            onOpenMention={openMention}
+            onOpenMention={cfg.features.noteMentions ? openMention : undefined}
+            objectId={event.objectId}
+            objectName={event.objectName}
           />
         </Section>
       )}
@@ -3147,7 +3622,7 @@ export function CalendarEventDialog({
           aria-label="Typ wydarzenia"
           className={cn("grid gap-1.5", docked ? "grid-cols-2" : "grid-cols-2 sm:grid-cols-4")}
         >
-          {EVENT_TYPE_ORDER.filter((t) => !isEdit || !isNoteEvent(t)).map((t) => {
+          {cfg.typeOrder.filter((t) => !isEdit || !isNoteEvent(t)).map((t) => {
             const m = EVENT_TYPE_META[t];
             const I = m.icon;
             const active = form.type === t;
@@ -3298,6 +3773,8 @@ export function CalendarEventDialog({
               value={form.objectId}
               onChange={(id) => {
                 set("objectId", id);
+                // Ręczny wybór jest rozstrzygający — podpowiedzi z maila znikają.
+                dismissObjectSuggestions();
                 // Podpowiedź adresu do lokalizacji, gdy pusta
                 const o = objects.find((x) => String(x.id) === id);
                 const addr = o ? [o.address, o.city].filter(Boolean).join(", ") : "";
@@ -3305,6 +3782,51 @@ export function CalendarEventDialog({
               }}
               fallbackName={event?.objectName}
             />
+            {objectHint && (
+              <p className="flex flex-wrap items-center gap-1 text-[11px] text-muted-foreground" data-testid="object-suggestion-hint">
+                <Mail className="h-3 w-3" aria-hidden />
+                Obiekt podpowiedziany z adresu {objectHint.matchedEmails[0] ?? "z maila"}
+                <button
+                  type="button"
+                  className="font-medium underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  onClick={() => {
+                    set("objectId", "");
+                    dismissObjectSuggestions();
+                  }}
+                >
+                  Wyczyść
+                </button>
+              </p>
+            )}
+            {objectSuggestions.length > 0 && (
+              <div className="space-y-1" data-testid="object-suggestions">
+                <span className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+                  <Mail className="h-3 w-3" aria-hidden /> Sugerowane obiekty:
+                </span>
+                <div className="flex flex-wrap gap-1">
+                  {objectSuggestions.map((sug) => (
+                    <button
+                      key={sug.objectId}
+                      type="button"
+                      data-testid={`object-suggestion-${sug.objectId}`}
+                      className="inline-flex max-w-full items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      onClick={() => {
+                        set("objectId", String(sug.objectId));
+                        const o = objects.find((x) => x.id === sug.objectId);
+                        const addr = o ? [o.address, o.city].filter(Boolean).join(", ") : "";
+                        if (addr && !form.location.trim()) set("location", addr);
+                        dismissObjectSuggestions();
+                      }}
+                      title={`Dopasowano po adresie: ${sug.matchedEmails.join(", ")}`}
+                    >
+                      <span className="truncate font-medium">{sug.objectName}</span>
+                      {sug.contractorName && <span className="truncate text-muted-foreground">· {sug.contractorName}</span>}
+                      <span className="truncate text-muted-foreground">· {sug.matchedEmails[0]}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
           <div className="space-y-1">
             <Label htmlFor="cal-location" className="flex items-center gap-1">
@@ -3326,7 +3848,7 @@ export function CalendarEventDialog({
               </button>
             )}
           </div>
-          {form.objectId && (
+          {cfg.features.routePlanner && form.objectId && (
             <div className="space-y-0.5" aria-live="polite">
               <span className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
                 <Route className="h-3.5 w-3.5" /> Dojazd (szacowany)
@@ -3336,7 +3858,7 @@ export function CalendarEventDialog({
             </div>
           )}
           {/* Pogoda — tylko dla zapisanego wydarzenia (punkt liczy backend z zapisanych danych). */}
-          {event && (
+          {cfg.features.weather && event && (
             <div className="space-y-0.5">
               <span className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
                 <CloudSun className="h-3.5 w-3.5" /> Pogoda
@@ -3348,6 +3870,76 @@ export function CalendarEventDialog({
                 endAt={event.endAt}
                 allDay={event.allDay}
               />
+            </div>
+          )}
+        </Section>
+      )}
+
+      {/*
+        Szansa i osoba kontaktowa — sekcja działu handlowego. Wybór szansy
+        podpowiada tytuł i właściciela, a przede wszystkim ZAWĘŻA listę kontaktów:
+        backend przyjmuje tylko osoby należące do szansy albo do jej kontrahenta.
+      */}
+      {cfg.features.leadPicker && !isNote && !isUrlop && (
+        <Section id="sec-lead" icon={Handshake} title="Szansa i kontakt">
+          <div className="space-y-1">
+            <Label htmlFor="cal-lead">Szansa</Label>
+            <LeadPicker
+              inputId="cal-lead"
+              value={selectedLead}
+              onPick={(lead) => {
+                setPickedLead(lead);
+                setForm((f) => ({
+                  ...f,
+                  leadId: lead.id,
+                  // Podpowiedzi wchodzą tylko w PUSTE pola — nadpisywanie tego,
+                  // co planujący już wpisał, byłoby zabraniem mu decyzji.
+                  title: f.title.trim() ? f.title : `${eventTypeLabel(f.type)} — ${lead.title}`,
+                  assigneeIds:
+                    f.assigneeIds.length === 0 && lead.salespersonId != null
+                      ? [lead.salespersonId]
+                      : f.assigneeIds,
+                  // Kontakt spoza nowej szansy przestaje być dozwolony.
+                  contactId: null,
+                }));
+              }}
+              onClear={() => {
+                setPickedLead(null);
+                setForm((f) => ({ ...f, leadId: null, contactId: null }));
+              }}
+            />
+          </div>
+          {cfg.features.contactPicker && (
+            <div className="space-y-1">
+              <Label htmlFor="cal-contact">Osoba kontaktowa</Label>
+              <ContactPicker
+                inputId="cal-contact"
+                contacts={leadContacts}
+                value={form.contactId}
+                disabled={form.leadId == null}
+                onChange={(id) => set("contactId", id)}
+              />
+              {form.leadId == null ? (
+                <p className="text-[11px] text-muted-foreground">
+                  Najpierw wskaż szansę — kontakt musi do niej należeć.
+                </p>
+              ) : (
+                selectedContact && (
+                  <div className="flex flex-wrap items-center gap-3 text-xs">
+                    {selectedContact.phone && (
+                      <a href={`tel:${selectedContact.phone}`} className="inline-flex items-center gap-1 text-primary hover:underline">
+                        <Phone className="h-3.5 w-3.5" /> {selectedContact.phone}
+                      </a>
+                    )}
+                    {selectedContact.email && (
+                      <a href={`mailto:${selectedContact.email}`} className="inline-flex items-center gap-1 text-primary hover:underline">
+                        <Mail className="h-3.5 w-3.5" /> {selectedContact.email}
+                      </a>
+                    )}
+                    {selectedContact.role && <span className="text-muted-foreground">{selectedContact.role}</span>}
+                  </div>
+                )
+              )}
             </div>
           )}
         </Section>
@@ -3531,33 +4123,33 @@ export function CalendarEventDialog({
       </Section>
       )}
 
-      {/* Kto (kafelek notatki nie ma techników) */}
+      {/* Kto (kafelek notatki nie ma przypisanych) */}
       {!isNote && (
       <Section id="sec-who" icon={Users} title={isUrlop ? "Kto *" : "Kto"}>
-        {techList.length === 0 ? (
-          <p className="text-xs text-muted-foreground">Brak aktywnych techników.</p>
+        {assigneeList.length === 0 ? (
+          <p className="text-xs text-muted-foreground">{cfg.assignees.labels.empty}.</p>
         ) : (
           <div
             role="group"
-            aria-label="Technicy"
-            aria-describedby={fieldErrors.technicians ? "cal-tech-err" : undefined}
+            aria-label={cfg.assignees.labels.many}
+            aria-describedby={fieldErrors.assignees ? "cal-assignee-err" : undefined}
             className={cn(
               "flex flex-wrap gap-1.5 rounded-md border p-2",
-              fieldErrors.technicians && "border-destructive"
+              fieldErrors.assignees && "border-destructive"
             )}
           >
-            {techList.map((t, idx) => {
-              const checked = form.technicianIds.includes(t.id);
+            {assigneeList.map((t, idx) => {
+              const checked = form.assigneeIds.includes(t.id);
               const leave = onLeave.get(t.id);
               const name = `${t.firstName} ${t.lastName}`;
               return (
                 <button
                   key={t.id}
-                  id={idx === 0 ? "cal-tech-first" : undefined}
+                  id={idx === 0 ? "cal-assignee-first" : undefined}
                   type="button"
                   role="checkbox"
                   aria-checked={checked}
-                  onClick={() => toggleTechnician(t.id)}
+                  onClick={() => toggleAssignee(t.id)}
                   className={cn(
                     "inline-flex items-center gap-1.5 rounded-full border py-0.5 pl-0.5 pr-2.5 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none",
                     checked
@@ -3591,7 +4183,7 @@ export function CalendarEventDialog({
             })}
           </div>
         )}
-        <FieldError id="cal-tech-err" msg={fieldErrors.technicians} />
+        <FieldError id="cal-assignee-err" msg={fieldErrors.assignees} />
 
         {leaveMessages.length > 0 && (
           <div
@@ -3601,7 +4193,7 @@ export function CalendarEventDialog({
           >
             <div className="flex items-center gap-2 font-medium">
               <TreePalm className="h-4 w-4 shrink-0" />
-              Technik na urlopie w tym terminie
+              {cfg.assignees.labels.one} na urlopie w tym terminie
             </div>
             <ul className="mt-1 space-y-0.5 text-xs">
               {leaveMessages.map((m) => (
@@ -3643,7 +4235,7 @@ export function CalendarEventDialog({
                     <span className="font-medium">{c.title}</span>
                     <span className="opacity-80">
                       · {fmtRange(c.startAt, c.endAt, c.allDay)} ·{" "}
-                      {c.technicians.map((t) => `${t.firstName} ${t.lastName}`).join(", ")}
+                      {assigneesOf(c, cfg).map((t) => `${t.firstName} ${t.lastName}`).join(", ")}
                     </span>
                   </>
                 );
@@ -3673,7 +4265,7 @@ export function CalendarEventDialog({
       )}
 
       {/* Protokół — przypięty jawnie albo wyliczony z realizacji */}
-      {showBilling && (
+      {showProtocol && (
         <Section
           id="sec-protocol"
           icon={FileCheck2}
@@ -3759,7 +4351,7 @@ export function CalendarEventDialog({
       )}
 
       {/* Wycena — dokument „za ile”; powstaje automatycznie dla prac płatnych */}
-      {showBilling && (
+      {showQuote && (
         <Section
           id="sec-quote"
           icon={Calculator}
@@ -3859,7 +4451,7 @@ export function CalendarEventDialog({
       )}
 
       {/* Realizacja — powiązanie z rejestrem Realizacji (auto lub ręcznie) */}
-      {showRealization && (
+      {cfg.features.realization && showRealization && (
         <Section
           id="sec-realization"
           icon={Receipt}
@@ -4135,19 +4727,34 @@ export function CalendarEventDialog({
             canEdit={!event.deletedAt}
             onCountChange={handleNotesCount}
             onDraftChange={setHasNoteDraft}
-            onOpenMention={openMention}
+            onOpenMention={cfg.features.noteMentions ? openMention : undefined}
+            objectId={event.objectId}
+            objectName={event.objectName}
           />
         </Section>
       ) : mode === "create" ? (
         <Section
           id="sec-first-note"
-          icon={StickyNote}
-          title="Pierwsza notatka"
+          icon={firstNoteMail ? Mail : StickyNote}
+          title={firstNoteMail ? "Mail z Outlooka" : "Pierwsza notatka"}
           open={openSec.firstNote}
           onToggle={() => toggleSec("firstNote")}
-          summary={firstNote.trim() ? firstNote.trim().slice(0, 60) : "opcjonalnie"}
+          summary={
+            firstNote.trim()
+              ? firstNote.trim().slice(0, 60)
+              : firstNoteFiles.length > 0
+                ? `${firstNoteFiles.length} ${plural(firstNoteFiles.length, "plik", "pliki", "plików")}`
+                : "opcjonalnie"
+          }
         >
           <div className="space-y-1">
+            {/* Mail z Outlooka: nagłówek tylko do odczytu — zapisze się w polach notatki. */}
+            {firstNoteMail && <MailNoteHeader mail={firstNoteMail} className="mb-1.5" meta={firstNoteMeta} />}
+            {firstNoteMail && firstNoteMeta.length > 0 && (
+              <ToggleChip id="cal-extract-msg-att" checked={extractMsgAtt} onChange={setExtractMsgAtt}>
+                Wypakuj załączniki z maila ({firstNoteMeta.length})
+              </ToggleChip>
+            )}
             <Label htmlFor="cal-first-note" className="sr-only">
               Pierwsza notatka
             </Label>
@@ -4155,12 +4762,38 @@ export function CalendarEventDialog({
               id="cal-first-note"
               value={firstNote}
               onChange={(e) => setFirstNote(e.target.value)}
-              rows={2}
+              // Szkic z maila to kilkanaście linijek — dwa wiersze zmusiłyby do przewijania w polu.
+              rows={prefill?.noteDraft ? 8 : 2}
               maxLength={4000}
               placeholder="np. Klient prosi o telefon przed przyjazdem"
               data-testid="first-note-input"
             />
-            <p className="text-[11px] text-muted-foreground">Zostanie dodana do dziennika zaraz po utworzeniu wydarzenia.</p>
+            {firstNoteFiles.length > 0 && (
+              <ul className="flex flex-wrap gap-1.5 pt-1" data-testid="first-note-files">
+                {firstNoteFiles.map((f) => (
+                  <li
+                    key={`${f.name}-${f.size}-${f.lastModified}`}
+                    className="inline-flex max-w-full items-center gap-1 rounded-full border bg-muted/40 px-2 py-0.5 text-[11px]"
+                  >
+                    <Paperclip className="h-3 w-3 shrink-0 text-muted-foreground" aria-hidden />
+                    <span className="truncate">{f.name}</span>
+                    <button
+                      type="button"
+                      className="shrink-0 rounded-full p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      onClick={() => setFirstNoteFiles((list) => list.filter((x) => x !== f))}
+                      aria-label={`Usuń załącznik ${f.name}`}
+                    >
+                      <X className="h-3 w-3" aria-hidden />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <p className="text-[11px] text-muted-foreground">
+              {firstNoteMail
+                ? "Mail zostanie zapisany w dzienniku zaraz po utworzeniu wydarzenia — z nagłówkiem i oryginalnym plikiem."
+                : "Zostanie dodana do dziennika zaraz po utworzeniu wydarzenia."}
+            </p>
           </div>
         </Section>
       ) : null}
@@ -4186,7 +4819,7 @@ export function CalendarEventDialog({
   );
 
   const metaLine = event && (
-    <span className="truncate text-[11px] text-muted-foreground">
+    <span className="block truncate text-[11px] text-muted-foreground">
       Utworzył {event.createdByLabel ?? "—"},{" "}
       <time dateTime={event.createdAt} {...tip(`Utworzono: ${fmtTimestamp(event.createdAt)}`)}>
         {fmtRelative(event.createdAt)}
@@ -4272,27 +4905,51 @@ export function CalendarEventDialog({
   return (
     <>
       {docked ? (
-        // Szuflada: zwykły panel w siatce strony (kalendarz zwęża się obok), więc bez
-        // overlaya i pułapki fokusu. Esc zamyka tak samo jak w oknie modalnym.
-        <aside
-          role="region"
-          aria-label={isEdit ? "Edycja wydarzenia" : "Wydarzenie"}
-          data-testid="event-drawer"
-          onKeyDown={(e) => {
-            onKeyDown(e);
-            if (e.key === "Escape") {
-              e.stopPropagation();
-              requestClose();
-            }
-          }}
-          className="relative flex h-fit min-w-0 flex-col overflow-hidden rounded-lg border bg-background shadow-sm lg:h-full lg:min-h-0"
-          {...dropProps}
-        >
-          {header}
-          {scrollBody}
-          {footer}
-          {dropOverlay}
-        </aside>
+        // Szuflada: od lg zwykły panel w siatce strony (kalendarz zwęża się obok), poniżej lg
+        // nakładka nasunięta z prawej — kalendarz nie ma tam gdzie się zwęzić. Esc zamyka
+        // w obu przypadkach, tak samo jak w oknie modalnym.
+        <>
+          {/* Przyciemnienie tylko pod nakładką; zamyka przez `requestClose`, więc szkic i zmiany są chronione. */}
+          {belowLg && (
+            <button
+              type="button"
+              aria-label="Zamknij panel"
+              className="fixed inset-0 z-40 bg-black/40 lg:hidden"
+              onClick={requestClose}
+            />
+          )}
+          <aside
+            ref={asideRef}
+            tabIndex={-1}
+            role="region"
+            aria-label={drawerLabel}
+            // `role` zostaje regionem (nie dialogiem) — inaczej panel wpadałby we własne
+            // wykluczenie `[role="dialog"]` przy obsłudze Esc i skrótów kalendarza.
+            aria-modal={belowLg ? "true" : undefined}
+            data-testid="event-drawer"
+            onKeyDown={(e) => {
+              onKeyDown(e);
+              if (e.key === "Escape") {
+                // `preventDefault` + `stopPropagation`, żeby handler na `window` (niżej)
+                // nie zamknął panelu po raz drugi.
+                e.preventDefault();
+                e.stopPropagation();
+                requestClose();
+              }
+            }}
+            className={cn(
+              "flex min-w-0 flex-col overflow-hidden bg-background",
+              "fixed inset-y-0 right-0 z-50 h-full w-[min(100vw,480px)] rounded-none border-l shadow-2xl alfa-drawer-in",
+              "lg:relative lg:inset-auto lg:z-auto lg:h-full lg:min-h-0 lg:w-auto lg:rounded-lg lg:border lg:shadow-sm"
+            )}
+            {...dropProps}
+          >
+            {header}
+            {scrollBody}
+            {footer}
+            {dropOverlay}
+          </aside>
+        </>
       ) : (
         <Dialog open={open} onOpenChange={(o) => !o && requestClose()}>
           <DialogContent

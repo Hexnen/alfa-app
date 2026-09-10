@@ -385,7 +385,8 @@ for (const o of OBJECTS) {
       installationType: o.installationType,
       status: o.status,
       department: o.department,
-      monthlyValue: o.monthlyValue ?? null,
+      // Seed demo opisuje obiekty monitoringowe — abonament idzie na linię ZDW.
+      monthlyZdw: o.monthlyValue ?? null,
       latitude: o.latitude ?? null,
       longitude: o.longitude ?? null,
       notes: o.notes ?? null,

@@ -8,6 +8,7 @@
  * (16 plików, >5 MB, .exe, pusty tekst bez plików, obrazek nie do zdekodowania), loadNotes
  * z załącznikami (kształt JSON), GET (nagłówki, ?download=1, treść), DELETE (uprawnienia,
  * wiersz + plik znikają), kaskada FK po twardym usunięciu notatki, removeEventAttachmentDir,
+ * maile .msg/.eml na białej liście (mail upuszczony na kalendarz zostaje przy notatce),
  * a także konsumentów notatki BEZ TEKSTU: dymek podglądu (GET /events/:id) i asystent
  * (get_event → liczba załączników).
  * Pliki lądują w <katalog bazy>/attachments — na kopii to katalog tymczasowy.
@@ -146,7 +147,13 @@ try {
   const notes = loadNotes(db, ev.id);
   ok("loadNotes: 3 notatki, załączniki [1, 2, 0]", notes.length === 3 && notes.map((n) => n.attachments.length).join() === "1,2,0", notes.map((n) => n.attachments.length));
   const keys = Object.keys(notes[0].attachments[0]).sort().join();
-  ok("loadNotes: klucze załącznika id,fileName,mime,size,kind,width,height,url", keys === "fileName,height,id,kind,mime,size,url,width", keys);
+  // `origin` doszło z migracją 0096 (upload vs załącznik wypakowany z maila .msg).
+  ok(
+    "loadNotes: klucze załącznika id,fileName,mime,size,kind,origin,width,height,url",
+    keys === "fileName,height,id,kind,mime,origin,size,url,width",
+    keys
+  );
+  ok("loadNotes: zwykły upload ma origin=upload", notes[0].attachments[0].origin === "upload", notes[0].attachments[0].origin);
   const g = await asOther.request(`/calendar/events/${ev.id}/notes`);
   const gj = (await g.json()) as { data: NoteJson[] };
   ok("GET /events/:id/notes zwraca attachments", gj.data[0]?.attachments?.[0]?.id === a1?.id, gj.data[0]);
@@ -200,6 +207,31 @@ try {
   ok("DELETE przez admina cudzego → 200, plik znika", d3.status === 200 && storedPathOf(a2[1].id) === null);
   const d4 = await asAdmin.request(`/calendar/attachments/${a1!.id}`, { method: "DELETE" });
   ok("DELETE już usuniętego → 404", d4.status === 404);
+
+  // --- maile na białej liście: .msg z Outlooka i .eml ---
+  // Mail przeciągnięty z Outlooka na kalendarz zostaje załącznikiem pierwszej notatki
+  // (src/lib/outlook-msg.ts, POST /calendar/msg/parse) — bez tych rozszerzeń w
+  // DOC_MIME_BY_EXT oryginał maila nie miałby gdzie wylądować.
+  const rMail = await postNote(asAdmin, ev.id, multipart("Mail z Outlooka", [
+    // Przeglądarka przy drag&drop podaje octet-stream — decyduje rozszerzenie.
+    { name: "Awaria kamery.msg", type: "application/octet-stream", data: Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]) },
+    { name: "kopia.eml", type: "message/rfc822", data: Buffer.from("From: a@b.invalid\r\n\r\ntreść") },
+  ]));
+  const aMail = rMail.json.data?.attachments ?? [];
+  ok(
+    ".msg + .eml → 201, kind file, MIME z rozszerzenia",
+    rMail.status === 201 &&
+      aMail.length === 2 &&
+      aMail[0]?.mime === "application/vnd.ms-outlook" &&
+      aMail[1]?.mime === "message/rfc822" &&
+      aMail.every((a) => a.kind === "file"),
+    rMail.json
+  );
+  ok(
+    ".msg: plik na dysku z rozszerzeniem .msg, nazwa bez zmian",
+    !!aMail[0] && fileExists(aMail[0].id) && (storedPathOf(aMail[0].id) ?? "").endsWith(".msg") && aMail[0].fileName === "Awaria kamery.msg",
+    aMail[0]
+  );
 
   // --- soft delete notatki nie rusza plików; kaskada FK przy twardym usunięciu ---
   const pdfPath = resolveStoredPath(storedPathOf(a2[0].id)!)!;

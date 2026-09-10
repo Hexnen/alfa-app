@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { db, schema } from "../db/index.js";
-import { asc, eq, or, sql } from "drizzle-orm";
+import { and, asc, eq, ne, or, sql } from "drizzle-orm";
 import type { ApiResponse } from "../types/index.js";
 import type { NewSalesperson } from "../db/schema.js";
 
@@ -54,6 +54,28 @@ async function employeeOk(id: number | null | undefined): Promise<boolean> {
   return rows.length > 0;
 }
 
+/** Czy wskazane konto użytkownika istnieje (null = brak powiązania, zawsze OK). */
+function userExists(id: number | null | undefined): boolean {
+  if (!id) return true;
+  return db.select({ id: schema.users.id }).from(schema.users).where(eq(schema.users.id, id)).get() != null;
+}
+
+/**
+ * Handlowiec, do którego to konto jest już przypięte (z pominięciem edytowanego).
+ * Jeden użytkownik = jeden handlowiec — inaczej „Moje” pokazywałoby dwa lejki naraz.
+ */
+function salespersonOfUser(userId: number, excludeId: number | null): { id: number; firstName: string; lastName: string } | undefined {
+  return db
+    .select({ id: schema.salespeople.id, firstName: schema.salespeople.firstName, lastName: schema.salespeople.lastName })
+    .from(schema.salespeople)
+    .where(
+      excludeId != null
+        ? and(eq(schema.salespeople.userId, userId), ne(schema.salespeople.id, excludeId))
+        : eq(schema.salespeople.userId, userId)
+    )
+    .get();
+}
+
 function parseBody(body: Record<string, unknown>): {
   data?: Partial<NewSalesperson>;
   error?: string;
@@ -87,9 +109,15 @@ function parseBody(body: Record<string, unknown>): {
   const employeeId = parseEmployeeId(body.employeeId);
   if (employeeId === INVALID) return { error: "Nieprawidłowy pracownik kadr" };
 
+  // Konto w aplikacji (ten sam parser co dla kadr — wolno wyłącznie id wiersza).
+  // Po nim moduł handlowy rozpoznaje „Moje”; istnienie i unikalność sprawdzają trasy.
+  const userId = parseEmployeeId(body.userId);
+  if (userId === INVALID) return { error: "Nieprawidłowe konto użytkownika" };
+
   return {
     data: {
       employeeId,
+      userId,
       firstName,
       lastName,
       phone: typeof body.phone === "string" ? body.phone.trim() : "",
@@ -132,6 +160,9 @@ app.get("/", async (c) => {
       // Nazwisko z kartoteki kadrowej — lista pokazuje, kto jest na liście płac,
       // bez dociągania Kadr osobnym żądaniem.
       employeeName: schema.hrEmployees.fullName,
+      // Konto w aplikacji — kolumna „Konto” w słowniku i podpowiedź, kto ma „Moje”.
+      userEmail: schema.users.email,
+      userDisplayName: schema.users.displayName,
       // Odwołanie do kolumny nadrzędnej piszemy DOSŁOWNIE (`salespeople.id`): drizzle
       // renderuje \${schema.salespeople.id} w szablonie jako niekwalifikowane "id", które
       // wewnątrz podzapytania trafiłoby w kolumnę `id` tabeli z podzapytania.
@@ -146,7 +177,7 @@ app.get("/", async (c) => {
         where coalesce(objects.salesperson_id, contractors.salesperson_id) = salespeople.id
       )`,
       objectsMonthlyValue: sql<number>`(
-        select coalesce(sum(coalesce(objects.monthly_value, 0) + coalesce(objects.monthly_rental, 0)), 0) from objects
+        select coalesce(sum(coalesce(objects.monthly_zdw, 0) + coalesce(objects.monthly_ofi, 0) + coalesce(objects.monthly_rental, 0)), 0) from objects
         join contractors on contractors.id = objects.contractor_id
         where coalesce(objects.salesperson_id, contractors.salesperson_id) = salespeople.id
       )`,
@@ -166,6 +197,7 @@ app.get("/", async (c) => {
       schema.hrEmployees,
       eq(schema.salespeople.employeeId, schema.hrEmployees.id),
     )
+    .leftJoin(schema.users, eq(schema.salespeople.userId, schema.users.id))
     .orderBy(asc(sql`lower(${schema.salespeople.lastName})`), asc(schema.salespeople.firstName));
 
   const data = rows
@@ -173,6 +205,8 @@ app.get("/", async (c) => {
     .map((r) => ({
       ...r.salesperson,
       employeeName: r.employeeName ?? null,
+      userEmail: r.userEmail ?? null,
+      userDisplayName: r.userDisplayName ?? null,
       contractorsCount: r.contractorsCount ?? 0,
       objectsCount: r.objectsCount ?? 0,
       objectsMonthlyValue: r.objectsMonthlyValue ?? 0,
@@ -196,6 +230,18 @@ app.post("/", async (c) => {
       { success: false, error: "Nie znaleziono pracownika w kadrach" },
       404,
     );
+  }
+  if (!userExists(data.userId)) {
+    return c.json<ApiResponse<null>>({ success: false, error: "Nie znaleziono użytkownika" }, 404);
+  }
+  if (data.userId) {
+    const taken = salespersonOfUser(data.userId, null);
+    if (taken) {
+      return c.json<ApiResponse<null>>(
+        { success: false, error: `To konto jest już przypisane do handlowca: ${`${taken.firstName} ${taken.lastName}`.trim()}` },
+        409,
+      );
+    }
   }
 
   const result = await db
@@ -243,6 +289,18 @@ app.put("/:id", async (c) => {
       { success: false, error: "Nie znaleziono pracownika w kadrach" },
       404,
     );
+  }
+  if (!userExists(data.userId)) {
+    return c.json<ApiResponse<null>>({ success: false, error: "Nie znaleziono użytkownika" }, 404);
+  }
+  if (data.userId) {
+    const taken = salespersonOfUser(data.userId, id);
+    if (taken) {
+      return c.json<ApiResponse<null>>(
+        { success: false, error: `To konto jest już przypisane do handlowca: ${`${taken.firstName} ${taken.lastName}`.trim()}` },
+        409,
+      );
+    }
   }
 
   const result = await db

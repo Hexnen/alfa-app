@@ -7,7 +7,8 @@
  * Konwencja odpowiedzi: { success, data } / { success:false, error }.
  */
 import { Hono } from "hono";
-import { db } from "../db/index.js";
+import { inArray } from "drizzle-orm";
+import { db, schema } from "../db/index.js";
 import { requireAdmin, getUser } from "../middleware/auth.js";
 import { logActivity } from "../lib/activity-log.js";
 import { deleteSetting, getSetting, setSetting } from "../lib/settings.js";
@@ -23,6 +24,9 @@ import {
 } from "../lib/calendar-config.js";
 import { runBackfill, type BackfillResult } from "../lib/calendar-realizations.js";
 import { DATE_RE, isValidCalendarDate } from "../lib/calendar-mutations.js";
+import { clientIdOf, publishCalendarChange } from "../lib/calendar-live.js";
+import { asDepartment } from "../lib/calendar-scope.js";
+import type { CalendarDepartment } from "../db/schema.js";
 
 const app = new Hono();
 app.use("*", requireAdmin);
@@ -168,6 +172,28 @@ app.post("/backfill-realizations", async (c) => {
       }
       return r;
     });
+    // Kalendarz „na żywo": backfill dopina realizacje do istniejących wydarzeń, a to
+    // widać na kafelkach (badge realizacji/protokołu) — otwarte karty mają się odświeżyć.
+    // Wydarzenia grupujemy po dziale, żeby sygnał trafił tylko tam, gdzie coś się zmieniło.
+    if (!dryRun && result.created?.length) {
+      const ids = result.created.map((r) => r.eventId);
+      const rows = db
+        .select({ id: schema.calendarEvents.id, department: schema.calendarEvents.department })
+        .from(schema.calendarEvents)
+        .where(inArray(schema.calendarEvents.id, ids))
+        .all();
+      const byDept = new Map<CalendarDepartment, number[]>();
+      for (const row of rows) {
+        const dept = asDepartment(row.department);
+        const bucket = byDept.get(dept);
+        if (bucket) bucket.push(row.id);
+        else byDept.set(dept, [row.id]);
+      }
+      const actorClientId = clientIdOf(c);
+      for (const [department, eventIds] of byDept) {
+        publishCalendarChange({ department, kind: "updated", eventIds, actorUserId: user.id, actorClientId });
+      }
+    }
     return c.json({ success: true, data: result });
   } catch (error) {
     console.error("Error in admin calendar backfill:", error);

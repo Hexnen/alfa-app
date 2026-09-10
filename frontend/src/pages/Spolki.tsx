@@ -44,7 +44,15 @@ import {
 import { cn, formatCurrency } from "@/lib/utils";
 
 /** Kolumny, po których da się sortować listę spółek. */
-type CompanySortKey = "name" | "fullName" | "nip" | "vat" | "objects" | "value" | "contracts";
+type CompanySortKey =
+  | "name"
+  | "fullName"
+  | "contractCode"
+  | "nip"
+  | "vat"
+  | "objects"
+  | "value"
+  | "contracts";
 
 /**
  * Domyślny kierunek sortowania kolumny — kwoty i liczniki ludzie czytają od
@@ -53,6 +61,7 @@ type CompanySortKey = "name" | "fullName" | "nip" | "vat" | "objects" | "value" 
 const DEFAULT_DIR: Record<CompanySortKey, "asc" | "desc"> = {
   name: "asc",
   fullName: "asc",
+  contractCode: "asc",
   nip: "asc",
   vat: "asc",
   objects: "desc",
@@ -172,7 +181,7 @@ export function Spolki() {
     const list = rows.filter((c) => {
       if (
         q &&
-        ![c.name, c.fullName, c.nip, c.notes]
+        ![c.name, c.fullName, c.nip, c.notes, c.contractCode]
           .filter(Boolean)
           .some((v) => String(v).toLowerCase().includes(q))
       ) {
@@ -198,9 +207,11 @@ export function Spolki() {
         ? c.name
         : sort === "fullName"
           ? c.fullName
-          : sort === "nip"
-            ? c.nip
-            : c.vatStatus) ?? "";
+          : sort === "contractCode"
+            ? c.contractCode
+            : sort === "nip"
+              ? c.nip
+              : c.vatStatus) ?? "";
     const number = (c: Company) =>
       sort === "objects"
         ? (c.objectsCount ?? 0)
@@ -382,6 +393,11 @@ export function Spolki() {
             <tr className="border-b">
               <SortHeader label="Spółka" sortKey="name" />
               <SortHeader label="Pełna nazwa" sortKey="fullName" />
+              <SortHeader
+                label="Kod umów"
+                sortKey="contractCode"
+                title="Kod do numeracji umów generowanych z szablonu (np. ZDW → 12/ZDW/2026)"
+              />
               <SortHeader label="NIP" sortKey="nip" />
               <SortHeader label="VAT (wykaz MF)" sortKey="vat" />
               <SortHeader label="Obiekty" sortKey="objects" align="right" />
@@ -417,6 +433,9 @@ export function Spolki() {
                   )}
                 </td>
                 <td className="py-3 px-2">{c.fullName || "-"}</td>
+                <td className="py-3 px-2" data-testid={`company-contract-code-${c.id}`}>
+                  {c.contractCode || <span className="text-muted-foreground">-</span>}
+                </td>
                 <td className="py-3 px-2 tabular-nums">{c.nip || "-"}</td>
                 <td className="py-3 px-2">
                   {c.vatStatus ? (
@@ -548,7 +567,8 @@ export function Spolki() {
           </tbody>
           <tfoot>
             <tr className="border-t">
-              <td className="py-3 px-2 font-medium" colSpan={4}>
+              {/* colSpan obejmuje kolumny tekstowe: Spółka, Pełna nazwa, Kod umów, NIP, VAT. */}
+              <td className="py-3 px-2 font-medium" colSpan={5}>
                 Razem
               </td>
               <td className="py-3 px-2 text-right font-medium tabular-nums">{sum.objects}</td>

@@ -23,6 +23,28 @@ export const PRICE_STALE_MONTHS = { warehouse: 6, service: 12 } as const;
 
 export type PriceSourceKind = keyof typeof PRICE_STALE_MONTHS;
 
+/**
+ * Drugi, ostrzejszy próg: cena, której nikt nie potwierdził od tak dawna, że
+ * nie jest już „do odświeżenia”, a po prostu niewiarygodna.
+ *
+ * Podwójny próg zamiast jednego, bo w kartotece z tysiącem pozycji zawsze coś
+ * będzie przekroczone o miesiąc — gdyby wszystko świeciło tym samym kolorem,
+ * lista wyglądałaby jak jeden wielki alarm i przestano by na nią patrzeć.
+ * Żółty mówi „zajrzyj przy okazji”, czerwony „tej kwoty nie wstawiaj do oferty”.
+ * Proporcja 2× względem `PRICE_STALE_MONTHS` trzyma tę samą logikę w obu
+ * katalogach (magazyn 6/12 mies., usługi 12/24).
+ */
+export const PRICE_OLD_MONTHS = { warehouse: 12, service: 24 } as const;
+
+/**
+ * Trzy stopnie wieku ceny: świeża / do odświeżenia / niewiarygodna.
+ *
+ * Rozdzielone od boolowskiego `isPriceStale`, bo poziom jest potrzebny tylko
+ * tam, gdzie UI ma trzy kolory; reszta aplikacji (filtry, kropki, dymki
+ * w Ofertach) pyta dalej o jedno bit-owe „stara czy nie”.
+ */
+export type PriceAgeLevel = "fresh" | "stale" | "old";
+
 /** `now` minus `months` miesięcy kalendarzowych. */
 function monthsAgo(now: Date, months: number): Date {
   const d = new Date(now.getTime());
@@ -58,6 +80,33 @@ export function isPriceStale(
   const stamp = parseStamp(priceUpdatedAt);
   if (!stamp) return true;
   return stamp.getTime() < monthsAgo(now, PRICE_STALE_MONTHS[kind]).getTime();
+}
+
+/**
+ * Stopień przeterminowania ceny.
+ *
+ * Zgodność z `isPriceStale` jest tu warunkiem, nie zbiegiem okoliczności:
+ * `priceAgeLevel(...) !== "fresh"` daje dokładnie to samo co
+ * `isPriceStale(...)`, bo oba mierzą ten sam próg `PRICE_STALE_MONTHS` na tym
+ * samym stemplu (brak daty → przeterminowana, tutaj od razu „old”, bo nieznany
+ * wiek to najgorszy przypadek, nie średni). Gdyby kiedyś progi się rozjechały,
+ * ten sam towar byłby żółty w tabeli i zielony w filtrze.
+ *
+ * `isPriceStale` i `priceAgeLabel` zostają bez zmian — etykietę parsuje
+ * regexem `components/offers/OfferSectionCard.tsx`, więc jej format jest
+ * kontraktem, a nie tylko tekstem dla człowieka.
+ */
+export function priceAgeLevel(
+  priceUpdatedAt: string | null | undefined,
+  kind: PriceSourceKind,
+  now: Date = new Date()
+): PriceAgeLevel {
+  const stamp = parseStamp(priceUpdatedAt);
+  if (!stamp) return "old";
+  const t = stamp.getTime();
+  if (t < monthsAgo(now, PRICE_OLD_MONTHS[kind]).getTime()) return "old";
+  if (t < monthsAgo(now, PRICE_STALE_MONTHS[kind]).getTime()) return "stale";
+  return "fresh";
 }
 
 /** Pełne miesiące kalendarzowe między dwiema datami (nieujemne). */

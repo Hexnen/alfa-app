@@ -23,7 +23,6 @@ import {
   weatherFacts,
   weatherHeadline,
   weatherLabel,
-  weatherLineText,
   weatherMeta,
   weatherTip,
 } from "@/lib/weather-meta";
@@ -81,46 +80,6 @@ export function WeatherMark({
         />
       )}
     </span>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Wiersz pogody w popoverze podglądu wydarzenia
-// ---------------------------------------------------------------------------
-
-/**
- * Jeden wiersz `dt`/`dd` z pogodą — do listy definicji w popoverze podglądu wydarzenia
- * (obok dojazdu, techników, rozliczenia). MUSI stać wewnątrz `<dl>`.
- * Bez prognozy nie renderuje nic; szczegóły (opady, źródło punktu) siedzą w dymku.
- */
-export function WeatherPreviewRow({
-  brief,
-  className,
-}: {
-  brief: WeatherBrief | null | undefined;
-  className?: string;
-}) {
-  if (!brief) return null;
-  const warn = brief.warningLevel > 0 ? (brief.warningLevel as 1 | 2 | 3) : null;
-  return (
-    <div className={cn("flex gap-2", className)} data-testid="preview-weather">
-      <dt className="w-4 shrink-0 text-muted-foreground">{renderIcon(brief.code, "h-3.5 w-3.5")}</dt>
-      <dd className="min-w-0" {...markTip(weatherTip(brief))}>
-        <span className="align-middle">{weatherLineText(brief)}</span>
-        {warn && (
-          <span
-            data-testid="preview-weather-warning"
-            className={cn(
-              "ml-1.5 inline-flex items-center gap-0.5 rounded-full border px-1.5 py-px align-middle text-[10px] font-semibold",
-              WARNING_BOX[warn],
-              WARNING_TONE[warn]
-            )}
-          >
-            <AlertTriangle className="h-3 w-3" aria-hidden /> IMGW {warn}°
-          </span>
-        )}
-      </dd>
-    </div>
   );
 }
 

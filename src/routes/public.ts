@@ -2,12 +2,14 @@ import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { db, schema } from "../db/index.js";
 import { and, eq, gte, sql } from "drizzle-orm";
-import type { OrderInput, ApiResponse } from "../types/index.js";
+import type { ObjectServiceInput, OrderInput, ApiResponse } from "../types/index.js";
 import { normalizeNIP, validateNIP } from "../utils/nip.js";
 import { createOrderFromInput, parseOrderInput } from "../services/orders.js";
 import { lookupCompanyByNip, isMfError } from "../lib/mf-whitelist.js";
 import { createRateLimiter, clientIp } from "../lib/rate-limit.js";
 import { isValidationError } from "../lib/validate.js";
+import { parseAllowedMapsUrl } from "../lib/maps-url.js";
+import { flagsFromServices, legacyObjectType, todayIso } from "../lib/object-services.js";
 
 const app = new Hono();
 
@@ -57,6 +59,9 @@ const PUBLIC_INTAKE_FIELDS = [
   "objectAddress",
   "objectCity",
   "objectLocationUrl",
+  // Okresy usług zakładanego obiektu — publiczny formularz może je przysłać
+  // wprost; gdy tego nie robi, wyprowadzamy je z odpowiedzi (niżej).
+  "objectServices",
   "contactPerson",
   "contactPhone",
   "contactEmail",
@@ -205,10 +210,20 @@ app.post("/order-intake", async (c) => {
       if (key in body) picked[key] = body[key];
     }
 
+    /*
+     * LEJEK HANDLOWY JEST POZA ZASIĘGIEM FORMULARZA PUBLICZNEGO. Kierunek jest
+     * jednostronny (szansa → zlecenie), więc anonimowe zgłoszenie nie może
+     * wskazać cudzej szansy ani przypisać sobie handlowca. `leadId`
+     * i `salespersonId` nie stoją na whiteliście wyżej, a poniższe `delete` jest
+     * bramką na wypadek, gdyby ktoś kiedyś dopisał je do listy pól publicznych;
+     * druga bramka siedzi w `createOrderFromInput` (`source === "public"`).
+     */
+    delete picked.leadId;
+    delete picked.salespersonId;
+
     // Wymuszona polityka CRM — nigdy z klienta.
     picked.status = "new";
     picked.createObject = true;
-    picked.objectType = "monitoring";
     picked.objectInstallationType = "new";
     picked.createContractor = true;
 
@@ -221,6 +236,37 @@ app.post("/order-intake", async (c) => {
       }
       throw err;
     }
+
+    /*
+     * USŁUGI OBIEKTU Z ODPOWIEDZI FORMULARZA. Do września 2026 publiczny ZDW
+     * wymuszał `objectType: "monitoring"` i nie wysyłał żadnych flag usług —
+     * obiekt z zewnętrznego zgłoszenia powstawał więc BEZ ANI JEDNEJ USŁUGI,
+     * niewidoczny w filtrach listy i bez wagi w koszcie centrum monitorowania.
+     *
+     * Formularz pyta wprost o montaż kamer, ich liczbę i wideorecepcję — z tego
+     * da się zbudować okresy. SSWiN i ochrony fizycznej nie zgadujemy: o nie
+     * formularz nie pyta, a wpisana „na wszelki wypadek” usługa jest gorsza niż
+     * jej brak (handlowiec i tak weryfikuje obiekt w statusie `pending`).
+     */
+    if (input.objectServices === undefined) {
+      const startDate = input.serviceStartDate || input.installationStartDate || todayIso();
+      const services: ObjectServiceInput[] = [];
+      if (input.isCameraInstallation || (input.cameraCount ?? 0) > 0) {
+        services.push({
+          service: "kamery",
+          startDate,
+          endDate: null,
+          cameraCount: input.cameraCount ?? null,
+        });
+      }
+      if (input.videoReception) {
+        services.push({ service: "wideorecepcja", startDate, endDate: null });
+      }
+      input.objectServices = services;
+    }
+    // @deprecated kolumna `objects.type` jest wciąż NOT NULL — wyliczamy ją
+    // z usług, zamiast wpisywać na sztywno „monitoring”.
+    input.objectType = legacyObjectType(flagsFromServices(input.objectServices));
 
     // NIP przed limitem: literówka w NIP-ie nie zjada puli zgłoszeń.
     const normalizedNip = normalizeNIP(input.payerNip);
@@ -345,36 +391,8 @@ function extractCoords(text: string): { lat: number; lng: number } | null {
   return null;
 }
 
-/**
- * Hosty, do których serwer w ogóle wykona żądanie. Lista DOKŁADNA (host równy
- * albo poddomena) — poprzedni wzorzec `google\.[a-z.]+` przepuszczał
- * `google.evil.com`, a `redirect: "follow"` pozwalał skróconemu linkowi
- * poprowadzić serwer pod dowolny adres, także w sieci wewnętrznej (SSRF).
- *
- * Skąd biorą się linki: użytkownik wkleja z aplikacji Google Maps —
- * `maps.app.goo.gl/…`, `goo.gl/maps/…`, `g.co/kgs/…` — które przekierowują na
- * `www.google.com/maps/…` albo `www.google.pl/maps/…` (patrz LocationPicker.tsx).
- */
-const ALLOWED_HOST_SUFFIXES = ["google.com", "google.pl", "goo.gl", "g.co"] as const;
-
-function isAllowedMapsHost(hostname: string): boolean {
-  const h = hostname.toLowerCase();
-  return ALLOWED_HOST_SUFFIXES.some((s) => h === s || h.endsWith(`.${s}`));
-}
-
-/** Adres z allowlisty, http(s), bez loginu/hasła w URL-u. */
-function parseAllowedMapsUrl(raw: string): URL | null {
-  let u: URL;
-  try {
-    u = new URL(raw);
-  } catch {
-    return null;
-  }
-  if (u.protocol !== "http:" && u.protocol !== "https:") return null;
-  if (u.username || u.password) return null;
-  if (!isAllowedMapsHost(u.hostname)) return null;
-  return u;
-}
+// Allowlista hostów i parser adresu Google Maps: src/lib/maps-url.ts (ten sam
+// filtr chroni pole `objects.maps_url` w kartotece obiektu).
 
 const RESOLVE_TIMEOUT_MS = 5_000;
 const RESOLVE_MAX_HOPS = 3;

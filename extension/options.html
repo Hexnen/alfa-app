@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="pl">
+  <head>
+    <meta charset="utf-8" />
+    <title>Alfa — magazyn: ustawienia wtyczki</title>
+    <style>
+      /* Style inline w <style>, bo MV3 blokuje inline <script>, a nie CSS.
+         Bez zewnętrznych fontów — strona opcji ma się otwierać offline. */
+      :root { color-scheme: light; }
+      body {
+        margin: 0;
+        padding: 24px;
+        font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+        color: #0f172a;
+        background: #f8fafc;
+      }
+      .card {
+        max-width: 560px;
+        margin: 0 auto;
+        background: #fff;
+        border: 1px solid #e2e8f0;
+        border-radius: 14px;
+        padding: 20px;
+        box-shadow: 0 6px 20px rgba(15, 23, 42, 0.06);
+      }
+      h1 { margin: 0 0 4px; font-size: 18px; }
+      p.lead { margin: 0 0 18px; color: #64748b; font-size: 13px; }
+      dl { margin: 0; display: grid; grid-template-columns: 150px 1fr; gap: 8px 12px; }
+      dt { color: #64748b; }
+      dd { margin: 0; word-break: break-all; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+      button {
+        margin-top: 18px;
+        border: none;
+        border-radius: 10px;
+        background: #1e3a8a;
+        color: #fff;
+        font-size: 14px;
+        font-weight: 600;
+        padding: 9px 16px;
+        cursor: pointer;
+      }
+      button:hover:not(:disabled) { background: #1d4ed8; }
+      button:disabled { opacity: 0.6; cursor: default; }
+      .result { margin-top: 12px; font-size: 13px; min-height: 20px; }
+      .result.ok { color: #166534; }
+      .result.err { color: #b91c1c; }
+      .result.warn { color: #92400e; }
+      .hint { margin-top: 16px; font-size: 12px; color: #64748b; }
+      @media (max-width: 480px) {
+        body { padding: 12px; }
+        dl { grid-template-columns: 1fr; gap: 2px 0; }
+        dd { margin-bottom: 8px; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Alfa — magazyn</h1>
+      <p class="lead">Ustawienia są wpisane w paczkę przy pobraniu z Magazynu i nie da się ich tu zmienić.</p>
+      <dl>
+        <dt>Adres aplikacji</dt>
+        <dd id="baseUrl">—</dd>
+        <dt>Użytkownik</dt>
+        <dd id="user">—</dd>
+        <dt>Token</dt>
+        <dd id="token">—</dd>
+        <dt>Wersja paczki</dt>
+        <dd id="version">—</dd>
+        <dt>Build paczki</dt>
+        <dd id="build">—</dd>
+      </dl>
+      <button id="check" type="button">Sprawdź połączenie</button>
+      <div class="result" id="result"></div>
+      <p class="hint">
+        Nowa paczka: Alfa → Techniczny → Magazyn → zakładka Towary → przycisk „Wtyczka”. Po zmianie hasła lub
+        wygenerowaniu nowego tokenu stara paczka przestaje działać.
+      </p>
+    </div>
+    <script src="config.js"></script>
+    <script src="options.js"></script>
+  </body>
+</html>

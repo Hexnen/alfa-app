@@ -9,6 +9,7 @@ import { autoFormatNIP, normalizeNIP, validateNIP } from "@/lib/nip";
 import {
   INVOICE_ISSUERS,
   OBJECT_KINDS,
+  servicesFromAnswers,
   useOrderIntakeDraft,
   useOrderIntakeWizard,
   type OrderIntakeFormState,
@@ -181,6 +182,15 @@ export function PublicOrderForm() {
       installationStartDate: form.isCameraInstallation
         ? form.installationStartDate || undefined
         : undefined,
+      /*
+       * USŁUGI ZAKŁADANEGO OBIEKTU. Klient nie dostaje edytora okresów — pytania
+       * zostają dokładnie takie, jakie były — więc listę składamy z jego
+       * odpowiedzi: montaż kamer (z ich liczbą) i wideorecepcja, start = termin
+       * rozpoczęcia usługi (wymagany, gdy któraś z tych odpowiedzi to „Tak”),
+       * a w ostateczności dzisiejsza data. Bez tego obiekt z publicznego ZDW
+       * powstawał BEZ ANI JEDNEJ USŁUGI.
+       */
+      objectServices: servicesFromAnswers(form),
     };
 
     setLoading(true);
@@ -615,8 +625,12 @@ export function PublicOrderForm() {
                     </div>
                   )}
                   <div>
+                    {/* Gwiazdka pojawia się wtedy, kiedy pole faktycznie jest
+                        wymagane — od tej daty liczy się okres usługi na obiekcie
+                        (montaż kamer albo wideorecepcja). */}
                     <label className="zdw-label">
                       Przewidywany termin rozpoczęcia usługi
+                      {(form.isCameraInstallation || form.videoReception) && req}
                     </label>
                     <input
                       className="zdw-input"

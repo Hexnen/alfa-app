@@ -1,0 +1,23 @@
+-- ---------------------------------------------------------------------------
+-- ZAŁĄCZNIKI WYPAKOWANE Z MAILA .MSG
+--
+-- Mail przeciągnięty z Outlooka trafia do notatki `kind='email'` (migracja 0094),
+-- a jego załączniki (image001.png, protokół.pdf) leżały dotąd wyłącznie w środku
+-- oryginalnego pliku .msg — żeby zobaczyć zdjęcie z maila, trzeba było pobrać
+-- plik i otworzyć go Outlookiem. Teraz backend wypakowuje je przy zapisie notatki
+-- i zapisuje jak zwykłe załączniki (obrazki → WebP z wymiarami).
+--
+--   * `calendar_note_attachments.origin` — „upload” (wybrany ręcznie) albo „msg”
+--     (wypakowany z maila). UI pokazuje te drugie jako chipy przy wierszu
+--     „Załączniki:” w nagłówku maila, a nie drugi raz w galerii notatki.
+--   * `calendar_event_notes.mail_attachments` — NAZWY załączników z maila jako
+--     tablica JSON stringów. Trzymamy je osobno, bo nie każdy załącznik da się
+--     wypakować (nieobsługiwany typ, >5 MB, limit 15 plików) — bez tej listy nie
+--     dałoby się pokazać, że coś w mailu było, a nie zostało zapisane.
+--
+-- Oba pola z DEFAULT / NULL-em: istniejące wiersze są poprawne bez backfillu
+-- (wszystko, co jest w bazie, przyszło z ręcznego uploadu).
+-- ---------------------------------------------------------------------------
+ALTER TABLE calendar_note_attachments ADD COLUMN origin TEXT NOT NULL DEFAULT 'upload';
+--> statement-breakpoint
+ALTER TABLE calendar_event_notes ADD COLUMN mail_attachments TEXT;

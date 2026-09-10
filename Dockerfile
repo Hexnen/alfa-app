@@ -51,7 +51,13 @@ RUN npm ci
 
 # Backend source + migrations + config
 COPY src ./src
+# Otagowane wzory umów Word (moduł „Drafty umów"). Bez tego katalogu
+# POST /contracts/drafts wywala się na brakującym pliku szablonu.
+COPY templates ./templates
 COPY scripts ./scripts
+# Pliki wtyczki przeglądarki (magazyn → „Wtyczka”). Bez tego katalogu
+# GET /api/warehouse/plugin/download nie ma z czego złożyć ZIP-a.
+COPY extension ./extension
 COPY drizzle.config.ts tsconfig.json ./
 
 # Built frontend from stage 1

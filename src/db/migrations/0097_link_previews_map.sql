@@ -1,0 +1,16 @@
+-- ---------------------------------------------------------------------------
+-- MINI-MAPA W PODGLĄDZIE LINKU (link_previews.map_json)
+--
+-- Link do Google Maps wklejony w notatce dostaje kartę z mini-mapą (Leaflet +
+-- OSM) zamiast zwykłego podglądu strony. Punkt bierze się z samego adresu
+-- (`parseGoogleMapsUrl`), a gdy adres go nie niesie — z rozwinięcia krótkiego
+-- linku albo z geokodera. Wszystkie trzy drogi są kosztowne (wyjście w sieć,
+-- kolejka 1 req/s Nominatim), więc wynik idzie do TEGO SAMEGO wiersza cache'u,
+-- co reszta podglądu: `{"lat":…,"lng":…,"zoom":…,"label":…}` albo NULL, gdy to
+-- nie jest link do map.
+--
+-- Kolumna jest dopisana, a nie wydzielona do osobnej tabeli, bo ma dokładnie
+-- ten sam klucz i to samo TTL, co podgląd (7 dni / 1 h — liczone przy odczycie
+-- w src/lib/link-preview.ts).
+-- ---------------------------------------------------------------------------
+ALTER TABLE `link_previews` ADD `map_json` text;

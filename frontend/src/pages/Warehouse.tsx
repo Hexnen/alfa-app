@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   AlertTriangle,
   Archive,
@@ -13,6 +14,9 @@ import {
   PackagePlus,
   Pencil,
   Plus,
+  Puzzle,
+  RefreshCw,
+  ShoppingCart,
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -26,10 +30,18 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { usePerms } from "@/auth/permissions";
 import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
 import {
   warehouseApi,
+  type PluginInboxEntry,
+  type ShopImportParseResult,
   type StockEntry,
   type WarehouseDef,
   type WarehouseDefInput,
@@ -39,6 +51,7 @@ import {
   type WarehouseDocumentInput,
   type WarehouseItem,
   type WarehouseItemInput,
+  type WarehouseItemSource,
 } from "@/lib/api";
 import {
   WarehouseDocumentForm,
@@ -48,6 +61,7 @@ import { WarehouseDocumentDetails } from "@/components/warehouse/WarehouseDocume
 import { WarehouseItemForm } from "@/components/warehouse/WarehouseItemForm";
 import { WarehouseForm } from "@/components/warehouse/WarehouseForm";
 import { WarehouseMovementsDialog } from "@/components/warehouse/WarehouseMovementsDialog";
+import { PluginDialog } from "@/components/warehouse/PluginDialog";
 import {
   DOC_STATUS_META,
   DOC_TYPE_META,
@@ -57,11 +71,13 @@ import {
   fmtPln,
   fmtPlnOrDash,
   fmtQty,
+  MARGIN_HELP,
+  MARKUP_HELP,
   totalStockFor,
   warehouseLabel,
 } from "@/components/warehouse/warehouseShared";
 import { fmtRelative, fmtTimestamp, pillClass } from "@/lib/calendar-labels";
-import { isPriceStale, priceAgeLabel } from "@/lib/price-age";
+import { priceAgeLabel, priceAgeLevel } from "@/lib/price-age";
 import { tip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
@@ -328,6 +344,173 @@ export function Warehouse() {
   const [itemDir, setItemDir] = useState<"asc" | "desc">("asc");
   const [itemFormOpen, setItemFormOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<WarehouseItem | null>(null);
+  /**
+   * Źródła edytowanego towaru. Lista kartotek niesie tylko ich LICZBĘ, więc
+   * ceny i kody dostawców doczytujemy dopiero przy otwarciu formularza —
+   * inaczej każde odświeżenie zakładki ciągnęłoby całą tabelę źródeł.
+   */
+  const [itemSources, setItemSources] = useState<WarehouseItemSource[]>([]);
+  /** true = formularz od razu poprosi o plik zapisanej strony sklepu. */
+  const [itemImportOpen, setItemImportOpen] = useState(false);
+  /**
+   * Gotowa propozycja importu wstrzykiwana do formularza (z kolejki wtyczki).
+   * Rozdzielona od `itemImportOpen`, bo to dwie różne rzeczy: „poproś o plik”
+   * vs „masz już sparsowane dane”.
+   */
+  const [itemImport, setItemImport] = useState<ShopImportParseResult | null>(
+    null
+  );
+  /** Towar, którego zdjęcie oglądamy w powiększeniu (null = zamknięte). */
+  const [photoItem, setPhotoItem] = useState<WarehouseItem | null>(null);
+
+  // --- Kolejka propozycji z wtyczki przeglądarki ---
+  const [inbox, setInbox] = useState<PluginInboxEntry[]>([]);
+  const [pluginOpen, setPluginOpen] = useState(false);
+  /**
+   * Wiersz kolejki, z którego wypełniamy właśnie formularz. Zamykamy go
+   * (`POST inbox/:id/done`) dopiero po UDANYM zapisie kartoteki — zamknięcie
+   * przy otwarciu formularza gubiłoby propozycję, gdyby ktoś zrezygnował
+   * w połowie albo zapis padł na walidacji.
+   */
+  const [pendingInboxId, setPendingInboxId] = useState<number | null>(null);
+
+  /**
+   * Kolejka jest DODATKIEM do zakładki — błąd (403 u kogoś bez uprawnień,
+   * chwilowy 500) nie może wywalać alertu na cały ekran magazynu, więc
+   * połykamy go i po prostu nie pokazujemy karty.
+   */
+  const loadInbox = useCallback(async () => {
+    try {
+      const res = await warehouseApi.getImportInbox();
+      setInbox(res.data || []);
+    } catch {
+      /* brak kolejki to nie awaria magazynu */
+    }
+  }, []);
+
+  useEffect(() => {
+    loadInbox();
+  }, [loadInbox]);
+
+  /*
+   * Świadomie BEZ pollingu. Wtyczka pracuje w INNEJ karcie przeglądarki, więc
+   * jedyny moment, w którym ta lista może być nieaktualna, to powrót do karty
+   * Alfa — a to dokładnie `visibilitychange`. Odpytywanie w tle kosztowałoby
+   * żądanie na minutę u każdego, kto trzyma magazyn otwarty przez cały dzień.
+   */
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === "visible") loadInbox();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [loadInbox]);
+
+  /**
+   * Jedno wejście do formularza towaru: `withImport` = od razu pytaj o plik
+   * („Import ze sklepu” i „Aktualizuj ze sklepu” to ta sama ścieżka, różni je
+   * tylko to, czy zaczynamy od pustej kartoteki). `opts.import` = dane już
+   * sparsowane (wtyczka), `opts.inboxId` = wiersz kolejki do zamknięcia po
+   * zapisie.
+   */
+  const openItemForm = useCallback(
+    async (
+      target: WarehouseItem | null,
+      withImport = false,
+      opts?: { import?: ShopImportParseResult | null; inboxId?: number | null }
+    ) => {
+      setEditingItem(target);
+      setItemSources([]);
+      setItemImportOpen(withImport);
+      setItemImport(opts?.import ?? null);
+      setPendingInboxId(opts?.inboxId ?? null);
+      setItemFormOpen(true);
+      if (!target || !target.sourcesCount) return;
+      try {
+        const res = await warehouseApi.getItemSources(target.id);
+        setItemSources(res.data || []);
+      } catch (err) {
+        alertError(err, "Błąd wczytywania źródeł towaru");
+      }
+    },
+    []
+  );
+
+  /**
+   * „Otwórz” z kolejki (i wejście z deep linku `?import=<id>`).
+   *
+   * Jeśli propozycja wskazuje towar, który już jest w kartotece, otwieramy go
+   * DO EDYCJI — inaczej wtyczka co import robiłaby duplikat tego samego
+   * czujnika. `matchItemId` liczy backend przy przyjęciu wpisu; dopasowanie
+   * `reason: "source"` z listy jest fallbackiem, gdy wpis powstał zanim
+   * kolumna była wypełniana.
+   */
+  const openFromInbox = useCallback(
+    async (id: number) => {
+      try {
+        const res = await warehouseApi.getImportInboxEntry(id);
+        const entry = res.data;
+        if (!entry) throw new Error("Puste dane propozycji importu");
+        const matchId =
+          entry.matchItemId ??
+          entry.matches.find((m) => m.reason === "source")?.id ??
+          null;
+        const target =
+          matchId !== null ? items.find((i) => i.id === matchId) ?? null : null;
+        await openItemForm(target, false, { import: entry, inboxId: id });
+        // Odczyt przestawił status na `opened` — lista musi to pokazać.
+        await loadInbox();
+      } catch (err) {
+        alertError(err, "Nie udało się otworzyć propozycji importu");
+      }
+    },
+    [items, openItemForm, loadInbox]
+  );
+
+  const handleInboxDiscard = async (entry: PluginInboxEntry) => {
+    const label = entry.name || entry.pageTitle || entry.productUrl || "propozycję";
+    if (!window.confirm(`Odrzucić „${label}”? Wpis zniknie z listy.`)) return;
+    try {
+      await warehouseApi.discardImportInbox(entry.id);
+    } catch (err) {
+      alertError(err, "Nie udało się odrzucić propozycji");
+    }
+    await loadInbox();
+  };
+
+  /*
+   * Deep link `?import=<id>`: wtyczka albo wysyła postMessage do otwartej karty
+   * (PluginImportBridge → nawigacja bez przeładowania), albo — gdy karty nie ma
+   * — otwiera ten adres wprost.
+   *
+   * Czekamy na `loading === false`, bo bez listy towarów nie da się rozstrzygnąć,
+   * czy import trafia w istniejącą kartotekę, czy zakłada nową. Parametr
+   * zdejmujemy od razu (`replace`), żeby odświeżenie strony ani „wstecz” nie
+   * otwierały formularza po raz drugi; `handledImport` chroni przed podwójnym
+   * odpaleniem efektu (StrictMode) i zwalnia się, gdy parametru już nie ma —
+   * dzięki temu POWTÓRNY klik na tym samym produkcie (dedup po URL zwraca ten
+   * sam id) znów otwiera formularz.
+   */
+  const [searchParams, setSearchParams] = useSearchParams();
+  const handledImport = useRef<number | null>(null);
+
+  useEffect(() => {
+    const raw = searchParams.get("import");
+    if (!raw) {
+      handledImport.current = null;
+      return;
+    }
+    if (loading) return;
+    const id = Number(raw);
+    const next = new URLSearchParams(searchParams);
+    next.delete("import");
+    setSearchParams(next, { replace: true });
+    if (!Number.isInteger(id) || id <= 0) return;
+    if (handledImport.current === id) return;
+    handledImport.current = id;
+    setTab("towary");
+    openFromInbox(id);
+  }, [loading, searchParams, setSearchParams, openFromInbox]);
 
   // --- Zakładka Magazyny ---
   const [showArchivedWh, setShowArchivedWh] = useState(false);
@@ -433,6 +616,22 @@ export function Warehouse() {
     } else {
       await warehouseApi.createItem(data);
     }
+    /*
+     * Propozycja z wtyczki jest „zrobiona” dopiero TERAZ — po zapisie, który
+     * się udał (błąd walidacji leci wyjątkiem wyżej i tu nie dochodzimy).
+     * Samo zamknięcie wiersza kolejki nie może jednak wywrócić zapisu towaru,
+     * który już jest w bazie: gdyby padło, wpis wygaśnie sam po 7 dniach.
+     */
+    if (pendingInboxId !== null) {
+      const id = pendingInboxId;
+      setPendingInboxId(null);
+      try {
+        await warehouseApi.markImportInboxDone(id);
+      } catch {
+        /* towar zapisany — nieudane domknięcie kolejki to nie błąd zapisu */
+      }
+      await loadInbox();
+    }
     await loadCore();
   };
 
@@ -465,20 +664,10 @@ export function Warehouse() {
   const handleItemRestore = async (item: WarehouseItem) => {
     if (!editable) return;
     try {
-      // PUT wymaga pełnego body (walidacja parseItemBody) — odsyłamy bieżące
-      // pola towaru, zmieniając wyłącznie flagę archiwum.
-      await warehouseApi.updateItem(item.id, {
-        name: item.name,
-        unit: item.unit,
-        sku: item.sku ?? undefined,
-        category: item.category ?? undefined,
-        description: item.description ?? undefined,
-        minStock: item.minStock,
-        isAsset: item.isAsset,
-        barcode: item.barcode ?? undefined,
-        photoData: item.photoData,
-        isArchived: false,
-      });
+      // Dedykowana trasa przestawia WYŁĄCZNIE flagę archiwum. Wcześniej robił
+      // to PUT z body odtworzonym z wiersza listy — a lista nie niesie zdjęcia
+      // ani symbolu producenta, więc „przywróć” po cichu je kasowało.
+      await warehouseApi.restoreItem(item.id);
       await loadCore();
     } catch (err) {
       alertError(err, "Błąd przywracania towaru");
@@ -985,6 +1174,27 @@ export function Warehouse() {
     itemDir,
   ]);
 
+  /**
+   * Ile widocznych towarów ma cenę starszą niż progi z `lib/price-age.ts`.
+   *
+   * Liczone na `visibleItems`, nie na całej kartotece — legenda ma opisywać to,
+   * co użytkownik faktycznie widzi po filtrach, inaczej „starsza niż 12 mies.
+   * (40)” przy dwóch czerwonych wierszach na ekranie wygląda jak błąd.
+   * Ta sama funkcja co w wierszach, żeby licznik i kolory nie mogły się
+   * rozjechać.
+   */
+  const itemPriceAge = useMemo(() => {
+    let stale = 0;
+    let old = 0;
+    for (const i of visibleItems) {
+      if (i.purchasePrice === null && i.effectiveSalePrice === null) continue;
+      const level = priceAgeLevel(i.priceUpdatedAt, "warehouse");
+      if (level === "stale") stale += 1;
+      else if (level === "old") old += 1;
+    }
+    return { staleCount: stale, oldCount: old };
+  }, [visibleItems]);
+
   const toggleItemSort = (key: ItemSortKey) => {
     if (itemSort === key) {
       setItemDir((d) => (d === "asc" ? "desc" : "asc"));
@@ -1015,18 +1225,43 @@ export function Warehouse() {
     setItemMax("");
   };
 
-  const photoThumb = (item: WarehouseItem) =>
-    item.photoData ? (
-      <img
-        src={item.photoData}
-        alt=""
-        className="h-10 w-10 rounded-md border object-cover"
-      />
-    ) : (
-      <div className="flex h-10 w-10 items-center justify-center rounded-md border bg-muted text-muted-foreground">
-        <ImageOff className="h-4 w-4" />
-      </div>
+  /**
+   * Miniatura. Lista nie niesie zdjęcia w JSON-ie (base64 ważyłby megabajty),
+   * więc `<img>` pobiera je z `/photo/raw` — zwykłym, leniwym żądaniem, które
+   * przeglądarka zapamiętuje w cache'u (ETag ze stempla edycji). `v=updatedAt`
+   * jest cache-bustem: podmiana zdjęcia zmienia stempel, więc po zapisie widać
+   * nowe zdjęcie, a nie stare z cache'u.
+   */
+  const photoSrc = (item: WarehouseItem, size: "thumb" | "full") =>
+    `/api/warehouse/items/${item.id}/photo/raw?size=${size}&v=${encodeURIComponent(
+      item.updatedAt
+    )}`;
+
+  const photoThumb = (item: WarehouseItem) => {
+    const src = item.photoData || (item.hasPhoto ? photoSrc(item, "thumb") : null);
+    if (!src)
+      return (
+        <div className="flex h-10 w-10 items-center justify-center rounded-md border bg-muted text-muted-foreground">
+          <ImageOff className="h-4 w-4" />
+        </div>
+      );
+    return (
+      <button
+        type="button"
+        onClick={() => setPhotoItem(item)}
+        className="block h-10 w-10 overflow-hidden rounded-md border transition hover:ring-2 hover:ring-primary"
+        data-testid="magazyn-towary-photo"
+        {...tip("Powiększ zdjęcie")}
+      >
+        <img
+          src={src}
+          alt={`Zdjęcie: ${item.name}`}
+          loading="lazy"
+          className="h-full w-full object-cover"
+        />
+      </button>
     );
+  };
 
   return (
     <div className="space-y-3">
@@ -1698,17 +1933,36 @@ export function Warehouse() {
                 <SelectItem value="all">Aktualne i archiwum</SelectItem>
               </SelectContent>
             </Select>
-            {editable && (
+            <div className="ml-auto flex items-center gap-2">
+              {/* „Wtyczka” stoi POZA bramką edycji: pobranie paczki i wczytanie
+                  jej u siebie w przeglądarce nie zmienia żadnych danych, a bez
+                  tego osoba z podglądem nie miałaby skąd wziąć instrukcji.
+                  Rotację i unieważnienie tokenu bramkuje sam dialog. */}
               <Button
-                className="ml-auto"
-                onClick={() => {
-                  setEditingItem(null);
-                  setItemFormOpen(true);
-                }}
+                variant="outline"
+                onClick={() => setPluginOpen(true)}
+                data-testid="magazyn-towary-wtyczka"
               >
-                <Plus className="mr-1 h-4 w-4" /> Nowy towar
+                <Puzzle className="mr-1 h-4 w-4" /> Wtyczka
               </Button>
-            )}
+              {editable && (
+                <>
+                  {/* Import obok „Nowego towaru”, bo to ta sama decyzja („zakładam
+                      kartotekę”) — tylko dane przychodzą z zapisanej strony sklepu
+                      zamiast z klawiatury. */}
+                  <Button
+                    variant="outline"
+                    onClick={() => openItemForm(null, true)}
+                    data-testid="magazyn-towary-import"
+                  >
+                    <ShoppingCart className="mr-1 h-4 w-4" /> Import ze sklepu
+                  </Button>
+                  <Button onClick={() => openItemForm(null)}>
+                    <Plus className="mr-1 h-4 w-4" /> Nowy towar
+                  </Button>
+                </>
+              )}
+            </div>
           </div>
 
           {/* Druga linia filtrów: cena sprzedaży — tryb i widełki kwot. */}
@@ -1766,6 +2020,120 @@ export function Warehouse() {
               </Button>
             )}
           </div>
+
+          {/* Legenda kolorów wierszy. Pokazujemy ją tylko wtedy, gdy na liście
+              naprawdę coś świeci — stała legenda nad pustą (świeżą) kartoteką
+              to sam szum, a przy okazji licznik mówi, ile pozycji czeka na
+              odświeżenie ceny, czego z samych pasów koloru nie da się policzyć. */}
+          {(itemPriceAge.staleCount > 0 || itemPriceAge.oldCount > 0) && (
+            <div
+              className="flex flex-wrap items-center gap-4 text-xs text-muted-foreground"
+              data-testid="magazyn-towary-price-age-legend"
+            >
+              {itemPriceAge.staleCount > 0 && (
+                <span className="flex items-center gap-1.5">
+                  <span className="h-3 w-3 rounded-sm bg-amber-200" />
+                  cena starsza niż 6 mies. ({itemPriceAge.staleCount})
+                </span>
+              )}
+              {itemPriceAge.oldCount > 0 && (
+                <span className="flex items-center gap-1.5">
+                  <span className="h-3 w-3 rounded-sm bg-red-200" />
+                  starsza niż 12 mies. ({itemPriceAge.oldCount})
+                </span>
+              )}
+            </div>
+          )}
+
+          {/* --- Do dodania z wtyczki ---
+              Skrzynka wejściowa z wtyczki przeglądarki: to NIE są towary, tylko
+              propozycje sprzed zapisu, więc stoją nad tabelą, a nie w niej.
+              Karta znika, kiedy kolejka jest pusta — u kogoś, kto wtyczki nie
+              używa, nie ma po niej śladu. */}
+          {inbox.length > 0 && (
+            <Card data-testid="magazyn-towary-inbox">
+              <CardContent className="space-y-2 p-3">
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  <Puzzle className="h-4 w-4 text-muted-foreground" />
+                  Do dodania z wtyczki ({inbox.length})
+                </div>
+                <ul className="divide-y rounded-md border">
+                  {inbox.map((entry) => {
+                    // Nazwę dopasowanego towaru bierzemy z listy w pamięci
+                    // (`getItems(true)`, więc także archiwalne) — backend
+                    // przysyła samo id, żeby lista kolejki była lekka.
+                    const match =
+                      entry.matchItemId !== null
+                        ? items.find((i) => i.id === entry.matchItemId) ?? null
+                        : null;
+                    const label =
+                      entry.name || entry.pageTitle || entry.productUrl || "(bez nazwy)";
+                    return (
+                      <li
+                        key={entry.id}
+                        className="flex flex-wrap items-center gap-2 px-3 py-2 text-sm"
+                        data-testid="magazyn-towary-inbox-row"
+                      >
+                        <span className="text-xs text-muted-foreground">
+                          {entry.shopLabel || entry.shop}
+                        </span>
+                        <span className="min-w-0 flex-1 truncate font-medium" title={label}>
+                          {label}
+                        </span>
+                        <span className="tabular-nums">
+                          {entry.priceNet !== null ? fmtPln(entry.priceNet) : "—"}
+                        </span>
+                        <span
+                          className="text-xs text-muted-foreground"
+                          {...tip(fmtTimestamp(entry.createdAt))}
+                        >
+                          {fmtRelative(entry.createdAt)}
+                        </span>
+                        {entry.matchItemId !== null && (
+                          // Nazwy towarów bywają zdaniami („TC-C320N Spec:… 2.8 mm,
+                          // PoE, IR 30 m…”) — bez obcięcia badge rozpychał wiersz
+                          // i zrzucał przyciski do drugiej linii.
+                          <span
+                            className={pillClass("amber", {
+                              className: "max-w-[18rem] truncate",
+                            })}
+                            {...tip(
+                              match ? `Już w kartotece: ${match.name}` : "Już w kartotece"
+                            )}
+                          >
+                            {match ? `już w kartotece: ${match.name}` : "już w kartotece"}
+                          </span>
+                        )}
+                        {editable && (
+                          <div className="flex items-center gap-1">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => openFromInbox(entry.id)}
+                              data-testid="magazyn-towary-inbox-open"
+                            >
+                              Otwórz
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => handleInboxDiscard(entry)}
+                              data-testid="magazyn-towary-inbox-discard"
+                            >
+                              <X className="mr-1 h-4 w-4" /> Odrzuć
+                            </Button>
+                          </div>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+                <p className="text-xs text-muted-foreground">
+                  Wpisy wygasają po 7 dniach.
+                </p>
+              </CardContent>
+            </Card>
+          )}
 
           <Card>
             <CardContent className="p-0">
@@ -1826,7 +2194,7 @@ export function Warehouse() {
                         onSort={toggleItemSort}
                         prefix="magazyn-towary"
                         align="right"
-                        title="Sortowanie po marży procentowej; towary bez policzonej marży idą na koniec"
+                        title={`${MARGIN_HELP} ${MARKUP_HELP} Sortowanie po marży procentowej; towary bez policzonej marży idą na koniec.`}
                       />
                       <SortHeader
                         label="Min. stan"
@@ -1890,28 +2258,42 @@ export function Warehouse() {
                            kwoty to nie jest stara kwota, nie ma czego pilnować
                            ani czym straszyć. Alarm zapalamy dopiero wtedy, gdy
                            cena istnieje, a stempel `priceUpdatedAt` mówi, że
-                           nikt jej nie potwierdzał od pół roku (lub go nie ma —
-                           to reguła z lib/price-age.ts). */
+                           nikt jej nie potwierdzał od pół roku (żółto) albo od
+                           roku (czerwono) — to reguła z lib/price-age.ts. */
                         const hasPrice =
                           item.purchasePrice !== null ||
                           item.effectiveSalePrice !== null;
-                        const priceStale =
-                          hasPrice && isPriceStale(item.priceUpdatedAt, "warehouse");
-                        const priceTip = priceStale
-                          ? tip(priceAgeLabel(item.priceUpdatedAt, "warehouse"))
+                        const ageLevel = hasPrice
+                          ? priceAgeLevel(item.priceUpdatedAt, "warehouse")
+                          : "fresh";
+                        const priceOld = ageLevel !== "fresh";
+                        const priceTip = priceOld
+                          ? tip(
+                              `${priceAgeLabel(item.priceUpdatedAt, "warehouse")} — żółty po 6 mies., czerwony po 12`
+                            )
                           : null;
-                        // Czerwień tylko na komórce, która faktycznie pokazuje
+                        // Kolor tylko na komórce, która faktycznie pokazuje
                         // kwotę — kreska „brak ceny" nie ma się co czerwienić.
-                        const staleCell = (value: number | null) =>
-                          priceStale && value !== null
-                            ? "font-medium text-red-600"
-                            : "";
+                        const ageCell = (value: number | null) =>
+                          !priceOld || value === null
+                            ? ""
+                            : ageLevel === "old"
+                              ? "font-medium text-red-600 dark:text-red-400"
+                              : "font-medium text-amber-700 dark:text-amber-300";
                         return (
                           <tr
                             key={item.id}
-                            className={`border-b last:border-0 ${
-                              item.isArchived ? "opacity-60" : ""
-                            }`}
+                            className={cn(
+                              "border-b last:border-0",
+                              // Tło całego wiersza, nie tylko komórki z kwotą:
+                              // przy przewijaniu tysiąca pozycji oko łapie pasy
+                              // koloru, a nie pojedyncze cyfry.
+                              ageLevel === "stale" &&
+                                "bg-amber-50 hover:bg-amber-100 dark:bg-amber-950/30",
+                              ageLevel === "old" &&
+                                "bg-red-50 hover:bg-red-100 dark:bg-red-950/30",
+                              item.isArchived && "opacity-60"
+                            )}
                           >
                             <td className="px-3 py-2">{photoThumb(item)}</td>
                             <td className="px-3 py-2">
@@ -1929,11 +2311,11 @@ export function Warehouse() {
                             </td>
                             <td className="px-3 py-2">{item.unit}</td>
                             <td
-                              className={`px-3 py-2 text-right tabular-nums ${staleCell(
+                              className={`px-3 py-2 text-right tabular-nums ${ageCell(
                                 item.purchasePrice
                               )}`}
                             >
-                              {priceStale && item.purchasePrice !== null ? (
+                              {priceOld && item.purchasePrice !== null ? (
                                 <span
                                   className="inline-flex items-center gap-1"
                                   {...priceTip}
@@ -1949,11 +2331,11 @@ export function Warehouse() {
                                 „auto" przestają się mieścić w jednej linii
                                 i komórka rozjeżdża się na dwa wiersze. */}
                             <td
-                              className={`whitespace-nowrap px-3 py-2 text-right tabular-nums ${staleCell(
+                              className={`whitespace-nowrap px-3 py-2 text-right tabular-nums ${ageCell(
                                 item.effectiveSalePrice
                               )}`}
                             >
-                              {priceStale && item.effectiveSalePrice !== null ? (
+                              {priceOld && item.effectiveSalePrice !== null ? (
                                 <span
                                   className="inline-flex items-center gap-1"
                                   {...priceTip}
@@ -1976,11 +2358,11 @@ export function Warehouse() {
                             </td>
                             <td
                               className="px-3 py-2 text-right tabular-nums"
-                              title={
+                              {...tip(
                                 item.marginAmount !== null
-                                  ? `Zysk ${fmtPln(item.marginAmount)} na ${item.unit}`
-                                  : "Brak ceny zakupu — marży nie da się policzyć"
-                              }
+                                  ? `Zysk ${fmtPln(item.marginAmount)} na ${item.unit}. ${MARGIN_HELP} ${MARKUP_HELP}`
+                                  : `Brak ceny zakupu — marży nie da się policzyć. ${MARGIN_HELP} ${MARKUP_HELP}`
+                              )}
                             >
                               {item.marginPct !== null ? (
                                 <>
@@ -2006,6 +2388,22 @@ export function Warehouse() {
                                 )}
                                 {item.isArchived && (
                                   <span className={pillClass("muted")}>archiwum</span>
+                                )}
+                                {/* Badge „🛒 n” = towar ma zapamiętane sklepy
+                                    dostawców. Adresów stron lista nie niesie
+                                    (są w formularzu), więc tutaj tylko liczba
+                                    i nazwy sklepów w dymku. */}
+                                {(item.sourcesCount ?? 0) > 0 && (
+                                  <span
+                                    className={pillClass("sky")}
+                                    data-testid="magazyn-towary-sources-badge"
+                                    {...tip(
+                                      `Sklepy dostawców: ${(item.sourceShops ?? []).join(", ")}`
+                                    )}
+                                  >
+                                    <ShoppingCart className="h-3 w-3" />
+                                    {item.sourcesCount}
+                                  </span>
                                 )}
                               </div>
                             </td>
@@ -2058,12 +2456,17 @@ export function Warehouse() {
                                     variant="ghost"
                                     size="sm"
                                     title="Edytuj"
-                                    onClick={() => {
-                                      setEditingItem(item);
-                                      setItemFormOpen(true);
-                                    }}
+                                    onClick={() => openItemForm(item)}
                                   >
                                     <Pencil className="h-4 w-4" />
+                                  </Button>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    title="Aktualizuj ze sklepu (zapisana strona produktu)"
+                                    onClick={() => openItemForm(item, true)}
+                                  >
+                                    <RefreshCw className="h-4 w-4" />
                                   </Button>
                                   {item.isArchived ? (
                                     <Button
@@ -2286,9 +2689,34 @@ export function Warehouse() {
         item={historyItem}
       />
 
+      {/* Podgląd zdjęcia — Esc i klik w tło zamykają (Radix). Świadomie NIE
+          otwiera edycji: „chcę zobaczyć, co to za sprzęt” to inna potrzeba niż
+          „chcę zmienić kartotekę”. */}
+      <Dialog open={photoItem !== null} onOpenChange={(o) => !o && setPhotoItem(null)}>
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="pr-6">{photoItem?.name}</DialogTitle>
+          </DialogHeader>
+          {photoItem && (
+            <img
+              src={photoItem.photoData || photoSrc(photoItem, "full")}
+              alt={`Zdjęcie: ${photoItem.name}`}
+              className="max-h-[70vh] w-full rounded-md object-contain"
+            />
+          )}
+        </DialogContent>
+      </Dialog>
+
       {itemFormOpen && (
         <WarehouseItemForm
-          key={editingItem?.id ?? "new"}
+          /* Liczba źródeł w kluczu: formularz czyta je do stanu przy montażu,
+             więc po doczytaniu z serwera musi się przemontować. Id wpisu
+             kolejki też jest w kluczu — bez niego otwarcie DRUGIEJ propozycji
+             z tej samej kartoteki zostawiłoby w formularzu poprzednie dane
+             (`imported` startuje z propsa tylko przy montażu). */
+          key={`${editingItem?.id ?? "new"}-${itemSources.length}-${
+            itemImportOpen ? "imp" : "plain"
+          }-${pendingInboxId ?? "x"}`}
           open={itemFormOpen}
           onClose={() => setItemFormOpen(false)}
           onSubmit={handleItemSubmit}
@@ -2296,6 +2724,27 @@ export function Warehouse() {
           categories={categories}
           manufacturers={manufacturers}
           warehouseMarkup={warehouseMarkup}
+          sources={itemSources}
+          initialImportOpen={itemImportOpen}
+          initialImport={itemImport}
+          onOpenExisting={(id) => {
+            const target = items.find((i) => i.id === id);
+            if (!target) {
+              window.alert("Nie znaleziono towaru na liście — odśwież stronę.");
+              return;
+            }
+            openItemForm(target);
+          }}
+        />
+      )}
+
+      {/* Instrukcja instalacji wtyczki + token. Montowany warunkowo, żeby
+          dialog ciągnął token i listę sklepów dopiero, gdy ktoś go otworzy. */}
+      {pluginOpen && (
+        <PluginDialog
+          open={pluginOpen}
+          onClose={() => setPluginOpen(false)}
+          editable={editable}
         />
       )}
 

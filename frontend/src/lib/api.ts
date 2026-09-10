@@ -1,8 +1,28 @@
 // Klucze usług obiektu mają jedno źródło prawdy — słownik etykiet w utils.
 // (utils nic z api nie importuje, więc zależność jest jednokierunkowa.)
 import type { ObjectServiceKey } from "./utils";
+// Prefill formularza zlecenia z szansy zwraca DOKŁADNIE stan tego formularza —
+// import wyłącznie typu (kasowany przy budowie), więc cyklu w runtime nie ma.
+import type { OrderIntakeFormState } from "./orderIntakeSteps";
 
 const API_BASE = "/api";
+
+/**
+ * Identyfikator TEJ KARTY przeglądarki. Losowany raz na załadowanie modułu i trzymany
+ * WYŁĄCZNIE w pamięci — świadomie NIE w localStorage, bo tam byłby wspólny dla wszystkich
+ * kart tej samej przeglądarki, a chodzi dokładnie o ich rozróżnienie.
+ *
+ * Backend odsyła go w sygnale SSE jako `actorClientId` (nagłówek `X-Alfa-Client`), dzięki
+ * czemu kalendarz „na żywo" pomija sygnał tylko w karcie, która sama zapisała — drugie okno
+ * i telefon tej samej osoby odświeżają się normalnie. Filtrowanie po id UŻYTKOWNIKA byłoby
+ * tu błędem: gasiłoby odświeżanie właśnie w tych kartach.
+ */
+export const CLIENT_ID: string =
+  typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `c${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+
+const CLIENT_ID_HEADER = "X-Alfa-Client";
 
 interface ApiResponse<T> {
   success: boolean;
@@ -28,6 +48,7 @@ async function request<T>(
     ...options,
     headers: {
       "Content-Type": "application/json",
+      [CLIENT_ID_HEADER]: CLIENT_ID,
       ...options?.headers,
     },
   });
@@ -52,7 +73,13 @@ async function request<T>(
  * (przeglądarka sama dopisuje boundary). Ten sam format błędu co `request`.
  */
 async function requestMultipart<T>(endpoint: string, body: FormData, method = "POST"): Promise<T> {
-  const response = await fetch(`${API_BASE}${endpoint}`, { method, body });
+  // Bez Content-Type (boundary dokłada przeglądarka), ale identyfikator karty musi być —
+  // notatka z załącznikami też ma odświeżyć kalendarz w innych kartach.
+  const response = await fetch(`${API_BASE}${endpoint}`, {
+    method,
+    body,
+    headers: { [CLIENT_ID_HEADER]: CLIENT_ID },
+  });
   const data = await response.json().catch(() => ({}));
   if (!response.ok || !data.success) {
     throw Object.assign(new Error(data.error || data.message || `Request failed (${response.status})`), {
@@ -177,7 +204,72 @@ export type ObjectSortKey =
   | "value"
   | "cost"
   | "profit"
+  /** Przewidywane zakończenie obiektu; puste daty na końcu w OBU kierunkach. */
+  | "expectedEnd"
   | "created";
+
+/**
+ * USŁUGI OBIEKTU JAKO OKRESY — lustro `src/types/index.ts`.
+ *
+ * Te same klucze co `objectServiceLabels` w ./utils (`ObjectServiceKey`), bo jeden
+ * słownik obsługuje etykiety, filtr listy i wykresy analityki.
+ */
+export type ObjectServiceKind = "kamery" | "sswin" | "wideorecepcja" | "ofi";
+
+/**
+ * Jeden okres świadczenia usługi. Ta sama usługa może wystąpić wiele razy (kamery
+ * 2020–2022 i znów od 2024), dlatego osobne wiersze zamiast flag — historia ma
+ * zostać widoczna po zakończeniu usługi.
+ *
+ * Okres ZAKOŃCZONY (`endDate` w przeszłości) nie liczy się do flag `hasX`, filtra
+ * `?service=` ani analityki, ale nadal wraca z API (kartoteka pokazuje go szarym).
+ */
+export interface ObjectService {
+  id: number;
+  objectId: number;
+  service: ObjectServiceKind;
+  /** YYYY-MM-DD, wymagana. Start w przyszłości = „zaplanowana” (nadal aktywna). */
+  startDate: string;
+  /** YYYY-MM-DD albo null = usługa trwa bezterminowo. */
+  endDate: string | null;
+  /**
+   * `true` = daty startu NIE ZNAMY: wstawił ją backfill migracji 0084 z daty
+   * założenia kartoteki (albo import z dnia uruchomienia). Usługa jest aktywna
+   * jak każda inna, ale nie liczy się jako „rozpoczęcie” w serii czasowej —
+   * przy dacie należy napisać „data szacowana”. Wpisanie daty w formularzu gasi
+   * flagę (decyduje o tym backend, po zmianie samej `startDate`).
+   *
+   * Opcjonalne, bo starsze odpowiedzi API tego pola nie mają.
+   */
+  startEstimated?: boolean;
+  /** Tylko kamery. null = „usługa jest, ale kamer nikt nie policzył” — to NIE zero. */
+  cameraCount: number | null;
+  notes: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Okres w body zapisu. Brak `id` = nowy wiersz; obecność `services` w body to PEŁNA
+ * PODMIANA listy (wiersze spoza niej backend kasuje) — inaczej usunięcie okresu
+ * w formularzu nie miałoby jak dojechać na serwer.
+ */
+export interface ObjectServiceInput {
+  id?: number;
+  service: ObjectServiceKind;
+  /** YYYY-MM-DD, wymagana. */
+  startDate: string;
+  endDate?: string | null;
+  /**
+   * Odsyłany do backendu TAKI, JAKI PRZYSZEDŁ — edycja liczby kamer czy uwag
+   * nie może udawać, że nagle znamy datę startu. Flagę gasi backend, gdy sama
+   * `startDate` różni się od zapisanej.
+   */
+  startEstimated?: boolean;
+  /** Tylko kamery; null = nie policzono (≠ 0). */
+  cameraCount?: number | null;
+  notes?: string | null;
+}
 
 /** Lista obiektów + podsumowanie CAŁEGO wyniku filtrowania (nie tylko strony). */
 export interface ObjectsResponse extends PaginatedResponse<ObjectWithContractor> {
@@ -187,8 +279,12 @@ export interface ObjectsResponse extends PaginatedResponse<ObjectWithContractor>
   /** Liczniki zakładek przy bieżących filtrach. */
   currentCount: number;
   archivedCount: number;
-  /** Suma wartości miesięcznych obiektów spełniających filtry. */
+  /** Suma przychodów miesięcznych obiektów spełniających filtry (oba abonamenty + dzierżawa). */
   totalMonthlyValue: number;
+  /** Rozbicie tej sumy na linie — starszy backend ich nie odsyła (stąd `?`). */
+  totalMonthlyZdw?: number;
+  totalMonthlyOfi?: number;
+  totalMonthlyRental?: number;
   /** Ile z nich ma niezerowy abonament. */
   withMonthlyValue: number;
   /** Suma kosztów miesięcznych (puste liczone jak 0 — patrz withMonthlyCost). */
@@ -197,6 +293,14 @@ export interface ObjectsResponse extends PaginatedResponse<ObjectWithContractor>
   withMonthlyCost: number;
   /** Suma jednorazowych kosztów instalacji. */
   totalSetupCost: number;
+  /**
+   * Obiekty „kończące się” w horyzoncie filtra `endingIn` (domyślnie 90 dni):
+   * przewidywane zakończenie w horyzoncie ALBO wszystkie aktywne okresy usług
+   * z końcem w horyzoncie. Starszy backend ich nie odsyła (stąd `?`).
+   */
+  endingSoonCount?: number;
+  /** Przychód miesięczny zagrożony wygaśnięciem — suma po obiektach z licznika wyżej. */
+  endingSoonRevenue?: number;
 }
 
 export async function getObjects(params?: {
@@ -219,6 +323,12 @@ export async function getObjects(params?: {
   maxCost?: number;
   /** "1" = tylko z uzupełnionym kosztem, "0" = tylko nieuzupełnione. */
   hasCost?: "1" | "0";
+  /**
+   * Tylko obiekty kończące się w najbliższych N dniach (przewidywane zakończenie
+   * albo wszystkie aktywne okresy usług z końcem w horyzoncie). Wejście z kafelka
+   * „Kończące się ≤ 90 dni” w analityce.
+   */
+  endingIn?: number;
   /** Zakładka: bieżące (wszystko poza „nieaktywny”) albo archiwalne. */
   scope?: "current" | "archived";
   /** Id handlowca albo "none" = obiekty bez opiekuna. */
@@ -242,6 +352,7 @@ export async function getObjects(params?: {
   if (params?.minCost !== undefined) searchParams.set("minCost", String(params.minCost));
   if (params?.maxCost !== undefined) searchParams.set("maxCost", String(params.maxCost));
   if (params?.hasCost) searchParams.set("hasCost", params.hasCost);
+  if (params?.endingIn !== undefined) searchParams.set("endingIn", String(params.endingIn));
   if (params?.scope) searchParams.set("scope", params.scope);
   if (params?.salespersonId !== undefined) searchParams.set("salespersonId", String(params.salespersonId));
   if (params?.companyId !== undefined) searchParams.set("companyId", String(params.companyId));
@@ -284,6 +395,68 @@ export async function deleteObject(id: number) {
     method: "DELETE",
   });
 }
+
+// --- Notatki kartoteki obiektu (`object_notes`) ---------------------------
+
+/**
+ * Skąd wzięła się notatka obiektu. `null` = wpisana wprost w kartotece;
+ * uzupełnione = kopia notatki wydarzenia kalendarza („Zapisz też w obiekcie”).
+ * Kopia jest niezależna — późniejsza edycja notatki w kalendarzu jej nie zmienia.
+ */
+export interface ObjectNoteSource {
+  eventId: number;
+  /** Notatka źródłowa; `null`, gdy w kalendarzu została już usunięta. */
+  noteId: number | null;
+  eventTitle: string;
+  eventType: CalendarEventType;
+  eventStartAt: string;
+  /** Dział wydarzenia — decyduje, do którego kalendarza prowadzi link. */
+  eventDepartment: CalendarDepartment;
+}
+
+/** Notatka w kartotece obiektu — autor, treść, ewentualne źródło w kalendarzu. */
+export interface ObjectNote {
+  id: number;
+  objectId: number;
+  userId: number | null;
+  /** Snapshot nazwy autora z chwili zapisu (jak w notatkach kalendarza). */
+  userLabel: string | null;
+  text: string;
+  createdAt: string;
+  updatedAt: string;
+  source: ObjectNoteSource | null;
+}
+
+/**
+ * Notatki kartoteki obiektu. Uprawnienie: klucz `objects` (view do odczytu,
+ * edit do zapisu); edycja i usunięcie dodatkowo tylko dla autora albo admina.
+ */
+export const objectsApi = {
+  /** Żywe notatki obiektu, najnowsze pierwsze. */
+  async notes(objectId: number) {
+    return request<ApiResponse<ObjectNote[]>>(`/objects/${objectId}/notes`);
+  },
+
+  async addNote(objectId: number, text: string) {
+    return request<ApiResponse<ObjectNote>>(`/objects/${objectId}/notes`, {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    });
+  },
+
+  /** Autor albo admin. */
+  async updateNote(noteId: number, text: string) {
+    return request<ApiResponse<ObjectNote>>(`/objects/notes/${noteId}`, {
+      method: "PUT",
+      body: JSON.stringify({ text }),
+    });
+  },
+
+  /** Soft delete; autor albo admin. */
+  async deleteNote(noteId: number) {
+    return request<ApiResponse<null>>(`/objects/notes/${noteId}`, { method: "DELETE" });
+  },
+};
 
 // Contracts
 /** Klucze sortowania listy umów — te same, co SORT_COLUMNS w src/routes/contracts.ts. */
@@ -484,10 +657,20 @@ export interface ObjectRecord {
   installationType: "new" | "takeover";
   status: "pending" | "in_progress" | "active" | "inactive";
   department: "sales" | "technical" | "accounting";
-  monthlyValue: number | null;
   /**
-   * Dzierżawa sprzętu (zł netto/mies.) — druga część miesięcznego przychodu obok
-   * abonamentu. Przychód obiektu to SUMA obu, nie samo `monthlyValue`.
+   * SUMA abonamentów (`monthlyZdw + monthlyOfi`) — pole WYLICZANE przez backend,
+   * nie kolumna. null = nie uzupełniono ŻADNEJ z linii. Do zapisu używaj
+   * rozbicia; ta wartość jest wyłącznie do wyświetlania.
+   */
+  monthlyValue: number | null;
+  /** Abonament za zdalny dozór wizyjny (kamery / SSWiN / wideorecepcja). */
+  monthlyZdw: number | null;
+  /** Abonament za ochronę fizyczną. */
+  monthlyOfi: number | null;
+  /**
+   * Dzierżawa sprzętu (zł netto/mies.) — trzecia część miesięcznego przychodu
+   * obok obu abonamentów. Przychód obiektu to SUMA wszystkich trzech pozycji.
+   * W Analityce dzierżawa liczy się do linii ZDV (to sprzęt monitoringu).
    */
   monthlyRental: number | null;
   /** Miesięczny koszt obsługi. null = NIEUZUPEŁNIONY, co nie znaczy 0 zł. */
@@ -505,6 +688,20 @@ export interface ObjectRecord {
   salespersonId?: number | null;
   /** Spółka grupy obsługująca obiekt. */
   companyId?: number | null;
+  /**
+   * Przewidywane zakończenie obsługi CAŁEGO obiektu (YYYY-MM-DD). Plan biznesowy,
+   * niezależny od końców pojedynczych okresów usług; null = bezterminowo.
+   */
+  expectedEndDate: string | null;
+  /** Link do pinezki w Google Maps (tylko domeny Google). null = brak. */
+  mapsUrl: string | null;
+  /**
+   * OKRESY USŁUG — źródło prawdy dla flag `hasX`/`cameraCount` wyżej. Zawiera też
+   * okresy ZAKOŃCZONE (do historii w kartotece), więc do „co obiekt ma dziś”
+   * filtruj po dacie albo czytaj flagi. `?`, bo starszy backend ich nie odsyła
+   * (ta sama umowa co `totalMonthlyZdw?` w `ObjectsResponse`).
+   */
+  services?: ObjectService[];
   createdAt: string;
   updatedAt: string;
 }
@@ -525,24 +722,55 @@ export interface ObjectInput {
   name: string;
   address?: string;
   city?: string;
-  /** Usługi obiektu; backend dolicza z nich sposób liczenia kosztu osobowego. */
+  /** Link do pinezki w Google Maps; null czyści wartość. Backend waliduje host. */
+  mapsUrl?: string | null;
+  /**
+   * OKRESY USŁUG — źródło prawdy. Obecność pola w body to PEŁNA PODMIANA listy;
+   * flagi `hasX`/`cameraCount` backend wtedy WYLICZA z okresów aktywnych (jak
+   * `monthlyValue` z rozbicia abonamentu), a przysłane — ignoruje.
+   */
+  services?: ObjectServiceInput[];
+  /**
+   * Usługi obiektu; backend dolicza z nich sposób liczenia kosztu osobowego.
+   * @deprecated Gdy w body jest `services`, flaga jest wyliczana z okresów
+   * i to pole jest ignorowane.
+   */
   hasCameras?: boolean;
-  /** null = „usługa jest, ale kamer nikt nie policzył” (a nie zero kamer). */
+  /**
+   * null = „usługa jest, ale kamer nikt nie policzył” (a nie zero kamer).
+   * @deprecated Jak `hasCameras` — przy `services` suma z aktywnych okresów kamer.
+   */
   cameraCount?: number | null;
+  /** @deprecated Jak `hasCameras` — wyliczane z `services`, gdy te są w body. */
   hasSswin?: boolean;
+  /** @deprecated Jak `hasCameras` — wyliczane z `services`, gdy te są w body. */
   hasVideoreception?: boolean;
+  /** @deprecated Jak `hasCameras` — wyliczane z `services`, gdy te są w body. */
   hasOfi?: boolean;
+  /**
+   * Przewidywane zakończenie obsługi całego obiektu (YYYY-MM-DD);
+   * null / "" czyści wartość („bezterminowo”).
+   */
+  expectedEndDate?: string | null;
   installationType: "new" | "takeover";
   status?: "pending" | "in_progress" | "active" | "inactive";
   department?: "sales" | "technical" | "accounting";
   /**
-   * Abonament miesięczny; null czyści wartość („obiekt bez abonamentu”).
+   * @deprecated Wysyłaj `monthlyZdw` / `monthlyOfi`. Gdy przyjdzie samo, backend
+   * rozdzieli je po usługach obiektu (src/lib/abonament-split.ts); gdy przyjdzie
+   * razem z rozbiciem — jest ignorowane.
+   */
+  monthlyValue?: number | null;
+  /**
+   * Abonament za zdalny dozór wizyjny; null czyści wartość („bez abonamentu ZDW”).
    * Bez `| null` wyczyszczone pole w ogóle nie docierało do backendu: `undefined`
    * wypada z JSON-a, a PUT /objects/:id robi `.set({ ...body })` — użytkownik
    * kasował kwotę, zapisywał i wracała stara. Ta sama umowa co przy
    * `monthlyCost` i `setupCost` niżej.
    */
-  monthlyValue?: number | null;
+  monthlyZdw?: number | null;
+  /** Abonament za ochronę fizyczną; null czyści wartość. */
+  monthlyOfi?: number | null;
   /** Dzierżawa sprzętu (zł netto/mies.); null czyści wartość. */
   monthlyRental?: number | null;
   /** Koszt miesięczny; null czyści wartość („nieuzupełniony”). */
@@ -573,6 +801,11 @@ export interface Contract {
   endDate: string | null;
   value: number | null;
   filePath: string | null;
+  /**
+   * Draft (dokument DOCX), z którego powstał wpis — nadaje go „Przenieś do
+   * rejestru”. `null` = umowa dodana ręcznie, bez pliku.
+   */
+  draftId: number | null;
   status: "draft" | "active" | "expired" | "terminated";
   createdAt: string;
 }
@@ -580,6 +813,12 @@ export interface Contract {
 export interface ContractWithDetails extends Contract {
   object: ObjectRecord | null;
   contractor: Contractor | null;
+  /**
+   * Gotowy adres DOCX-a do podglądu (`…/file?inline=1`) albo `null`, gdy nie ma
+   * czego pokazać: umowa bez draftu, draft skasowany lub dokument jeszcze
+   * niewygenerowany. Liczy go backend — front nie składa ścieżek plików sam.
+   */
+  draftFileUrl: string | null;
 }
 
 export interface ContractInput {
@@ -644,6 +883,20 @@ export interface Order {
   serviceStartDate: string | null;
   installationStartDate: string | null;
   notes: string | null;
+  /**
+   * Okresy usług zakładanego obiektu, zapamiętane NA ZLECENIU (kolumna JSON) —
+   * dzięki temu przeżywają edycję zlecenia i widzi je mail. null = zlecenie
+   * sprzed tej zmiany albo bez usług; `?` bo starszy backend pola nie odsyła.
+   */
+  objectServices?: ObjectServiceInput[] | null;
+  /** Szansa sprzedaży, z której zlecenie powstało (kierunek: szansa → zlecenie). */
+  leadId?: number | null;
+  /** Handlowiec prowadzący; domyślnie właściciel szansy. */
+  salespersonId?: number | null;
+  /** Nazwa handlowca rozwiązana przez backend (kartoteka jest za innym kluczem). */
+  salespersonName?: string | null;
+  /** Tytuł powiązanej szansy — etykieta linku „Szansa" na karcie zlecenia. */
+  leadTitle?: string | null;
   createdAt: string;
   updatedAt: string;
   // Joined data from backend
@@ -684,6 +937,13 @@ export interface OrderInput {
   interventionGroup?: boolean;
   videoReception?: boolean;
   installationStartDate?: string;
+  /**
+   * Szansa, z której powstaje zlecenie. Backend linkuje w obie strony i odrzuca
+   * drugie zlecenie z tej samej szansy (409). Formularz publiczny pole ignoruje.
+   */
+  leadId?: number | null;
+  /** Handlowiec prowadzący; brak = właściciel szansy z `leadId`. */
+  salespersonId?: number | null;
   // Flags for auto-creating contractor and object
   createContractor?: boolean;
   createObject?: boolean;
@@ -695,12 +955,28 @@ export interface OrderInput {
   contractorEmail?: string;
   contractorContactPerson?: string;
   // Additional object data when creating new
-  /** Usługi zakładanego obiektu (zamiast dawnego jednego „typu ochrony”). */
+  /**
+   * OKRESY USŁUG zakładanego obiektu — zapisywane też na samym zleceniu, żeby PUT,
+   * szczegóły i mail je widziały. Gdy brak, backend buduje listę z flag `objectHas*`
+   * (start: `serviceStartDate` → `installationStartDate` → dziś).
+   */
+  objectServices?: ObjectServiceInput[];
+  /**
+   * Usługi zakładanego obiektu (zamiast dawnego jednego „typu ochrony”).
+   * @deprecated Fallback dla publicznego formularza i starszych klientów; nowy kod
+   * wysyła `objectServices` (z flagi nie da się odtworzyć daty startu usługi).
+   */
   objectHasCameras?: boolean;
-  /** null/undefined = usługa jest, ale kamer nikt nie policzył. */
+  /**
+   * null/undefined = usługa jest, ale kamer nikt nie policzył.
+   * @deprecated Jak `objectHasCameras` — używaj `objectServices[].cameraCount`.
+   */
   objectCameraCount?: number | null;
+  /** @deprecated Jak `objectHasCameras` — używaj `objectServices`. */
   objectHasSswin?: boolean;
+  /** @deprecated Jak `objectHasCameras` — używaj `objectServices`. */
   objectHasVideoreception?: boolean;
+  /** @deprecated Jak `objectHasCameras` — używaj `objectServices`. */
   objectHasOfi?: boolean;
   objectInstallationType?: "new" | "takeover";
 }
@@ -752,6 +1028,7 @@ export type OrderSortKey =
   | "requester"
   | "object"
   | "payer"
+  | "salesperson"
   | "created";
 
 /** Lista zleceń + rozkład statusów CAŁEGO wyniku filtrowania (nie tylko strony). */
@@ -776,6 +1053,10 @@ export async function getOrders(params?: {
   payerContractorId?: number | "none";
   /** "1" = tylko montaże kamer, "0" = tylko pozostałe. */
   camera?: "1" | "0";
+  /** Id handlowca prowadzącego albo "none" = zlecenia bez opiekuna. */
+  salespersonId?: number | "none";
+  /** Zlecenia z jednej szansy sprzedaży. */
+  leadId?: number;
   /** Zakres daty przyjęcia zlecenia („YYYY-MM-DD"). */
   createdFrom?: string;
   createdTo?: string;
@@ -791,6 +1072,10 @@ export async function getOrders(params?: {
     searchParams.set("payerContractorId", String(params.payerContractorId));
   }
   if (params?.camera) searchParams.set("camera", params.camera);
+  if (params?.salespersonId !== undefined) {
+    searchParams.set("salespersonId", String(params.salespersonId));
+  }
+  if (params?.leadId) searchParams.set("leadId", String(params.leadId));
   if (params?.createdFrom) searchParams.set("createdFrom", params.createdFrom);
   if (params?.createdTo) searchParams.set("createdTo", params.createdTo);
   if (params?.sort) searchParams.set("sort", params.sort);
@@ -858,6 +1143,17 @@ export interface OrderMailPreview {
   to: string;
   /** Kopia do osoby kontaktowej na obiekcie, o ile to inny adres (tylko wariant „client”). */
   cc: string | null;
+  /**
+   * Stała kopia ukryta z ustawień Administracja → Poczta (`orderClientBcc`).
+   * Opcjonalne: starszy backend tego pola nie zwraca.
+   */
+  bcc?: string | null;
+  /**
+   * Czy wysyłka jest w ogóle możliwa — decyduje BACKEND (wyłączony przełącznik
+   * wysyłki, brak SMTP, brak adresata). `reason` to gotowy komunikat po polsku,
+   * który front pokazuje przy zablokowanym przycisku „Wyślij”.
+   */
+  sending?: { ready: boolean; reason?: string };
 }
 
 /**
@@ -905,6 +1201,12 @@ export interface PublicOrderIntakeInput {
   interventionGroup?: boolean;
   videoReception?: boolean;
   installationStartDate?: string;
+  /**
+   * Okresy usług zakładanego obiektu (whitelist body: src/routes/public.ts:64).
+   * Klient nie widzi ich w formularzu — lista powstaje z jego odpowiedzi o montaż
+   * kamer i wideorecepcję. Gdy pole nie przyjdzie, backend liczy je tak samo sam.
+   */
+  objectServices?: ObjectServiceInput[];
 }
 
 /** Dane firmy dostępne dla formularza publicznego (węższe niż w panelu). */
@@ -1829,6 +2131,14 @@ export interface Salesperson {
   employeeId: number | null;
   /** Nazwisko z Kadr doklejane przez API (null = brak powiązania). */
   employeeName?: string | null;
+  /**
+   * Konto użytkownika tej osoby — po nim działa „Moje / Wszyscy" i filtr
+   * `salespersonId=me`. null = handlowiec bez konta w systemie.
+   */
+  userId?: number | null;
+  /** Dane konta doklejane przez API (null = brak powiązania). */
+  userEmail?: string | null;
+  userDisplayName?: string | null;
   notes: string | null;
   active: boolean;
   /** Liczone przez API: ilu kontrahentów i ile obiektów prowadzi. */
@@ -1857,6 +2167,11 @@ export interface SalespersonInput {
   commissionRate?: number | null;
   /** Powiązanie z kartoteką kadrową; null czyści powiązanie. */
   employeeId?: number | null;
+  /**
+   * Konto użytkownika handlowca; null odpina. Backend odrzuca konto już
+   * przypięte do innego handlowca (409) — jedno konto = jeden portfel.
+   */
+  userId?: number | null;
   notes?: string;
   active?: boolean;
 }
@@ -1925,6 +2240,15 @@ export interface Company {
   employerMarkupUop: number | null;
   employerMarkupZlecenieZua: number | null;
   employerMarkupZlecenieZza: number | null;
+  // --- Dane do umów (moduł „Drafty umów”) ---
+  /** Kod do numeracji umów, np. „ZDW” → numer `12/ZDW/2026`. */
+  contractCode: string | null;
+  /** Nazwa używana W TREŚCI umowy — `fullName` jest z KRS, czyli wersalikami. */
+  contractName: string | null;
+  /** Reprezentant w dopełniaczu: „Sławomira Jaworskiego - Prezesa Zarządu”. */
+  representativeLine: string | null;
+  /** Kapitał zakładowy jako gotowy tekst do umowy: „50 000,00 zł”. */
+  shareCapital: string | null;
   /** Liczone przez API. */
   objectsCount?: number;
   objectsMonthlyValue?: number;
@@ -1951,6 +2275,11 @@ export interface CompanyInput {
   employerMarkupUop?: number | null;
   employerMarkupZlecenieZua?: number | null;
   employerMarkupZlecenieZza?: number | null;
+  // --- Dane do umów (sekcja „Dane do umów” w formularzu spółki) ---
+  contractCode?: string | null;
+  contractName?: string | null;
+  representativeLine?: string | null;
+  shareCapital?: string | null;
 }
 
 /** Skrót spółki dołączany do obiektu. */
@@ -2557,6 +2886,12 @@ export interface Offer {
   leaseAnnualRate: number | null;
   leaseIncludeLabour: boolean;
   orderId: number | null;
+  /** Szansa sprzedaży, z której powstała oferta (null = oferta bez szansy). */
+  leadId?: number | null;
+  /** Tytuł tej szansy — rozwiązany przez backend (lista i szczegóły oferty). */
+  leadTitle?: string | null;
+  /** Etap tej szansy (tylko szczegóły oferty) — po co podpowiadać „wygrana”, gdy już jest. */
+  leadStage?: LeadStage | null;
   warehouseDocId: number | null;
   notes: string | null;
   /** Token linku dla klienta; null = oferta nieudostępniona. */
@@ -2805,6 +3140,8 @@ export interface OfferInput {
   leaseMonths?: number | null;
   leaseAnnualRate?: number | null;
   leaseIncludeLabour?: boolean;
+  /** Powiązanie z szansą sprzedaży; null odpina. */
+  leadId?: number | null;
   notes?: string;
 }
 
@@ -2946,12 +3283,15 @@ export function parsePackageParams(raw: string): OfferPackageParam[] {
 }
 
 export const offersApi = {
-  async list(opts: { status?: OfferStatus; kind?: OfferKind; year?: number; q?: string } = {}) {
+  async list(
+    opts: { status?: OfferStatus; kind?: OfferKind; year?: number; q?: string; leadId?: number } = {}
+  ) {
     const params = new URLSearchParams();
     if (opts.status) params.set("status", opts.status);
     if (opts.kind) params.set("kind", opts.kind);
     if (opts.year) params.set("year", String(opts.year));
     if (opts.q) params.set("q", opts.q);
+    if (opts.leadId) params.set("leadId", String(opts.leadId));
     const q = params.toString();
     return request<ApiResponse<OfferListRow[]>>(`/offers${q ? `?${q}` : ""}`);
   },
@@ -4182,10 +4522,22 @@ export interface WarehouseItem {
   purchasePrice: number | null;
   /** Własna cena sprzedaży netto. null = liczona z narzutu firmowego. */
   salePrice: number | null;
-  photoData: string | null;
+  /**
+   * Zdjęcie jako data-URL. UWAGA: `GET /items` go NIE niesie (lista z pięcioma
+   * zdjęciami ważyła megabajty) — tam przychodzi tylko `hasPhoto`, a samo
+   * zdjęcie doczytuje formularz z `GET /items/:id/photo`.
+   */
+  photoData?: string | null;
+  /** Czy kartoteka ma zdjęcie (jedyna informacja o zdjęciu na liście). */
+  hasPhoto?: boolean;
   minStock: number | null;
   isAsset: boolean;
   barcode: string | null;
+  /**
+   * Symbol producenta (MPN). W przeciwieństwie do kodu u dostawcy jest ten sam
+   * we wszystkich sklepach, więc to po nim import rozpoznaje „ten towar już mamy”.
+   */
+  manufacturerCode: string | null;
   isArchived: boolean;
   /** Login (email) osoby, która założyła kartotekę. */
   createdBy: string | null;
@@ -4214,6 +4566,14 @@ export interface WarehouseItem {
   marginPct: number | null;
   /** Narzut: o ile procent cena przewyższa koszt (%). */
   markupPct: number | null;
+  /**
+   * Liczba sklepów dostawców przypiętych do towaru — dokładana TYLKO przez
+   * `GET /items` (badge „🛒 n” w tabeli). Odpowiedź POST/PUT jej nie niesie,
+   * dlatego pole jest opcjonalne.
+   */
+  sourcesCount?: number;
+  /** Nazwy sklepów do dymka przy badge'u — jak `sourcesCount`, tylko z listy. */
+  sourceShops?: string[];
 }
 
 export interface WarehouseItemInput {
@@ -4230,9 +4590,18 @@ export interface WarehouseItemInput {
   minStock?: number | null;
   isAsset?: boolean;
   barcode?: string;
+  /** Symbol producenta (MPN). */
+  manufacturerCode?: string;
   photoData?: string | null;
   /** false = przywrócenie towaru z archiwum */
   isArchived?: boolean;
+  /**
+   * Źródła (sklepy dostawców). `undefined` = NIE RUSZAJ istniejących źródeł
+   * (formularz, który ich nie doczytał, nie może ich skasować); tablica =
+   * pełna podmiana zbioru — upsert po `shop`, reszta wierszy znika.
+   * Powtórzony `shop` w tablicy backend odrzuca (400).
+   */
+  sources?: WarehouseItemSourceInput[];
 }
 
 /** Parametry cenowe firmy używane przez kartotekę magazynu. */
@@ -4356,6 +4725,233 @@ export interface WarehouseMovement {
   createdBy: string | null;
 }
 
+// ---------------------------------------------------------------------------
+// Import towaru z zapisanej strony sklepu dostawcy
+//
+// Typy PRZEPISANE 1:1 z `src/lib/shop-import/types.ts` i `src/routes/warehouse.ts`
+// — front świadomie nie importuje z backendu, więc każda zmiana pola po tamtej
+// stronie musi trafić także tutaj (kontrakt opisany w planie, sekcja 4).
+// ---------------------------------------------------------------------------
+
+/** Parser dedykowany sklepu; „generic” = tylko dane z JSON-LD/og/microdata. */
+export type ShopParserId = "samal" | "janex" | "eltrox" | "grodno" | "generic";
+
+/**
+ * Co właściwie znaczy znaleziona cena. „unknown” = jedna cena bez etykiety →
+ * backend NIE proponuje ceny zakupu, człowiek wskazuje netto/brutto w panelu.
+ */
+export type ShopPriceKind = "net" | "gross" | "both" | "unknown";
+
+/** Skąd wzięliśmy adres produktu (i tym samym domenę sklepu). */
+export type ShopDetectedBy =
+  | "urlHint"
+  | "savedFrom"
+  | "canonical"
+  | "ogUrl"
+  | "jsonLd"
+  | "hiddenInput"
+  | "linkHost"
+  | "none";
+
+export interface ParsedAttribute {
+  name: string;
+  value: string;
+}
+
+export interface ShopParseDiagnostics {
+  /** Pola, które parser wypełnił. */
+  recognized: string[];
+  /** Pola, których nie znalazł — to lista do kalibracji parsera. */
+  missing: string[];
+  warnings: string[];
+  shopDetectedBy: ShopDetectedBy;
+  parserUsed: ShopParserId;
+  parserVersion: string;
+  htmlBytes: number;
+  charset: string;
+}
+
+export interface ParsedProduct {
+  /** Domena sklepu bez „www.”. Może być PUSTA (`shopDetectedBy: "none"`). */
+  shop: string;
+  shopLabel: string;
+  url: string | null;
+  name: string | null;
+  supplierCode: string | null;
+  supplierProductId: string | null;
+  manufacturer: string | null;
+  manufacturerCode: string | null;
+  ean: string | null;
+  priceNet: number | null;
+  priceGross: number | null;
+  priceKind: ShopPriceKind;
+  vatRate: number | null;
+  currency: string;
+  stock: number | null;
+  stockText: string | null;
+  unit: string | null;
+  category: string | null;
+  descriptionText: string | null;
+  attributes: ParsedAttribute[];
+  loggedIn: boolean;
+  /** PRZESŁANKI (także negatywne!) — nie „dowody zalogowania”. */
+  loginSignals: string[];
+  accountLabel: string | null;
+  imageUrl: string | null;
+  diagnostics: ShopParseDiagnostics;
+}
+
+/** Propozycja pól kartoteki towaru (człowiek zatwierdza w panelu). */
+export interface ShopImportSuggestedItem {
+  name: string | null;
+  /** Nasz indeks nadaje człowiek — sklep nigdy go nie zna, więc zawsze null. */
+  sku: string | null;
+  category: string | null;
+  manufacturer: string | null;
+  manufacturerCode: string | null;
+  barcode: string | null;
+  unit: string | null;
+  purchasePrice: number | null;
+  description: string | null;
+}
+
+/** Powód dopasowania — kolejność = malejąca pewność. */
+export type ShopImportMatchReason =
+  | "source"
+  | "ean"
+  | "manufacturerCode"
+  | "sku"
+  | "name";
+
+/** „Ten towar już mamy” — pytanie zadawane PRZED zapisem, żeby nie robić duplikatu. */
+export interface ShopImportMatch {
+  id: number;
+  name: string;
+  sku: string | null;
+  manufacturer: string | null;
+  manufacturerCode: string | null;
+  barcode: string | null;
+  purchasePrice: number | null;
+  salePrice: number | null;
+  unit: string;
+  isArchived: boolean;
+  reason: ShopImportMatchReason;
+  confidence: "exact" | "likely";
+}
+
+export interface ShopImportParseResult {
+  parsed: ParsedProduct;
+  suggestedItem: ShopImportSuggestedItem;
+  suggestedSource: WarehouseItemSourceInput;
+  matches: ShopImportMatch[];
+  /** Zdjęcie pobrane z og:image, już przeskalowane (data-URL) albo null. */
+  photoData: string | null;
+  photoWarning: string | null;
+}
+
+/** Źródło towaru = „ten towar kupujemy w tym sklepie, pod tym kodem, ostatnio za tyle”. */
+export interface WarehouseItemSource {
+  id: number;
+  itemId: number;
+  /** Domena sklepu bez „www.” — klucz tożsamości (UNIQUE z itemId). */
+  shop: string;
+  shopLabel: string | null;
+  productUrl: string | null;
+  supplierCode: string | null;
+  supplierProductId: string | null;
+  lastPriceNet: number | null;
+  lastPriceGross: number | null;
+  vatRate: number | null;
+  currency: string;
+  lastStock: number | null;
+  /** Czy strona, z której wzięliśmy dane, była zapisana PO ZALOGOWANIU. */
+  loggedIn: boolean;
+  fetchedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  /** Tylko z `GET /items/:id/sources?raw=1` — zrzut z parsera. */
+  raw?: unknown;
+}
+
+/**
+ * Body źródła. Pole NIEPRZYSŁANE = null (nie „zostaw jak było”): źródło jest
+ * spójnym zestawem z jednego odczytu, więc scalanie po polach dałoby cenę
+ * z dziś i stan z zeszłego miesiąca. Wyjątek: `fetchedAt` = „odczytano teraz”.
+ */
+export interface WarehouseItemSourceInput {
+  shop: string;
+  shopLabel?: string | null;
+  productUrl?: string | null;
+  supplierCode?: string | null;
+  supplierProductId?: string | null;
+  lastPriceNet?: number | string | null;
+  lastPriceGross?: number | string | null;
+  vatRate?: number | string | null;
+  currency?: string | null;
+  lastStock?: number | null;
+  loggedIn?: boolean;
+  raw?: unknown;
+  fetchedAt?: string;
+}
+
+/**
+ * Wiersz kolejki „Do dodania z wtyczki” (`GET /warehouse/import/inbox`).
+ *
+ * Lista jest ŚWIADOMIE lekka: bez `parsed` i bez zdjęcia (do 1 MB base64 na
+ * wpis) — pełną propozycję ściąga `getImportInboxEntry` dopiero przy otwarciu
+ * formularza. `matchItemId` to „ten produkt już mamy w kartotece” wyliczone
+ * przy zapisie wiersza po stronie serwera, nie w panelu.
+ */
+export interface PluginInboxEntry {
+  id: number;
+  /** `queued` = jeszcze nietknięty, `opened` = ktoś go już otwierał. */
+  status: "queued" | "opened";
+  /** `open` = klik „Dodaj do towarów Alfa”, `queue` = „Dodaj do kolejki”. */
+  mode: "open" | "queue";
+  shop: string;
+  shopLabel: string | null;
+  name: string | null;
+  pageTitle: string | null;
+  productUrl: string | null;
+  priceNet: number | null;
+  matchCount: number;
+  matchItemId: number | null;
+  hasPhoto: boolean;
+  createdAt: string;
+  expiresAt: string;
+}
+
+/** Pełna propozycja z kolejki = odpowiedź `/import/parse` + skąd przyszła. */
+export type PluginInboxDetail = ShopImportParseResult & {
+  inboxId: number;
+  matchItemId: number | null;
+};
+
+/**
+ * Stan tokenu wtyczki. `masked` („abcd…wxyz”) wystarcza, żeby po rotacji
+ * poznać, że token się zmienił — pełny sekret opuszcza serwer WYŁĄCZNIE
+ * w `config.js` w strumieniu ZIP.
+ */
+export interface PluginTokenInfo {
+  hasToken: boolean;
+  masked: string | null;
+  createdAt: string | null;
+  /**
+   * Adres aplikacji, który serwer WPISZE do paczki (`config.js`). Panel go
+   * pokazuje, bo przy osobnym devie i produkcji ZIP wygląda identycznie,
+   * a wskazuje inne środowisko — i bez tej informacji nie da się tego poznać.
+   */
+  baseUrl: string;
+}
+
+/** Sklep obsługiwany przez wtyczkę; `calibrated=false` = parser do kalibracji. */
+export interface PluginShopInfo {
+  shop: string;
+  label: string;
+  parser: string;
+  calibrated: boolean;
+}
+
 export const warehouseApi = {
   // Towary (kartoteka)
   async getItems(includeArchived = false) {
@@ -4386,6 +4982,25 @@ export const warehouseApi = {
     });
   },
 
+  /**
+   * Przywrócenie z archiwum. Lustro DELETE — przestawia WYŁĄCZNIE flagę.
+   * Nie wolno tego robić PUT-em: pełna podmiana kartoteki z body odtworzonego
+   * z listy gubi ceny, producenta i zdjęcie (lista ich nie niesie).
+   */
+  async restoreItem(id: number) {
+    return request<ApiResponse<WarehouseItem>>(
+      `/warehouse/items/${id}/restore`,
+      { method: "POST" }
+    );
+  },
+
+  /** Zdjęcie towaru (data-URL) — lista go nie niesie, formularz doczytuje osobno. */
+  async getItemPhoto(id: number) {
+    return request<ApiResponse<{ photoData: string }>>(
+      `/warehouse/items/${id}/photo`
+    );
+  },
+
   /** Cena z ostatniego zatwierdzonego PZ (null = towar nigdy nie był przyjęty z ceną). */
   async getLastPurchase(id: number) {
     return request<ApiResponse<WarehouseLastPurchase | null>>(
@@ -4398,6 +5013,178 @@ export const warehouseApi = {
     return request<ApiResponse<WarehousePricingConfig>>(
       "/warehouse/pricing-config"
     );
+  },
+
+  // --- Źródła towaru (sklepy dostawców) ---
+
+  /** Źródła towaru; `raw` = dołóż zrzut z parsera (bywa dziesiątki KB). */
+  async getItemSources(id: number, raw = false) {
+    return request<ApiResponse<WarehouseItemSource[]>>(
+      `/warehouse/items/${id}/sources${raw ? "?raw=1" : ""}`
+    );
+  },
+
+  /**
+   * Zapis JEDNEGO źródła („Odśwież z pliku” przy istniejącym towarze).
+   * Sklep jest w adresie, bo to on identyfikuje wiersz — PUT jest idempotentny.
+   * Ciało to PEŁNA podmiana pól źródła (pominięte pole = null).
+   */
+  async upsertItemSource(
+    id: number,
+    shop: string,
+    data: Omit<WarehouseItemSourceInput, "shop">
+  ) {
+    return request<ApiResponse<WarehouseItemSource>>(
+      `/warehouse/items/${id}/sources/${encodeURIComponent(shop)}`,
+      { method: "PUT", body: JSON.stringify(data) }
+    );
+  },
+
+  async deleteItemSource(id: number, sourceId: number) {
+    return request<ApiResponse<{ id: number }>>(
+      `/warehouse/items/${id}/sources/${sourceId}`,
+      { method: "DELETE" }
+    );
+  },
+
+  // --- Import z zapisanej strony sklepu (nic nie zapisuje) ---
+
+  /**
+   * Zapisana strona produktu (Ctrl+S → „Strona sieci Web, kompletna”) → propozycja
+   * kartoteki. `url` przydaje się, gdy parser nie umiał wyprowadzić adresu ze
+   * strony; `fetchImage: false` pomija pobieranie zdjęcia z sklepu.
+   */
+  async parseShopPage(
+    file: File,
+    url?: string,
+    opts?: { fetchImage?: boolean }
+  ) {
+    const fd = new FormData();
+    fd.append("file", file);
+    if (url) fd.append("url", url);
+    return requestMultipart<ApiResponse<ShopImportParseResult>>(
+      `/warehouse/import/parse${opts?.fetchImage === false ? "?fetchImage=0" : ""}`,
+      fd
+    );
+  },
+
+  /**
+   * To samo z gołym HTML-em. Wtyczka przeglądarki NIE woła tej trasy — ma
+   * własną, tokenową (`POST /api/plugin/import`, bez cookie sesji). Ten wariant
+   * został dla panelu i testów.
+   */
+  async parseShopHtml(
+    html: string,
+    url?: string,
+    opts?: { fetchImage?: boolean }
+  ) {
+    return request<ApiResponse<ShopImportParseResult>>(
+      `/warehouse/import/parse${opts?.fetchImage === false ? "?fetchImage=0" : ""}`,
+      { method: "POST", body: JSON.stringify({ html, url }) }
+    );
+  },
+
+  // --- Kolejka propozycji z wtyczki przeglądarki ---
+
+  /** „Do dodania z wtyczki” — moje wiersze `queued` + `opened`, nieprzeterminowane. */
+  async getImportInbox() {
+    return request<ApiResponse<PluginInboxEntry[]>>("/warehouse/import/inbox");
+  },
+
+  /** Sam licznik — bez ciągnięcia listy. */
+  async getImportInboxCount() {
+    return request<ApiResponse<{ queued: number }>>(
+      "/warehouse/import/inbox/count"
+    );
+  },
+
+  /**
+   * Pełna propozycja do formularza towaru (kształt 1:1 z `/import/parse`).
+   * UWAGA: odczyt PRZESTAWIA status wiersza na `opened`, więc nie wołamy tego
+   * „na wszelki wypadek” przy renderowaniu listy.
+   */
+  async getImportInboxEntry(id: number) {
+    return request<ApiResponse<PluginInboxDetail>>(
+      `/warehouse/import/inbox/${id}`
+    );
+  },
+
+  /** „Nie chcę tego” — wiersz znika z listy i nie wraca przy kolejnym kliku w sklepie. */
+  async discardImportInbox(id: number) {
+    return request<ApiResponse<{ id: number; status: string }>>(
+      `/warehouse/import/inbox/${id}/discard`,
+      { method: "POST" }
+    );
+  },
+
+  /** Wołane PO udanym zapisie kartoteki z tej propozycji. */
+  async markImportInboxDone(id: number) {
+    return request<ApiResponse<{ id: number; status: string }>>(
+      `/warehouse/import/inbox/${id}/done`,
+      { method: "POST" }
+    );
+  },
+
+  // --- Wtyczka: token, obsługiwane sklepy, paczka ---
+
+  async getPluginToken() {
+    return request<ApiResponse<PluginTokenInfo>>("/warehouse/plugin/token");
+  },
+
+  /** Nowy token = wszystkie wcześniej pobrane paczki przestają działać. */
+  async rotatePluginToken() {
+    return request<ApiResponse<PluginTokenInfo>>(
+      "/warehouse/plugin/token/rotate",
+      { method: "POST" }
+    );
+  },
+
+  async revokePluginToken() {
+    return request<ApiResponse<PluginTokenInfo>>("/warehouse/plugin/token", {
+      method: "DELETE",
+    });
+  },
+
+  async getPluginShops() {
+    return request<ApiResponse<PluginShopInfo[]>>("/warehouse/plugin/shops");
+  },
+
+  /**
+   * Pobranie paczki ZIP. Świadomie NIE przez `request`: odpowiedź to plik
+   * binarny, a nie `{success,data}`, więc `response.json()` wyłożyłoby się na
+   * pierwszym bajcie. Błąd serwera JEST JSON-em — dlatego przy `!res.ok`
+   * wyciągamy z niego komunikat, zamiast pokazywać „Request failed”.
+   *
+   * Klik w link robimy sami (`<a download>` + `revokeObjectURL`), a nie
+   * `window.location`: dzięki temu żądanie leci fetchem z nagłówkiem
+   * identyfikatora karty jak każde inne i można obsłużyć błąd.
+   */
+  async downloadPlugin(): Promise<void> {
+    const res = await fetch(`${API_BASE}/warehouse/plugin/download`, {
+      headers: { [CLIENT_ID_HEADER]: CLIENT_ID },
+    });
+    if (!res.ok) {
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      throw Object.assign(
+        new Error(
+          data.error || `Nie udało się pobrać paczki wtyczki (${res.status})`
+        ),
+        { status: res.status }
+      );
+    }
+    const url = URL.createObjectURL(await res.blob());
+    try {
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "alfa-magazyn-wtyczka.zip";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } finally {
+      // Zwolnienie zaraz po kliknięciu jest bezpieczne: przeglądarka trzyma
+      // własną referencję do bloba na czas zapisywania pliku.
+      URL.revokeObjectURL(url);
+    }
   },
 
   // Magazyny
@@ -4582,6 +5369,12 @@ export const deleteAdminUser = (id: number) =>
 // Kalendarz (dział techniczny) + globalny activity_log
 // ---------------------------------------------------------------------------
 
+/**
+ * Dział, do którego należy wiersz `calendar_events`. Jeden silnik kalendarza,
+ * dwie konfiguracje (patrz `@/lib/calendar-config`); backend filtruje wierszowo.
+ */
+export type CalendarDepartment = "technical" | "handlowy";
+
 export type CalendarEventType =
   | "serwis"
   | "montaz"
@@ -4592,7 +5385,16 @@ export type CalendarEventType =
   | "konserwacja"
   | "urlop"
   /** Kafelek wskazujący na istniejącą notatkę (ręcznie albo ze wzmianki daty w treści). */
-  | "notatka";
+  | "notatka"
+  // --- Typy działu handlowego (`department = "handlowy"`). `wizja`, `urlop`
+  // i `notatka` są wspólne dla obu działów — patrz DEPARTMENT_TYPE_ORDER.
+  | "spotkanie"
+  | "telefon"
+  | "email"
+  | "zadanie"
+  | "prezentacja"
+  /** Termin bez czynności: deadline oferty, decyzja klienta, przetarg. */
+  | "termin";
 
 export type CalendarEventStatus = "planned" | "confirmed" | "done" | "cancelled";
 
@@ -4666,6 +5468,13 @@ export interface CalendarEventTechnician {
   lastName: string;
 }
 
+/** Handlowiec przypisany do wydarzenia handlowego (`calendar_event_salespeople`). */
+export interface CalendarEventSalesperson {
+  id: number;
+  firstName: string;
+  lastName: string;
+}
+
 export interface CalendarEvent {
   id: number;
   type: CalendarEventType;
@@ -4678,7 +5487,7 @@ export interface CalendarEvent {
   endAt: string;
   allDay: boolean;
   status: CalendarEventStatus;
-  department: string;
+  department: CalendarDepartment;
   objectId: number | null;
   objectName: string | null;
   orderId: number | null;
@@ -4698,6 +5507,21 @@ export interface CalendarEvent {
   /** `true` = realizacja została ręcznie odpięta; automat jej nie odtworzy. */
   realizationOptout: boolean;
   technicians: CalendarEventTechnician[];
+  /**
+   * Przypisani handlowcy (`department = "handlowy"`). Odpowiednik `technicians`
+   * dla drugiego działu — celowo osobne pole, nie polimorficzne `assignees`;
+   * most nad różnicą robi `assigneesOf()` z `@/lib/calendar-config`.
+   */
+  salespeople?: CalendarEventSalesperson[];
+  /** Szansa sprzedaży, do której wydarzenie należy (tylko dział handlowy). */
+  leadId?: number | null;
+  leadTitle?: string | null;
+  leadStage?: LeadStage | null;
+  /** Osoba kontaktowa, z którą jest spotkanie / telefon. */
+  contactId?: number | null;
+  contactName?: string | null;
+  /** Telefon osoby kontaktowej — lista aktywności robi z niego link `tel:`. */
+  contactPhone?: string | null;
   createdBy: number | null;
   createdByLabel: string | null;
   updatedBy: number | null;
@@ -4740,9 +5564,13 @@ export interface CalendarNoteRef {
   attachmentsCount: number;
   /** Tylko w `sourceNote`; wyszukiwarka pola nie zwraca. */
   source?: CalendarNoteSource;
+  /** Rodzaj wpisu; dla maila `text` ma już prefiks „📧 temat”. Brak = starszy backend. */
+  kind?: CalendarNoteKind;
 }
 
 export type CalendarNoteSource = "user" | "assistant" | "system";
+/** „text” = zwykły wpis dziennika, „email” = mail z Outlooka (pole `mail`). */
+export type CalendarNoteKind = "text" | "email";
 
 /** Załącznik notatki (obrazki serwer konwertuje do WebP — `fileName` może różnić się od oryginału). */
 export interface CalendarNoteAttachment {
@@ -4751,6 +5579,11 @@ export interface CalendarNoteAttachment {
   mime: string;
   size: number;
   kind: "image" | "file";
+  /**
+   * „upload” = plik dodany ręcznie, „msg” = wypakowany z maila .msg przy zapisie
+   * notatki (migracja 0096). Brak = starszy backend — traktuj jak „upload”.
+   */
+  origin?: "upload" | "msg";
   width: number | null;
   height: number | null;
   /** Ścieżka względem origin (`/api/calendar/attachments/:id`); `?download=1` wymusza pobranie. */
@@ -4761,7 +5594,81 @@ export interface CalendarNoteAttachment {
 export const CALENDAR_ATTACHMENT_MAX_FILES = 15;
 export const CALENDAR_ATTACHMENT_MAX_SIZE = 5 * 1024 * 1024;
 export const CALENDAR_ATTACHMENT_ACCEPT =
-  "image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.odt,.ods,.odp,.csv,.txt,.rtf";
+  "image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.odt,.ods,.odp,.csv,.txt,.rtf,.msg,.eml";
+
+/**
+ * Nagłówek maila w notatce `kind === "email"` — dokładnie te pola, które
+ * backend trzyma w kolumnach `mail_*` (migracja 0094).
+ */
+export interface CalendarNoteMailHeader {
+  subject: string;
+  /** „Jan Kowalski <jan@x.pl>” albo sam adres. */
+  from: string;
+  to: string[];
+  cc: string[];
+  /** ISO 8601 albo null. */
+  sentAt: string | null;
+  /**
+   * NAZWY załączników maila — także tych, których nie dało się wypakować
+   * (nieobsługiwany typ, >5 MB). Brak = starszy backend / zwykła notatka.
+   */
+  attachments?: string[];
+}
+
+/** Obiekt podpowiedziany po adresach z maila (src/lib/mail-object-match.ts). */
+export interface MailObjectSuggestion {
+  objectId: number;
+  objectName: string;
+  contractorName: string | null;
+  /** Adresy z maila, które doprowadziły do tego obiektu. */
+  matchedEmails: string[];
+  /** „object_contact” = kontakt przypięty do obiektu (mocna przesłanka). */
+  via: "object_contact" | "contractor";
+}
+
+/** Metadane załącznika maila BEZ bajtów — chipy w szkicu notatki (przed zapisem). */
+export interface ParsedMsgAttachmentMeta {
+  name: string;
+  /** MIME z maila; bywa pusty — wtedy typ rozstrzyga rozszerzenie. */
+  mime: string;
+  size: number;
+  isImage: boolean;
+}
+
+/** Mail `.msg` z Outlooka rozłożony przez backend (src/lib/outlook-msg.ts). */
+export interface ParsedOutlookMsg {
+  subject: string;
+  from: string;
+  to: string[];
+  cc: string[];
+  /** ISO 8601 albo null, gdy plik nie niósł daty. */
+  sentAt: string | null;
+  bodyText: string;
+  /** Same nazwy załączników maila (z mailami zagnieżdżonymi włącznie). */
+  attachments: string[];
+  /** Załączniki z treścią — bez bajtów. Brak = starszy backend. */
+  attachmentsMeta?: ParsedMsgAttachmentMeta[];
+}
+
+/**
+ * Odpowiedź `POST /calendar/events/:id/notes`. `skippedAttachments` (tylko przy
+ * wypakowywaniu z maila) to nazwy załączników, których backend NIE zapisał —
+ * nieobsługiwany typ, ponad 5 MB albo limit 15 plików.
+ */
+export type CalendarAddNoteResponse = ApiResponse<CalendarNote> & { skippedAttachments?: string[] };
+
+/** Odpowiedź `POST /calendar/msg/parse` — nic jeszcze nie zapisano. */
+export interface CalendarMsgParseResult {
+  parsed: ParsedOutlookMsg;
+  /** Nagłówek do zapisania przy notatce (`kind='email'`). */
+  mail: CalendarNoteMailHeader;
+  /** SAMA treść maila — nagłówek renderuje karta notatki, nie tekst. */
+  noteText: string;
+  /** Temat bez „RE:/FW:/ODP.:”, przycięty do 200 znaków. */
+  suggestedTitle: string;
+  /** Obiekty podpowiedziane po adresach (posortowane: kontakt obiektu → liczba trafień). */
+  objectSuggestions: MailObjectSuggestion[];
+}
 
 /** Notatka do wydarzenia (dziennik) — osobna od `description` (stały opis). */
 export interface CalendarNote {
@@ -4770,7 +5677,12 @@ export interface CalendarNote {
   userId: number | null;
   userLabel: string | null;
   source: CalendarNoteSource;
+  /** Brak = starszy backend (traktuj jak „text”). */
+  kind?: CalendarNoteKind;
+  /** Dla maila: SAMA treść (body) — nagłówek renderuje UI z pola `mail`. */
   text: string;
+  /** Nagłówek maila; null/brak dla zwykłej notatki. */
+  mail?: CalendarNoteMailHeader | null;
   createdAt: string;
   updatedAt: string;
   /** Brak = starszy backend bez załączników. */
@@ -4779,6 +5691,11 @@ export interface CalendarNote {
   mentions?: CalendarNoteMention[];
   /** Wszystkie żywe kafelki `notatka` tej notatki (także podpięte ręcznie). */
   linkedEventIds?: number[];
+  /**
+   * Id żywej kopii tej notatki w kartotece obiektu (`object_notes`) albo `null`.
+   * Front pokazuje wtedy chip „w obiekcie” zamiast przycisku „Do obiektu”.
+   */
+  objectNoteId: number | null;
 }
 
 /** Wzmianka daty w treści notatki (parser: `@/lib/note-mentions`). */
@@ -4821,6 +5738,17 @@ export interface CalendarEventInput {
   /** Jawnie przypięta wycena (null = odepnij → wycena realizacji / brak). */
   quoteId?: number | null;
   technicianIds: number[];
+  /**
+   * Dział wiersza. Brak = `"technical"` (backend przyjmuje domyślną wartość),
+   * a `PUT` działu już nie zmienia — przekazanie innego kończy się 400.
+   */
+  department?: CalendarDepartment;
+  /** Przypisani handlowcy — odpowiednik `technicianIds` dla działu handlowego. */
+  salespersonIds?: number[];
+  /** Szansa sprzedaży (tylko dział handlowy; techniczny dostaje `null`). */
+  leadId?: number | null;
+  /** Osoba kontaktowa — musi należeć do szansy albo jej kontrahenta. */
+  contactId?: number | null;
   recurrence?: CalendarRecurrenceInput | null;
   /** Tylko dla `type === "notatka"`: notatka, na którą wskazuje kafelek. */
   noteId?: number | null;
@@ -4888,10 +5816,21 @@ export interface CalendarEventsQuery {
   /** "with" = z protokołem, "without" = wykonane prace bez protokołu. */
   protocol?: "with" | "without";
   includeDeleted?: boolean;
+  /** Dział; brak = wszystkie widoczne dla użytkownika (backend zawęża wierszowo). */
+  department?: CalendarDepartment;
+  /** Handlowcy (backend przyjmuje "1,2,3"); "me" = handlowiec zalogowanego konta. */
+  salespersonId?: number[] | "me";
+  /** Wydarzenia jednej szansy sprzedaży. */
+  leadId?: number;
+  /** Wydarzenia z jedną osobą kontaktową. */
+  contactId?: number;
 }
 
 export interface CalendarConflictsQuery {
-  technicianIds: number[];
+  /** Kolizje techników (dział techniczny). Pusta lista / brak = pytamy o handlowców. */
+  technicianIds?: number[];
+  /** Kolizje handlowców — dla wydarzeń działu handlowego (zamiast techników). */
+  salespersonIds?: number[];
   startAt: string;
   endAt: string;
   excludeId?: number;
@@ -4918,6 +5857,20 @@ export interface TechnicianAvailability {
   lastName: string;
   leaves: TechnicianLeave[];
 }
+
+/** To samo dla handlowców (`GET /calendar/availability?department=handlowy`). */
+export interface SalespersonAvailability {
+  salespersonId: number;
+  firstName: string;
+  lastName: string;
+  leaves: TechnicianLeave[];
+}
+
+/** Wiersz dostępności niezależnie od działu — id czyta `availabilityAssigneeId`. */
+export type CalendarAvailability = TechnicianAvailability | SalespersonAvailability;
+
+export const availabilityAssigneeId = (row: CalendarAvailability): number =>
+  "technicianId" in row ? row.technicianId : row.salespersonId;
 
 // --- Pogoda przy wydarzeniach (Open-Meteo + ostrzeżenia IMGW) -------------
 // Kształty 1:1 z `src/lib/weather.ts` na backendzie.
@@ -5007,6 +5960,13 @@ export const calendarApi = {
     if (params.billing?.length) sp.set("billing", params.billing.join(","));
     if (params.protocol) sp.set("protocol", params.protocol);
     if (params.includeDeleted) sp.set("includeDeleted", "1");
+    if (params.department) sp.set("department", params.department);
+    // "me" idzie dosłownie — backend podmienia je na handlowca zalogowanego konta
+    // (a bez dopasowania zwraca pusty zbiór, nie „wszystko").
+    if (params.salespersonId === "me") sp.set("salespersonId", "me");
+    else if (params.salespersonId?.length) sp.set("salespersonId", params.salespersonId.join(","));
+    if (params.leadId) sp.set("leadId", String(params.leadId));
+    if (params.contactId) sp.set("contactId", String(params.contactId));
     return request<ApiResponse<CalendarEvent[]>>(
       `/calendar/events?${sp.toString()}`
     );
@@ -5067,10 +6027,11 @@ export const calendarApi = {
     );
   },
 
-  /** Kolizje terminów techników (ostrzeżenie, nie blokada). */
+  /** Kolizje terminów techników albo handlowców (ostrzeżenie, nie blokada). */
   async conflicts(params: CalendarConflictsQuery) {
     const sp = new URLSearchParams();
-    sp.set("technicianIds", params.technicianIds.join(","));
+    if (params.technicianIds?.length) sp.set("technicianIds", params.technicianIds.join(","));
+    if (params.salespersonIds?.length) sp.set("salespersonIds", params.salespersonIds.join(","));
     sp.set("startAt", params.startAt);
     sp.set("endAt", params.endAt);
     if (params.excludeId) sp.set("excludeId", String(params.excludeId));
@@ -5079,12 +6040,23 @@ export const calendarApi = {
     );
   },
 
-  /** Urlopy techników nachodzące na zakres [from, to) — do oznaczania w dialogu. */
-  async availability(from: string, to: string) {
+  /**
+   * Urlopy przypisanych nachodzące na zakres [from, to) — do oznaczania w dialogu.
+   * Bez `department` (dotychczasowe wywołania) wiersze są per technik; z
+   * `department: "handlowy"` per handlowiec, stąd typ zwrotny zależny od argumentu.
+   */
+  async availability<D extends CalendarDepartment | undefined = undefined>(
+    from: string,
+    to: string,
+    department?: D
+  ): Promise<
+    ApiResponse<D extends "handlowy" ? SalespersonAvailability[] : TechnicianAvailability[]>
+  > {
     const sp = new URLSearchParams({ from, to });
-    return request<ApiResponse<TechnicianAvailability[]>>(
-      `/calendar/availability?${sp.toString()}`
-    );
+    if (department) sp.set("department", department);
+    return request<
+      ApiResponse<D extends "handlowy" ? SalespersonAvailability[] : TechnicianAvailability[]>
+    >(`/calendar/availability?${sp.toString()}`);
   },
 
   async objectEvents(objectId: number) {
@@ -5135,19 +6107,49 @@ export const calendarApi = {
     return request<ApiResponse<CalendarNoteRef[]>>(`/calendar/notes/search?${sp.toString()}`);
   },
 
-  async addNote(eventId: number, text: string) {
+  /**
+   * `copyToObject` = zapisz kopię notatki także w kartotece obiektu wydarzenia.
+   * Wymaga wydarzenia z obiektem, uprawnienia edit do klucza `objects`
+   * i NIEPUSTEJ treści (same załączniki backend odrzuca komunikatem).
+   */
+  async addNote(eventId: number, text: string, opts?: { copyToObject?: boolean }) {
     return request<ApiResponse<CalendarNote>>(`/calendar/events/${eventId}/notes`, {
       method: "POST",
-      body: JSON.stringify({ text }),
+      body: JSON.stringify(opts?.copyToObject ? { text, copyToObject: true } : { text }),
     });
   },
 
-  /** Notatka z załącznikami — multipart (`text` + wiele pól `files`). Tekst może być pusty, gdy są pliki. */
-  async addNoteWithFiles(eventId: number, text: string, files: File[]) {
+  /**
+   * Notatka z załącznikami — multipart (`text` + wiele pól `files`). Tekst może
+   * być pusty, gdy są pliki albo gdy jedzie nagłówek maila (`mail`) — wtedy
+   * backend zapisuje wpis jako `kind='email'`.
+   */
+  async addNoteWithFiles(
+    eventId: number,
+    text: string,
+    files: File[],
+    opts?: { copyToObject?: boolean; mail?: CalendarNoteMailHeader | null; extractMsgAttachments?: boolean }
+  ) {
     const formData = new FormData();
     formData.append("text", text);
     for (const f of files) formData.append("files", f, f.name);
-    return requestMultipart<ApiResponse<CalendarNote>>(`/calendar/events/${eventId}/notes`, formData);
+    // Multipart nie zna booleanów — backend czyta „1”.
+    if (opts?.copyToObject) formData.append("copyToObject", "1");
+    // Nagłówek maila jako JSON w jednym polu (backend: parseMailField).
+    if (opts?.mail) formData.append("mail", JSON.stringify(opts.mail));
+    // Wypakowanie załączników z jadącego obok pliku .msg (backend pomija te, których nie wolno zapisać).
+    if (opts?.extractMsgAttachments) formData.append("extractMsgAttachments", "1");
+    return requestMultipart<CalendarAddNoteResponse>(`/calendar/events/${eventId}/notes`, formData);
+  },
+
+  /**
+   * Kopiuje ISTNIEJĄCĄ notatkę wydarzenia do kartoteki jego obiektu.
+   * Idempotentne — przy istniejącej kopii zwraca ją bez tworzenia drugiej.
+   */
+  async copyNoteToObject(noteId: number) {
+    return request<ApiResponse<ObjectNote>>(`/calendar/notes/${noteId}/copy-to-object`, {
+      method: "POST",
+    });
   },
 
   /** Usuwa załącznik notatki; autor lub admin. */
@@ -5168,6 +6170,22 @@ export const calendarApi = {
     return request<ApiResponse<null>>(`/calendar/notes/${noteId}`, { method: "DELETE" });
   },
 
+  /**
+   * Czyta mail `.msg` upuszczony na kalendarz — NIC nie zapisuje. Zwraca gotowy
+   * tytuł wydarzenia i tekst pierwszej notatki; sam plik front dokłada potem
+   * jako załącznik notatki (`addNoteWithFiles`).
+   */
+  async parseMsg(file: File, department: CalendarDepartment) {
+    const fd = new FormData();
+    fd.append("file", file, file.name);
+    // Dział idzie i w polu, i w query — backend czyta oba, a proxy bywa wybredne.
+    fd.append("department", department);
+    return requestMultipart<ApiResponse<CalendarMsgParseResult>>(
+      `/calendar/msg/parse?department=${encodeURIComponent(department)}`,
+      fd
+    );
+  },
+
   /** Bieżący token ICS (null, jeśli jeszcze nie wygenerowano) — bez rotacji. */
   async getFeedToken() {
     return request<ApiResponse<{ token: string; url: string } | null>>(
@@ -5183,6 +6201,69 @@ export const calendarApi = {
     );
   },
 };
+
+// ---------------------------------------------------------------------------
+// Kalendarz „na żywo" — SSE /calendar/live
+// ---------------------------------------------------------------------------
+
+/** Rodzaj zmiany w sygnale SSE (src/lib/calendar-live.ts po stronie backendu). */
+export type CalendarChangeKind =
+  | "created"
+  | "updated"
+  | "moved"
+  | "deleted"
+  | "restored"
+  | "notes";
+
+export interface CalendarLiveChange {
+  department: CalendarDepartment;
+  kind: CalendarChangeKind;
+  /** Id wydarzeń objętych zmianą (może być puste — sygnał „przeładuj"). */
+  ids: number[];
+  /** Kto zmienił — informacyjnie (etykieta, logi). NIE służy do pomijania sygnału. */
+  actorUserId: number | null;
+  /**
+   * Która KARTA zmieniła (`CLIENT_ID`). Pomijamy sygnał tylko dla własnej karty — inne
+   * karty i urządzenia tej samej osoby mają się odświeżyć. `null` = zapis spoza przeglądarki.
+   */
+  actorClientId: string | null;
+  ts: number;
+}
+
+/**
+ * Subskrypcja sygnałów o zmianach w kalendarzu. Zwraca funkcję sprzątającą.
+ *
+ * EventSource NIE wysyła nagłówków ani ciała — autoryzacja idzie wyłącznie z cookie
+ * `alfa_session` (żądanie same-origin, w dev przez proxy Vite). Ponowne łączenie po
+ * zerwaniu robi sama przeglądarka wg `retry:` przysłanego przez serwer, więc nie ma tu
+ * własnej pętli — wystarczy zamknąć strumień w cleanupie.
+ *
+ * Sygnał NIE niesie danych wydarzenia: odbiorca po nim woła zwykłe `getEvents()`, które
+ * nadal pilnuje uprawnień. Backend wysyła wyłącznie działy, które wolno oglądać.
+ */
+export function subscribeCalendarLive(
+  onChange: (change: CalendarLiveChange) => void,
+  opts?: { department?: CalendarDepartment; onError?: (e: Event) => void }
+): () => void {
+  // Brak EventSource (stary webview, test w node) = po prostu bez odświeżania na żywo.
+  if (typeof window === "undefined" || typeof window.EventSource === "undefined") return () => {};
+  const qs = opts?.department ? `?department=${encodeURIComponent(opts.department)}` : "";
+  const es = new EventSource(`${API_BASE}/calendar/live${qs}`, { withCredentials: true });
+  const onMessage = (e: MessageEvent<string>) => {
+    try {
+      onChange(JSON.parse(e.data) as CalendarLiveChange);
+    } catch {
+      /* uszkodzona ramka — ignoruj, następna i tak przyjdzie */
+    }
+  };
+  es.addEventListener("calendar", onMessage as EventListener);
+  if (opts?.onError) es.addEventListener("error", opts.onError);
+  return () => {
+    es.removeEventListener("calendar", onMessage as EventListener);
+    if (opts?.onError) es.removeEventListener("error", opts.onError);
+    es.close();
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Zapisane zestawy filtrów kalendarza (per użytkownik) — /calendar/filter-sets
@@ -6362,6 +7443,326 @@ export const adminCompanyApi = {
   },
 };
 
+// ---------------------------------------------------------------------------
+// Administracja → Poczta (SMTP, nadawca, adresaci maili ze zleceń)
+// ---------------------------------------------------------------------------
+//
+// Ten sam kształt kontraktu co `/admin/company/settings`: `{ values, sources,
+// defaults, meta }`, PUT przyjmuje podzbiór pól, a `null` znaczy „usuń z bazy,
+// wróć do domyślnego”. Jedyny wyjątek to hasło SMTP — NIGDY nie wraca z
+// backendu (jest tylko flaga `hasPassword`), a w PUT wysyłamy `smtpPassword`
+// wyłącznie wtedy, gdy człowiek faktycznie wpisał nowe. Puste pole hasła =
+// „zostaw jak było”, a nie „skasuj hasło”.
+
+/**
+ * Wariant wysłanej wiadomości. `test` to sprawdzian połączenia z panelu;
+ * `rfq`/`termination` należą do Grup interwencyjnych (zapytanie o ofertę i
+ * wypowiedzenie obiektu) — dziennik `mail_log` jest wspólny dla całej aplikacji.
+ */
+export type MailVariant = "client" | "internal" | "test" | "rfq" | "termination";
+
+/**
+ * Wpis dziennika wysyłek. Powstaje TAK SAMO przy sukcesie i przy porażce
+ * (`status`), bo „mail nie doszedł" jest informacją równie ważną co „doszedł" —
+ * przy błędzie backend zwraca ten sam wpis obok komunikatu 502.
+ */
+export interface MailLogEntry {
+  id: number;
+  /** Czego dotyczy wpis („order”, „test”…) — dziennik jest wspólny dla całej aplikacji. */
+  entityType: string;
+  entityId: number | null;
+  variant: MailVariant;
+  toAddr: string;
+  ccAddr: string | null;
+  bccAddr: string | null;
+  subject: string;
+  status: "sent" | "failed";
+  error: string | null;
+  messageId: string | null;
+  userId: number | null;
+  /** Gotowa etykieta („Marcin Sajdak”) — front nie dociąga użytkowników osobno. */
+  userLabel: string | null;
+  createdAt: string;
+}
+
+export interface MailSettingsValues {
+  smtpHost: string;
+  smtpPort: number;
+  /** SSL/TLS od pierwszego bajtu (465). Wyłączone = STARTTLS na 587. */
+  smtpSecure: boolean;
+  smtpUser: string;
+  /** Czy hasło jest zapisane w bazie. Samego hasła backend nie zwraca. */
+  hasPassword: boolean;
+  fromName: string;
+  fromAddress: string;
+  replyTo: string;
+  /** Odbiorcy wariantu wewnętrznego — kilka adresów po przecinku. */
+  orderInternalTo: string;
+  /** Stała kopia ukryta maila do klienta (np. archiwum sekretariatu). */
+  orderClientBcc: string;
+  /** Główny bezpiecznik: wyłączone = podgląd działa, wysyłka nie. */
+  sendEnabled: boolean;
+}
+
+export type MailSettingsField = keyof MailSettingsValues;
+
+/** Opis pola z backendu — etykieta i podpowiedź mogą przyjść z serwera. */
+export interface MailSettingsMetaField {
+  label?: string;
+  help?: string;
+  type?: string;
+  secret?: boolean;
+}
+
+export interface AdminMailSettings {
+  values: MailSettingsValues;
+  sources?: Partial<Record<MailSettingsField, AssistantSettingSource>>;
+  defaults?: Partial<MailSettingsValues>;
+  meta?: Partial<Record<MailSettingsField, MailSettingsMetaField>>;
+}
+
+/**
+ * PUT: dowolny podzbiór; `null` = przywróć domyślne. `hasPassword` jest tylko
+ * do odczytu (to flaga, nie wartość) — zapisuje się `smtpPassword`.
+ */
+export type AdminMailSettingsUpdate = {
+  [K in Exclude<MailSettingsField, "hasPassword">]?: MailSettingsValues[K] | null;
+} & {
+  /** Nowe hasło SMTP. Pomiń, żeby zostawić dotychczasowe; `null` kasuje. */
+  smtpPassword?: string | null;
+};
+
+/** Wartości pokazywane, dopóki backend nie zwróci swoich (albo gdy go nie ma). */
+export const MAIL_FALLBACK_VALUES: MailSettingsValues = {
+  smtpHost: "",
+  smtpPort: 587,
+  smtpSecure: false,
+  smtpUser: "",
+  hasPassword: false,
+  fromName: "",
+  fromAddress: "",
+  replyTo: "",
+  orderInternalTo: "",
+  orderClientBcc: "",
+  sendEnabled: false,
+};
+
+/** Klucze z backendu bywają `smtp_host` — dopuszczamy obie konwencje. */
+function normalizeMailKeyed<T>(raw: unknown): Partial<Record<MailSettingsField, T>> {
+  if (!raw || typeof raw !== "object") return {};
+  const byLower = new Map<string, unknown>();
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    byLower.set(k.replace(/_/g, "").toLowerCase(), v);
+  }
+  const out: Partial<Record<MailSettingsField, T>> = {};
+  for (const field of Object.keys(MAIL_FALLBACK_VALUES) as MailSettingsField[]) {
+    const v = byLower.get(field.toLowerCase());
+    if (v !== undefined) out[field] = v as T;
+  }
+  return out;
+}
+
+function coerceMailValues(raw: unknown): MailSettingsValues {
+  const v = normalizeMailKeyed<unknown>(raw);
+  const fb = MAIL_FALLBACK_VALUES;
+  return {
+    smtpHost: asStr(v.smtpHost, fb.smtpHost),
+    smtpPort: asNum(v.smtpPort, fb.smtpPort),
+    smtpSecure: asBool(v.smtpSecure, fb.smtpSecure),
+    smtpUser: asStr(v.smtpUser, fb.smtpUser),
+    hasPassword: asBool(v.hasPassword, fb.hasPassword),
+    fromName: asStr(v.fromName, fb.fromName),
+    fromAddress: asStr(v.fromAddress, fb.fromAddress),
+    replyTo: asStr(v.replyTo, fb.replyTo),
+    orderInternalTo: asStr(v.orderInternalTo, fb.orderInternalTo),
+    orderClientBcc: asStr(v.orderClientBcc, fb.orderClientBcc),
+    sendEnabled: asBool(v.sendEnabled, fb.sendEnabled),
+  };
+}
+
+/**
+ * Opis pól z backendu przychodzi jako LISTA (`meta.fields: [{ name, label, … }]`),
+ * a UI pyta o pojedyncze pole — przekładamy więc na słownik po nazwie. Wariant
+ * już-słownikowy też przepuszczamy, żeby zmiana po stronie API nic nie zepsuła.
+ */
+function normalizeMailMeta(raw: unknown): AdminMailSettings["meta"] {
+  if (!raw || typeof raw !== "object") return undefined;
+  const src = raw as Record<string, unknown>;
+  const known = new Set(Object.keys(MAIL_FALLBACK_VALUES));
+  const out: Partial<Record<MailSettingsField, MailSettingsMetaField>> = {};
+
+  const fields = Array.isArray(src.fields) ? src.fields : Array.isArray(src) ? src : null;
+  if (fields) {
+    for (const f of fields) {
+      const item = (f ?? {}) as Record<string, unknown>;
+      const name = typeof item.name === "string" ? item.name : "";
+      if (!known.has(name)) continue;
+      out[name as MailSettingsField] = {
+        label: typeof item.label === "string" ? item.label : undefined,
+        help: typeof item.help === "string" ? item.help : undefined,
+        type: typeof item.type === "string" ? item.type : undefined,
+        secret: typeof item.secret === "boolean" ? item.secret : undefined,
+      };
+    }
+  } else {
+    for (const [k, v] of Object.entries(src)) {
+      if (known.has(k) && v && typeof v === "object") {
+        out[k as MailSettingsField] = v as MailSettingsMetaField;
+      }
+    }
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+function normalizeMailSettings(raw: unknown): AdminMailSettings {
+  const src = (raw ?? {}) as Record<string, unknown>;
+  // Niektóre odpowiedzi (import z CMA) opakowują ustawienia w `settings`.
+  const body = (src.values || src.sources ? src : ((src.settings as Record<string, unknown>) ?? src)) as Record<
+    string,
+    unknown
+  >;
+  return {
+    values: coerceMailValues(body.values ?? body),
+    sources: normalizeMailKeyed<AssistantSettingSource>(body.sources),
+    defaults: body.defaults ? coerceMailValues(body.defaults) : undefined,
+    meta: normalizeMailMeta(body.meta),
+  };
+}
+
+const MAIL_VARIANTS: MailVariant[] = ["client", "internal", "test", "rfq", "termination"];
+
+/** Wpis dziennika — pola tekstowe bywają `null`, id bywa stringiem z SQLite. */
+function normalizeMailLogEntry(raw: unknown): MailLogEntry {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const pick = (...keys: string[]) => {
+    for (const k of keys) if (r[k] !== undefined && r[k] !== null) return r[k];
+    return undefined;
+  };
+  const orNull = (v: unknown) => (v == null || v === "" ? null : String(v));
+  const variant = asStr(pick("variant"), "client");
+  return {
+    id: asNum(pick("id"), 0),
+    entityType: asStr(pick("entityType", "entity_type"), ""),
+    entityId: asNumOrNull(pick("entityId", "entity_id")),
+    variant: (MAIL_VARIANTS as string[]).includes(variant) ? (variant as MailVariant) : "client",
+    toAddr: asStr(pick("toAddr", "to_addr", "to"), ""),
+    ccAddr: orNull(pick("ccAddr", "cc_addr", "cc")),
+    bccAddr: orNull(pick("bccAddr", "bcc_addr", "bcc")),
+    subject: asStr(pick("subject"), ""),
+    status: asStr(pick("status"), "sent") === "failed" ? "failed" : "sent",
+    error: orNull(pick("error")),
+    messageId: orNull(pick("messageId", "message_id")),
+    userId: asNumOrNull(pick("userId", "user_id")),
+    userLabel: orNull(pick("userLabel", "user_label", "userName", "user_name")),
+    createdAt: asStr(pick("createdAt", "created_at"), ""),
+  };
+}
+
+/** Lista wpisów z dowolnego kształtu odpowiedzi (`items` albo goła tablica). */
+function normalizeMailLogList(raw: unknown): { items: MailLogEntry[]; total: number } {
+  const src = (raw ?? {}) as Record<string, unknown>;
+  const arr = Array.isArray(src) ? src : Array.isArray(src.items) ? src.items : [];
+  const items = arr.map(normalizeMailLogEntry);
+  const total = asNum(src.total, items.length);
+  return { items, total };
+}
+
+export const adminMailApi = {
+  async settings(): Promise<AdminMailSettings> {
+    const r = await request<ApiResponse<AdminMailSettings>>("/admin/mail/settings");
+    return normalizeMailSettings(r.data);
+  },
+
+  async updateSettings(body: AdminMailSettingsUpdate): Promise<AdminMailSettings> {
+    const r = await request<ApiResponse<AdminMailSettings>>("/admin/mail/settings", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
+    return normalizeMailSettings(r.data);
+  },
+
+  /** Przepisuje konfigurację SMTP z ustawień CMA (/cma/ustawienia). */
+  async importCma(): Promise<AdminMailSettings> {
+    const r = await request<ApiResponse<AdminMailSettings>>("/admin/mail/import-cma", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    return normalizeMailSettings(r.data);
+  },
+
+  /** Wiadomość testowa; bez `to` backend wysyła na adres nadawcy. */
+  async testSmtp(to?: string): Promise<{ messageId: string | null }> {
+    const r = await request<ApiResponse<{ messageId?: string | null }>>("/admin/mail/test-smtp", {
+      method: "POST",
+      body: JSON.stringify(to ? { to } : {}),
+    });
+    return { messageId: r.data?.messageId ?? null };
+  },
+
+  async log(params?: {
+    limit?: number;
+    offset?: number;
+    entityType?: string;
+    entityId?: number;
+  }): Promise<{ items: MailLogEntry[]; total: number }> {
+    const qs = new URLSearchParams();
+    if (params?.limit != null) qs.set("limit", String(params.limit));
+    if (params?.offset != null) qs.set("offset", String(params.offset));
+    if (params?.entityType) qs.set("entityType", params.entityType);
+    if (params?.entityId != null) qs.set("entityId", String(params.entityId));
+    const q = qs.toString();
+    const r = await request<ApiResponse<{ items: MailLogEntry[]; total: number }>>(
+      `/admin/mail/log${q ? `?${q}` : ""}`
+    );
+    return normalizeMailLogList(r.data);
+  },
+};
+
+/**
+ * Wynik wysyłki maila zlecenia.
+ *
+ * Nie rzucamy wyjątkiem, bo backend przy porażce SMTP zwraca 502 RAZEM z
+ * wpisem dziennika (`data`) — a `request()` przy błędzie odrzuca całe ciało
+ * odpowiedzi. Tu chcemy i komunikat, i wpis, żeby historia w oknie od razu
+ * pokazała nieudaną próbę.
+ */
+export interface OrderMailSendResult {
+  ok: boolean;
+  entry: MailLogEntry | null;
+  error?: string;
+  status: number;
+}
+
+export async function sendOrderMail(
+  id: number,
+  body: { variant: OrderMailVariant; to: string[]; cc?: string[]; bcc?: string[] }
+): Promise<OrderMailSendResult> {
+  const response = await fetch(`${API_BASE}/orders/${id}/mail/send`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const raw = (await response.json().catch(() => ({}))) as ApiResponse<unknown>;
+  const entry = raw.data ? normalizeMailLogEntry(raw.data) : null;
+  if (response.ok && raw.success) return { ok: true, entry, status: response.status };
+  return {
+    ok: false,
+    entry,
+    error:
+      raw.error ||
+      (response.status === 404
+        ? "Backend nie obsługuje jeszcze wysyłki maili."
+        : `Nie udało się wysłać maila (HTTP ${response.status}).`),
+    status: response.status,
+  };
+}
+
+/** Historia wysyłek konkretnego zlecenia (ten sam dziennik, zawężony). */
+export async function getOrderMailLog(id: number): Promise<MailLogEntry[]> {
+  const r = await request<ApiResponse<{ items: MailLogEntry[] }>>(`/orders/${id}/mail/log`);
+  return normalizeMailLogList(r.data).items;
+}
+
 /** Status błędu z `request` (404 = endpointu jeszcze nie ma, 403 = brak uprawnień). */
 export const errStatus = (e: unknown): number | undefined =>
   typeof e === "object" && e !== null && "status" in e && typeof (e as { status: unknown }).status === "number"
@@ -6377,8 +7778,8 @@ export const isMissingEndpoint = (e: unknown): boolean => errStatus(e) === 404;
 //
 // Wszystkie trzy widoki mówią tym samym słownikiem faktów, liczonym w
 // src/routes/analytics.ts:
-//   revenue = coalesce(monthly_value,0) + coalesce(monthly_rental,0)
-//             — abonament PLUS dzierżawa sprzętu
+//   revenue = coalesce(monthly_zdw,0) + coalesce(monthly_ofi,0) + coalesce(monthly_rental,0)
+//             — abonament ZDW PLUS abonament OFI PLUS dzierżawa sprzętu
 //   cost    = personnelCost + otherCost      ← KOSZT SKŁADA SIĘ Z DWÓCH CZĘŚCI
 //   profit  = revenue - cost                 margin = profit / revenue * 100
 // gdzie `personnelCost` to koszt osobowy policzony z wypłat kadrowych (mapowanie
@@ -6406,13 +7807,15 @@ export type AnalyticsScope = "current" | "active" | "all";
  *   ofi = ochrona fizyczna,
  *   all = obie linie razem (domyślnie).
  *
- * PRZEKRÓJ NIE JEST ROZŁĄCZNY: obiekt z OFI i kamerami wchodzi do OBU w całości,
- * więc „zdv" plus „ofi" daje WIĘCEJ niż „all". Nie ma co tych sum zestawiać.
+ * ZBIÓR OBIEKTÓW NIE JEST ROZŁĄCZNY: obiekt z OFI i kamerami POLICZY SIĘ w obu
+ * przekrojach, więc suma `objects` przekracza liczbę obiektów. PRZYCHÓD JUŻ TAK:
+ * do „zdv" wchodzi abonament ZDW plus dzierżawa, do „ofi" abonament OFI, więc
+ * przychód „zdv" plus „ofi" jest DOKŁADNIE równy „all".
  *
  * Różnica dotyczy też kosztu osobowego: w „ofi" liczą się tylko godziny ludzi na
  * obiekcie, w „zdv" tylko udział w puli centrum monitorowania, w „all" oba.
- * Przychód i koszt pozostały zostają w całości po obu stronach — kartoteka ma
- * jedną kwotę na obiekt, bez rozbicia na linie.
+ * Koszt pozostały zostaje w całości po obu stronach — kartoteka ma jedną kwotę
+ * kosztu na obiekt, bez rozbicia na linie.
  */
 export type AnalyticsService = "zdv" | "ofi" | "all";
 
@@ -6598,6 +8001,14 @@ export interface AnalyticsObjectRow {
     ofi: boolean;
     videoreception: boolean;
   };
+  /**
+   * OKRESY usług tego obiektu — pełna lista, także zakończone (z nich bierze się
+   * druga linia w kolumnie „Usługi” i mianownik CMA per miesiąc). `?` bo starszy
+   * backend ich nie odsyła; wtedy zostaje samo `services` wyżej (stan na dziś).
+   */
+  servicePeriods?: ObjectService[];
+  /** Przewidywane zakończenie obiektu (YYYY-MM-DD); null = bezterminowo. */
+  expectedEndDate?: string | null;
   /** Waga obiektu w podziale kosztu centrum monitorowania (SSWiN + wideorecepcja + kamery). */
   serviceUnits?: number;
   status: "pending" | "in_progress" | "active" | "inactive";
@@ -6635,6 +8046,41 @@ export interface AnalyticsObjectsData extends AnalyticsEnvelope {
   byCompany: AnalyticsBucket[];
   /** Zawsze 6 pozycji: „<0%”, „0–20”, „20–40”, „40–60”, „60%+”, „brak danych”. */
   marginBuckets: AnalyticsBucket[];
+  /**
+   * Obiekty kończące się w horyzoncie (domyślnie 90 dni): przewidywane zakończenie
+   * w horyzoncie ALBO wszystkie aktywne okresy usług z końcem w horyzoncie.
+   * `revenue` = miesięczny przychód zagrożony. `?` bo starszy backend nie liczy.
+   */
+  endingSoon?: { count: number; revenue: number; horizonDays: number };
+  /** Ostatnie 12 miesięcy — patrz `AnalyticsTimelinePoint`. `?` jak wyżej. */
+  timeline?: AnalyticsTimelinePoint[];
+}
+
+/**
+ * Jeden miesiąc serii czasowej usług. Liczony z OKRESÓW, ale kwoty są BIEŻĄCE
+ * (`monthly_zdw/ofi/rental` z kartoteki) — historii cen nie mamy, więc `revenue`
+ * odpowiada na „ile dzisiejszymi stawkami warte były wtedy aktywne obiekty”,
+ * a nie „ile wtedy zafakturowano”. Karta musi to mówić w `CoverageNote`.
+ */
+export interface AnalyticsTimelinePoint {
+  /** YYYY-MM */
+  month: string;
+  /** Obiekty z ≥1 usługą aktywną w tym miesiącu. */
+  activeObjects: number;
+  /** Jednostki usług aktywnych w miesiącu, per rodzaj (kamery = suma sztuk). */
+  activeUnits: Record<ObjectServiceKind, number>;
+  /** Okresy zaczęte w tym miesiącu — TYLKO te ze znaną datą startu. */
+  started: number;
+  /**
+   * Okresy z datą startu SZACOWANĄ (`startEstimated`), które wypadły w tym
+   * miesiącu i NIE weszły do `started`. Do dopisania przy punkcie wykresu
+   * („+147 z datą szacowaną”), żeby miesiąc importu kartoteki nie wyglądał na
+   * miesiąc bez ani jednego pozyskania. Opcjonalne — starsze API tego nie ma.
+   */
+  startedEstimated?: number;
+  /** Okresy zakończone w tym miesiącu. */
+  ended: number;
+  revenue: number;
 }
 
 export interface AnalyticsSalespersonRow {
@@ -6752,3 +8198,1631 @@ export async function getAnalyticsSalespeople(params?: {
     `/analytics/handlowcy${analyticsQuery(params)}`
   );
 }
+
+/**
+ * Lejek sprzedaży (`GET /analytics/lejek`) — drugi, niezależny od rentowności
+ * przekrój zakładki „Handlowcy”: droga szansy przez etapy zamiast pieniędzy
+ * z obiektów. Wszystkie liczby (poza `rotting`/`openNow`, które są stanem NA
+ * TERAZ) dotyczą jednej KOHORTY: szans utworzonych między `from` a `to`.
+ *
+ * Kształt jest gotowy do rysowania — front nie liczy tu niczego poza
+ * formatowaniem; etykiety etapów i powodów przegranej bierze z
+ * `@/lib/sales-labels` (jedno źródło nazw dla całego modułu handlowego).
+ */
+export interface AnalyticsFunnelStage {
+  stage: LeadStage;
+  /** Ile szans kohorty KIEDYKOLWIEK dotarło do tego etapu (cofnięcie nie odbiera dotarcia). */
+  reached: number;
+  /** Ile stoi na nim dziś. */
+  current: number;
+  /** Konwersja do następnego etapu w % (null: ostatni etap albo `reached = 0`). */
+  conversion: number | null;
+  /** Średni czas ZAKOŃCZONEGO pobytu w etapie (dni); null = brak próbek. */
+  avgDays: number | null;
+  avgDaysSamples: number;
+  /** Wartość szans, które dotarły do etapu (MRR netto / wdrożenie netto). */
+  monthly: number;
+  setup: number;
+}
+
+export interface AnalyticsFunnelSalesperson {
+  /** null = szanse bez opiekuna. */
+  salespersonId: number | null;
+  name: string;
+  leads: number;
+  won: number;
+  lost: number;
+  open: number;
+  winRate: number | null;
+  wonMonthly: number;
+  wonSetup: number;
+  avgDaysToWin: number | null;
+}
+
+export interface AnalyticsFunnelData {
+  /** Zakres kohorty (YYYY-MM-DD, `to` włącznie). */
+  from: string;
+  to: string;
+  salespersonId: number | "none" | null;
+  generatedAt: string;
+  /** Liczność kohorty. */
+  leads: number;
+  /** Etapy otwarte + „wygrany” na końcu. */
+  funnel: AnalyticsFunnelStage[];
+  won: { count: number; monthly: number; setup: number; medianDaysToWin: number | null };
+  /** `reason: null` = przegrana bez podanego powodu. */
+  lost: { count: number; byReason: { reason: LeadLostReason | null; count: number }[] };
+  /** 0..100; null gdy w kohorcie nic jeszcze się nie zamknęło. */
+  winRate: number | null;
+  bySalesperson: AnalyticsFunnelSalesperson[];
+  /** STAN NA TERAZ (nie kohorta): otwarte szanse i ile z nich gnije. */
+  rotting: number;
+  openNow: number;
+  /** Ile szans kohorty ma w dzienniku choć jedną zmianę etapu — bez tego „0 dni” to nie wynik. */
+  coverage: { leadsWithHistory: number; leads: number };
+}
+
+export async function getAnalyticsFunnel(params?: {
+  from?: string;
+  to?: string;
+  salespersonId?: number | "none";
+}) {
+  const sp = new URLSearchParams();
+  if (params?.from) sp.set("from", params.from);
+  if (params?.to) sp.set("to", params.to);
+  if (params?.salespersonId != null) sp.set("salespersonId", String(params.salespersonId));
+  const q = sp.toString();
+  return request<ApiResponse<AnalyticsFunnelData>>(`/analytics/lejek${q ? `?${q}` : ""}`);
+}
+
+// ---------------------------------------------------------------------------
+// Manuale (Techniczny → /technical/manuale)
+// Biblioteka instrukcji z załącznikami (jak notatki kalendarza) i powiązaniami
+// z towarami magazynu / usługami. Backend: src/routes/manuals.ts.
+// ---------------------------------------------------------------------------
+
+/** Załącznik manuala — obrazki backend konwertuje do WebP, więc `fileName` może różnić się od oryginału. */
+export interface ManualAttachment {
+  id: number;
+  fileName: string;
+  mime: string;
+  size: number;
+  kind: "image" | "file";
+  width: number | null;
+  height: number | null;
+  /** Ścieżka względem origin: `/api/manuals/attachments/:id`. */
+  url: string;
+  /** To samo z `?download=1` (Content-Disposition: attachment). */
+  downloadUrl?: string;
+  createdAt?: string;
+  /** Punkt, do którego plik należy; null = plik „luzem” („Pozostałe pliki”). */
+  sectionId: number | null;
+  /** Kolejność w obrębie punktu (albo wśród plików bez punktu). */
+  position: number;
+}
+
+/**
+ * Punkt („1.”) albo podpunkt („1.1”) manuala — maksymalnie dwa poziomy.
+ * `children` jest wypełnione tylko dla punktów poziomu 1; wszystko posortowane po `position`.
+ */
+export interface ManualSection {
+  id: number;
+  parentId: number | null;
+  position: number;
+  title: string | null;
+  body: string | null;
+  attachments: ManualAttachment[];
+  children: ManualSection[];
+}
+
+/**
+ * Węzeł wejścia `PUT /manuals/:id/sections`. `id` = punkt istniejący (update),
+ * brak `id` = nowy punkt — wtedy `key` wraca w `keyMap` z nadanym id, żeby dało
+ * się dograć do niego pliki.
+ */
+export interface ManualSectionInput {
+  id?: number;
+  key?: string;
+  title?: string | null;
+  body?: string | null;
+  /** Załączniki punktu w kolejności wyświetlania; niewymienione tracą przypisanie. */
+  attachmentIds?: number[];
+  children?: ManualSectionInput[];
+}
+
+/** Odpowiedź `PUT /manuals/:id/sections`: manual po zapisie + mapowanie `key` → nadane id. */
+export interface ManualSectionsResult {
+  manual: Manual;
+  keyMap: Record<string, number>;
+}
+
+/** Powiązanie manuala z towarem magazynu albo usługą. */
+export interface ManualLink {
+  id: number;
+  kind: "item" | "service";
+  /** Id towaru (`warehouse_items`) albo usługi (`services`). */
+  refId: number;
+  name: string;
+  /** SKU/producent dla towaru, kategoria/jednostka dla usługi. */
+  meta: string | null;
+}
+
+export interface Manual {
+  id: number;
+  title: string;
+  description: string | null;
+  createdBy: string | null;
+  updatedBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+  attachmentsCount: number;
+  /** WSZYSTKIE załączniki manuala, płasko — również te przypisane do punktów. */
+  attachments: ManualAttachment[];
+  links: ManualLink[];
+  /** Struktura treści: punkty poziomu 1 z podpunktami w `children`. */
+  sections: ManualSection[];
+  /** Załączniki bez punktu (`sectionId === null`) — w podglądzie „Pozostałe pliki”. */
+  unassignedAttachments: ManualAttachment[];
+}
+
+/** Wynik wyszukiwarki towarów w pickerze powiązań. */
+export interface ManualPickItem {
+  id: number;
+  name: string;
+  sku: string | null;
+  manufacturer: string | null;
+  category: string | null;
+}
+
+/** Wynik wyszukiwarki usług w pickerze powiązań. */
+export interface ManualPickService {
+  id: number;
+  name: string;
+  category: string | null;
+  unit: string | null;
+}
+
+/** Limity załączników manuala — te same, co przy notatkach kalendarza. */
+export const MANUAL_ATTACHMENT_MAX_FILES = 15;
+export const MANUAL_ATTACHMENT_MAX_SIZE = 5 * 1024 * 1024;
+export const MANUAL_ATTACHMENT_ACCEPT = CALENDAR_ATTACHMENT_ACCEPT;
+
+/** Klucze sortowania listy manuali (backend: title|updatedAt|createdAt|attachmentsCount). */
+export type ManualSortKey = "title" | "updatedAt" | "createdAt" | "attachmentsCount";
+
+export const manualsApi = {
+  /** Cała lista (paginacja i filtry docelowo po stronie klienta — zbiór jest mały). */
+  async list(params?: {
+    q?: string;
+    itemId?: number;
+    serviceId?: number;
+    sort?: ManualSortKey;
+    dir?: "asc" | "desc";
+  }) {
+    const sp = new URLSearchParams();
+    if (params?.q?.trim()) sp.set("q", params.q.trim());
+    if (params?.itemId !== undefined) sp.set("itemId", String(params.itemId));
+    if (params?.serviceId !== undefined) sp.set("serviceId", String(params.serviceId));
+    if (params?.sort) sp.set("sort", params.sort);
+    if (params?.dir) sp.set("dir", params.dir);
+    const q = sp.toString();
+    return request<ApiResponse<Manual[]>>(`/manuals${q ? `?${q}` : ""}`);
+  },
+
+  async get(id: number) {
+    return request<ApiResponse<Manual>>(`/manuals/${id}`);
+  },
+
+  /**
+   * Nowy manual — multipart, bo od razu przyjmuje pliki. Powiązania jadą jako
+   * JSON-owe tablice w polach formularza (`itemIds`, `serviceIds`).
+   */
+  async create(input: {
+    title: string;
+    description?: string;
+    files?: File[];
+    itemIds?: number[];
+    serviceIds?: number[];
+  }) {
+    const fd = new FormData();
+    fd.append("title", input.title);
+    fd.append("description", input.description ?? "");
+    if (input.itemIds?.length) fd.append("itemIds", JSON.stringify(input.itemIds));
+    if (input.serviceIds?.length) fd.append("serviceIds", JSON.stringify(input.serviceIds));
+    for (const f of input.files ?? []) fd.append("files", f, f.name);
+    return requestMultipart<ApiResponse<Manual>>("/manuals", fd);
+  },
+
+  async update(id: number, input: { title?: string; description?: string | null }) {
+    return request<ApiResponse<Manual>>(`/manuals/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(input),
+    });
+  },
+
+  async remove(id: number) {
+    return request<ApiResponse<null>>(`/manuals/${id}`, { method: "DELETE" });
+  },
+
+  /**
+   * Dokłada pliki do istniejącego manuala (limit liczony łącznie — backend zwróci 400).
+   * `sectionId` = punkt docelowy (pliki lądują na jego końcu); bez niego plik jest „luzem”.
+   */
+  async addAttachments(id: number, files: File[], sectionId?: number | null) {
+    const fd = new FormData();
+    for (const f of files) fd.append("files", f, f.name);
+    if (sectionId != null) fd.append("sectionId", String(sectionId));
+    return requestMultipart<ApiResponse<Manual>>(`/manuals/${id}/attachments`, fd);
+  },
+
+  /**
+   * Zastępuje CAŁĄ strukturę punktów manuala oraz przypisanie załączników do nich.
+   * Punkty nieobecne w wejściu są kasowane (ich pliki wracają do „Pozostałych”, nie giną).
+   */
+  async setSections(id: number, sections: ManualSectionInput[]) {
+    return request<ApiResponse<ManualSectionsResult>>(`/manuals/${id}/sections`, {
+      method: "PUT",
+      body: JSON.stringify({ sections }),
+    });
+  },
+
+  async deleteAttachment(attachmentId: number) {
+    return request<ApiResponse<null>>(`/manuals/attachments/${attachmentId}`, { method: "DELETE" });
+  },
+
+  /** Zastępuje CAŁY zbiór powiązań manuala. */
+  async setLinks(id: number, links: { itemIds: number[]; serviceIds: number[] }) {
+    return request<ApiResponse<Manual>>(`/manuals/${id}/links`, {
+      method: "PUT",
+      body: JSON.stringify(links),
+    });
+  },
+
+  /** Wyszukiwarka towarów do pickera — własny endpoint manuali (bez uprawnień do magazynu). */
+  async pickItems(q: string) {
+    const sp = new URLSearchParams();
+    if (q.trim()) sp.set("q", q.trim());
+    const s = sp.toString();
+    return request<ApiResponse<ManualPickItem[]>>(`/manuals/pick/items${s ? `?${s}` : ""}`);
+  },
+
+  /** Wyszukiwarka usług do pickera. */
+  async pickServices(q: string) {
+    const sp = new URLSearchParams();
+    if (q.trim()) sp.set("q", q.trim());
+    const s = sp.toString();
+    return request<ApiResponse<ManualPickService[]>>(`/manuals/pick/services${s ? `?${s}` : ""}`);
+  },
+};
+
+// ---------------------------------------------------------------------------
+// CMA → Grupy interwencyjne (/cma/grupy-interwencyjne)
+// Firmy świadczące usługę grupy interwencyjnej, warunki per obiekt (historia
+// wierszy) i rejestr podjazdów z rozliczeniem. Backend:
+// src/routes/intervention-groups.ts, prefiks /api/cma/intervention-groups.
+// ---------------------------------------------------------------------------
+
+/** Załącznik firmy / warunków / interwencji — obrazki backend konwertuje do WebP. */
+export interface InterventionAttachment {
+  id: number;
+  fileName: string;
+  mimeType: string;
+  size: number;
+  kind: "image" | "file";
+  width: number | null;
+  height: number | null;
+  url: string;
+  /** To samo z dyspozycją `attachment`. */
+  downloadUrl?: string;
+  createdAt?: string;
+}
+
+/** Firma interwencyjna (podwykonawca dojeżdżający na alarm). */
+export interface InterventionCompany {
+  id: number;
+  name: string;
+  /** Obszar działania (miasta, województwa) — tekst z kartoteki. */
+  area: string | null;
+  contactPerson: string | null;
+  phone: string | null;
+  email: string | null;
+  notes: string | null;
+  active: boolean;
+  /** Ile obiektów ma warunki z tą firmą (wszystkie wiersze, także zakończone). */
+  objectsCount: number;
+  /** Ile z nich obowiązuje na dziś. */
+  activeTermsCount: number;
+  /** Umowy ramowe. */
+  attachments: InterventionAttachment[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface InterventionCompanyInput {
+  name: string;
+  area?: string | null;
+  contactPerson?: string | null;
+  phone?: string | null;
+  email?: string | null;
+  notes?: string | null;
+  active?: boolean;
+}
+
+/**
+ * Warunki grupy interwencyjnej na obiekcie. Obiekt może mieć WIELE wierszy —
+ * to historia zmian firm, a nie jedno ustawienie. Kwoty są złotówkowe netto,
+ * a `null` znaczy „nikt nie uzupełnił”, nie 0 zł.
+ */
+export interface InterventionTerm {
+  id: number;
+  objectId: number;
+  companyId: number;
+  companyName: string;
+  objectName: string;
+  objectAddress: string | null;
+  objectCity: string | null;
+  contractorName: string | null;
+  /** YYYY-MM-DD. */
+  startDate: string;
+  /** YYYY-MM-DD albo null = obowiązuje bezterminowo. */
+  endDate: string | null;
+  /** Kwota jednego podjazdu poza pulą darmowych. */
+  calloutFee: number | null;
+  subscriptionFee: number | null;
+  /** Ile podjazdów w miesiącu wchodzi w abonament. */
+  freeCallouts: number | null;
+  hourlyStandbyFee: number | null;
+  notes: string | null;
+  /** `end_date IS NULL OR end_date >= dziś` — liczone przez backend. */
+  isCurrent: boolean;
+  /** Umowa na obiekt. */
+  attachments: InterventionAttachment[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface InterventionTermInput {
+  /** Tylko przy tworzeniu — PUT nie przenosi warunków na inny obiekt. */
+  objectId?: number;
+  companyId: number;
+  startDate: string;
+  endDate?: string | null;
+  calloutFee?: number | null;
+  subscriptionFee?: number | null;
+  freeCallouts?: number | null;
+  hourlyStandbyFee?: number | null;
+  notes?: string | null;
+}
+
+/**
+ * Jeden podjazd. Rozliczenie (`seqInMonth`, `isFree`, koszty) liczy backend PRZY
+ * ODCZYCIE z warunków obowiązujących w dniu zdarzenia — edycja warunków
+ * przelicza historię wstecz, więc front tych liczb nie cache'uje.
+ */
+export interface Intervention {
+  id: number;
+  objectId: number;
+  objectName: string;
+  objectCity: string | null;
+  companyId: number;
+  companyName: string;
+  termId: number;
+  /** ISO z godziną (`YYYY-MM-DDTHH:mm`). */
+  happenedAt: string;
+  reason: string | null;
+  reportedBy: string | null;
+  standbyHours: number | null;
+  notes: string | null;
+  /** Numer podjazdu w miesiącu kalendarzowym dla pary (obiekt, warunki). */
+  seqInMonth: number;
+  /** `seqInMonth <= freeCallouts` — podjazd w ramach abonamentu. */
+  isFree: boolean;
+  calloutCost: number | null;
+  standbyCost: number | null;
+  totalCost: number | null;
+  attachments: InterventionAttachment[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Stopka listy interwencji — sumy z NIE-nullowych składników. */
+export interface InterventionSummary {
+  count: number;
+  freeCount: number;
+  calloutCost: number;
+  standbyCost: number;
+  totalCost: number;
+}
+
+export interface InterventionInput {
+  /** Wymagane przy tworzeniu; przy PUT zmiana obiektu ponownie rozwiązuje warunki. */
+  objectId?: number;
+  /** `YYYY-MM-DDTHH:mm` — bez sekund, tak jak daje `<input type="datetime-local">`. */
+  happenedAt: string;
+  reason?: string | null;
+  reportedBy?: string | null;
+  standbyHours?: number | null;
+  notes?: string | null;
+}
+
+/**
+ * Wynik wyszukiwarki obiektów — własny endpoint, bez uprawnień do kartoteki.
+ *
+ * Ten sam kształt obsługuje `ObjectPicker` w innych modułach (drafty umów mają
+ * własny `/contracts/drafts/pick/objects`), dlatego spółka jest OPCJONALNA:
+ * interwencje jej nie zwracają, a umowy tak (`ContractDraftPickObject`).
+ */
+export interface InterventionPickObject {
+  id: number;
+  name: string;
+  address: string | null;
+  city: string | null;
+  contractorName: string | null;
+  companyId?: number | null;
+  companyName?: string | null;
+}
+
+/** Szablony maili: zapytanie o ofertę i wypowiedzenie obiektu. */
+export type InterventionMailKind = "rfq" | "termination";
+
+export interface InterventionMailTemplate {
+  kind: InterventionMailKind;
+  label: string;
+  subject: string;
+  body: string;
+  subjectDefault: string;
+  bodyDefault: string;
+  /** Czy treść jest wciąż domyślna (nikt jej nie nadpisał w ustawieniach). */
+  isDefault: boolean;
+  updatedAt: string | null;
+}
+
+export interface InterventionMailPlaceholder {
+  token: string;
+  label: string;
+  /** W których szablonach placeholder ma sens. */
+  kinds: InterventionMailKind[];
+}
+
+export interface InterventionMailPreview {
+  subject: string;
+  html: string;
+  text: string;
+  to: string;
+  /** Tokeny bez danych — front pokazuje je jako ostrzeżenie nad podglądem. */
+  missing: string[];
+  sending: { ready: boolean; reason?: string };
+}
+
+export interface InterventionMailSendResult {
+  ok: boolean;
+  /** Wpis dziennika powstaje TAKŻE przy porażce (502) — historia ma to pokazać. */
+  logEntry: MailLogEntry | null;
+  error?: string;
+  status: number;
+}
+
+const IG_BASE = "/cma/intervention-groups";
+
+/** Buduje query string, pomijając puste wartości (Radix nie zna pustych stringów). */
+function igQuery(params: Record<string, string | number | undefined | null>): string {
+  const sp = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v === undefined || v === null) continue;
+    const s = String(v).trim();
+    if (s) sp.set(k, s);
+  }
+  const q = sp.toString();
+  return q ? `?${q}` : "";
+}
+
+const igFormData = (files: File[]): FormData => {
+  const fd = new FormData();
+  for (const f of files) fd.append("files", f, f.name);
+  return fd;
+};
+
+export const interventionsApi = {
+  // --- Firmy ---
+  async listCompanies(params?: { q?: string; status?: "all" | "active" | "archived" }) {
+    return request<ApiResponse<{ items: InterventionCompany[] }>>(
+      `${IG_BASE}/companies${igQuery({ q: params?.q, status: params?.status })}`
+    );
+  },
+
+  async createCompany(input: InterventionCompanyInput) {
+    return request<ApiResponse<InterventionCompany>>(`${IG_BASE}/companies`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  },
+
+  /** Pełny body albo skrót `{ active }` (archiwizacja bez otwierania formularza). */
+  async updateCompany(id: number, input: Partial<InterventionCompanyInput>) {
+    return request<ApiResponse<InterventionCompany>>(`${IG_BASE}/companies/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(input),
+    });
+  },
+
+  /** Sukces zwraca `{ id }` — katalog załączników kasuje backend. */
+  async deleteCompany(id: number) {
+    return request<ApiResponse<{ id: number }>>(`${IG_BASE}/companies/${id}`, { method: "DELETE" });
+  },
+
+  async addCompanyAttachments(id: number, files: File[]) {
+    return requestMultipart<ApiResponse<InterventionCompany>>(
+      `${IG_BASE}/companies/${id}/attachments`,
+      igFormData(files)
+    );
+  },
+
+  async deleteCompanyAttachment(id: number, attachmentId: number) {
+    return request<ApiResponse<{ id: number; companyId: number }>>(
+      `${IG_BASE}/companies/${id}/attachments/${attachmentId}`,
+      { method: "DELETE" }
+    );
+  },
+
+  // --- Warunki ---
+  async listTerms(params?: { companyId?: number; status?: "all" | "current" | "ended"; q?: string }) {
+    return request<ApiResponse<{ items: InterventionTerm[] }>>(
+      `${IG_BASE}/terms${igQuery({ companyId: params?.companyId, status: params?.status, q: params?.q })}`
+    );
+  },
+
+  /** Warunki jednego obiektu, malejąco po dacie startu (karta obiektu). */
+  async listObjectTerms(objectId: number) {
+    return request<ApiResponse<{ items: InterventionTerm[] }>>(`${IG_BASE}/objects/${objectId}/terms`);
+  },
+
+  async createTerm(input: InterventionTermInput) {
+    return request<ApiResponse<InterventionTerm>>(`${IG_BASE}/terms`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  },
+
+  async updateTerm(id: number, input: InterventionTermInput) {
+    return request<ApiResponse<InterventionTerm>>(`${IG_BASE}/terms/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(input),
+    });
+  },
+
+  async deleteTerm(id: number) {
+    return request<ApiResponse<{ id: number }>>(`${IG_BASE}/terms/${id}`, { method: "DELETE" });
+  },
+
+  async addTermAttachments(id: number, files: File[]) {
+    return requestMultipart<ApiResponse<InterventionTerm>>(
+      `${IG_BASE}/terms/${id}/attachments`,
+      igFormData(files)
+    );
+  },
+
+  async deleteTermAttachment(id: number, attachmentId: number) {
+    return request<ApiResponse<{ id: number; termId: number }>>(
+      `${IG_BASE}/terms/${id}/attachments/${attachmentId}`,
+      { method: "DELETE" }
+    );
+  },
+
+  // --- Interwencje ---
+  async listInterventions(params?: {
+    objectId?: number;
+    companyId?: number;
+    /** YYYY-MM; bez parametru backend bierze bieżący miesiąc. */
+    month?: string;
+    q?: string;
+  }) {
+    return request<ApiResponse<{ items: Intervention[]; summary: InterventionSummary }>>(
+      `${IG_BASE}/interventions${igQuery({
+        objectId: params?.objectId,
+        companyId: params?.companyId,
+        month: params?.month,
+        q: params?.q,
+      })}`
+    );
+  },
+
+  /** Interwencje jednego obiektu; bez `month` — cała historia. */
+  async listObjectInterventions(objectId: number, month?: string) {
+    return request<ApiResponse<{ items: Intervention[]; summary: InterventionSummary }>>(
+      `${IG_BASE}/objects/${objectId}/interventions${igQuery({ month })}`
+    );
+  },
+
+  async createIntervention(input: InterventionInput) {
+    return request<ApiResponse<Intervention>>(`${IG_BASE}/interventions`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  },
+
+  async updateIntervention(id: number, input: InterventionInput) {
+    return request<ApiResponse<Intervention>>(`${IG_BASE}/interventions/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(input),
+    });
+  },
+
+  async deleteIntervention(id: number) {
+    return request<ApiResponse<{ id: number }>>(`${IG_BASE}/interventions/${id}`, { method: "DELETE" });
+  },
+
+  async addInterventionAttachments(id: number, files: File[]) {
+    return requestMultipart<ApiResponse<Intervention>>(
+      `${IG_BASE}/interventions/${id}/attachments`,
+      igFormData(files)
+    );
+  },
+
+  async deleteInterventionAttachment(id: number, attachmentId: number) {
+    return request<ApiResponse<{ id: number; interventionId: number }>>(
+      `${IG_BASE}/interventions/${id}/attachments/${attachmentId}`,
+      { method: "DELETE" }
+    );
+  },
+
+  // --- Picker obiektów (własny endpoint modułu, limit 30) ---
+  async pickObjects(q: string) {
+    return request<ApiResponse<{ items: InterventionPickObject[] }>>(
+      `${IG_BASE}/pick/objects${igQuery({ q })}`
+    );
+  },
+
+  // --- Szablony maili ---
+  async mailTemplates() {
+    return request<
+      ApiResponse<{ items: InterventionMailTemplate[]; placeholders: InterventionMailPlaceholder[] }>
+    >(`${IG_BASE}/mail/templates`);
+  },
+
+  async saveMailTemplate(kind: InterventionMailKind, input: { subject: string; body: string }) {
+    return request<ApiResponse<InterventionMailTemplate>>(`${IG_BASE}/mail/templates/${kind}`, {
+      method: "PUT",
+      body: JSON.stringify(input),
+    });
+  },
+
+  /** Przywraca treść domyślną (kasuje nadpisanie w `app_settings`). */
+  async resetMailTemplate(kind: InterventionMailKind) {
+    return request<ApiResponse<InterventionMailTemplate>>(`${IG_BASE}/mail/templates/${kind}`, {
+      method: "DELETE",
+    });
+  },
+
+  async mailPreview(input: {
+    kind: InterventionMailKind;
+    companyId: number;
+    objectId?: number;
+    termId?: number;
+  }) {
+    return request<ApiResponse<InterventionMailPreview>>(`${IG_BASE}/mail/preview`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  },
+
+  /**
+   * Wysyłka. Nie rzuca przy 502 — backend zwraca wtedy komunikat RAZEM z wpisem
+   * dziennika, a okno ma pokazać jedno i drugie (jak przy mailach zleceń).
+   */
+  async sendMail(input: {
+    kind: InterventionMailKind;
+    companyId: number;
+    objectId?: number;
+    termId?: number;
+    to: string[];
+    cc?: string[];
+    bcc?: string[];
+  }): Promise<InterventionMailSendResult> {
+    const response = await fetch(`${API_BASE}${IG_BASE}/mail/send`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+    const raw = (await response.json().catch(() => ({}))) as ApiResponse<{ logEntry?: unknown }>;
+    const rawEntry = raw.data?.logEntry;
+    const logEntry = rawEntry ? normalizeMailLogEntry(rawEntry) : null;
+    if (response.ok && raw.success) return { ok: true, logEntry, status: response.status };
+    return {
+      ok: false,
+      logEntry,
+      error:
+        raw.error ||
+        (response.status === 404
+          ? "Backend nie obsługuje jeszcze wysyłki maili grup interwencyjnych."
+          : `Nie udało się wysłać maila (HTTP ${response.status}).`),
+      status: response.status,
+    };
+  },
+
+  /** Historia wysyłek modułu (`entity_type = 'intervention_group'`). */
+  async mailLog(params?: { companyId?: number; limit?: number }): Promise<MailLogEntry[]> {
+    const r = await request<ApiResponse<{ items: MailLogEntry[] }>>(
+      `${IG_BASE}/mail/log${igQuery({ companyId: params?.companyId, limit: params?.limit })}`
+    );
+    return normalizeMailLogList(r.data).items;
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Handlowy — szanse sprzedaży (`/leads`) i osoby kontaktowe (`/contacts`)
+//
+// Cały kontrakt modułu handlowego powstaje TUTAJ, w jednym miejscu na końcu
+// pliku: ekrany fal 1–3 tylko go używają. Wartości enumów są lustrem
+// `src/db/schema.ts` (LEAD_STAGES, LEAD_SOURCES, LEAD_SERVICES,
+// LEAD_LOST_REASONS); etykiety PL mieszkają w `@/lib/sales-labels`.
+// ---------------------------------------------------------------------------
+
+/** Etapy lejka. Kolejność jak w schemacie — `wygrany`/`przegrany` zamykają szansę. */
+export type LeadStage =
+  | "nowy"
+  | "kontakt"
+  | "wizja"
+  | "oferta"
+  | "negocjacje"
+  | "wygrany"
+  | "przegrany";
+
+export type LeadSource = "polecenie" | "www" | "formularz" | "telefon" | "targi" | "inne";
+
+/** Usługi, o które szansa zabiega (`ochrona` mapuje się na `ofi` przy zleceniu). */
+export type LeadService = "kamery" | "sswin" | "wideorecepcja" | "ofi" | "ochrona";
+
+export type LeadLostReason =
+  | "cena"
+  | "konkurencja"
+  | "brak_decyzji"
+  | "brak_potrzeby"
+  | "brak_kontaktu"
+  | "inne";
+
+/**
+ * Powód „gnicia" szansy liczony przez backend (`SALES_ROT_DAYS = 7`):
+ * `no_activity` = brak zaplanowanej następnej aktywności, `idle` = cisza > 7 dni.
+ * Front go nie wylicza — tylko pokazuje (patrz `rottingTip`).
+ */
+export type LeadRotReason = "no_activity" | "idle";
+
+/** Skrót wydarzenia kalendarza pokazywany na karcie i liście szans. */
+export interface LeadActivityBrief {
+  id: number;
+  type: CalendarEventType;
+  title: string;
+  startAt: string;
+  endAt: string;
+  allDay: boolean;
+  status: CalendarEventStatus;
+}
+
+/** Szansa sprzedaży — odpowiedź `LeadJson` z `src/routes/leads.ts`. */
+export interface Lead {
+  id: number;
+  title: string;
+  stage: LeadStage;
+  source: LeadSource | null;
+  contractorId: number | null;
+  /** Prospekt: klient jeszcze bez kartoteki (kontrahent powstaje przy konwersji). */
+  prospectName: string | null;
+  prospectNip: string | null;
+  prospectPhone: string | null;
+  prospectEmail: string | null;
+  /** Rodzaj obiektu — wartości z `OBJECT_KINDS` (`@/lib/orderIntakeSteps`). */
+  objectKind: string | null;
+  address: string | null;
+  city: string | null;
+  mapsUrl: string | null;
+  lat: number | null;
+  lng: number | null;
+  services: LeadService[];
+  /** MRR netto — abonament miesięczny, główna metryka lejka. */
+  estimatedMonthly: number | null;
+  /** Jednorazowe wdrożenie (montaż, sprzęt). */
+  estimatedSetup: number | null;
+  /** Prawdopodobieństwo 0–100 (do wartości ważonej). */
+  probability: number | null;
+  /** YYYY-MM-DD */
+  expectedCloseDate: string | null;
+  salespersonId: number | null;
+  objectId: number | null;
+  orderId: number | null;
+  wonAt: string | null;
+  lostAt: string | null;
+  lostReason: LeadLostReason | null;
+  lostNote: string | null;
+  /** Denormalizacja: ostatni kontakt (aktywność, notatka, zmiana etapu). */
+  lastActivityAt: string | null;
+  notes: string | null;
+  createdBy: number | null;
+  createdByLabel: string | null;
+  updatedBy: number | null;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt: string | null;
+  // --- pola doklejane przez backend ---
+  contractorName: string | null;
+  /** Nazwa klienta do pokazania: kontrahent albo prospekt. */
+  clientLabel: string;
+  salespersonName: string | null;
+  objectName: string | null;
+  orderNumber: string | null;
+  offersCount: number;
+  contactsCount: number;
+  /** Najbliższa zaplanowana aktywność (null = szansa bez następnego kroku). */
+  nextActivity: LeadActivityBrief | null;
+  /** Ile aktywności jest po terminie. */
+  overdueCount: number;
+  rotting: boolean;
+  rotReason: LeadRotReason | null;
+}
+
+/** Karta szansy: `GET /leads/:id`. */
+export interface LeadDetail extends Lead {
+  contacts: Contact[];
+  offers: OfferListRow[];
+  orders: Order[];
+  activities: {
+    overdue: LeadActivityBrief[];
+    upcoming: LeadActivityBrief[];
+    done: LeadActivityBrief[];
+  };
+  /** Oś czasu: `activity_log` szansy + jej wydarzeń kalendarza (desc, limit 500). */
+  history: ActivityEntry[];
+}
+
+/** Klucze sortowania listy szans — te same, co `SORT_COLUMNS` w `src/routes/leads.ts`. */
+export type LeadSortKey =
+  | "title"
+  | "stage"
+  | "estimatedMonthly"
+  | "expectedCloseDate"
+  | "lastActivityAt"
+  | "nextActivityAt"
+  | "createdAt";
+
+export interface LeadsQuery {
+  q?: string;
+  stage?: LeadStage[];
+  /** Lista id, "me" = handlowiec zalogowanego konta, "none" = bez opiekuna. */
+  salespersonId?: number[] | "me" | "none";
+  source?: LeadSource;
+  service?: LeadService;
+  contractorId?: number;
+  objectId?: number;
+  /** Tylko szanse „gnijące" (brak następnej aktywności albo cisza > 7 dni). */
+  rotting?: boolean;
+  /** Domyślnie lista pokazuje tylko otwarte etapy. */
+  includeClosed?: boolean;
+  includeDeleted?: boolean;
+  /** Widełki przewidywanego zamknięcia (YYYY-MM-DD). */
+  closeFrom?: string;
+  closeTo?: string;
+  sort?: LeadSortKey;
+  dir?: "asc" | "desc";
+  page?: number;
+  /** Domyślnie 50, maks. 200. */
+  pageSize?: number;
+}
+
+/** Podsumowanie nad listą — liczone przez backend na CAŁYM zbiorze po filtrach. */
+export interface LeadsSummary {
+  count: number;
+  monthly: number;
+  setup: number;
+  /** MRR przemnożony przez `probability` (szanse bez P% liczą się jak 0). */
+  weightedMonthly: number;
+}
+
+export interface LeadsResponse {
+  items: Lead[];
+  total: number;
+  page: number;
+  pageSize: number;
+  summary: LeadsSummary;
+}
+
+/** Kolumna kanbanu (`GET /leads/board`) — po 200 kart na kolumnę. */
+export interface LeadBoardColumn {
+  stage: LeadStage;
+  count: number;
+  monthly: number;
+  setup: number;
+  items: Lead[];
+}
+
+export interface LeadInput {
+  title: string;
+  stage?: LeadStage;
+  source?: LeadSource | null;
+  contractorId?: number | null;
+  prospectName?: string | null;
+  prospectNip?: string | null;
+  prospectPhone?: string | null;
+  prospectEmail?: string | null;
+  objectKind?: string | null;
+  address?: string | null;
+  city?: string | null;
+  mapsUrl?: string | null;
+  lat?: number | null;
+  lng?: number | null;
+  services?: LeadService[];
+  estimatedMonthly?: number | null;
+  estimatedSetup?: number | null;
+  probability?: number | null;
+  expectedCloseDate?: string | null;
+  salespersonId?: number | null;
+  objectId?: number | null;
+  notes?: string | null;
+}
+
+/**
+ * `PATCH /leads/:id/stage` — to jest drag&drop kanbanu. Etap `przegrany`
+ * wymaga powodu; backend ustawia i czyści `wonAt`/`lostAt` sam.
+ */
+export interface LeadStageInput {
+  stage: LeadStage;
+  lostReason?: LeadLostReason | null;
+  lostNote?: string | null;
+}
+
+/** Dane kontrahenta zakładanego przy konwersji (gdy nie wskazano `contractorId`). */
+export interface LeadConvertContractorInput {
+  name: string;
+  nip?: string | null;
+  address?: string | null;
+  city?: string | null;
+  postalCode?: string | null;
+  phone?: string | null;
+  email?: string | null;
+}
+
+/** Obiekt zakładany przy konwersji szansy (`department='sales'`, `status='pending'`). */
+export interface LeadConvertObjectInput {
+  name: string;
+  address?: string | null;
+  city?: string | null;
+  mapsUrl?: string | null;
+  monthlyZdw?: number | null;
+  monthlyOfi?: number | null;
+  hasCameras?: boolean;
+  hasSswin?: boolean;
+  hasVideoReception?: boolean;
+  hasOfi?: boolean;
+  cameraCount?: number | null;
+  installationType?: string | null;
+}
+
+/** `POST /leads/:id/convert` — jedna transakcja: kontrahent + obiekt + przepięcia. */
+export interface LeadConvertInput {
+  contractorId?: number | null;
+  contractor?: LeadConvertContractorInput;
+  object: LeadConvertObjectInput;
+  /** `true` = od razu etap `wygrany` (domyślne zachowanie DnD na kolumnę Wygrane). */
+  markWon?: boolean;
+}
+
+/** Wynik konwersji — front od razu linkuje do świeżego obiektu. */
+export interface LeadConvertResult {
+  lead: Lead;
+  contractorId: number;
+  objectId: number;
+}
+
+/** `GET /leads/stats/pipeline` — dane pulpitu i wykresu lejka. */
+export interface LeadPipelineStats {
+  byStage: { stage: LeadStage; count: number; monthly: number; setup: number }[];
+  won: { count: number; monthly: number; setup: number };
+  lost: {
+    count: number;
+    byReason: { reason: LeadLostReason; count: number }[];
+  };
+  /** Ile szans gnije i ile nie ma zaplanowanej następnej aktywności. */
+  rotting: number;
+  noNextActivity: number;
+}
+
+/**
+ * `GET /leads/:id/order-prefill` — gotowy stan formularza zlecenia. Kierunek
+ * jest jednostronny (szansa → zlecenie); formularz publiczny pól nie przyjmuje.
+ */
+export interface LeadOrderPrefill extends Partial<OrderIntakeFormState> {
+  leadId: number;
+  leadTitle: string;
+  /**
+   * Zlecenie, które ta szansa JUŻ ma. Formularz mówi o tym od razu, zamiast
+   * pozwolić wypełnić siedem kroków i dostać 409 przy zapisie.
+   */
+  leadOrderId: number | null;
+  salespersonId: number | null;
+  payerContractorId: number | null;
+  objectId: number | null;
+}
+
+const leadsQuery = (p: LeadsQuery = {}): string => {
+  const sp = new URLSearchParams();
+  if (p.q) sp.set("q", p.q);
+  if (p.stage?.length) sp.set("stage", p.stage.join(","));
+  if (p.salespersonId === "me" || p.salespersonId === "none") sp.set("salespersonId", p.salespersonId);
+  else if (p.salespersonId?.length) sp.set("salespersonId", p.salespersonId.join(","));
+  if (p.source) sp.set("source", p.source);
+  if (p.service) sp.set("service", p.service);
+  if (p.contractorId) sp.set("contractorId", String(p.contractorId));
+  if (p.objectId) sp.set("objectId", String(p.objectId));
+  if (p.rotting) sp.set("rotting", "1");
+  if (p.includeClosed) sp.set("includeClosed", "1");
+  if (p.includeDeleted) sp.set("includeDeleted", "1");
+  if (p.closeFrom) sp.set("closeFrom", p.closeFrom);
+  if (p.closeTo) sp.set("closeTo", p.closeTo);
+  if (p.sort) sp.set("sort", p.sort);
+  if (p.dir) sp.set("dir", p.dir);
+  if (p.page) sp.set("page", String(p.page));
+  if (p.pageSize) sp.set("pageSize", String(p.pageSize));
+  const q = sp.toString();
+  return q ? `?${q}` : "";
+};
+
+export const leadsApi = {
+  /** Lista z paginacją po stronie backendu (wzorzec `Objects.tsx`). */
+  async list(params: LeadsQuery = {}) {
+    return request<ApiResponse<LeadsResponse>>(`/leads${leadsQuery(params)}`);
+  },
+
+  /** Kanban: kolumny etapów z podsumowaniami (200 kart na kolumnę). */
+  async board(params: { salespersonId?: number[] | "me"; q?: string; service?: LeadService } = {}) {
+    const sp = new URLSearchParams();
+    if (params.salespersonId === "me") sp.set("salespersonId", "me");
+    else if (params.salespersonId?.length) sp.set("salespersonId", params.salespersonId.join(","));
+    if (params.q) sp.set("q", params.q);
+    if (params.service) sp.set("service", params.service);
+    const q = sp.toString();
+    return request<ApiResponse<{ columns: LeadBoardColumn[] }>>(`/leads/board${q ? `?${q}` : ""}`);
+  },
+
+  async get(id: number) {
+    return request<ApiResponse<LeadDetail>>(`/leads/${id}`);
+  },
+
+  async create(data: LeadInput) {
+    return request<ApiResponse<Lead>>("/leads", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  },
+
+  async update(id: number, data: Partial<LeadInput>) {
+    return request<ApiResponse<Lead>>(`/leads/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    });
+  },
+
+  /** Zmiana etapu (stepper na karcie i DnD kanbanu). */
+  async setStage(id: number, data: LeadStageInput) {
+    return request<ApiResponse<Lead>>(`/leads/${id}/stage`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    });
+  },
+
+  /** Szansa → kontrahent + obiekt (jedna transakcja po stronie backendu). */
+  async convert(id: number, data: LeadConvertInput) {
+    return request<ApiResponse<LeadConvertResult>>(`/leads/${id}/convert`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  },
+
+  /** Stan formularza zlecenia wyliczony z szansy (`/orders/formularz?leadId=`). */
+  async orderPrefill(id: number) {
+    return request<ApiResponse<LeadOrderPrefill>>(`/leads/${id}/order-prefill`);
+  },
+
+  /** Soft delete — szansa zostaje w koszu i da się ją przywrócić. */
+  async remove(id: number) {
+    return request<ApiResponse<null>>(`/leads/${id}`, { method: "DELETE" });
+  },
+
+  async restore(id: number) {
+    return request<ApiResponse<Lead>>(`/leads/${id}/restore`, { method: "POST" });
+  },
+
+  async pipeline(params: { salespersonId?: number[] | "me"; from?: string; to?: string } = {}) {
+    const sp = new URLSearchParams();
+    if (params.salespersonId === "me") sp.set("salespersonId", "me");
+    else if (params.salespersonId?.length) sp.set("salespersonId", params.salespersonId.join(","));
+    if (params.from) sp.set("from", params.from);
+    if (params.to) sp.set("to", params.to);
+    const q = sp.toString();
+    return request<ApiResponse<LeadPipelineStats>>(`/leads/stats/pipeline${q ? `?${q}` : ""}`);
+  },
+};
+
+// --- Osoby kontaktowe ------------------------------------------------------
+
+/**
+ * Osoba kontaktowa. Osobny byt od `contractors.contact_person` (jeden tekst) —
+ * migracja starego pola jest poza zakresem v1, oba żyją równolegle.
+ */
+export interface Contact {
+  id: number;
+  contractorId: number | null;
+  leadId: number | null;
+  objectId: number | null;
+  firstName: string;
+  lastName: string;
+  role: string | null;
+  phone: string | null;
+  email: string | null;
+  /** Główna osoba u kontrahenta — najwyżej jedna (częściowy unique w bazie). */
+  isPrimary: boolean;
+  notes: string | null;
+  active: boolean;
+  createdBy: number | null;
+  createdAt: string;
+  updatedAt: string;
+  // --- doklejane przez backend ---
+  contractorName?: string | null;
+  leadTitle?: string | null;
+  objectName?: string | null;
+  /** Pełne imię i nazwisko złożone przez backend (tylko do wyświetlenia). */
+  fullName?: string;
+  /** Tylko `GET /contacts/:id`: wydarzenia z tą osobą. */
+  events?: CalendarEvent[];
+}
+
+export interface ContactInput {
+  contractorId?: number | null;
+  leadId?: number | null;
+  objectId?: number | null;
+  firstName?: string;
+  /** Wymagane przez backend razem z min. jednym powiązaniem. */
+  lastName: string;
+  role?: string | null;
+  phone?: string | null;
+  email?: string | null;
+  /** `true` zdejmuje flagę pozostałym kontaktom kontrahenta (transakcja). */
+  isPrimary?: boolean;
+  notes?: string | null;
+  active?: boolean;
+}
+
+export type ContactSortKey = "lastName" | "role" | "contractor" | "createdAt";
+
+export interface ContactsQuery {
+  q?: string;
+  contractorId?: number;
+  leadId?: number;
+  objectId?: number;
+  /** Brak = wszystkie; `true`/`false` zawęża do (nie)aktywnych. */
+  active?: boolean;
+  sort?: ContactSortKey;
+  dir?: "asc" | "desc";
+  page?: number;
+  pageSize?: number;
+}
+
+export type ContactsResponse = PaginatedResponse<Contact>;
+
+export const contactsApi = {
+  async list(params: ContactsQuery = {}) {
+    const sp = new URLSearchParams();
+    if (params.q) sp.set("q", params.q);
+    if (params.contractorId) sp.set("contractorId", String(params.contractorId));
+    if (params.leadId) sp.set("leadId", String(params.leadId));
+    if (params.objectId) sp.set("objectId", String(params.objectId));
+    if (params.active !== undefined) sp.set("active", params.active ? "1" : "0");
+    if (params.sort) sp.set("sort", params.sort);
+    if (params.dir) sp.set("dir", params.dir);
+    if (params.page) sp.set("page", String(params.page));
+    if (params.pageSize) sp.set("pageSize", String(params.pageSize));
+    const q = sp.toString();
+    return request<ContactsResponse>(`/contacts${q ? `?${q}` : ""}`);
+  },
+
+  async get(id: number) {
+    return request<ApiResponse<Contact>>(`/contacts/${id}`);
+  },
+
+  async create(data: ContactInput) {
+    return request<ApiResponse<Contact>>("/contacts", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  },
+
+  async update(id: number, data: Partial<ContactInput>) {
+    return request<ApiResponse<Contact>>(`/contacts/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    });
+  },
+
+  /**
+   * Usuwa kontakt. Backend odpowiada 409, gdy wskazuje na niego
+   * `calendar_events.contact_id` — wtedy UI proponuje „ustaw nieaktywny".
+   */
+  async remove(id: number) {
+    return request<ApiResponse<null>>(`/contacts/${id}`, { method: "DELETE" });
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Umowy → Drafty umów (/contracts?panel=drafty)
+// Generator umów z szablonu Worda: rejestr draftów, prefill z CRM, numeracja
+// per spółka i rok, wygenerowany DOCX + załączniki (np. skan podpisanej umowy).
+// Backend: src/routes/contract-drafts.ts, prefiks /api/contracts/drafts
+// (router montowany PRZED /contracts). Uprawnienia: klucz zakładki `contracts`.
+// ---------------------------------------------------------------------------
+
+export type ContractDraftStatus = "draft" | "sent" | "signed" | "rejected" | "archived";
+
+/** Etykiety statusów — jedno źródło dla listy, badge'ów i selecta. */
+export const CONTRACT_DRAFT_STATUS_LABELS: Record<ContractDraftStatus, string> = {
+  draft: "Szkic",
+  sent: "Wysłana do klienta",
+  signed: "Podpisana",
+  rejected: "Odrzucona",
+  archived: "Archiwalna",
+};
+
+/** Załącznik draftu — kształt identyczny z załącznikami grup interwencyjnych. */
+export interface ContractDraftAttachment {
+  id: number;
+  fileName: string;
+  mimeType: string;
+  size: number;
+  kind: "image" | "file";
+  width: number | null;
+  height: number | null;
+  url: string;
+  downloadUrl: string;
+  createdAt: string;
+}
+
+/** Definicja jednego pola formularza umowy (przychodzi z rejestru szablonów). */
+export interface ContractDraftFieldDef {
+  key: string;
+  label: string;
+  /** Nazwa sekcji formularza — musi być jedną z `ContractTemplate.groups`. */
+  group: string;
+  type: "text" | "textarea" | "email" | "money" | "date" | "select";
+  options?: { value: string; label: string }[];
+  required: boolean;
+  /** Np. numer umowy — nadaje go backend, front tylko pokazuje. */
+  readOnly: boolean;
+  hint: string | null;
+  /** Co wpisać do DOCX, gdy pole zostanie puste (np. kropkowany placeholder). */
+  emptyPlaceholder: string | null;
+  /** Klucz pola nadrzędnego — wartość liczona (kwota → „słownie”). */
+  derivedFrom: string | null;
+}
+
+/** Szablon umowy: nagłówek/stopka są przywiązane do konkretnej spółki. */
+export interface ContractTemplate {
+  key: string;
+  label: string;
+  description: string;
+  companyId: number | null;
+  companyName: string;
+  /** Spółka obiektu zgadza się ze spółką szablonu (true, gdy pytamy bez obiektu). */
+  available: boolean;
+  /** Pełne zdanie po polsku, gdy `available === false`. */
+  warning: string | null;
+  /** Kolejność sekcji formularza. */
+  groups: string[];
+  fields: ContractDraftFieldDef[];
+  /** Skąd wzięty wzór — oryginalny plik Worda i data wydania. */
+  sourceNote: string;
+  /** Nazwa otagowanego pliku w `templates/umowy/`. */
+  fileName: string;
+  /** Rozmiar tego pliku w bajtach (0 = pliku nie ma na dysku serwera). */
+  fileSize: number;
+  /** `fields.length` — bez rozwijania listy pól. */
+  fieldCount: number;
+  /** Ile draftów powstało z tego wzoru (cała baza, bez filtrów). */
+  draftCount: number;
+}
+
+/** Draft umowy w rejestrze (lista, karta obiektu, odpowiedź po zapisie). */
+export interface ContractDraft {
+  id: number;
+  objectId: number;
+  objectName: string;
+  objectAddress: string | null;
+  objectCity: string | null;
+  contractorId: number | null;
+  contractorName: string | null;
+  companyId: number;
+  companyName: string;
+  templateKey: string;
+  templateLabel: string;
+  contractNumber: string;
+  seq: number;
+  year: number;
+  /** YYYY-MM-DD. */
+  contractDate: string;
+  status: ContractDraftStatus;
+  statusLabel: string;
+  fields: Record<string, string>;
+  notes: string | null;
+  generatedFileName: string | null;
+  generatedAt: string | null;
+  /** `/api/contracts/drafts/:id/file` albo null, gdy pliku nie ma. */
+  fileUrl: string | null;
+  /** Pola zmieniły się po ostatniej generacji — plik jest nieaktualny. */
+  stale: boolean;
+  /**
+   * Id wiersza w rejestrze umów, jeśli draft już tam trafił („Przenieś do
+   * rejestru”); `null` = jeszcze nie.
+   */
+  registryContractId: number | null;
+  attachments: ContractDraftAttachment[];
+  createdBy: number | null;
+  createdByLabel: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Wynik wyszukiwarki obiektów draftów — dodatkowo niesie spółkę obiektu. */
+export interface ContractDraftPickObject {
+  id: number;
+  name: string;
+  address: string | null;
+  city: string | null;
+  contractorName: string | null;
+  companyId: number | null;
+  companyName: string | null;
+}
+
+/** Wstępne wypełnienie formularza danymi z CRM. */
+export interface ContractDraftPrefill {
+  template: ContractTemplate;
+  fields: Record<string, string>;
+  /** Skąd wzięła się wartość: „obiekt”, „kontrahent”, „spółka”, „wyliczone”… */
+  sources: Record<string, string>;
+  /** Czego zabrakło w kartotece — pełne zdania po polsku. */
+  warnings: string[];
+  /** Podgląd numeru; ostateczny nadaje POST (licznik w transakcji). */
+  numberPreview: string;
+  companyId: number | null;
+  companyName: string | null;
+  contractorId: number | null;
+  contractorName: string | null;
+  objectName: string;
+  /** Domyślnie dziś, YYYY-MM-DD. */
+  contractDate: string;
+}
+
+export interface ContractDraftCreateInput {
+  objectId: number;
+  templateKey: string;
+  contractDate?: string;
+  fields: Record<string, string>;
+  notes?: string | null;
+  status?: ContractDraftStatus;
+}
+
+/** PUT nie przenosi draftu na inny obiekt/szablon i nie zmienia numeru. */
+export interface ContractDraftUpdateInput {
+  fields?: Record<string, string>;
+  contractDate?: string;
+  status?: ContractDraftStatus;
+  notes?: string | null;
+}
+
+const CD_BASE = "/contracts/drafts";
+
+export const contractDraftsApi = {
+  /** Rejestr draftów. Sortowanie zostawiamy klientowi (lista jest krótka). */
+  async list(params?: {
+    objectId?: number;
+    companyId?: number;
+    status?: ContractDraftStatus;
+    templateKey?: string;
+    q?: string;
+    sort?: "number" | "date" | "object" | "contractor" | "status" | "created";
+    dir?: "asc" | "desc";
+  }) {
+    return request<ApiResponse<{ items: ContractDraft[] }>>(
+      `${CD_BASE}${igQuery({
+        objectId: params?.objectId,
+        companyId: params?.companyId,
+        status: params?.status,
+        templateKey: params?.templateKey,
+        q: params?.q,
+        sort: params?.sort,
+        dir: params?.dir,
+      })}`
+    );
+  },
+
+  /** Wyszukiwarka obiektów modułu (limit 30) — bez uprawnień do kartoteki. */
+  async pickObjects(q: string) {
+    return request<ApiResponse<{ items: ContractDraftPickObject[] }>>(
+      `${CD_BASE}/pick/objects${igQuery({ q })}`
+    );
+  },
+
+  /** Rejestr szablonów; z `objectId` dostajemy `available`/`warning` per szablon. */
+  async templates(objectId?: number) {
+    return request<ApiResponse<{ items: ContractTemplate[] }>>(
+      `${CD_BASE}/templates${igQuery({ objectId })}`
+    );
+  },
+
+  async prefill(objectId: number, template: string) {
+    return request<ApiResponse<ContractDraftPrefill>>(
+      `${CD_BASE}/prefill${igQuery({ objectId, template })}`
+    );
+  },
+
+  /** Drafty jednego obiektu (sekcja na karcie obiektu). */
+  async listByObject(objectId: number) {
+    return request<ApiResponse<{ items: ContractDraft[] }>>(`${CD_BASE}/objects/${objectId}`);
+  },
+
+  async get(id: number) {
+    return request<ApiResponse<ContractDraft>>(`${CD_BASE}/${id}`);
+  },
+
+  /** POST nadaje numer i od razu generuje DOCX. */
+  async create(input: ContractDraftCreateInput) {
+    return request<ApiResponse<ContractDraft>>(CD_BASE, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  },
+
+  /** PUT nie regeneruje pliku — draft wraca ze `stale: true`. */
+  async update(id: number, input: ContractDraftUpdateInput) {
+    return request<ApiResponse<ContractDraft>>(`${CD_BASE}/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(input),
+    });
+  },
+
+  /** Ponowna generacja DOCX z aktualnych pól (kasuje poprzedni plik). */
+  async generate(id: number) {
+    return request<ApiResponse<ContractDraft>>(`${CD_BASE}/${id}/generate`, { method: "POST" });
+  },
+
+  async remove(id: number) {
+    return request<ApiResponse<{ id: number }>>(`${CD_BASE}/${id}`, { method: "DELETE" });
+  },
+
+  /**
+   * „Przenieś do rejestru” — z draftu (dokumentu) robi wiersz w rejestrze umów.
+   * 409, gdy draft już tam jest albo numer zajmuje inna umowa.
+   */
+  async promote(id: number) {
+    // Sam wiersz rejestru (bez dołączonego obiektu i kontrahenta) + adres pliku.
+    return request<ApiResponse<{ contract: Contract & { draftFileUrl: string | null }; draft: ContractDraft }>>(
+      `${CD_BASE}/${id}/promote`,
+      { method: "POST" }
+    );
+  },
+
+  async addAttachments(id: number, files: File[]) {
+    return requestMultipart<ApiResponse<ContractDraft>>(
+      `${CD_BASE}/${id}/attachments`,
+      igFormData(files)
+    );
+  },
+
+  async deleteAttachment(id: number, attachmentId: number) {
+    return request<ApiResponse<{ id: number; draftId: number }>>(
+      `${CD_BASE}/${id}/attachments/${attachmentId}`,
+      { method: "DELETE" }
+    );
+  },
+
+  /**
+   * Adres wygenerowanego DOCX. Pobieranie idzie zwykłym `<a href>`, a nie
+   * `fetch`-em: sesja siedzi w ciasteczku, więc przeglądarka poradzi sobie sama
+   * (i nie musimy trzymać blobów w pamięci).
+   *
+   * `inline = true` daje wariant `?inline=1` — dla podglądu w przeglądarce
+   * (DocxPreview), gdzie plik ma się otworzyć, a nie ściągnąć.
+   */
+  fileUrl(id: number, inline = false): string {
+    return `${API_BASE}${CD_BASE}/${id}/file${inline ? "?inline=1" : ""}`;
+  },
+
+  /**
+   * Ten sam adres z `&preview=1` — wariant KOLOROWANY (żółte pola do
+   * uzupełnienia, zielone wypełnione), liczony przez serwer w pamięci.
+   *
+   * Doklejamy go WYŁĄCZNIE pod `DocxPreview`. „Otwórz w nowej karcie”
+   * i „Pobierz” mają dawać plik czysty — kolory są pomocą przy sprawdzaniu
+   * umowy, a nie jej częścią.
+   */
+  previewUrl(url: string | null | undefined): string | null {
+    if (!url) return null;
+    return `${url}${url.includes("?") ? "&" : "?"}preview=1`;
+  },
+
+  /**
+   * Adres pliku WZORU (panel „Wzory umów”). `blank` to pusty dokument
+   * z kropkami w miejsce pól — dokładnie to, co wyjdzie z generatora przed
+   * wypełnieniem; `tagged` to surowy plik z `{tagami}` (dla administratora).
+   */
+  templateFileUrl(key: string, mode: "blank" | "tagged" = "blank"): string {
+    return `${API_BASE}${CD_BASE}/templates/${encodeURIComponent(key)}/file${mode === "blank" ? "" : `?mode=${mode}`}`;
+  },
+};
+
+/**
+ * Aliasy nazw z zamrożonego kontraktu API (backend nazywa te kształty `…Json`).
+ * W kodzie frontu używamy krótszych nazw — jak przy interwencjach — ale te
+ * pozwalają cytować kontrakt jeden do jednego.
+ */
+export type ContractDraftJson = ContractDraft;
+export type ContractTemplateJson = ContractTemplate;
+export type ContractDraftFieldDefJson = ContractDraftFieldDef;
+export type ContractDraftPrefillJson = ContractDraftPrefill;
+export type ContractDraftAttachmentJson = ContractDraftAttachment;
+
+// ---------------------------------------------------------------------------
+// Podgląd linków (unfurl) — karty pod adresami wpisanymi w notatkach
+// ---------------------------------------------------------------------------
+
+/**
+ * Metadane cudzej strony. `status: "error"` znaczy „nie udało się pobrać” —
+ * wypełnione są wtedy tylko `url`, `host` i zastępczy `favicon`, a front i tak
+ * pokazuje klikalny link z domeną.
+ */
+/** Punkt mini-mapy — wypełniony wyłącznie dla linków Google Maps. */
+export interface LinkPreviewMap {
+  lat: number;
+  lng: number;
+  zoom: number;
+  label: string | null;
+}
+
+export interface LinkPreview {
+  url: string;
+  finalUrl: string;
+  host: string;
+  title: string | null;
+  description: string | null;
+  image: string | null;
+  favicon: string | null;
+  siteName: string | null;
+  /** Link do Map Google → karta z mini-mapą zamiast zwykłego podglądu strony. */
+  map: LinkPreviewMap | null;
+  status: "ok" | "error";
+  error: string | null;
+  fetchedAt: string;
+}
+
+/** Dystans do punktu z karty mapy (w jedną stronę). */
+export interface LinkDistance {
+  km: number;
+  minutes: number;
+  method: "route" | "straight";
+  /** Tylko dla `object` — nazwa obiektu z kartoteki. */
+  objectName?: string;
+}
+
+export interface LinkDistances {
+  office: LinkDistance | null;
+  object: LinkDistance | null;
+  /** Ile pinezkę dzieli od drogi, do której liczona jest trasa (km; 0 = na drodze). */
+  snapKm?: number;
+}
+
+export const linksApi = {
+  /** GET /links/preview?url=… — wynik jest cache'owany po stronie serwera (7 dni). */
+  async preview(url: string) {
+    return request<ApiResponse<LinkPreview>>(`/links/preview?url=${encodeURIComponent(url)}`);
+  },
+  /** GET /links/distances — „od biura" i „od obiektu" dla pinezki wklejonej w notatce. */
+  async distances(lat: number, lng: number, objectId?: number | null) {
+    const params = new URLSearchParams({ lat: String(lat), lng: String(lng) });
+    if (objectId) params.set("objectId", String(objectId));
+    return request<ApiResponse<LinkDistances>>(`/links/distances?${params.toString()}`);
+  },
+};

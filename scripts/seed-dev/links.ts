@@ -122,7 +122,7 @@ export function seedLinks(outerTx?: Tx): LinksCounts {
   const revenue =
     db
       .select({
-        v: sql<number>`coalesce(sum(coalesce(monthly_value, 0) + coalesce(monthly_rental, 0)), 0)`,
+        v: sql<number>`coalesce(sum(coalesce(monthly_zdw, 0) + coalesce(monthly_ofi, 0) + coalesce(monthly_rental, 0)), 0)`,
       })
       .from(schema.objects)
       .all()[0]?.v ?? 0;

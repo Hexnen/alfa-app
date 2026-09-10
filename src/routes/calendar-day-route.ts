@@ -16,7 +16,7 @@
  */
 import { Hono } from "hono";
 import { createHash } from "crypto";
-import { and, asc, gt, inArray, isNull, lt } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, isNull, lt } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
 import { getCompanyConfig } from "../lib/company-config.js";
 import { DATE_RE } from "../lib/calendar-mutations.js";
@@ -155,6 +155,9 @@ app.get("/day-route", async (c) => {
     .from(schema.calendarEvents)
     .where(
       and(
+        // Planer trasy jest narzędziem DZIAŁU TECHNICZNEGO (wyjazdy do obiektów) —
+        // wydarzenia handlowe nie mają tu czego szukać ani pokazywać.
+        eq(schema.calendarEvents.department, "technical"),
         isNull(schema.calendarEvents.deletedAt),
         lt(schema.calendarEvents.startAt, nextDay(date)),
         gt(schema.calendarEvents.endAt, date)

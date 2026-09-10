@@ -14,22 +14,28 @@ import {
   CALENDAR_EVENT_STATUSES,
   CALENDAR_SERIES_FREQS,
   CALENDAR_BILLINGS,
+  CALENDAR_DEPARTMENTS,
+  DEPARTMENT_EVENT_TYPES,
   type CalendarBilling,
+  type CalendarDepartment,
   type CalendarEvent as CalendarEventRow,
   type CalendarEventType,
   type CalendarEventStatus,
   type CalendarSeriesFreq,
   type CalendarEventNote as CalendarEventNoteRow,
   type CalendarNoteSource,
+  type NoteAttachmentOrigin,
   CALENDAR_NOTE_MAX,
 } from "../db/schema.js";
 import { logActivity, logFieldDiffs, userLabelOf, type ActivityUser, type DbOrTx, type Tx } from "./activity-log.js";
 import { onEventCreated, onEventDeleted, onEventRestored, onEventUpdated } from "./calendar-realizations.js";
-import { noteEventLinks, noteOfRow, noteWithAttachments, type Note } from "./calendar-queries.js";
+import { briefTextOf, noteEventLinks, noteOfRow, noteWithAttachments, type Note } from "./calendar-queries.js";
+import type { MsgMail } from "./outlook-msg.js";
 import { attachmentOfRow, type StoredAttachment } from "./calendar-attachments.js";
 import { expandOccurrences, describeRule, shiftLocal, diffMinutes, type RecurrenceRule } from "./calendar-recurrence.js";
 import { ApiError, BILLING_HIDDEN_TYPES, BILLING_LABELS, STATUS_LABELS, TYPE_LABELS } from "./calendar-labels.js";
 import { mentionKeys } from "./note-mentions.js";
+import { leadTitleById, touchLead } from "./sales-leads.js";
 import { zonedToday } from "./tz.js";
 
 export const CALENDAR_ENTITY = "calendar_event";
@@ -54,6 +60,12 @@ export function fmtDate(s: string | null | undefined): string {
 // ---------------------------------------------------------------------------
 
 export interface ParsedInput {
+  /**
+   * Dział wiersza — decyduje o dozwolonych typach, o tym, kogo się przypisuje
+   * (technicy vs handlowcy), i o widoczności (src/lib/calendar-scope.ts).
+   * Domyślnie „technical”; PUT nie może go zmienić.
+   */
+  department: CalendarDepartment;
   type: CalendarEventType;
   title: string;
   description: string | null;
@@ -83,6 +95,12 @@ export interface ParsedInput {
   /** Jawnie przypięta wycena (null = wycena realizacji / brak). */
   quoteId: number | null;
   technicianIds: number[];
+  /** Przypisani handlowcy (tylko dział handlowy; techniczny ma zawsze pustą listę). */
+  salespersonIds: number[];
+  /** Szansa sprzedaży, do której należy aktywność (tylko dział handlowy). */
+  leadId: number | null;
+  /** Osoba kontaktowa (tylko dział handlowy; musi należeć do szansy lub jej kontrahenta). */
+  contactId: number | null;
   recurrence: RecurrenceRule | null;
   /**
    * Tylko dla type = "notatka": notatka, na którą wskazuje kafelek (wymagana). Dla pozostałych
@@ -182,10 +200,25 @@ export function parseInput(body: unknown): ParsedInput {
   if (!body || typeof body !== "object") throw new ApiError(400, "Nieprawidłowe dane wejściowe");
   const b = body as Record<string, unknown>;
 
+  // Dział ustala resztę reguł, więc czytamy go PRZED typem.
+  let department: CalendarDepartment = "technical";
+  if (b.department != null && b.department !== "") {
+    if (!CALENDAR_DEPARTMENTS.includes(b.department as CalendarDepartment)) {
+      throw new ApiError(400, `Pole department: dozwolone ${CALENDAR_DEPARTMENTS.join(", ")}`);
+    }
+    department = b.department as CalendarDepartment;
+  }
+  const isSales = department === "handlowy";
+
   if (!CALENDAR_EVENT_TYPES.includes(b.type as CalendarEventType)) {
     throw new ApiError(400, `Pole type: dozwolone ${CALENDAR_EVENT_TYPES.join(", ")}`);
   }
   const type = b.type as CalendarEventType;
+  // Typy są rozłączne per dział (poza wspólnymi wizja/urlop/notatka) — wydarzenie
+  // handlowe „montaż” albo techniczne „telefon” to zawsze pomyłka klienta.
+  if (!DEPARTMENT_EVENT_TYPES[department].includes(type)) {
+    throw new ApiError(400, `Pole type: w dziale ${department} dozwolone ${DEPARTMENT_EVENT_TYPES[department].join(", ")}`);
+  }
   const isUrlop = type === "urlop";
   // Kafelek notatki: tytuł, daty, technicy i reszta są WYMUSZANE (patrz niżej) — z ciała
   // liczą się tylko `noteId`, `startAt` i `status`.
@@ -224,15 +257,25 @@ export function parseInput(body: unknown): ParsedInput {
     status = b.status as CalendarEventStatus;
   }
 
+  // Przypisania są ROZŁĄCZNE wg działu: techniczny nie zna handlowców i odwrotnie.
   let technicianIds: number[] = [];
-  if (b.technicianIds != null && !isNote) {
+  if (b.technicianIds != null && !isNote && !isSales) {
     if (!Array.isArray(b.technicianIds)) throw new ApiError(400, "Pole technicianIds: oczekiwano tablicy");
     technicianIds = [...new Set(b.technicianIds.map((x) => optInt(x, "technicianIds")!))];
   }
-  if (isUrlop && technicianIds.length === 0) throw new ApiError(400, "Urlop wymaga wskazania technika");
+  let salespersonIds: number[] = [];
+  if (b.salespersonIds != null && !isNote && isSales) {
+    if (!Array.isArray(b.salespersonIds)) throw new ApiError(400, "Pole salespersonIds: oczekiwano tablicy");
+    salespersonIds = [...new Set(b.salespersonIds.map((x) => optInt(x, "salespersonIds")!))];
+  }
+  // Urlop musi mieć KOGO dotyczyć — w każdym dziale swojego.
+  if (isUrlop && isSales && salespersonIds.length === 0) throw new ApiError(400, "Urlop wymaga wskazania handlowca");
+  if (isUrlop && !isSales && technicianIds.length === 0) throw new ApiError(400, "Urlop wymaga wskazania technika");
 
   let billing: CalendarBilling | null = null;
-  if (b.billing != null && b.billing !== "" && !BILLING_HIDDEN_TYPES.includes(type)) {
+  // Dział handlowy niczego nie rozlicza — rozliczenie, protokół, wycena i realizacja
+  // są tam bez sensu i lecą do kosza już na wejściu (patrz `return` niżej).
+  if (b.billing != null && b.billing !== "" && !isSales && !BILLING_HIDDEN_TYPES.includes(type)) {
     if (!CALENDAR_BILLINGS.includes(b.billing as CalendarBilling)) {
       throw new ApiError(400, `Pole billing: dozwolone ${CALENDAR_BILLINGS.join(", ")} albo null`);
     }
@@ -242,6 +285,7 @@ export function parseInput(body: unknown): ParsedInput {
   // Notatka: obiekt/zlecenie kopiujemy ze źródłowego wydarzenia w transakcji, reszta odpada.
   const noRefs = isUrlop || isNote;
   return {
+    department,
     type,
     title,
     description: isNote ? null : optText(b.description),
@@ -253,12 +297,17 @@ export function parseInput(body: unknown): ParsedInput {
     status,
     objectId: noRefs ? null : optInt(b.objectId, "objectId"),
     orderId: noRefs ? null : optInt(b.orderId, "orderId"),
-    realizationId: noRefs ? null : "realizationId" in b ? optInt(b.realizationId, "realizationId") : undefined,
-    realizationOptout: isNote ? undefined : optBool(b.realizationOptout, "realizationOptout"),
+    realizationId: noRefs || isSales ? null : "realizationId" in b ? optInt(b.realizationId, "realizationId") : undefined,
+    realizationOptout: isNote || isSales ? undefined : optBool(b.realizationOptout, "realizationOptout"),
     billing,
-    protocolId: noRefs ? null : optInt(b.protocolId, "protocolId"),
-    quoteId: noRefs ? null : optInt(b.quoteId, "quoteId"),
+    protocolId: noRefs || isSales ? null : optInt(b.protocolId, "protocolId"),
+    quoteId: noRefs || isSales ? null : optInt(b.quoteId, "quoteId"),
     technicianIds,
+    salespersonIds,
+    // Szansa i kontakt istnieją WYŁĄCZNIE w dziale handlowym; urlop i kafelek notatki
+    // ich nie dotyczą (kafelek dziedziczy je ze źródła w transakcji).
+    leadId: isSales && !noRefs ? optInt(b.leadId, "leadId") : null,
+    contactId: isSales && !noRefs ? optInt(b.contactId, "contactId") : null,
     recurrence: isNote ? null : parseRecurrence(b.recurrence),
     noteId,
   };
@@ -315,16 +364,60 @@ export function assertRefs(tx: DbOrTx, input: ParsedInput, excludeEventId: numbe
     const missing = input.technicianIds.filter((id) => !found.includes(id));
     if (missing.length > 0) throw new ApiError(400, `Technik #${missing.join(", #")} nie istnieje`);
   }
+  if (input.salespersonIds.length > 0) {
+    const found = tx
+      .select({ id: schema.salespeople.id })
+      .from(schema.salespeople)
+      .where(inArray(schema.salespeople.id, input.salespersonIds))
+      .all()
+      .map((s) => s.id);
+    const missing = input.salespersonIds.filter((id) => !found.includes(id));
+    if (missing.length > 0) throw new ApiError(400, `Handlowiec #${missing.join(", #")} nie istnieje`);
+  }
+  let lead: { id: number; contractorId: number | null; deletedAt: string | null } | undefined;
+  if (input.leadId != null) {
+    lead = tx
+      .select({ id: schema.leads.id, contractorId: schema.leads.contractorId, deletedAt: schema.leads.deletedAt })
+      .from(schema.leads)
+      .where(eq(schema.leads.id, input.leadId))
+      .get();
+    if (!lead) throw new ApiError(400, `Szansa #${input.leadId} nie istnieje`);
+    if (lead.deletedAt) throw new ApiError(400, `Szansa #${input.leadId} jest usunięta`);
+  }
+  if (input.contactId != null) {
+    const contact = tx
+      .select({ id: schema.contacts.id, contractorId: schema.contacts.contractorId, leadId: schema.contacts.leadId })
+      .from(schema.contacts)
+      .where(eq(schema.contacts.id, input.contactId))
+      .get();
+    if (!contact) throw new ApiError(400, `Osoba kontaktowa #${input.contactId} nie istnieje`);
+    // Kontakt musi mieć cokolwiek wspólnego ze wskazaną szansą: albo wisi wprost przy
+    // niej, albo przy jej kontrahencie. Inaczej wydarzenie zestawiałoby dane dwóch
+    // różnych klientów i nikt by tego nie wyłapał.
+    if (lead) {
+      const belongs = contact.leadId === lead.id || (lead.contractorId != null && contact.contractorId === lead.contractorId);
+      if (!belongs) {
+        throw new ApiError(400, `Osoba kontaktowa #${input.contactId} nie należy do szansy #${lead.id} ani do jej kontrahenta`);
+      }
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Helpery domenowe (w transakcji)
 // ---------------------------------------------------------------------------
 
-/** Dla urlopu bez tytułu generuje „Urlop — Jan Kowalski” (kilku techników: po przecinku). */
+/**
+ * Dla urlopu bez tytułu generuje „Urlop — Jan Kowalski” (kilka osób: po przecinku).
+ * Kogo wpisać, decyduje dział: techniczny bierze techników, handlowy handlowców.
+ */
 export function resolveTitle(dbx: DbOrTx, input: ParsedInput): string {
   if (input.title || input.type !== "urlop") return input.title;
-  return `Urlop — ${input.technicianIds.map((id) => techNameById(dbx, id)).join(", ")}`.slice(0, 300);
+  const names =
+    input.department === "handlowy"
+      ? input.salespersonIds.map((id) => salesNameById(dbx, id))
+      : input.technicianIds.map((id) => techNameById(dbx, id));
+  return `Urlop — ${names.join(", ")}`.slice(0, 300);
 }
 
 function techNameById(dbx: DbOrTx, id: number): string {
@@ -334,6 +427,27 @@ function techNameById(dbx: DbOrTx, id: number): string {
     .where(eq(schema.technicians.id, id))
     .get();
   return t ? `${t.firstName} ${t.lastName}`.trim() : `#${id}`;
+}
+
+function salesNameById(dbx: DbOrTx, id: number): string {
+  const s = dbx
+    .select({ firstName: schema.salespeople.firstName, lastName: schema.salespeople.lastName })
+    .from(schema.salespeople)
+    .where(eq(schema.salespeople.id, id))
+    .get();
+  return s ? `${s.firstName} ${s.lastName}`.trim() : `#${id}`;
+}
+
+/** Nazwa osoby kontaktowej do wpisu w dzienniku. */
+function contactNameById(dbx: DbOrTx, id: number | null): string {
+  if (id == null) return "—";
+  // identity-ok: id → nazwisko (migawka na opis zmiany), nie nazwisko → id.
+  const c = dbx
+    .select({ firstName: schema.contacts.firstName, lastName: schema.contacts.lastName })
+    .from(schema.contacts)
+    .where(eq(schema.contacts.id, id))
+    .get(); // identity-ok
+  return c ? `${c.firstName} ${c.lastName}`.trim() || `#${id}` : `#${id}`;
 }
 
 /** Nazwa obiektu do wpisu w dzienniku — odczyt PO ID, nigdy odwrotnie. */
@@ -365,8 +479,18 @@ export function currentAssignees(dbx: DbOrTx, eventId: number): number[] {
     .map((r) => r.id);
 }
 
+/** Aktualnie przypisani handlowcy (dział handlowy). */
+export function currentSalespeople(dbx: DbOrTx, eventId: number): number[] {
+  return dbx
+    .select({ id: schema.calendarEventSalespeople.salespersonId })
+    .from(schema.calendarEventSalespeople)
+    .where(eq(schema.calendarEventSalespeople.eventId, eventId))
+    .all()
+    .map((r) => r.id);
+}
+
 /** Ustawia zbiór techników wydarzenia; loguje assigned/unassigned per technik. */
-function syncAssignees(tx: Tx, ev: CalendarEventRow, technicianIds: number[], ctx: MutationCtx) {
+function syncTechnicians(tx: Tx, ev: CalendarEventRow, technicianIds: number[], ctx: MutationCtx) {
   const before = currentAssignees(tx, ev.id);
   const toAdd = technicianIds.filter((id) => !before.includes(id));
   const toRemove = before.filter((id) => !technicianIds.includes(id));
@@ -382,6 +506,31 @@ function syncAssignees(tx: Tx, ev: CalendarEventRow, technicianIds: number[], ct
     logActivity(tx, { ...base, action: "assigned", field: "technician", oldValue: null, newValue: id, summary: `Przypisano technika: ${techNameById(tx, id)}` });
   }
   return { added: toAdd.length, removed: toRemove.length };
+}
+
+/** To samo dla handlowców — osobna tabela, ten sam dziennik (assigned/unassigned). */
+function syncSalespeople(tx: Tx, ev: CalendarEventRow, salespersonIds: number[], ctx: MutationCtx) {
+  const before = currentSalespeople(tx, ev.id);
+  const toAdd = salespersonIds.filter((id) => !before.includes(id));
+  const toRemove = before.filter((id) => !salespersonIds.includes(id));
+  const base = { entityType: CALENDAR_ENTITY, entityId: ev.id, objectId: ev.objectId, user: ctx.user, summarySuffix: ctx.summarySuffix };
+  for (const id of toRemove) {
+    tx.delete(schema.calendarEventSalespeople)
+      .where(and(eq(schema.calendarEventSalespeople.eventId, ev.id), eq(schema.calendarEventSalespeople.salespersonId, id)))
+      .run();
+    logActivity(tx, { ...base, action: "unassigned", field: "salesperson", oldValue: id, newValue: null, summary: `Odpisano handlowca: ${salesNameById(tx, id)}` });
+  }
+  for (const id of toAdd) {
+    tx.insert(schema.calendarEventSalespeople).values({ eventId: ev.id, salespersonId: id }).run();
+    logActivity(tx, { ...base, action: "assigned", field: "salesperson", oldValue: null, newValue: id, summary: `Przypisano handlowca: ${salesNameById(tx, id)}` });
+  }
+  return { added: toAdd.length, removed: toRemove.length };
+}
+
+/** Przypisania obu rodzajów — wołane z jednego miejsca, żeby żadne nie umknęło. */
+function syncAssignees(tx: Tx, ev: CalendarEventRow, input: Pick<ParsedInput, "technicianIds" | "salespersonIds">, ctx: MutationCtx) {
+  syncTechnicians(tx, ev, input.technicianIds, ctx);
+  syncSalespeople(tx, ev, input.salespersonIds, ctx);
 }
 
 /** Loguje diff pól (bez dat i bez statusu — te mają własne akcje) + moved + status_changed. */
@@ -426,6 +575,8 @@ function logEventDiff(tx: Tx, before: CalendarEventRow, after: CalendarEventRow,
       { key: "billing", label: "rozliczenie", format: (v) => (v == null ? "—" : (BILLING_LABELS[v as CalendarBilling] ?? String(v))) },
       { key: "protocolId", label: "protokół", format: (v) => protocolNumberById(tx, (v as number | null) ?? null) },
       { key: "quoteId", label: "wycenę", format: (v) => quoteNumberById(tx, (v as number | null) ?? null) },
+      { key: "leadId", label: "szansę", format: (v) => leadTitleById(tx, (v as number | null) ?? null) },
+      { key: "contactId", label: "osobę kontaktową", format: (v) => contactNameById(tx, (v as number | null) ?? null) },
     ],
   });
 }
@@ -495,9 +646,13 @@ function insertNoteEvent(
       endAt: shiftLocal(p.startAt, 24 * 60, true),
       allDay: true,
       status: p.status ?? "planned",
-      department: "technical",
+      // Kafelek dziedziczy ze ŹRÓDŁA wszystko, co decyduje o tym, gdzie go widać:
+      // dział, obiekt/zlecenie i (dla handlowych) szansę z osobą kontaktową.
+      department: p.source.department,
       objectId: p.source.objectId,
       orderId: p.source.orderId,
+      leadId: p.source.leadId,
+      contactId: p.source.contactId,
       billing: null,
       noteId: p.note.id,
       noteMention: p.mention,
@@ -668,6 +823,8 @@ function applyUpdate(
       billing: input.billing,
       protocolId: input.protocolId,
       quoteId: input.quoteId,
+      leadId: input.leadId,
+      contactId: input.contactId,
       updatedBy: ctx.user.id,
       updatedAt: sql`(datetime('now'))`,
     })
@@ -675,10 +832,13 @@ function applyUpdate(
     .returning()
     .get();
   logEventDiff(tx, row, after, ctx);
-  syncAssignees(tx, after, input.technicianIds, ctx);
+  syncAssignees(tx, after, input, ctx);
   // Realizacje: utworzenie / synchronizacja / odpięcie wg ustawień (calendar-realizations.ts).
   // `row` (stan sprzed) pozwala wykryć przejście statusu na „wykonane” → wstępne podliczenie.
   onEventUpdated(tx, after, ctx, row);
+  // Znacznik ruchu na szansie — także na tej, od której wydarzenie właśnie odpięto.
+  touchLead(tx, row.leadId);
+  touchLead(tx, after.leadId);
   return after;
 }
 
@@ -744,7 +904,7 @@ export function createEvent(tx: Tx, input: ParsedInput, ctx: MutationCtx): { fir
         endAt: occ.endAt,
         allDay: input.allDay,
         status: input.status,
-        department: "technical",
+        department: input.department,
         objectId: input.objectId,
         orderId: input.orderId,
         realizationId: input.realizationId ?? null,
@@ -752,6 +912,8 @@ export function createEvent(tx: Tx, input: ParsedInput, ctx: MutationCtx): { fir
         billing: input.billing,
         protocolId: input.protocolId,
         quoteId: input.quoteId,
+        leadId: input.leadId,
+        contactId: input.contactId,
         seriesId,
         createdBy: ctx.user.id,
         updatedBy: ctx.user.id,
@@ -760,6 +922,9 @@ export function createEvent(tx: Tx, input: ParsedInput, ctx: MutationCtx): { fir
       .get();
     for (const tid of input.technicianIds) {
       tx.insert(schema.calendarEventAssignees).values({ eventId: ev.id, technicianId: tid }).run();
+    }
+    for (const sid of input.salespersonIds) {
+      tx.insert(schema.calendarEventSalespeople).values({ eventId: ev.id, salespersonId: sid }).run();
     }
     logActivity(tx, {
       entityType: CALENDAR_ENTITY, entityId: ev.id, objectId: ev.objectId, user: ctx.user, summarySuffix: ctx.summarySuffix,
@@ -770,6 +935,8 @@ export function createEvent(tx: Tx, input: ParsedInput, ctx: MutationCtx): { fir
     });
     // Realizacja + protokół dla typów objętych (wg ustawień calendar.*).
     onEventCreated(tx, ev, ctx);
+    // Zaplanowana aktywność to ruch na szansie — reguła „zawsze następna aktywność”.
+    touchLead(tx, ev.leadId);
     ids.push(ev.id);
   }
   return { firstId: ids[0], seriesId, occurrencesCount: ids.length };
@@ -780,6 +947,11 @@ export function updateEvent(tx: Tx, id: number, input: ParsedInput, scope: Scope
   const row = getEventRow(tx, id);
   if (!row) throw new ApiError(404, "Wydarzenie nie istnieje");
   if (row.deletedAt) throw new ApiError(409, "Wydarzenie jest usunięte — najpierw je przywróć");
+  // Działu nie da się przełączyć edycją: wydarzenie ma inne pola, innych przypisanych
+  // i innych odbiorców. Przekazanie sprawy drugiemu działowi = nowe wydarzenie.
+  if (row.department !== input.department) {
+    throw new ApiError(400, "Nie można zmienić działu wydarzenia — utwórz nowe wydarzenie w docelowym dziale");
+  }
   // Typ „notatka” to inny byt niż zwykłe wydarzenie — konwersji w żadną stronę nie ma.
   if ((row.type === "notatka") !== (input.type === "notatka")) {
     throw new ApiError(400, "Nie można zmienić typu wydarzenia na „notatka” ani z „notatka” na inny");
@@ -854,6 +1026,7 @@ export function moveEvent(tx: Tx, id: number, body: Record<string, unknown>, ctx
     .get();
   logEventDiff(tx, row, after, ctx);
   onEventUpdated(tx, after, ctx, row);
+  touchLead(tx, after.leadId);
   return after;
 }
 
@@ -874,6 +1047,8 @@ export function deleteEvent(tx: Tx, id: number, scope: Scope, ctx: MutationCtx):
     });
     // Realizacja „nietknięta” znika razem z wydarzeniem; z kwotami/podpisem zostaje z adnotacją.
     onEventDeleted(tx, t, ctx);
+    // Skasowanie jedynej przyszłej aktywności zapala szansie „Brak następnej aktywności”.
+    touchLead(tx, t.leadId);
     // Kafelki notatek tego wydarzenia nie mają już czego pokazywać — znikają razem z nim
     // (restoreEvent je przywraca). Same kafelki notatek żadnych notatek nie mają.
     if (t.type !== "notatka") {
@@ -901,6 +1076,7 @@ export function restoreEvent(tx: Tx, id: number, ctx: MutationCtx): CalendarEven
     summary: `Przywrócono wydarzenie „${row.title}” (${fmtDate(row.startAt)})`,
   });
   onEventRestored(tx, after, ctx);
+  touchLead(tx, after.leadId);
   // Kafelki notatek wracają razem z wydarzeniem — ale tylko te, które POWINNY istnieć:
   // notatka nadal żyje, a kafelek jest ręczny albo jego wzmianka wciąż jest w treści
   // (kafelek po skasowanej wzmiance i tak zniknąłby przy najbliższej synchronizacji).
@@ -937,7 +1113,8 @@ export function restoreEvent(tx: Tx, id: number, ctx: MutationCtx): CalendarEven
 // ---------------------------------------------------------------------------
 
 /** Skrót notatki do summary activity_log (pierwsze 120 znaków, bez nowych linii). */
-function noteSummary(text: string, max = 120): string {
+/** Skrót treści notatki do wpisu w dzienniku (activity_log) — wspólny z notatkami obiektu. */
+export function noteSummary(text: string, max = 120): string {
   const t = text.replace(/\s+/g, " ").trim();
   return t.length > max ? `${t.slice(0, max - 1)}…` : t;
 }
@@ -966,10 +1143,18 @@ export interface AddNoteInput {
   eventId: number;
   text: string;
   ctx: MutationCtx;
+  /**
+   * Nagłówek maila z Outlooka — obecny robi z wpisu notatkę `kind='email'`
+   * (migracja 0094). W `text` idzie wtedy SAMA treść maila; nagłówek renderuje UI.
+   */
+  mail?: MsgMail | null;
   /** Domyślnie "user"; asystent → "assistant" (etykieta „Asystent (kto zatwierdził)”). */
   source?: CalendarNoteSource;
-  /** Pliki już zapisane na dysku (src/lib/calendar-attachments.ts storeUploads) — tu tylko wiersze. */
-  attachments?: StoredAttachment[];
+  /**
+   * Pliki już zapisane na dysku (src/lib/calendar-attachments.ts storeUploads) — tu tylko wiersze.
+   * `origin` odróżnia upload ręczny od załącznika wypakowanego z maila (domyślnie „upload”).
+   */
+  attachments?: Array<StoredAttachment & { origin?: NoteAttachmentOrigin }>;
 }
 
 /** Dodaje notatkę do wydarzenia (event musi istnieć i nie być usunięty). */
@@ -980,13 +1165,31 @@ export function addNote(tx: DbOrTx, input: AddNoteInput): Note {
   // Kafelek notatki tylko WSKAZUJE cudzą notatkę — własnego dziennika nie ma (brak rekurencji).
   if (ev.type === "notatka") throw new ApiError(400, "Wydarzenie typu notatka nie może mieć własnych notatek");
   const attachments = input.attachments ?? [];
-  const text = parseNoteText(input.text, attachments.length > 0);
+  const mail = input.mail ?? null;
+  // Mail bez treści jest sensowny (samo „FYI" w temacie + załącznik), więc
+  // nagłówek liczy się jak załącznik: pusty `text` przechodzi.
+  const text = parseNoteText(input.text, attachments.length > 0 || !!mail);
   const source = input.source ?? "user";
   const who = userLabelOf(input.ctx.user);
   const userLabel = source === "assistant" ? `Asystent${who ? ` (${who})` : ""}` : source === "system" ? "System" : who;
   const row = tx
     .insert(schema.calendarEventNotes)
-    .values({ eventId: ev.id, userId: input.ctx.user.id, userLabel, source, text })
+    .values({
+      eventId: ev.id,
+      userId: input.ctx.user.id,
+      userLabel,
+      source,
+      text,
+      kind: mail ? "email" : "text",
+      mailSubject: mail?.subject ?? null,
+      mailFrom: mail?.from ?? null,
+      // Listy odbiorców jako JSON — SQLite nie ma typu tablicowego.
+      mailTo: mail ? JSON.stringify(mail.to) : null,
+      mailCc: mail ? JSON.stringify(mail.cc) : null,
+      mailSentAt: mail?.sentAt ?? null,
+      // Nazwy załączników maila — snapshot wiersza „Załączniki:” (migracja 0096).
+      mailAttachments: mail ? JSON.stringify(mail.attachments ?? []) : null,
+    })
     .returning()
     .get();
   const attRows = attachments.length
@@ -995,10 +1198,13 @@ export function addNote(tx: DbOrTx, input: AddNoteInput): Note {
   const attInfo = attachments.length ? `${text ? " " : ""}(załączniki: ${attachments.length})` : "";
   logActivity(tx, {
     entityType: CALENDAR_ENTITY, entityId: ev.id, objectId: ev.objectId, user: input.ctx.user, summarySuffix: input.ctx.summarySuffix,
-    action: "note_added", field: "note", newValue: row.id, summary: `Dodano notatkę: ${noteSummary(text)}${attInfo}`,
+    action: "note_added", field: "note", newValue: row.id,
+    summary: `Dodano ${mail ? "mail" : "notatkę"}: ${noteSummary(briefTextOf(row))}${attInfo}`,
   });
   // Wzmianki dat w treści (@piątek, @15.09) → kafelki w kalendarzu, w tej samej transakcji.
   syncNoteMentionEvents(tx, row, ev, input.ctx);
+  // Notatka przy aktywności handlowej to kontakt z klientem — szansa przestaje „gnić”.
+  touchLead(tx, ev.leadId);
   return noteOfRow(row, attRows.map(attachmentOfRow), noteEventLinks(tx, [row.id]).get(row.id));
 }
 

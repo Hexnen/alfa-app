@@ -59,6 +59,12 @@ const full: OrderMailInput = {
   invoiceIssuer: "Alfa Group Sp. z o.o.",
   serviceStartDate: "2026-04-01",
   installationStartDate: "2026-03-15",
+  // OKRESY USŁUG na zleceniu (kolumna JSON `orders.object_services`). Mail ma
+  // pokazać zakres z datami, a nie samą liczbę kamer bez terminu.
+  objectServices: [
+    { service: "kamery", startDate: "2026-04-01", endDate: null, cameraCount: 12 },
+    { service: "wideorecepcja", startDate: "2026-04-01", endDate: "2027-03-31", cameraCount: null },
+  ],
   notes: "Wjazd na teren od strony ul. Polnej, kod do bramy u ochrony.",
 };
 
@@ -68,7 +74,16 @@ ok("temat: [TYP] OBIEKT / KONTRAHENT", mail.subject === "[ZDW] OSIEDLE ZIELONA D
 ok("html zawiera nazwę obiektu", mail.html.includes("Osiedle Zielona Dolina"));
 ok("html zawiera numer zlecenia", mail.html.includes("ZDW/2026/0042"));
 ok("html wita zlecającą po imieniu", mail.html.includes("Dzień dobry Anna Kowalska,"));
-ok("html ma sekcję zakresu usługi", mail.html.includes("ZAKRES USŁUGI") && mail.html.includes("Kamery: 12 szt."));
+ok(
+  "html ma sekcję zakresu usługi z okresami",
+  mail.html.includes("ZAKRES USŁUGI") && mail.html.includes("Kamery 12 szt. · od 1 kwietnia 2026"),
+  mail.html.match(/Kamery[^<]*/)?.[0]
+);
+ok(
+  "zakończony okres pokazuje obie daty",
+  mail.html.includes("Wideo recepcja · od 1 kwietnia 2026 do 31 marca 2027"),
+  mail.html.match(/Wideo recepcja[^<]*/)?.[0]
+);
 // „Zakres usługi” wymienia tylko to, co klient DOSTAJE — w fixture
 // interventionGroup: false, więc tego punktu ma w ogóle nie być.
 ok("zakres pomija odpowiedzi „Nie”", !mail.html.includes("Grupa interwencyjna"), mail.html.match(/Grupa interwencyjna[^<]*/)?.[0]);
@@ -257,7 +272,7 @@ const LABELS = [
   "Płatnik", "Nazwa", "NIP", "E-mail do faktur", "Wystawca faktury", "Kontrahent w CRM",
   "Obiekt", "Nazwa obiektu", "Rodzaj obiektu", "Adres", "Miejscowość", "Lokalizacja", "Obiekt w CRM",
   "Osoba kontaktowa na obiekcie", "Osoba kontaktowa",
-  "Zakres i dane techniczne", "Montaż kamer", "Liczba kamer", "Liczba megafonów",
+  "Zakres i dane techniczne", "Usługi", "Montaż kamer", "Liczba kamer", "Liczba megafonów",
   "Numer oferty Vtools", "Internet w ramach usługi", "Grupa interwencyjna", "Wideo recepcja",
   "Finanse", "Abonament netto/mies.", "Długość umowy", "Dzierżawa netto/mies.",
   "Długość dzierżawy", "Wartość łączna",
@@ -343,6 +358,23 @@ ok(
   "wewn.: uwagi zachowują łamanie linii",
   nastyInternal.html.includes("Uwaga &lt;b&gt;pogrubiona&lt;/b&gt;<br>druga linia")
 );
+
+// ---------------------------------------------------------------------------
+// 6. Zlecenie SPRZED okresów usług — fallback na `cameraCount`/`videoReception`
+// ---------------------------------------------------------------------------
+// Zlecenia złożone przed wrześniem 2026 mają `object_services` puste. Mail nie
+// może wtedy zgubić zakresu: wraca do wariantu z samą liczbą kamer i „Tak/Nie”.
+
+const { objectServices: _dropped, ...legacyOrder } = full;
+const legacy = buildOrderConfirmationMail(legacyOrder, { baseUrl: "https://app.example.invalid" });
+ok("stare zlecenie: zakres z samej liczby kamer", legacy.html.includes("Kamery: 12 szt."), legacy.html.match(/Kamery[^<]*/)?.[0]);
+ok("stare zlecenie: wideorecepcja z odpowiedzi „Tak”", legacy.html.includes("Wideo recepcja"));
+ok("stare zlecenie: bez linii z datami usług", !legacy.html.includes("Kamery 12 szt. ·"));
+ok("stare zlecenie: bez null/undefined", !/null|undefined/.test(legacy.html));
+
+const legacyInternal = buildOrderInternalMail(legacyOrder, { baseUrl: "https://app.example.invalid" });
+ok("wewn. stare zlecenie: wiersz „Usługi” z „—”", /USŁUGI[\s\S]{0,400}—/.test(legacyInternal.html) || legacyInternal.text.includes("Usługi: —"), legacyInternal.text.match(/Usługi.*/)?.[0]);
+ok("wewn.: wiersz „Usługi” z okresami", internal.text.includes("Kamery 12 szt. · od 1 kwietnia 2026"), internal.text.match(/Usługi.*/)?.[0]);
 
 console.log(failures === 0 ? "\nWszystko OK" : `\n${failures} test(ów) nie przeszło`);
 process.exit(failures === 0 ? 0 : 1);

@@ -140,6 +140,67 @@ function yesNo(value: unknown): string | null {
   return null;
 }
 
+/**
+ * OKRESY USŁUG ZE ZLECENIA (`orders.object_services`, kolumna JSON).
+ *
+ * Czytane defensywnie: kolumna bywa stringiem (surowy odczyt przez better-sqlite3
+ * z pominięciem drizzle), tablicą (mode: "json") albo śmieciem ze starszej wersji
+ * klienta. Mail NIE MA PRAWA wywalić się na danych — nierozpoznany kształt to
+ * `null`, czyli powrót do wariantu sprzed okresów (`cameraCount`/`videoReception`).
+ */
+interface MailServicePeriod {
+  service: string;
+  startDate: string | null;
+  endDate: string | null;
+  cameraCount: number | null;
+}
+
+const SERVICE_NAMES: Record<string, string> = {
+  kamery: "Kamery",
+  sswin: "SSWiN",
+  wideorecepcja: "Wideo recepcja",
+  ofi: "Ochrona fizyczna",
+};
+
+function servicePeriodsOf(order: OrderMailInput): MailServicePeriod[] | null {
+  const raw: unknown = (order as { objectServices?: unknown }).objectServices;
+  let parsed: unknown = raw;
+  if (typeof raw === "string") {
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) return null;
+  const out: MailServicePeriod[] = [];
+  for (const item of parsed) {
+    if (typeof item !== "object" || item === null) continue;
+    const r = item as Record<string, unknown>;
+    const service = text(r.service);
+    if (!service || !(service in SERVICE_NAMES)) continue;
+    out.push({
+      service,
+      startDate: text(r.startDate),
+      endDate: text(r.endDate),
+      cameraCount: count(r.cameraCount),
+    });
+  }
+  return out.length > 0 ? out : null;
+}
+
+/** „Kamery 8 szt. · od 1 października 2026 do 30 września 2028”. */
+function servicePeriodLine(p: MailServicePeriod): string {
+  const name = SERVICE_NAMES[p.service] ?? p.service;
+  const head = p.service === "kamery" && p.cameraCount !== null ? `${name} ${p.cameraCount} szt.` : name;
+  const from = date(p.startDate);
+  const to = date(p.endDate);
+  if (from && to) return `${head} · od ${from} do ${to}`;
+  if (from) return `${head} · od ${from}`;
+  if (to) return `${head} · do ${to}`;
+  return head;
+}
+
 /** Kwota z okresem: „1 200,00 zł netto/mies. × 24 mies.”. */
 function amountPerMonths(amount: unknown, months: unknown): string | null {
   const value = money(amount);
@@ -357,7 +418,7 @@ function buttonHtml(label: string, href: string): string {
  * @param headerExtraHtml plakietki pod tytułem (numer zlecenia, status)
  * @param body gotowe wiersze `<tr>` między nagłówkiem a stopką
  */
-function shellHtml(params: {
+export function wrapMailShell(params: {
   subject: string;
   logoUrl: string;
   headerTitle: string;
@@ -504,13 +565,21 @@ function collect(order: OrderMailInput): MailContent {
   // tego, czego nie kupił. Komplet Tak/Nie jest w wariancie wewnętrznym.
   const included = (label: string, answer: string | null) => (answer === "Tak" ? label : "");
 
+  // Zlecenie z okresami usług pokazuje je z datami („Kamery 8 szt. · od …”) —
+  // klient dostaje wtedy zakres i termin w jednej linii. Zlecenie sprzed
+  // września 2026 nie ma tej listy i wraca na stary wariant z samych liczb.
+  const periods = servicePeriodsOf(order);
+
   const scopeItems: string[] = [
-    cameras !== null ? `Kamery: ${cameras} szt.` : "",
+    ...(periods
+      ? periods.map(servicePeriodLine)
+      : [cameras !== null ? `Kamery: ${cameras} szt.` : ""]),
     megaphones !== null ? `Megafony: ${megaphones} szt.` : "",
     included("Montaż kamer", install),
     included("Internet w ramach usługi", internet),
     included("Grupa interwencyjna", intervention),
-    included("Wideo recepcja", video),
+    // Przy okresach wideorecepcja jest już wypisana wyżej, z własnymi datami.
+    periods ? "" : included("Wideo recepcja", video),
     vtools ? `Numer oferty Vtools: ${vtools}` : "",
   ].filter(Boolean);
 
@@ -583,7 +652,7 @@ export function buildOrderConfirmationMail(
 
   const subject = mailSubject(order);
 
-  const html = shellHtml({
+  const html = wrapMailShell({
     subject,
     logoUrl: logoUrlFrom(opts),
     headerTitle: "Potwierdzenie przyjęcia zlecenia",
@@ -779,6 +848,16 @@ function collectInternal(order: OrderMailInput, base: string): Section[] {
     {
       title: "Zakres i dane techniczne",
       rows: [
+        // Wariant wewnętrzny pokazuje KAŻDE pole, więc wiersz „Usługi” stoi
+        // tu zawsze — pusty („—”) dla zleceń sprzed okresów usług, gdzie zakres
+        // trzeba czytać z „Liczba kamer” i „Wideo recepcja” niżej.
+        {
+          label: "Usługi",
+          value:
+            servicePeriodsOf(order)
+              ?.map(servicePeriodLine)
+              .join("; ") ?? null,
+        },
         { label: "Montaż kamer", value: yesNo(order.isCameraInstallation) },
         { label: "Liczba kamer", value: pieces(order.cameraCount) },
         { label: "Liczba megafonów", value: pieces(order.megaphoneCount) },
@@ -846,7 +925,7 @@ export function buildOrderInternalMail(
 
   const crmHref = orderId !== null && base ? `${base}/orders/${orderId}` : null;
 
-  const html = shellHtml({
+  const html = wrapMailShell({
     subject,
     logoUrl: logoUrlFrom(opts),
     headerTitle: `Zlecenie ${number || EMPTY}`,
@@ -889,4 +968,40 @@ ${crmHref ? buttonHtml("Otwórz zlecenie w CRM", crmHref) : ""}
   lines.push("Wiadomość wewnętrzna — wygenerowana automatycznie przez CRM Alfa Group.");
 
   return { subject, html, text: lines.join("\n") };
+}
+
+/**
+ * Absolutny adres aplikacji dla zasobów i linków wklejanych do maila (logo, CRM).
+ *
+ * Kolejność: `APP_PUBLIC_URL` (wdrożenie) → `Origin` (żądanie z przeglądarki) →
+ * `X-Forwarded-Host` (proxy) → `Host`. Gdy nic nie da się ustalić — pusty string,
+ * czyli szablon zostawi ścieżkę względną.
+ *
+ * `X-Forwarded-Host` MUSI iść przed `Host`: w devie front woła /api przez proxy
+ * Vite z `changeOrigin: true`, które przepisuje Host na `localhost:4001` i nie
+ * przesyła Origin. Bez tego kroku mail wskazywałby backend zamiast aplikacji.
+ *
+ * Mieszka TUTAJ, a nie w trasach zleceń, bo z tego samego szablonu (logo w nagłówku)
+ * korzystają też maile grup interwencyjnych — src/lib/intervention-mail.ts.
+ */
+export function resolveBaseUrl(c: { req: { header(name: string): string | undefined } }): string {
+  const configured = (process.env.APP_PUBLIC_URL || "").trim();
+  if (configured) return configured.replace(/\/+$/, "");
+
+  const origin = (c.req.header("origin") || "").trim();
+  if (/^https?:\/\//i.test(origin)) return origin.replace(/\/+$/, "");
+
+  // Nagłówki proxy bywają listą („a, b”) — liczy się pierwszy wpis, czyli klient.
+  const first = (name: string) => (c.req.header(name) || "").split(",")[0].trim();
+
+  const host = first("x-forwarded-host") || (c.req.header("host") || "").trim();
+  if (!host) return "";
+  const proto = first("x-forwarded-proto") || "http";
+  return `${proto}://${host}`;
+}
+
+/** Absolutny URL logo dla nagłówka maila (klient pocztowy nie zna adresu aplikacji). */
+export function mailLogoUrl(baseUrl: string | undefined): string {
+  const base = (baseUrl || "").replace(/\/+$/, "");
+  return base ? `${base}/alfa-logo-mail.png` : "/alfa-logo-mail.png";
 }

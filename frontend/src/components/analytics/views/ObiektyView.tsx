@@ -11,10 +11,15 @@ import { useNavigate } from "react-router-dom";
 import { Card, CardContent } from "@/components/ui/card";
 import {
   cn,
+  formatDate,
+  isServicePeriodEnded,
   objectServiceLabels,
+  objectServiceKeys,
   objectServicesLabel,
   objectServicesOf,
+  servicePeriodLabel,
   statusLabels,
+  todayIsoLocal,
 } from "@/lib/utils";
 import {
   getAnalyticsObjects,
@@ -23,6 +28,7 @@ import {
   type AnalyticsScope,
   type AnalyticsService,
   type CostWindow,
+  type ObjectService,
 } from "@/lib/api";
 import {
   ChartCard,
@@ -38,8 +44,10 @@ import {
   RankBarDiverging,
   SCATTER_MIN_ROWS,
   ScatterQuadrant,
+  ServiceTimelineChart,
   ShareBar,
   monthsLabel,
+  nf,
   pct,
   plnFull,
   serviceTag,
@@ -85,6 +93,7 @@ type SortKey =
   | "name"
   | "contractor"
   | "services"
+  | "expectedEnd"
   | "status"
   | "salesperson"
   | "revenue"
@@ -98,6 +107,9 @@ const DEFAULT_DIR: Record<SortKey, "asc" | "desc"> = {
   name: "asc",
   contractor: "asc",
   services: "asc",
+  // Najbliższe zakończenie najpierw — kolumna istnieje po to, żeby zobaczyć,
+  // co trzeba przedłużyć, a nie co się kończy za trzy lata.
+  expectedEnd: "asc",
   status: "asc",
   salesperson: "asc",
   revenue: "desc",
@@ -108,15 +120,125 @@ const DEFAULT_DIR: Record<SortKey, "asc" | "desc"> = {
   payback: "asc",
 };
 
-/** Filtr rentowności nad tabelą. */
-type Chip = "all" | "profitable" | "unprofitable" | "nocost";
+/** Filtr rentowności nad tabelą (ostatni chip: horyzont zakończeń). */
+type Chip = "all" | "profitable" | "unprofitable" | "nocost" | "endingsoon";
 
-const CHIP_LABELS: Record<Chip, string> = {
-  all: "Wszystkie",
-  profitable: "Rentowne",
-  unprofitable: "Nierentowne",
-  nocost: "Bez danych kosztowych",
-};
+const CHIP_KEYS: Chip[] = [
+  "all",
+  "profitable",
+  "unprofitable",
+  "nocost",
+  "endingsoon",
+];
+
+function chipLabel(chip: Chip, horizonDays: number): string {
+  switch (chip) {
+    case "all":
+      return "Wszystkie";
+    case "profitable":
+      return "Rentowne";
+    case "unprofitable":
+      return "Nierentowne";
+    case "nocost":
+      return "Bez danych kosztowych";
+    case "endingsoon":
+      return `Kończące się ≤ ${horizonDays} dni`;
+  }
+}
+
+/** Domyślny horyzont „kończy się wkrótce" — ten sam, co `?endingIn=` na liście. */
+const ENDING_SOON_DEFAULT_DAYS = 90;
+
+/** Data przesunięta o N dni w formacie kolumn (`YYYY-MM-DD`). */
+function isoPlusDays(today: string, days: number): string {
+  const d = new Date(`${today}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * „Obiekt kończy się w ciągu N dni" — PRZEPISANY 1:1 z backendu
+ * (`isEndingSoon` w src/lib/object-services.ts). Dwa niezależne powody:
+ *
+ *  1. wpisane wprost `expectedEndDate` w horyzoncie,
+ *  2. obiekt ma ≥1 NIEZAKOŃCZONY okres usługi i KAŻDY z nich kończy się
+ *     w horyzoncie — po tej dacie nie zostaje ani jedna usługa.
+ *
+ * Warunek „≥1 niezakończony okres" nie jest kosmetyczny: bez niego obiekt,
+ * któremu wszystkie okresy już minęły, spełniałby drugi warunek pusto i wpadał
+ * do zestawienia. Obiekt, który już się skończył, dopiero się nie kończy.
+ *
+ * Liczymy to na froncie, a nie bierzemy `data.endingSoon` wprost, bo kafelek,
+ * chip i tabela muszą mówić o TYM SAMYM zbiorze — czyli o wierszach po szukajce.
+ * Z API bierzemy wyłącznie horyzont, żeby obie strony liczyły to samo „wkrótce".
+ */
+function isEndingSoonRow(
+  row: AnalyticsObjectRow,
+  today: string,
+  horizonDays: number
+): boolean {
+  const limitDate = isoPlusDays(today, horizonDays);
+  if (row.expectedEndDate && row.expectedEndDate <= limitDate) return true;
+  const periods = row.servicePeriods ?? [];
+  const notEnded = periods.filter((p) => !isServicePeriodEnded(p, today));
+  if (notEnded.length === 0) return false;
+  return notEnded.every((p) => !!p.endDate && p.endDate <= limitDate);
+}
+
+/**
+ * Przypis o okresach z ZGADYWANĄ datą startu. Polska liczba mnoga jest
+ * trójdzielna („1 usługa ma", „2 usługi mają", „5 usług ma"), a zdanie z tym
+ * przypisem czyta się tuż pod wykresem — złe formy rzucają się w oczy bardziej
+ * niż sama liczba.
+ */
+function estimatedStartsNote(n: number): string {
+  const few = n % 10 >= 2 && n % 10 <= 4 && !(n % 100 >= 12 && n % 100 <= 14);
+  if (n === 1) {
+    return "usługa z importu ma szacowaną datę startu — nie liczy się jako rozpoczęcie.";
+  }
+  if (few) {
+    return "usługi z importu mają szacowaną datę startu — nie liczą się jako rozpoczęcia.";
+  }
+  return "usług z importu ma szacowaną datę startu — nie liczą się jako rozpoczęcia.";
+}
+
+/** „2026-03" → „03.2026" — miesiąc w bliźniaku tabelarycznym serii czasowej. */
+function monthCell(month: string): string {
+  return `${month.slice(5, 7)}.${month.slice(0, 4)}`;
+}
+
+/**
+ * Data jako liczba porównywalna — `cmpNullLast` operuje na liczbach, a daty
+ * ISO są porządkowo równoważne swojemu zapisowi bez myślników.
+ */
+function dateSortValue(iso: string | null | undefined): number | null {
+  return iso ? Number(iso.replace(/-/g, "")) : null;
+}
+
+/**
+ * Druga linia komórki „Usługi": zakresy dat AKTYWNYCH okresów.
+ *
+ * Same zakresy, bez powtarzania nazw usług — te stoją już w pierwszej linii.
+ * Identyczne zakresy sklejamy w jeden napis (kamery i SSWiN od tej samej daty
+ * to jedna informacja, nie dwie), a pełne rozbicie z nazwami niesie `title`.
+ */
+function activePeriodRanges(
+  periods: readonly ObjectService[],
+  today: string
+): string[] {
+  const out: string[] = [];
+  for (const p of periods) {
+    if (isServicePeriodEnded(p, today)) continue;
+    const range = p.endDate
+      ? `${formatDate(p.startDate)} – ${formatDate(p.endDate)}`
+      : `od ${formatDate(p.startDate)}`;
+    // Data startu z importu bywa ZGADYWANA (kartoteka nie miała dat) — bez tego
+    // dopisku wygląda jak fakt i trafia do wniosków o rotacji usług.
+    const text = p.startEstimated ? `${range} (szacowana)` : range;
+    if (!out.includes(text)) out.push(text);
+  }
+  return out;
+}
 
 /**
  * Pasma zwrotu z instalacji. Granice są umowne, ale muszą być stałe —
@@ -146,6 +268,10 @@ export function ObiektyView({
   const [sort, setSort] = useState<SortKey>("revenue");
   const [dir, setDir] = useState<"asc" | "desc">("desc");
   const [chip, setChip] = useState<Chip>("all");
+  // Dzisiejsza data w strefie PRZEGLĄDARKI, policzona raz na montaż: wszystkie
+  // porównania okresów są kalendarzowe, a `new Date().toISOString()` po polskiej
+  // 22:00 pokazywałby już jutro.
+  const today = useMemo(() => todayIsoLocal(), []);
 
   const toggleSort = useCallback((key: string) => {
     const k = key as SortKey;
@@ -306,14 +432,32 @@ export function ObiektyView({
       .sort((a, b) => b.revenue - a.revenue);
   }, [rows]);
 
+  /**
+   * Zestawienie „kończy się wkrótce" liczone z WIDOCZNYCH wierszy. Z API bierzemy
+   * tylko horyzont (`endingSoon.horizonDays`), żeby kafelek, chip i tabela mówiły
+   * o jednym zbiorze — a link do listy obiektów o tych samych dniach.
+   */
+  const endingSoon = useMemo(() => {
+    const horizonDays = data?.endingSoon?.horizonDays ?? ENDING_SOON_DEFAULT_DAYS;
+    const ids = new Set<number>();
+    let revenue = 0;
+    for (const r of rows) {
+      if (!isEndingSoonRow(r, today, horizonDays)) continue;
+      ids.add(r.id);
+      revenue += r.revenue;
+    }
+    return { horizonDays, ids, count: ids.size, revenue };
+  }, [rows, data, today]);
+
   const chipCounts = useMemo(
     () => ({
       all: rows.length,
       profitable: rows.filter((r) => r.hasCost && r.profit > 0).length,
       unprofitable: rows.filter((r) => r.hasCost && r.profit <= 0).length,
       nocost: rows.filter((r) => !r.hasCost).length,
+      endingsoon: endingSoon.count,
     }),
-    [rows]
+    [rows, endingSoon]
   );
 
   const tableRows = useMemo(() => {
@@ -321,6 +465,7 @@ export function ObiektyView({
       if (chip === "profitable") return r.hasCost && r.profit > 0;
       if (chip === "unprofitable") return r.hasCost && r.profit <= 0;
       if (chip === "nocost") return !r.hasCost;
+      if (chip === "endingsoon") return endingSoon.ids.has(r.id);
       return true;
     });
     const out = [...filtered];
@@ -334,6 +479,14 @@ export function ObiektyView({
           return cmpText(
             objectServicesLabel(servicesOfRow(a)),
             objectServicesLabel(servicesOfRow(b)),
+            dir
+          );
+        case "expectedEnd":
+          // Puste na końcu w OBU kierunkach: „bezterminowo" to nie jest data
+          // najdalsza w przyszłości, tylko brak planu zakończenia.
+          return cmpNullLast(
+            dateSortValue(a.expectedEndDate),
+            dateSortValue(b.expectedEndDate),
             dir
           );
         case "status":
@@ -369,15 +522,26 @@ export function ObiektyView({
       }
     });
     return out;
-  }, [rows, chip, sort, dir]);
+  }, [rows, chip, sort, dir, endingSoon]);
 
   if (state !== "ready" || !data) {
     return <ResourceNotice state={state === "ready" ? "error" : state} />;
   }
 
+  const timeline = data.timeline ?? [];
+  // Ile okresów przepadło serii czasowej, bo import zgadł im datę startu.
+  // Sumujemy po widocznych miesiącach, nie po całej kartotece.
+  const estimatedStarts = timeline.reduce(
+    (s, p) => s + (p.startedEstimated ?? 0),
+    0
+  );
+
   return (
     <div className="space-y-3">
-      <KpiRow>
+      {/* Siedem kafelków: na `xl` układają się 6 + 1, od `2xl` mieszczą się
+          w jednym rzędzie. Zawijanie jest tu lepsze niż ściśnięcie do sześciu —
+          „kończące się" to osobne pytanie, a nie wariant przychodu. */}
+      <KpiRow className="2xl:grid-cols-7">
         <KpiTile
           label={`Przychód mies.${serviceTag(service)}`}
           value={plnFull(agg.revenue)}
@@ -427,6 +591,22 @@ export function ObiektyView({
               : "zwrot nieznany bez kosztów"
           }
           tip="Suma kosztów instalacji. Zwrot liczy się z miesięcznego zysku obiektu."
+        />
+        <KpiTile
+          data-testid="analytics-objects-ending-soon"
+          label={`Kończące się ≤ ${endingSoon.horizonDays} dni`}
+          value={nf(endingSoon.count)}
+          // Zero to WYNIK, a nie awaria — ale tylko wtedy, gdy ktoś te daty
+          // w ogóle wpisał. W kartotece bez dat zakończenia zero znaczy „nie
+          // wiemy" i podpis musi to powiedzieć, zamiast udawać spokój.
+          tone={endingSoon.count > 0 ? "warn" : "neutral"}
+          sub={
+            endingSoon.count > 0
+              ? `${plnFull(endingSoon.revenue)}/mies. zagrożone`
+              : "brak dat zakończenia"
+          }
+          tip={`Obiekty, które w ciągu ${endingSoon.horizonDays} dni zostaną bez ani jednej usługi: wpisane przewidywane zakończenie obiektu w horyzoncie ALBO wszystkie niezakończone okresy usług kończące się w horyzoncie. Kliknij, żeby zobaczyć je na liście obiektów.`}
+          onClick={() => navigate(`/objects?endingIn=${endingSoon.horizonDays}`)}
         />
       </KpiRow>
 
@@ -617,11 +797,61 @@ export function ObiektyView({
         </div>
       </ChartCard>
 
+      {/* Karta nie renderuje się wcale, gdy backend nie odsyła serii (starsze
+          wdrożenie): pusty wykres z dwunastoma zerami wyglądałby jak zapaść
+          firmy, a nie jak brak danych. */}
+      {timeline.length > 0 && (
+        <ChartCard
+          title="Usługi w czasie (12 mies.)"
+          description="Aktywne obiekty i rozpoczęte/zakończone usługi wg okresów; kwoty bieżące (abonamenty nie mają historii cen)."
+          tableData={{
+            headers: [
+              "Miesiąc",
+              "Aktywne obiekty",
+              "Kamery",
+              "SSWiN",
+              "Wideorecepcja",
+              "OFI",
+              "Rozpoczęte",
+              "Zakończone",
+              "Przychód",
+            ],
+            rows: timeline.map((p) => [
+              monthCell(p.month),
+              nf(p.activeObjects),
+              ...objectServiceKeys.map((k) => nf(p.activeUnits[k])),
+              nf(p.started),
+              nf(p.ended),
+              plnFull(p.revenue),
+            ]),
+          }}
+        >
+          <div className="space-y-2">
+            <ServiceTimelineChart
+              points={timeline}
+              ariaLabel="Seria czasowa usług: górny panel to rozpoczęte (w górę) i zakończone (w dół) okresy usług w kolejnych miesiącach, dolny panel to liczba aktywnych obiektów"
+            />
+            <p className="text-xs text-muted-foreground">
+              Przychód w tabeli to dzisiejsze stawki obiektów aktywnych w danym
+              miesiącu — kartoteka trzyma jeden komplet kwot, bez historii cen.
+              To odpowiedź na „ile dzisiejszymi stawkami warte były wtedy
+              dozorowane obiekty”, a nie „ile wtedy zafakturowano”.
+            </p>
+            {estimatedStarts > 0 && (
+              <p className="text-xs text-amber-600">
+                {estimatedStarts} {estimatedStartsNote(estimatedStarts)}
+              </p>
+            )}
+          </div>
+        </ChartCard>
+      )}
+
       <div className="flex flex-wrap items-center gap-2">
-        {(Object.keys(CHIP_LABELS) as Chip[]).map((c) => (
+        {CHIP_KEYS.map((c) => (
           <button
             key={c}
             type="button"
+            data-testid={`analytics-objects-chip-${c}`}
             onClick={() => setChip(c)}
             className={cn(
               "rounded-full border px-3 py-1 text-sm transition-colors",
@@ -630,7 +860,7 @@ export function ObiektyView({
                 : "border-slate-200 text-slate-600 hover:bg-slate-50"
             )}
           >
-            {CHIP_LABELS[c]}
+            {chipLabel(c, endingSoon.horizonDays)}
             <span
               className={cn(
                 "ml-1.5 tabular-nums",
@@ -645,7 +875,7 @@ export function ObiektyView({
 
       <Card>
         <CardContent className="overflow-x-auto p-0">
-          <table className="w-full min-w-[1200px] text-sm">
+          <table className="w-full min-w-[1440px] text-sm">
             <thead className="border-b bg-muted/50 text-xs uppercase tracking-wide text-muted-foreground">
               <tr>
                 <SortHeader label="Obiekt" sortKey="name" active={sort === "name"} dir={dir} onToggle={toggleSort} />
@@ -656,7 +886,15 @@ export function ObiektyView({
                   active={sort === "services"}
                   dir={dir}
                   onToggle={toggleSort}
-                  tip="Kamery, SSWiN, wideorecepcja i OFI są niezależne — obiekt może mieć kilka naraz"
+                  tip="Kamery, SSWiN, wideorecepcja i OFI są niezależne — obiekt może mieć kilka naraz. Druga linia: okresy AKTYWNYCH usług"
+                />
+                <SortHeader
+                  label="Przew. zakończenie"
+                  sortKey="expectedEnd"
+                  active={sort === "expectedEnd"}
+                  dir={dir}
+                  onToggle={toggleSort}
+                  tip="Planowy koniec obsługi CAŁEGO obiektu z kartoteki. „—” = bezterminowo (nie: „nie wiadomo kiedy”); data w przeszłości jest wyróżniona"
                 />
                 <SortHeader label="Status" sortKey="status" active={sort === "status"} dir={dir} onToggle={toggleSort} />
                 <SortHeader
@@ -685,11 +923,16 @@ export function ObiektyView({
             </thead>
             <tbody>
               {tableRows.map((r) => (
-                <ObjectRow key={r.id} row={r} onClick={() => navigate(`/objects/${r.id}`)} />
+                <ObjectRow
+                  key={r.id}
+                  row={r}
+                  today={today}
+                  onClick={() => navigate(`/objects/${r.id}`)}
+                />
               ))}
               {tableRows.length === 0 && (
                 <tr>
-                  <td colSpan={11} className="py-10 text-center text-sm text-muted-foreground">
+                  <td colSpan={12} className="py-10 text-center text-sm text-muted-foreground">
                     Brak obiektów spełniających kryteria.
                   </td>
                 </tr>
@@ -727,13 +970,21 @@ function Counter({
 
 function ObjectRow({
   row,
+  today,
   onClick,
 }: {
   row: AnalyticsObjectRow;
+  today: string;
   onClick: () => void;
 }) {
   const never = row.hasCost && row.setupCost > 0 && row.profit <= 0;
   const sp = spLabel(row.salesperson);
+  const periods = row.servicePeriods ?? [];
+  const ranges = activePeriodRanges(periods, today);
+  // Przeterminowane, czyli plan zakończenia minął, a obiekt wciąż jest w
+  // kartotece — albo umowa została przedłużona i nikt tego nie zapisał, albo
+  // obiekt powinien być już zamknięty. Jedno i drugie warto zobaczyć.
+  const overdue = !!row.expectedEndDate && row.expectedEndDate < today;
 
   return (
     <tr
@@ -745,7 +996,48 @@ function ObjectRow({
         {row.city && <div className="text-xs text-muted-foreground">{row.city}</div>}
       </td>
       <td className="px-2 py-2 text-muted-foreground">{row.contractorName ?? DASH}</td>
-      <td className="px-2 py-2">{objectServicesLabel(servicesOfRow(row), DASH)}</td>
+      {/* Druga linia to OKRESY aktywnych usług. Pierwsza mówi CO świadczymy,
+          druga OD KIEDY — bez tego „Kamery 8" wygląda tak samo w obiekcie
+          obsługiwanym od dekady i w takim, który ruszył w zeszłym tygodniu. */}
+      <td className="px-2 py-2" data-testid="analytics-object-services">
+        {objectServicesLabel(servicesOfRow(row), DASH)}
+        {ranges.length > 0 && (
+          <span
+            className="block text-xs text-muted-foreground"
+            title={periods
+              .filter((p) => !isServicePeriodEnded(p, today))
+              .map((p) => servicePeriodLabel(p))
+              .join("\n")}
+          >
+            {/* Każdy zakres jako osobny `whitespace-nowrap`: kolumna może się
+                zawinąć MIĘDZY zakresami, ale nigdy w środku daty — „01.01.2024 –
+                31.12.2026" złamane na trzy linie przestaje być datą. */}
+            {ranges.slice(0, 3).map((r, i) => (
+              <span key={r} className="whitespace-nowrap">
+                {i > 0 && " · "}
+                {r}
+              </span>
+            ))}
+            {ranges.length > 3 && (
+              <span className="whitespace-nowrap"> · +{ranges.length - 3}</span>
+            )}
+          </span>
+        )}
+      </td>
+      <td
+        className={cn(
+          "whitespace-nowrap px-2 py-2 tabular-nums",
+          overdue ? "text-amber-600" : "text-muted-foreground"
+        )}
+        data-testid="analytics-object-expected-end"
+        title={
+          overdue
+            ? "Przewidywane zakończenie już minęło — obiekt nadal jest w kartotece"
+            : undefined
+        }
+      >
+        {row.expectedEndDate ? formatDate(row.expectedEndDate) : DASH}
+      </td>
       <td className="px-2 py-2 text-muted-foreground">
         {statusLabels[row.status] ?? row.status}
       </td>

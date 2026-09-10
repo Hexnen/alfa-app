@@ -9,7 +9,7 @@
  */
 import { jsonSchema, tool, type JSONSchema7, type Tool, type ToolExecutionOptions } from "ai";
 import { z } from "zod";
-import { and, asc, gt, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
 import { db, schema } from "../../db/index.js";
 import { CALENDAR_EVENT_STATUSES, CALENDAR_EVENT_TYPES, CALENDAR_SERIES_FREQS, type User } from "../../db/schema.js";
 import { ApiError, STATUS_LABELS, TYPE_LABELS } from "../calendar-labels.js";
@@ -390,6 +390,9 @@ export function buildCalendarActions(config: Partial<ToolsConfig> = {}) {
     try {
       parsed = parseInput({
         ...input,
+        // Asystent obsługuje WYŁĄCZNIE kalendarz techniczny — dział podajemy jawnie,
+        // żeby nie zależeć od wartości domyślnej parseInput.
+        department: "technical",
         allDay,
         startAt,
         endAt,
@@ -554,6 +557,8 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
         const truncatedRange = span > cfg.maxHorizonDays;
         const to = truncatedRange ? addDays(from.slice(0, 10), cfg.maxHorizonDays) : toIn;
         const conds = [
+          // Asystent obsługuje wyłącznie kalendarz techniczny.
+          eq(schema.calendarEvents.department, "technical"),
           isNull(schema.calendarEvents.deletedAt),
           gt(schema.calendarEvents.endAt, from),
           lt(schema.calendarEvents.startAt, to),
@@ -611,6 +616,7 @@ export function buildCalendarTools(_user: User, config: Partial<ToolsConfig> = {
         if (!hasFilter) return { error: "Podaj przynajmniej jeden filtr: query, technicianId/technicianName, type lub status (do grafiku w zakresie dat użyj list_events)" };
         // `strict` = false → bez filtrów type/status (fallback, gdy filtr daje 0 wyników).
         const base = (strict: boolean) => [
+          eq(schema.calendarEvents.department, "technical"),
           isNull(schema.calendarEvents.deletedAt),
           gt(schema.calendarEvents.endAt, from),
           lt(schema.calendarEvents.startAt, to),

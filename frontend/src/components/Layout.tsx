@@ -12,7 +12,9 @@ import {
   Wrench,
   IdCard,
   FolderKanban,
+  Handshake,
   CalendarCog,
+  Mail,
   ChevronDown,
   Menu,
   X,
@@ -29,6 +31,8 @@ import { Button } from "./ui/button";
 import { tip } from "./ui/tooltip";
 import { useAuth } from "@/auth/AuthProvider";
 import { usePerms, TABS } from "@/auth/permissions";
+import { initials } from "@/lib/calendar-labels";
+import { APP_VERSION } from "@/lib/version";
 
 type NavChild = {
   name: string;
@@ -36,8 +40,10 @@ type NavChild = {
   /** Podpis zakładki (ten sam co nagłówek strony) — dymek nad etykietą sekcji. */
   desc?: string;
   // Optional custom active matcher (needed when sibling paths overlap, e.g.
-  // "/orders" is a prefix of "/orders/formularz").
-  isActive?: (pathname: string) => boolean;
+  // "/orders" is a prefix of "/orders/formularz"). Drugi argument to
+  // `location.search` — panele na jednej ścieżce (`/contracts?panel=drafty`)
+  // rozróżnia dopiero query.
+  isActive?: (pathname: string, search: string) => boolean;
   /** Opcjonalna ikona podzakładki (np. w grupie Administracja). */
   icon?: LucideIcon;
 };
@@ -72,7 +78,36 @@ const topLevel: NavItem[] = [
     icon: Landmark,
     desc: "Spółki grupy — słownik wspólny z kadrami",
   },
-  { name: "Umowy", href: "/contracts", icon: FileText, desc: "Umowy serwisowe i monitoringu" },
+  {
+    name: "Umowy",
+    href: "/contracts",
+    icon: FileText,
+    desc: "Umowy serwisowe i monitoringu",
+    children: [
+      {
+        name: "Rejestr umów",
+        href: "/contracts?panel=rejestr",
+        desc: "Zawarte umowy: numery, okresy i wartości",
+        // Rejestr jest panelem domyślnym, więc łapie też wejście bez query i
+        // karty pojedynczej umowy (/contracts/:id).
+        isActive: (p, s) =>
+          (p === "/contracts" && !["drafty", "wzory"].includes(new URLSearchParams(s).get("panel") ?? "")) ||
+          p.startsWith("/contracts/"),
+      },
+      {
+        name: "Drafty umów",
+        href: "/contracts?panel=drafty",
+        desc: "Generator umów z szablonu Worda",
+        isActive: (p, s) => p === "/contracts" && new URLSearchParams(s).get("panel") === "drafty",
+      },
+      {
+        name: "Wzory umów",
+        href: "/contracts?panel=wzory",
+        desc: "Zarejestrowane szablony Worda i ich pola",
+        isActive: (p, s) => p === "/contracts" && new URLSearchParams(s).get("panel") === "wzory",
+      },
+    ],
+  },
   {
     name: "Zlecenia",
     href: "/orders",
@@ -144,6 +179,55 @@ const sections: NavItem[] = [
     ],
   },
   {
+    // Miejsce pracy handlowca: lejek szans, aktywności i własny kalendarz.
+    // Stoi po Kadrach, bo to sprzedaż „przed" obiektem, a nie raport z niego.
+    name: "Handlowy",
+    href: "/handlowy",
+    icon: Handshake,
+    desc: "Szanse sprzedaży, aktywności i kalendarz handlowca",
+    children: [
+      { name: "Pulpit", href: "/handlowy/pulpit", desc: "Agenda dnia, zaległości i stan lejka" },
+      {
+        name: "Leady",
+        href: "/handlowy/leady",
+        desc: "Szanse sprzedaży — lejek i lista",
+        // Karta szansy (/handlowy/leady/12) ma podświetlać Leady.
+        isActive: (p) => p === "/handlowy/leady" || p.startsWith("/handlowy/leady/"),
+      },
+      {
+        name: "Kalendarz",
+        href: "/handlowy/kalendarz",
+        desc: "Spotkania, telefony i zadania działu handlowego",
+      },
+      {
+        name: "Aktywności",
+        href: "/handlowy/aktywnosci",
+        desc: "Zaległe, dzisiejsze i nadchodzące zadania handlowca",
+      },
+      {
+        name: "Kontakty",
+        href: "/handlowy/kontakty",
+        desc: "Osoby kontaktowe u kontrahentów i w szansach",
+      },
+      // Skróty do zakładek spoza sekcji — chowają się same, gdy użytkownik
+      // nie ma do nich uprawnień (filterNav liczy klucz z href). Aktywności
+      // celowo nie dopasowują adresu: te ekrany należą do swoich sekcji i
+      // podświetlenie dwóch sekcji naraz wyglądałoby na błąd.
+      {
+        name: "Oferty",
+        href: "/technical/oferty",
+        desc: "Oferty dla klientów: pakiety sprzętu, abonament i dzierżawa",
+        isActive: () => false,
+      },
+      {
+        name: "Handlowcy",
+        href: "/handlowcy",
+        desc: "Opiekunowie handlowi kontrahentów i obiektów",
+        isActive: () => false,
+      },
+    ],
+  },
+  {
     name: "CMA",
     href: "/cma",
     icon: Cctv,
@@ -153,6 +237,11 @@ const sections: NavItem[] = [
       { name: "Trendy", href: "/cma/trendy", desc: "Trendy z zaimportowanych raportów" },
       { name: "Braki kamer", href: "/cma/braki-kamer", desc: "Aktualne braki obrazu z kamer" },
       { name: "Obiekty", href: "/cma/obiekty", desc: "Powiązanie rejestru monitoringu z kartoteką obiektów" },
+      {
+        name: "Grupy interwencyjne",
+        href: "/cma/grupy-interwencyjne",
+        desc: "Firmy interwencyjne, warunki i rejestr podjazdów",
+      },
       { name: "Ustawienia", href: "/cma/ustawienia", desc: "Ustawienia poczty i importu raportów" },
     ],
   },
@@ -176,6 +265,7 @@ const sections: NavItem[] = [
       { name: "Technicy", href: "/technical/technicy", desc: "Technicy, stawki i przypisania" },
       { name: "Obiekty", href: "/technical/obiekty", desc: "Obiekty obsługiwane przez dział techniczny" },
       { name: "Magazyn", href: "/technical/magazyn", desc: "Dokumenty PZ/WZ/RW/MM i stany magazynowe" },
+      { name: "Manuale", href: "/technical/manuale", desc: "Instrukcje i dokumentacja sprzętu oraz usług" },
       { name: "Projekty", href: "/technical/projekty", desc: "Projekty i oferty systemów CCTV" },
       { name: "Szablony", href: "/technical/szablony", desc: "Modele kamer i szablony wyposażenia" },
     ],
@@ -213,6 +303,12 @@ const adminSection: NavItem = {
       href: "/admin/firma",
       icon: Building2,
       desc: "Adres biura, stawki i zakres automatu liczącego realizacje",
+    },
+    {
+      name: "Poczta",
+      href: "/admin/poczta",
+      icon: Mail,
+      desc: "Serwer SMTP, nadawca i adresaci maili ze zleceń",
     },
     {
       name: "Asystent AI",
@@ -255,12 +351,16 @@ export function Layout({ children }: LayoutProps) {
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
   const { user, logout } = useAuth();
   const perms = usePerms();
+  /** Podpis konta: nazwa własna, a gdy jej brak — adres e-mail. */
+  const userName = user ? user.displayName || user.email : "";
 
   // --- Zwijanie sidebara (tylko desktop; mobile ma swój drawer) -------------
   const [collapsed, setCollapsed] = useState(readCollapsed);
   const [desktop, setDesktop] = useState(isDesktopWidth);
   /** Flyout z podzakładkami sekcji w trybie zwiniętym (pozycja = ikona sekcji). */
   const [flyout, setFlyout] = useState<{ item: NavItem; top: number } | null>(null);
+  /** Menu konta pod miniaturką użytkownika (tylko tryb zwinięty). */
+  const [userMenu, setUserMenu] = useState(false);
   /** Pasek ikon: zwinięty sidebar renderujemy tylko na desktopie. */
   const rail = collapsed && desktop;
 
@@ -273,6 +373,7 @@ export function Layout({ children }: LayoutProps) {
 
   const toggleCollapsed = () => {
     setFlyout(null);
+    setUserMenu(false);
     setCollapsed((c) => {
       const next = !c;
       try {
@@ -291,6 +392,7 @@ export function Layout({ children }: LayoutProps) {
       if (isTypingTarget(e.target) || !isDesktopWidth()) return;
       e.preventDefault();
       setFlyout(null);
+      setUserMenu(false);
       setCollapsed((c) => {
         const next = !c;
         try {
@@ -305,16 +407,27 @@ export function Layout({ children }: LayoutProps) {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  // Flyout: zamknij klikiem obok / Esc.
+  // Flyouty paska ikon (podzakładki sekcji i menu konta): zamknij klikiem obok / Esc.
   useEffect(() => {
-    if (!flyout) return;
+    if (!flyout && !userMenu) return;
     const onDown = (e: MouseEvent) => {
       const t = e.target as HTMLElement | null;
-      if (t?.closest?.("[data-sidebar-flyout]") || t?.closest?.("[data-sidebar-rail-group]")) return;
+      // Kliknięcia w same przełączniki obsługuje ich onClick (inaczej mousedown
+      // zamknąłby menu, a klik otworzyłby je z powrotem).
+      if (
+        t?.closest?.("[data-sidebar-flyout]") ||
+        t?.closest?.("[data-sidebar-rail-group]") ||
+        t?.closest?.("[data-sidebar-user-button]")
+      )
+        return;
       setFlyout(null);
+      setUserMenu(false);
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setFlyout(null);
+      if (e.key === "Escape") {
+        setFlyout(null);
+        setUserMenu(false);
+      }
     };
     document.addEventListener("mousedown", onDown);
     document.addEventListener("keydown", onKey);
@@ -322,14 +435,22 @@ export function Layout({ children }: LayoutProps) {
       document.removeEventListener("mousedown", onDown);
       document.removeEventListener("keydown", onKey);
     };
-  }, [flyout]);
+  }, [flyout, userMenu]);
+
+  // Wyjście z trybu paska ikon (rozwinięcie menu, zwężenie okna) zabiera menu konta.
+  useEffect(() => {
+    if (!rail) setUserMenu(false);
+  }, [rail]);
 
   // Mapuje ścieżkę SPA na klucz zakładki z katalogu uprawnień. Ścieżki
   // szczegółowe bez własnego klucza (np. /orders/formularz) dziedziczą
   // uprawnienie z nadrzędnej zakładki (/orders → "orders").
   const tabKeySet = useMemo(() => new Set(TABS.map((t) => t.key)), []);
   const keyFor = (href: string): string | null => {
-    let key = href.replace(/^\//, "");
+    // Podzakładki-panele mają query w href (`/contracts?panel=drafty`) — bez
+    // obcięcia go klucz „contracts?panel=drafty” nie trafiłby w katalog i wpis
+    // pokazałby się KAŻDEMU (brak klucza = pozycja zawsze widoczna).
+    let key = href.replace(/^\//, "").split("?")[0].replace(/\/$/, "");
     while (key) {
       if (tabKeySet.has(key)) return key;
       const i = key.lastIndexOf("/");
@@ -370,7 +491,7 @@ export function Layout({ children }: LayoutProps) {
 
   const isChildActive = (child: NavChild) =>
     child.isActive
-      ? child.isActive(location.pathname)
+      ? child.isActive(location.pathname, location.search)
       : location.pathname === child.href ||
         location.pathname.startsWith(child.href + "/");
 
@@ -401,7 +522,7 @@ export function Layout({ children }: LayoutProps) {
       desc: child?.desc ?? hit.desc ?? null,
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [location.pathname, visibleTopLevel, visibleSections, perms.isAdmin]);
+  }, [location.pathname, location.search, visibleTopLevel, visibleSections, perms.isAdmin]);
 
   // Pionowy napis w pasku ikon: writing-mode + obrót o 180° (czytany z dołu do
   // góry); will-change/geometricPrecision wymuszają rasteryzację w pełnej
@@ -458,6 +579,7 @@ export function Layout({ children }: LayoutProps) {
         aria-expanded={open}
         onClick={(e) => {
           const r = e.currentTarget.getBoundingClientRect();
+          setUserMenu(false);
           setFlyout(open ? null : { item, top: r.top });
         }}
       >
@@ -671,16 +793,26 @@ export function Layout({ children }: LayoutProps) {
 
         {/* Bottom bar: user + logout */}
         {rail ? (
+          // W pasku ikon nie ma miejsca na nazwę — zostaje miniaturka konta
+          // (inicjały; aplikacja nie ma zdjęć profilowych), a wylogowanie
+          // chowa się w małym menu obok.
           <div className="flex flex-col items-center border-t p-2">
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={() => logout()}
-              aria-label="Wyloguj"
-              title={`Wyloguj${user ? ` — ${user.displayName || user.email}` : ""}`}
+            <button
+              type="button"
+              data-sidebar-user-button
+              data-testid="sidebar-user-avatar"
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-semibold uppercase text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              title={userName || "Konto"}
+              aria-label={`Konto: ${userName || "użytkownik"}`}
+              aria-haspopup="menu"
+              aria-expanded={userMenu}
+              onClick={() => {
+                setFlyout(null);
+                setUserMenu((v) => !v);
+              }}
             >
-              <LogOut className="h-5 w-5" />
-            </Button>
+              {initials(userName)}
+            </button>
           </div>
         ) : (
           <div className="border-t p-4">
@@ -742,6 +874,38 @@ export function Layout({ children }: LayoutProps) {
         </div>
       )}
 
+      {/* Menu konta spod miniaturki (tylko przy zwiniętym sidebarze) */}
+      {rail && userMenu && (
+        <div
+          data-sidebar-flyout
+          data-testid="sidebar-user-menu"
+          role="menu"
+          aria-label="Konto"
+          className="fixed bottom-2 left-16 z-50 ml-1 w-56 rounded-lg border bg-popover p-2 text-popover-foreground shadow-xl"
+        >
+          <div className="px-2 py-1.5">
+            <div className="truncate text-sm font-semibold">{userName || "Konto"}</div>
+            {user && user.displayName && user.displayName !== user.email && (
+              <div className="truncate text-xs text-muted-foreground">{user.email}</div>
+            )}
+          </div>
+          <div className="my-1 border-t" />
+          <button
+            type="button"
+            role="menuitem"
+            data-testid="sidebar-logout"
+            className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            onClick={() => {
+              setUserMenu(false);
+              logout();
+            }}
+          >
+            <LogOut className="h-4 w-4" />
+            Wyloguj
+          </button>
+        </div>
+      )}
+
       {/* Main content */}
       <div
         className={cn(
@@ -764,6 +928,22 @@ export function Layout({ children }: LayoutProps) {
 
         {/* Page content */}
         <main className="px-3 pb-3 pt-2 lg:px-4 lg:pb-3 lg:pt-2">{children}</main>
+      </div>
+
+      {/* Numer wersji w prawym dolnym rogu aplikacji → „Co nowego”. Renderuje
+          się tylko w zalogowanej powłoce (strony publiczne nie mają Layoutu).
+          Niska warstwa (z-30) i wąski obszar klikalny — dialogi, dymki i
+          podglądy (z-50 i wyżej) przykrywają go, a reszta ekranu zostaje
+          klikalna dzięki `pointer-events-none` na kontenerze. */}
+      <div className="pointer-events-none fixed bottom-2 right-3 z-30 print:hidden">
+        <Link
+          to="/co-nowego"
+          title="Co nowego"
+          className="pointer-events-auto rounded bg-background/80 px-1.5 py-0.5 text-[0.7rem] leading-none text-muted-foreground/70 backdrop-blur-sm transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          data-testid="app-version-link"
+        >
+          v{APP_VERSION}
+        </Link>
       </div>
     </div>
   );
