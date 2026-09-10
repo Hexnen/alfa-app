@@ -56,6 +56,8 @@ import {
   type WarehouseItem,
 } from "@/lib/api";
 import { fmtRelative, fmtTimestamp, pillClass } from "@/lib/calendar-labels";
+// Definicja marży mieszka w magazynie (tam się liczy) — oferta ma mówić to samo.
+import { MARGIN_HELP } from "@/components/warehouse/warehouseShared";
 import { cn } from "@/lib/utils";
 import { OfferEditor } from "@/components/offers/OfferEditor";
 import { PackageEditor } from "@/components/offers/PackageEditor";
@@ -812,7 +814,7 @@ export function Oferty() {
                         label="Marża"
                         sortKey="margin"
                         align="right"
-                        title="Sortowanie po marży procentowej; oferty bez policzonej marży idą na koniec"
+                        title={`${MARGIN_HELP} Sortowanie po marży procentowej; oferty bez policzonej marży idą na koniec.`}
                       />
                       {editable && <th className="px-3 py-2 text-right font-medium">Akcje</th>}
                     </tr>

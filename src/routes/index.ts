@@ -22,6 +22,8 @@ import monitoredObjectsRoutes from "./monitored-objects.js";
 import cmaMailRoutes from "./cma-mail.js";
 import hrRoutes from "./hr.js";
 import warehouseRoutes from "./warehouse.js";
+import warehousePluginRoutes from "./warehouse-plugin.js";
+import pluginRoutes from "./plugin.js";
 import authRoutes from "./auth.js";
 import publicRoutes from "./public.js";
 import adminRoutes from "./admin.js";
@@ -53,6 +55,14 @@ const BODY_LIMIT_XLS_IMPORT = 20 * MB;
 const BODY_LIMIT_DESIGNER = 30 * MB;
 /** Notatki wydarzeń z załącznikami: 15 plików × 5 MB + narzut multipart (src/lib/calendar-attachments.ts). */
 const BODY_LIMIT_NOTE_ATTACHMENTS = 80 * MB;
+/**
+ * Import towaru z zapisanej strony sklepu. „Strona sieci Web, kompletna” z
+ * Chrome ma inline'owane CSS-y i base64 obrazków — próbka SAMAL waży ~1,3 MB,
+ * ale strony z galerią zdjęć w data-URL dochodzą do kilku MB. 12 MB to sufit,
+ * przy którym parser (limit HTML w src/lib/shop-import) odrzuca plik własnym
+ * komunikatem, zamiast dostać 413 bez wyjaśnienia.
+ */
+const BODY_LIMIT_SHOP_IMPORT = 12 * MB;
 
 /**
  * Sufit zależny od trasy: trasy dużych ciał są wyliczone jawnie, reszta dostaje
@@ -69,6 +79,16 @@ function bodyLimitFor(path: string, method: string): number {
   if (/^\/calendar\/events\/\d+\/notes$/.test(path) && method === "POST") return BODY_LIMIT_NOTE_ATTACHMENTS;
   if (path === "/cma/reports/import" || path === "/monitored-objects/import") {
     return BODY_LIMIT_XLS_IMPORT;
+  }
+  // Zapisana strona produktu ze sklepu dostawcy (multipart albo JSON z pluginu).
+  if (path === "/warehouse/import/parse" && method === "POST") {
+    return BODY_LIMIT_SHOP_IMPORT;
+  }
+  // Wtyczka przeglądarki przysyła `outerHTML` otwartej strony produktu — ten
+  // sam materiał co „Zapisz stronę”, więc ten sam sufit (wtyczka pilnuje go
+  // też u siebie, żeby nie wysyłać 12 MB w ciemno).
+  if (path === "/plugin/import" && method === "POST") {
+    return BODY_LIMIT_SHOP_IMPORT;
   }
   return BODY_LIMIT_DEFAULT;
 }
@@ -102,6 +122,13 @@ api.route("/calendar", calendarPublicRoutes);
 // --- OFERTY: dokument dla klienta spod linku (auth po tokenie w ścieżce) ---
 // GET /public-offer/:token — montowane PRZED requireAuth, jak /public.
 api.route("/", offersPublicRoutes);
+
+// --- WTYCZKA MAGAZYNU: API dla rozszerzenia przeglądarki (Bearer users.plugin_token) ---
+// Montowane PRZED requireAuth, jak /public: żądania lecą ze service workera
+// wtyczki, który NIE dostaje cookie `alfa_session` (SameSite=Lax). Router ma
+// własny strażnik (token + canView/canEdit na `technical/magazyn` + limit tempa),
+// więc trasy pod /plugin nie są publiczne — mają tylko inne poświadczenie.
+api.route("/plugin", pluginRoutes);
 
 // --- Wszystkie pozostałe trasy API — chronione sesją ---
 api.use("*", requireAuth);
@@ -249,6 +276,10 @@ api.route("/cma", cmaRoutes);
 api.route("/monitoring", monitoringRoutes);
 api.route("/monitored-objects", monitoredObjectsRoutes);
 api.route("/hr", hrRoutes);
+// Kolejka importów z wtyczki + token + paczka ZIP. PRZED `warehouseRoutes`,
+// bo Hono dopasowuje po kolejności rejestracji (uprawnienia obie części
+// dziedziczą z prefiksu /warehouse w API_TAB_MAP).
+api.route("/warehouse", warehousePluginRoutes);
 api.route("/warehouse", warehouseRoutes);
 // Analityka finansowa — montowana TUTAJ, czyli poniżej api.use("*", tabPermissionGuard).
 // W bloku nad strażnikiem (obok /calendar czy /company-lookup) wystawiłaby przychody,

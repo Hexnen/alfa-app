@@ -4182,10 +4182,22 @@ export interface WarehouseItem {
   purchasePrice: number | null;
   /** Własna cena sprzedaży netto. null = liczona z narzutu firmowego. */
   salePrice: number | null;
-  photoData: string | null;
+  /**
+   * Zdjęcie jako data-URL. UWAGA: `GET /items` go NIE niesie (lista z pięcioma
+   * zdjęciami ważyła megabajty) — tam przychodzi tylko `hasPhoto`, a samo
+   * zdjęcie doczytuje formularz z `GET /items/:id/photo`.
+   */
+  photoData?: string | null;
+  /** Czy kartoteka ma zdjęcie (jedyna informacja o zdjęciu na liście). */
+  hasPhoto?: boolean;
   minStock: number | null;
   isAsset: boolean;
   barcode: string | null;
+  /**
+   * Symbol producenta (MPN). W przeciwieństwie do kodu u dostawcy jest ten sam
+   * we wszystkich sklepach, więc to po nim import rozpoznaje „ten towar już mamy”.
+   */
+  manufacturerCode: string | null;
   isArchived: boolean;
   /** Login (email) osoby, która założyła kartotekę. */
   createdBy: string | null;
@@ -4214,6 +4226,14 @@ export interface WarehouseItem {
   marginPct: number | null;
   /** Narzut: o ile procent cena przewyższa koszt (%). */
   markupPct: number | null;
+  /**
+   * Liczba sklepów dostawców przypiętych do towaru — dokładana TYLKO przez
+   * `GET /items` (badge „🛒 n” w tabeli). Odpowiedź POST/PUT jej nie niesie,
+   * dlatego pole jest opcjonalne.
+   */
+  sourcesCount?: number;
+  /** Nazwy sklepów do dymka przy badge'u — jak `sourcesCount`, tylko z listy. */
+  sourceShops?: string[];
 }
 
 export interface WarehouseItemInput {
@@ -4230,9 +4250,18 @@ export interface WarehouseItemInput {
   minStock?: number | null;
   isAsset?: boolean;
   barcode?: string;
+  /** Symbol producenta (MPN). */
+  manufacturerCode?: string;
   photoData?: string | null;
   /** false = przywrócenie towaru z archiwum */
   isArchived?: boolean;
+  /**
+   * Źródła (sklepy dostawców). `undefined` = NIE RUSZAJ istniejących źródeł
+   * (formularz, który ich nie doczytał, nie może ich skasować); tablica =
+   * pełna podmiana zbioru — upsert po `shop`, reszta wierszy znika.
+   * Powtórzony `shop` w tablicy backend odrzuca (400).
+   */
+  sources?: WarehouseItemSourceInput[];
 }
 
 /** Parametry cenowe firmy używane przez kartotekę magazynu. */
@@ -4356,6 +4385,233 @@ export interface WarehouseMovement {
   createdBy: string | null;
 }
 
+// ---------------------------------------------------------------------------
+// Import towaru z zapisanej strony sklepu dostawcy
+//
+// Typy PRZEPISANE 1:1 z `src/lib/shop-import/types.ts` i `src/routes/warehouse.ts`
+// — front świadomie nie importuje z backendu, więc każda zmiana pola po tamtej
+// stronie musi trafić także tutaj (kontrakt opisany w planie, sekcja 4).
+// ---------------------------------------------------------------------------
+
+/** Parser dedykowany sklepu; „generic” = tylko dane z JSON-LD/og/microdata. */
+export type ShopParserId = "samal" | "janex" | "eltrox" | "grodno" | "generic";
+
+/**
+ * Co właściwie znaczy znaleziona cena. „unknown” = jedna cena bez etykiety →
+ * backend NIE proponuje ceny zakupu, człowiek wskazuje netto/brutto w panelu.
+ */
+export type ShopPriceKind = "net" | "gross" | "both" | "unknown";
+
+/** Skąd wzięliśmy adres produktu (i tym samym domenę sklepu). */
+export type ShopDetectedBy =
+  | "urlHint"
+  | "savedFrom"
+  | "canonical"
+  | "ogUrl"
+  | "jsonLd"
+  | "hiddenInput"
+  | "linkHost"
+  | "none";
+
+export interface ParsedAttribute {
+  name: string;
+  value: string;
+}
+
+export interface ShopParseDiagnostics {
+  /** Pola, które parser wypełnił. */
+  recognized: string[];
+  /** Pola, których nie znalazł — to lista do kalibracji parsera. */
+  missing: string[];
+  warnings: string[];
+  shopDetectedBy: ShopDetectedBy;
+  parserUsed: ShopParserId;
+  parserVersion: string;
+  htmlBytes: number;
+  charset: string;
+}
+
+export interface ParsedProduct {
+  /** Domena sklepu bez „www.”. Może być PUSTA (`shopDetectedBy: "none"`). */
+  shop: string;
+  shopLabel: string;
+  url: string | null;
+  name: string | null;
+  supplierCode: string | null;
+  supplierProductId: string | null;
+  manufacturer: string | null;
+  manufacturerCode: string | null;
+  ean: string | null;
+  priceNet: number | null;
+  priceGross: number | null;
+  priceKind: ShopPriceKind;
+  vatRate: number | null;
+  currency: string;
+  stock: number | null;
+  stockText: string | null;
+  unit: string | null;
+  category: string | null;
+  descriptionText: string | null;
+  attributes: ParsedAttribute[];
+  loggedIn: boolean;
+  /** PRZESŁANKI (także negatywne!) — nie „dowody zalogowania”. */
+  loginSignals: string[];
+  accountLabel: string | null;
+  imageUrl: string | null;
+  diagnostics: ShopParseDiagnostics;
+}
+
+/** Propozycja pól kartoteki towaru (człowiek zatwierdza w panelu). */
+export interface ShopImportSuggestedItem {
+  name: string | null;
+  /** Nasz indeks nadaje człowiek — sklep nigdy go nie zna, więc zawsze null. */
+  sku: string | null;
+  category: string | null;
+  manufacturer: string | null;
+  manufacturerCode: string | null;
+  barcode: string | null;
+  unit: string | null;
+  purchasePrice: number | null;
+  description: string | null;
+}
+
+/** Powód dopasowania — kolejność = malejąca pewność. */
+export type ShopImportMatchReason =
+  | "source"
+  | "ean"
+  | "manufacturerCode"
+  | "sku"
+  | "name";
+
+/** „Ten towar już mamy” — pytanie zadawane PRZED zapisem, żeby nie robić duplikatu. */
+export interface ShopImportMatch {
+  id: number;
+  name: string;
+  sku: string | null;
+  manufacturer: string | null;
+  manufacturerCode: string | null;
+  barcode: string | null;
+  purchasePrice: number | null;
+  salePrice: number | null;
+  unit: string;
+  isArchived: boolean;
+  reason: ShopImportMatchReason;
+  confidence: "exact" | "likely";
+}
+
+export interface ShopImportParseResult {
+  parsed: ParsedProduct;
+  suggestedItem: ShopImportSuggestedItem;
+  suggestedSource: WarehouseItemSourceInput;
+  matches: ShopImportMatch[];
+  /** Zdjęcie pobrane z og:image, już przeskalowane (data-URL) albo null. */
+  photoData: string | null;
+  photoWarning: string | null;
+}
+
+/** Źródło towaru = „ten towar kupujemy w tym sklepie, pod tym kodem, ostatnio za tyle”. */
+export interface WarehouseItemSource {
+  id: number;
+  itemId: number;
+  /** Domena sklepu bez „www.” — klucz tożsamości (UNIQUE z itemId). */
+  shop: string;
+  shopLabel: string | null;
+  productUrl: string | null;
+  supplierCode: string | null;
+  supplierProductId: string | null;
+  lastPriceNet: number | null;
+  lastPriceGross: number | null;
+  vatRate: number | null;
+  currency: string;
+  lastStock: number | null;
+  /** Czy strona, z której wzięliśmy dane, była zapisana PO ZALOGOWANIU. */
+  loggedIn: boolean;
+  fetchedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  /** Tylko z `GET /items/:id/sources?raw=1` — zrzut z parsera. */
+  raw?: unknown;
+}
+
+/**
+ * Body źródła. Pole NIEPRZYSŁANE = null (nie „zostaw jak było”): źródło jest
+ * spójnym zestawem z jednego odczytu, więc scalanie po polach dałoby cenę
+ * z dziś i stan z zeszłego miesiąca. Wyjątek: `fetchedAt` = „odczytano teraz”.
+ */
+export interface WarehouseItemSourceInput {
+  shop: string;
+  shopLabel?: string | null;
+  productUrl?: string | null;
+  supplierCode?: string | null;
+  supplierProductId?: string | null;
+  lastPriceNet?: number | string | null;
+  lastPriceGross?: number | string | null;
+  vatRate?: number | string | null;
+  currency?: string | null;
+  lastStock?: number | null;
+  loggedIn?: boolean;
+  raw?: unknown;
+  fetchedAt?: string;
+}
+
+/**
+ * Wiersz kolejki „Do dodania z wtyczki” (`GET /warehouse/import/inbox`).
+ *
+ * Lista jest ŚWIADOMIE lekka: bez `parsed` i bez zdjęcia (do 1 MB base64 na
+ * wpis) — pełną propozycję ściąga `getImportInboxEntry` dopiero przy otwarciu
+ * formularza. `matchItemId` to „ten produkt już mamy w kartotece” wyliczone
+ * przy zapisie wiersza po stronie serwera, nie w panelu.
+ */
+export interface PluginInboxEntry {
+  id: number;
+  /** `queued` = jeszcze nietknięty, `opened` = ktoś go już otwierał. */
+  status: "queued" | "opened";
+  /** `open` = klik „Dodaj do towarów Alfa”, `queue` = „Dodaj do kolejki”. */
+  mode: "open" | "queue";
+  shop: string;
+  shopLabel: string | null;
+  name: string | null;
+  pageTitle: string | null;
+  productUrl: string | null;
+  priceNet: number | null;
+  matchCount: number;
+  matchItemId: number | null;
+  hasPhoto: boolean;
+  createdAt: string;
+  expiresAt: string;
+}
+
+/** Pełna propozycja z kolejki = odpowiedź `/import/parse` + skąd przyszła. */
+export type PluginInboxDetail = ShopImportParseResult & {
+  inboxId: number;
+  matchItemId: number | null;
+};
+
+/**
+ * Stan tokenu wtyczki. `masked` („abcd…wxyz”) wystarcza, żeby po rotacji
+ * poznać, że token się zmienił — pełny sekret opuszcza serwer WYŁĄCZNIE
+ * w `config.js` w strumieniu ZIP.
+ */
+export interface PluginTokenInfo {
+  hasToken: boolean;
+  masked: string | null;
+  createdAt: string | null;
+  /**
+   * Adres aplikacji, który serwer WPISZE do paczki (`config.js`). Panel go
+   * pokazuje, bo przy osobnym devie i produkcji ZIP wygląda identycznie,
+   * a wskazuje inne środowisko — i bez tej informacji nie da się tego poznać.
+   */
+  baseUrl: string;
+}
+
+/** Sklep obsługiwany przez wtyczkę; `calibrated=false` = parser do kalibracji. */
+export interface PluginShopInfo {
+  shop: string;
+  label: string;
+  parser: string;
+  calibrated: boolean;
+}
+
 export const warehouseApi = {
   // Towary (kartoteka)
   async getItems(includeArchived = false) {
@@ -4386,6 +4642,25 @@ export const warehouseApi = {
     });
   },
 
+  /**
+   * Przywrócenie z archiwum. Lustro DELETE — przestawia WYŁĄCZNIE flagę.
+   * Nie wolno tego robić PUT-em: pełna podmiana kartoteki z body odtworzonego
+   * z listy gubi ceny, producenta i zdjęcie (lista ich nie niesie).
+   */
+  async restoreItem(id: number) {
+    return request<ApiResponse<WarehouseItem>>(
+      `/warehouse/items/${id}/restore`,
+      { method: "POST" }
+    );
+  },
+
+  /** Zdjęcie towaru (data-URL) — lista go nie niesie, formularz doczytuje osobno. */
+  async getItemPhoto(id: number) {
+    return request<ApiResponse<{ photoData: string }>>(
+      `/warehouse/items/${id}/photo`
+    );
+  },
+
   /** Cena z ostatniego zatwierdzonego PZ (null = towar nigdy nie był przyjęty z ceną). */
   async getLastPurchase(id: number) {
     return request<ApiResponse<WarehouseLastPurchase | null>>(
@@ -4398,6 +4673,178 @@ export const warehouseApi = {
     return request<ApiResponse<WarehousePricingConfig>>(
       "/warehouse/pricing-config"
     );
+  },
+
+  // --- Źródła towaru (sklepy dostawców) ---
+
+  /** Źródła towaru; `raw` = dołóż zrzut z parsera (bywa dziesiątki KB). */
+  async getItemSources(id: number, raw = false) {
+    return request<ApiResponse<WarehouseItemSource[]>>(
+      `/warehouse/items/${id}/sources${raw ? "?raw=1" : ""}`
+    );
+  },
+
+  /**
+   * Zapis JEDNEGO źródła („Odśwież z pliku” przy istniejącym towarze).
+   * Sklep jest w adresie, bo to on identyfikuje wiersz — PUT jest idempotentny.
+   * Ciało to PEŁNA podmiana pól źródła (pominięte pole = null).
+   */
+  async upsertItemSource(
+    id: number,
+    shop: string,
+    data: Omit<WarehouseItemSourceInput, "shop">
+  ) {
+    return request<ApiResponse<WarehouseItemSource>>(
+      `/warehouse/items/${id}/sources/${encodeURIComponent(shop)}`,
+      { method: "PUT", body: JSON.stringify(data) }
+    );
+  },
+
+  async deleteItemSource(id: number, sourceId: number) {
+    return request<ApiResponse<{ id: number }>>(
+      `/warehouse/items/${id}/sources/${sourceId}`,
+      { method: "DELETE" }
+    );
+  },
+
+  // --- Import z zapisanej strony sklepu (nic nie zapisuje) ---
+
+  /**
+   * Zapisana strona produktu (Ctrl+S → „Strona sieci Web, kompletna”) → propozycja
+   * kartoteki. `url` przydaje się, gdy parser nie umiał wyprowadzić adresu ze
+   * strony; `fetchImage: false` pomija pobieranie zdjęcia z sklepu.
+   */
+  async parseShopPage(
+    file: File,
+    url?: string,
+    opts?: { fetchImage?: boolean }
+  ) {
+    const fd = new FormData();
+    fd.append("file", file);
+    if (url) fd.append("url", url);
+    return requestMultipart<ApiResponse<ShopImportParseResult>>(
+      `/warehouse/import/parse${opts?.fetchImage === false ? "?fetchImage=0" : ""}`,
+      fd
+    );
+  },
+
+  /**
+   * To samo z gołym HTML-em. Wtyczka przeglądarki NIE woła tej trasy — ma
+   * własną, tokenową (`POST /api/plugin/import`, bez cookie sesji). Ten wariant
+   * został dla panelu i testów.
+   */
+  async parseShopHtml(
+    html: string,
+    url?: string,
+    opts?: { fetchImage?: boolean }
+  ) {
+    return request<ApiResponse<ShopImportParseResult>>(
+      `/warehouse/import/parse${opts?.fetchImage === false ? "?fetchImage=0" : ""}`,
+      { method: "POST", body: JSON.stringify({ html, url }) }
+    );
+  },
+
+  // --- Kolejka propozycji z wtyczki przeglądarki ---
+
+  /** „Do dodania z wtyczki” — moje wiersze `queued` + `opened`, nieprzeterminowane. */
+  async getImportInbox() {
+    return request<ApiResponse<PluginInboxEntry[]>>("/warehouse/import/inbox");
+  },
+
+  /** Sam licznik — bez ciągnięcia listy. */
+  async getImportInboxCount() {
+    return request<ApiResponse<{ queued: number }>>(
+      "/warehouse/import/inbox/count"
+    );
+  },
+
+  /**
+   * Pełna propozycja do formularza towaru (kształt 1:1 z `/import/parse`).
+   * UWAGA: odczyt PRZESTAWIA status wiersza na `opened`, więc nie wołamy tego
+   * „na wszelki wypadek” przy renderowaniu listy.
+   */
+  async getImportInboxEntry(id: number) {
+    return request<ApiResponse<PluginInboxDetail>>(
+      `/warehouse/import/inbox/${id}`
+    );
+  },
+
+  /** „Nie chcę tego” — wiersz znika z listy i nie wraca przy kolejnym kliku w sklepie. */
+  async discardImportInbox(id: number) {
+    return request<ApiResponse<{ id: number; status: string }>>(
+      `/warehouse/import/inbox/${id}/discard`,
+      { method: "POST" }
+    );
+  },
+
+  /** Wołane PO udanym zapisie kartoteki z tej propozycji. */
+  async markImportInboxDone(id: number) {
+    return request<ApiResponse<{ id: number; status: string }>>(
+      `/warehouse/import/inbox/${id}/done`,
+      { method: "POST" }
+    );
+  },
+
+  // --- Wtyczka: token, obsługiwane sklepy, paczka ---
+
+  async getPluginToken() {
+    return request<ApiResponse<PluginTokenInfo>>("/warehouse/plugin/token");
+  },
+
+  /** Nowy token = wszystkie wcześniej pobrane paczki przestają działać. */
+  async rotatePluginToken() {
+    return request<ApiResponse<PluginTokenInfo>>(
+      "/warehouse/plugin/token/rotate",
+      { method: "POST" }
+    );
+  },
+
+  async revokePluginToken() {
+    return request<ApiResponse<PluginTokenInfo>>("/warehouse/plugin/token", {
+      method: "DELETE",
+    });
+  },
+
+  async getPluginShops() {
+    return request<ApiResponse<PluginShopInfo[]>>("/warehouse/plugin/shops");
+  },
+
+  /**
+   * Pobranie paczki ZIP. Świadomie NIE przez `request`: odpowiedź to plik
+   * binarny, a nie `{success,data}`, więc `response.json()` wyłożyłoby się na
+   * pierwszym bajcie. Błąd serwera JEST JSON-em — dlatego przy `!res.ok`
+   * wyciągamy z niego komunikat, zamiast pokazywać „Request failed”.
+   *
+   * Klik w link robimy sami (`<a download>` + `revokeObjectURL`), a nie
+   * `window.location`: dzięki temu żądanie leci fetchem z nagłówkiem
+   * identyfikatora karty jak każde inne i można obsłużyć błąd.
+   */
+  async downloadPlugin(): Promise<void> {
+    const res = await fetch(`${API_BASE}/warehouse/plugin/download`, {
+      headers: { [CLIENT_ID_HEADER]: CLIENT_ID },
+    });
+    if (!res.ok) {
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      throw Object.assign(
+        new Error(
+          data.error || `Nie udało się pobrać paczki wtyczki (${res.status})`
+        ),
+        { status: res.status }
+      );
+    }
+    const url = URL.createObjectURL(await res.blob());
+    try {
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "alfa-magazyn-wtyczka.zip";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } finally {
+      // Zwolnienie zaraz po kliknięciu jest bezpieczne: przeglądarka trzyma
+      // własną referencję do bloba na czas zapisywania pliku.
+      URL.revokeObjectURL(url);
+    }
   },
 
   // Magazyny

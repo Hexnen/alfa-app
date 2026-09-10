@@ -568,6 +568,20 @@
       "when": 1788852563284,
       "tag": "0080_calendar_note_events",
       "breakpoints": true
+    },
+    {
+      "idx": 91,
+      "version": "6",
+      "when": 1789200000000,
+      "tag": "0091_warehouse_item_sources",
+      "breakpoints": true
+    },
+    {
+      "idx": 93,
+      "version": "6",
+      "when": 1789300001000,
+      "tag": "0093_plugin_import_inbox",
+      "breakpoints": true
     }
   ]
 }

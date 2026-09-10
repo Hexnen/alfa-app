@@ -47,6 +47,13 @@ const FRONTEND_DIR = "./frontend/dist";
 // Allowed CORS origins. Same-origin requests (frontend served by this app)
 // don't need CORS, but extra origins can be added via CORS_ORIGINS
 // (comma-separated) without a rebuild — e.g. a separate prod domain.
+//
+// Wtyczka przeglądarki (extension/, trasy /api/plugin/*) NIE potrzebuje tu
+// wpisu: cały jej ruch idzie z service workera MV3, a taki fetch — do hosta
+// z `host_permissions` — nie podlega CORS. Gdyby kiedyś zaczął strzelać
+// z content scriptu (czyli z originu sklepu), przeglądarka zablokowałaby go
+// bez śladu w logach; poprawką jest wrócić do service workera, a nie
+// dopisywać tu domeny obcych sklepów.
 const corsOrigins = [
   "http://localhost:4000",
   "http://localhost:5173",

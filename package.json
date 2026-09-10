@@ -17,11 +17,13 @@
     "@resvg/resvg-js": "^2.6.2",
     "ai": "^7.0.79",
     "better-sqlite3": "^11.6.0",
+    "cheerio": "^1.2.0",
     "drizzle-orm": "^0.36.0",
     "hono": "^4.6.0",
     "imapflow": "^1.4.6",
     "mailparser": "^3.9.14",
     "nodemailer": "^9.0.3",
+    "pizzip": "^3.2.0",
     "sharp": "^0.35.4",
     "xlsx": "^0.18.5",
     "zod": "^4.4.3"

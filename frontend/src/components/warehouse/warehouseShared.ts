@@ -212,3 +212,33 @@ export function todayIso(): string {
   const dd = String(d.getDate()).padStart(2, "0");
   return `${d.getFullYear()}-${mm}-${dd}`;
 }
+
+/**
+ * Domena sklepu (klucz `shop` źródła towaru) z adresu wpisanego przez człowieka:
+ * bez schematu, bez „www.”, małymi literami. Zwraca pusty string, gdy z adresu
+ * nie da się wyprowadzić hosta — te same reguły co `SHOP_RE` na backendzie,
+ * bo to ta sama wartość ląduje w `warehouse_item_sources.shop`.
+ */
+export function shopFromUrl(raw: string): string {
+  const s = raw.trim();
+  if (!s) return "";
+  let host = "";
+  try {
+    host = new URL(s.includes("://") ? s : `https://${s}`).hostname;
+  } catch {
+    return "";
+  }
+  host = host.toLowerCase().replace(/^www\./, "");
+  return /^[a-z0-9.-]{3,80}$/.test(host) ? host : "";
+}
+
+/*
+ * Marża i narzut to DWIE różne liczby z tych samych dwóch kwot i ludzie mylą
+ * je nagminnie („20% marży” bywa w rozmowie 20% narzutu, czyli o 4 pkt mniej
+ * zysku). Definicje trzymamy w jednym miejscu i wklejamy w każdy dymek, który
+ * te wartości pokazuje — magazyn i oferty mówią wtedy dokładnie to samo.
+ */
+export const MARGIN_HELP =
+  "Marża = zysk ÷ cena sprzedaży (jaki procent ceny stanowi zysk).";
+export const MARKUP_HELP =
+  "Narzut = zysk ÷ cena zakupu (o ile procent podniesiono cenę zakupu).";

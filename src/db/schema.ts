@@ -540,6 +540,21 @@ export const users = sqliteTable("users", {
   // Token subskrypcji kalendarza ICS (GET /calendar/feed.ics?token=...).
   // NULL = użytkownik nie wygenerował feedu. Rotowany przez POST /calendar/feed-token.
   calendarToken: text("calendar_token").unique(),
+  // Token wtyczki przeglądarki „Dodaj do towarów Alfa" (Bearer na /api/plugin/*).
+  // NULL = użytkownik nigdy nie pobrał paczki. Tworzony przy pierwszym pobraniu
+  // ZIP-a (GET /warehouse/plugin/download), rotowany/unieważniany w panelu.
+  //
+  // Trzymany JAWNIE, nie jako hash — świadomie: paczkę z wtyczką generujemy
+  // wielokrotnie (drugi komputer, ponowne pobranie) i za każdym razem trzeba
+  // wpisać do niej DZIAŁAJĄCY token; z hashem dałoby się tylko rotować sekret
+  // przy każdym pobraniu, czyli psuć wszystkie wcześniej pobrane paczki.
+  // Ryzyko ograniczamy ZAKRESEM: token otwiera wyłącznie /api/plugin/*
+  // (odczyt kartoteki + wrzucenie propozycji do kolejki), nigdy panelu ani
+  // zapisu towaru. Reset hasła (src/lib/auth/users.ts) i rotacja unieważniają
+  // go natychmiast. Dokładnie tak samo jest z `calendarToken` powyżej.
+  pluginToken: text("plugin_token").unique(),
+  /** Kiedy wydano bieżący token wtyczki — panel pokazuje wiek paczki. */
+  pluginTokenCreatedAt: text("plugin_token_created_at"),
   createdAt: text("created_at")
     .default(sql`(datetime('now'))`)
     .notNull(),
@@ -1484,6 +1499,16 @@ export const warehouseItems = sqliteTable("warehouse_items", {
   minStock: real("min_stock"), // próg alertu niskiego stanu
   isAsset: integer("is_asset", { mode: "boolean" }).default(false).notNull(),
   barcode: text("barcode"),
+  /**
+   * Symbol producenta (MPN — np. „TC-C320N Spec:AK/I3/E/Y/C/2.8mm/V2.0”).
+   *
+   * Świadomie osobne pole obok `sku` i `barcode`: `sku` to NASZ kod z etykiety,
+   * a każdy sklep ma jeszcze SWÓJ własny indeks (patrz `warehouse_item_sources.
+   * supplier_code`) — jedyne, co jest wspólne dla wszystkich sklepów i dla
+   * karty katalogowej, to symbol producenta. Dlatego to on jest kluczem
+   * dopasowania przy imporcie strony produktu (EAN bywa nieuzupełniony).
+   */
+  manufacturerCode: text("manufacturer_code"),
   isArchived: integer("is_archived", { mode: "boolean" })
     .default(false)
     .notNull(),
@@ -1510,6 +1535,156 @@ export const warehouseItems = sqliteTable("warehouse_items", {
 
 export type WarehouseItem = typeof warehouseItems.$inferSelect;
 export type NewWarehouseItem = typeof warehouseItems.$inferInsert;
+
+/**
+ * Źródła towaru = sklepy dostawców, w których ten sam towar da się kupić.
+ *
+ * Osobna tabela, a nie kolumny w kartotece, bo ten sam sprzęt kupujemy w kilku
+ * miejscach (SAMAL, Janex, Eltrox, Grodno) i każde z nich ma WŁASNY indeks,
+ * własny adres strony i własną cenę. Wiersz jest jednocześnie „skąd to brać”
+ * i „ile to kosztowało, gdy ostatnio patrzyliśmy” — dzięki temu import strony
+ * produktu jest ODŚWIEŻENIEM znanego źródła, a nie zakładaniem duplikatu.
+ *
+ * `raw_json` trzyma surowy zrzut z parsera (do diagnostyki „skąd ta cena”);
+ * celowo BEZ etykiety konta — zapisana strona bywa zalogowana na osobę i login
+ * nie ma po co siedzieć w bazie kartoteki.
+ */
+export const warehouseItemSources = sqliteTable(
+  "warehouse_item_sources",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    itemId: integer("item_id")
+      .notNull()
+      .references(() => warehouseItems.id, { onDelete: "cascade" }),
+    /** Domena sklepu bez `www.` — klucz tożsamości źródła (np. „samal.pl”). */
+    shop: text("shop").notNull(),
+    /** Nazwa do pokazania („SAMAL”, „Janex International”) — snapshot, nie słownik. */
+    shopLabel: text("shop_label"),
+    productUrl: text("product_url"),
+    /** Indeks towaru U DOSTAWCY (to, co pada w rozmowie i w zamówieniu). */
+    supplierCode: text("supplier_code"),
+    /** Techniczny identyfikator produktu w sklepie (id z formularza koszyka). */
+    supplierProductId: text("supplier_product_id"),
+    lastPriceNet: real("last_price_net"),
+    lastPriceGross: real("last_price_gross"),
+    vatRate: real("vat_rate"),
+    currency: text("currency").default("PLN").notNull(),
+    lastStock: real("last_stock"),
+    /**
+     * Czy strona, z której wzięliśmy dane, była zapisana PO ZALOGOWANIU.
+     * Bez tego nie da się odróżnić naszej ceny hurtowej od ceny detalicznej
+     * z witryny — a różnica bywa kilkukrotna.
+     */
+    loggedIn: integer("logged_in", { mode: "boolean" }).default(false).notNull(),
+    rawJson: text("raw_json"),
+    /** Kiedy dane pochodzą z faktycznego odczytu strony (nie kiedy zapisano wiersz). */
+    fetchedAt: text("fetched_at"),
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+    updatedAt: text("updated_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+  },
+  (t) => ({
+    itemIdx: index("warehouse_item_sources_item_idx").on(t.itemId),
+    /**
+     * Jeden wiersz na (towar, sklep). To ta reguła czyni import IDEMPOTENTNYM:
+     * wrzucenie tej samej strony po tygodniu odświeża cenę i stan, a nie dokłada
+     * drugiego wiersza „samal.pl” obok pierwszego.
+     */
+    itemShopUidx: uniqueIndex("warehouse_item_sources_item_shop_uidx").on(t.itemId, t.shop),
+    /** Wyszukiwanie „co to za towar” po kodzie u dostawcy (dopasowanie przy imporcie). */
+    shopCodeIdx: index("warehouse_item_sources_shop_code_idx").on(t.shop, t.supplierCode),
+  })
+);
+
+export type WarehouseItemSource = typeof warehouseItemSources.$inferSelect;
+export type NewWarehouseItemSource = typeof warehouseItemSources.$inferInsert;
+
+/**
+ * Kolejka importów z wtyczki przeglądarki („Dodaj do towarów Alfa").
+ *
+ * KAŻDY klik w sklepie kończy się wierszem tutaj — także ten w trybie „open"
+ * („otwórz teraz"). Bez tego kliknięcie przy zamkniętej karcie Magazynu
+ * przepadałoby bez śladu, a wtyczka musiałaby trzymać stan po swojej stronie.
+ * „Otwórz teraz" to tylko SYGNAŁ dla karty aplikacji; danymi jest ten wiersz.
+ *
+ * Wiersz jest PROPOZYCJĄ do przejrzenia przez człowieka, nie zapisem kartoteki:
+ * `parsedJson` niesie dokładnie ten kształt, który zwraca
+ * `POST /warehouse/import/parse` (parsed + suggestedItem + suggestedSource +
+ * matches), więc formularz towaru dostaje z kolejki to samo, co przy imporcie
+ * z pliku — jedna ścieżka wypełniania, jeden zestaw pól do pominięcia.
+ *
+ * Czego tu NIE MA: surowego HTML strony (kilka MB na wiersz, po sparsowaniu
+ * zbędny) i `accountLabel` z parsera (e-mail konta w sklepie — dana osobowa
+ * niepotrzebna do odświeżania ceny; wycinana przed zapisem).
+ */
+export const warehouseImportInbox = sqliteTable(
+  "warehouse_import_inbox",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    userId: integer("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    /**
+     * queued — czeka w panelu; opened — formularz towaru został z niego
+     * otwarty (ale nie zapisany); done — towar zapisany; discarded — człowiek
+     * odrzucił propozycję. `done`/`discarded` zostają w tabeli do wygaśnięcia:
+     * inaczej „Odrzuć" i ponowny klik w sklepie mnożyłyby ten sam wiersz.
+     */
+    status: text("status", { enum: ["queued", "opened", "done", "discarded"] })
+      .default("queued")
+      .notNull(),
+    /** Czym był klik: „open" = przełącz mnie na Magazyn, „queue" = zostaw w sklepie. */
+    mode: text("mode", { enum: ["open", "queue"] }).default("open").notNull(),
+    /** Domena sklepu bez `www.` — ten sam klucz co `warehouse_item_sources.shop`. */
+    shop: text("shop"),
+    shopLabel: text("shop_label"),
+    /** Adres produktu w postaci surowej (do porównań normalizowany w kodzie). */
+    productUrl: text("product_url"),
+    /** `document.title` karty — jedyny ślad tego, co widział użytkownik. */
+    pageTitle: text("page_title"),
+    /** Nazwa i cena na wierzchu, żeby lista kolejki nie parsowała JSON-a. */
+    name: text("name"),
+    priceNet: real("price_net"),
+    /** Odpowiedź serwisu parsowania (bez `accountLabel`) — źródło dla formularza. */
+    parsedJson: text("parsed_json").notNull(),
+    /** Miniatura produktu jako data-URL (≤1 MB, ten sam limit co kartoteka). */
+    photoData: text("photo_data"),
+    photoWarning: text("photo_warning"),
+    matchCount: integer("match_count").default(0).notNull(),
+    /**
+     * Towar, do którego wiersz najpewniej należy (pierwsze dopasowanie po
+     * źródle). Świadomie BEZ klucza obcego: usunięcie towaru nie ma kasować
+     * propozycji z kolejki, a panel i tak sprawdza, czy id nadal istnieje.
+     */
+    matchItemId: integer("match_item_id"),
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+    openedAt: text("opened_at"),
+    /**
+     * +7 dni od wrzucenia. Kolejka bez terminu rośnie bez końca — porzucone
+     * „dodam później" zostawałoby w panelu na zawsze. Czyszczona leniwie przy
+     * każdym imporcie z wtyczki (bez crona).
+     */
+    expiresAt: text("expires_at").notNull(),
+  },
+  (t) => ({
+    /** Lista kolejki: „moje wiersze w statusie X, najnowsze pierwsze". */
+    userStatusIdx: index("warehouse_import_inbox_user_status_idx").on(
+      t.userId,
+      t.status,
+      t.createdAt
+    ),
+    /** Dedup: „czy ten sam produkt już u mnie czeka?" przy każdym imporcie. */
+    userUrlIdx: index("warehouse_import_inbox_user_url_idx").on(t.userId, t.productUrl),
+  })
+);
+
+export type WarehouseImportInbox = typeof warehouseImportInbox.$inferSelect;
+export type NewWarehouseImportInbox = typeof warehouseImportInbox.$inferInsert;
 
 // Magazyny — główny, pojazdy, pracownicy, budowy. Hierarchia max 1 poziom
 // (parent nie może sam mieć parenta — pilnowane w API).

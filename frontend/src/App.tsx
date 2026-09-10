@@ -38,6 +38,7 @@ import { AdminCalendar } from "./pages/AdminCalendar";
 import { AdminCompany } from "./pages/AdminCompany";
 import { PublicOrderForm } from "./pages/PublicOrderForm";
 import { PublicOffer } from "./pages/PublicOffer";
+import { PluginImportBridge } from "./components/PluginImportBridge";
 import { useAuth } from "./auth/AuthProvider";
 import { usePerms, tabKeyForPath } from "./auth/permissions";
 import AuthScreen from "./auth/AuthScreen";
@@ -72,6 +73,10 @@ function AuthedApp() {
   return (
     <Layout>
       <AccessGuard />
+      {/* Nasłuch sygnału z wtyczki przeglądarki — musi być w zalogowanej części
+          i WEWNĄTRZ routera (używa `useNavigate`), a nie w `App`, gdzie
+          obejmowałby też publiczne trasy bez sesji. */}
+      <PluginImportBridge />
       <Routes>
         <Route path="/" element={<Dashboard />} />
         <Route path="/contractors" element={<Contractors />} />
