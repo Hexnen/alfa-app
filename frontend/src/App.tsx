@@ -21,6 +21,7 @@ import { Analityka, AnalitykaRedirect } from "./pages/Analityka";
 import { Monitoring } from "./pages/Monitoring";
 import { Templates } from "./pages/Templates";
 import { Warehouse } from "./pages/Warehouse";
+import { Manuals } from "./pages/Manuals";
 import { Uslugi } from "./pages/Uslugi";
 import { Oferty } from "./pages/Oferty";
 import { Calendar } from "./pages/Calendar";
@@ -30,12 +31,20 @@ import { CmaReportDetails } from "./pages/CmaReportDetails";
 import { CmaTrends } from "./pages/CmaTrends";
 import { CmaCameraOutages } from "./pages/CmaCameraOutages";
 import { CmaObjects } from "./pages/CmaObjects";
+import { CmaInterventionGroups } from "./pages/CmaInterventionGroups";
 import { CmaSettings } from "./pages/CmaSettings";
 import { Ofi } from "./pages/Ofi";
+import { HandlowyPulpit } from "./pages/HandlowyPulpit";
+import { HandlowyLeady } from "./pages/HandlowyLeady";
+import { HandlowyLeadDetails } from "./pages/HandlowyLeadDetails";
+import { HandlowyKalendarz } from "./pages/HandlowyKalendarz";
+import { HandlowyAktywnosci } from "./pages/HandlowyAktywnosci";
+import { HandlowyKontakty } from "./pages/HandlowyKontakty";
 import { AdminUsers } from "./pages/AdminUsers";
 import { AdminAssistant } from "./pages/AdminAssistant";
 import { AdminCalendar } from "./pages/AdminCalendar";
 import { AdminCompany } from "./pages/AdminCompany";
+import { AdminMail } from "./pages/AdminMail";
 import { PublicOrderForm } from "./pages/PublicOrderForm";
 import { PublicOffer } from "./pages/PublicOffer";
 import { PluginImportBridge } from "./components/PluginImportBridge";
@@ -97,6 +106,7 @@ function AuthedApp() {
           <Route path="/technical/szablony" element={<Templates />} />
           <Route path="/technical/kalendarz" element={<Calendar />} />
           <Route path="/technical/magazyn" element={<Warehouse />} />
+          <Route path="/technical/manuale" element={<Manuals />} />
           <Route path="/technical/uslugi" element={<Uslugi />} />
           <Route path="/technical/oferty" element={<Oferty />} />
           {/* Oferta ma własny adres z numeru: /technical/oferty/of202608014 */}
@@ -121,17 +131,27 @@ function AuthedApp() {
           <Route path="/analityka" element={<AnalitykaRedirect />} />
           <Route path="/analityka/:tab" element={<Analityka />} />
           <Route path="/ofi" element={<Ofi />} />
+          {/* Handlowy: strona na zakładkę (wzorzec CMA), bez wspólnego routera. */}
+          <Route path="/handlowy" element={<Navigate to="/handlowy/pulpit" replace />} />
+          <Route path="/handlowy/pulpit" element={<HandlowyPulpit />} />
+          <Route path="/handlowy/leady" element={<HandlowyLeady />} />
+          <Route path="/handlowy/leady/:id" element={<HandlowyLeadDetails />} />
+          <Route path="/handlowy/kalendarz" element={<HandlowyKalendarz />} />
+          <Route path="/handlowy/aktywnosci" element={<HandlowyAktywnosci />} />
+          <Route path="/handlowy/kontakty" element={<HandlowyKontakty />} />
           <Route path="/cma" element={<Navigate to="/cma/raporty" replace />} />
           <Route path="/cma/raporty" element={<CmaReports />} />
           <Route path="/cma/raporty/:id" element={<CmaReportDetails />} />
           <Route path="/cma/trendy" element={<CmaTrends />} />
           <Route path="/cma/braki-kamer" element={<CmaCameraOutages />} />
           <Route path="/cma/obiekty" element={<CmaObjects />} />
+          <Route path="/cma/grupy-interwencyjne" element={<CmaInterventionGroups />} />
           <Route path="/cma/ustawienia" element={<CmaSettings />} />
           <Route path="/admin/users" element={<AdminUsers />} />
           <Route path="/admin/asystent" element={<AdminAssistant />} />
           <Route path="/admin/kalendarz" element={<AdminCalendar />} />
           <Route path="/admin/firma" element={<AdminCompany />} />
+          <Route path="/admin/poczta" element={<AdminMail />} />
         </Routes>
       </Layout>
   );

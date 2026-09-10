@@ -25,7 +25,7 @@ import {
   type CalendarSettingsField,
   type CalendarSettingsValues,
 } from "@/lib/api";
-import { EVENT_TYPE_META, EVENT_TYPE_ORDER, REALIZATION_TYPES, isNoteEvent } from "@/lib/calendar-labels";
+import { DEPARTMENT_TYPE_ORDER, EVENT_TYPE_META, REALIZATION_TYPES, isNoteEvent } from "@/lib/calendar-labels";
 import { ErrorBox, Field, SectionCard, Switch } from "@/components/admin-assistant/shared";
 import { deepEq, errMsg, useFlash } from "@/components/admin-assistant/helpers";
 import { cn } from "@/lib/utils";
@@ -198,7 +198,7 @@ export function AdminCalendar() {
   /** Typy do wyboru: z backendu (meta.allowedTypes) albo wszystkie poza urlopem i notatką. */
   const allowedTypes = settings.meta?.allowedTypes?.length
     ? settings.meta.allowedTypes
-    : EVENT_TYPE_ORDER.filter((t) => t !== "urlop" && !isNoteEvent(t));
+    : DEPARTMENT_TYPE_ORDER.technical.filter((t) => t !== "urlop" && !isNoteEvent(t));
 
   return (
     <div className="space-y-3 pb-24">

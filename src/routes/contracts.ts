@@ -30,7 +30,9 @@ type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
  */
 function parseContractFields(raw: unknown) {
   const b = asRecord(raw);
-  rejectReadonlyFields(b);
+  // `draftId` nadaje wyłącznie „Przenieś do rejestru” (POST /contracts/drafts/:id/promote)
+  // — ręczna edycja umowy nie może przypiąć sobie cudzego dokumentu.
+  rejectReadonlyFields(b, ["draftId"]);
   return {
     objectId: parseFk(b.objectId, "objects", "Obiekt", { nullable: false }),
     contractNumber: parseString(b.contractNumber, { label: "Numer umowy", max: STR.SHORT }),
@@ -49,8 +51,13 @@ function assertDateOrder(startDate: string, endDate: string | null | undefined):
   }
 }
 
-/** Czy inny wiersz ma już ten numer umowy (numer identyfikuje dokument — musi być unikalny). */
-function numberTaken(tx: Tx | typeof db, contractNumber: string, exceptId?: number): boolean {
+/**
+ * Czy inny wiersz ma już ten numer umowy (numer identyfikuje dokument — musi być unikalny).
+ *
+ * Eksportowane, bo tej samej kontroli używa „Przenieś do rejestru”
+ * (src/routes/contract-drafts.ts) — numer draftu musi być wolny w rejestrze.
+ */
+export function numberTaken(tx: Tx | typeof db, contractNumber: string, exceptId?: number): boolean {
   const conditions: SQL[] = [eq(schema.contracts.contractNumber, contractNumber)];
   if (exceptId !== undefined) conditions.push(ne(schema.contracts.id, exceptId));
   return (
@@ -140,6 +147,23 @@ function numberParam(raw: string | undefined): number | undefined {
 function dateParam(raw: string | undefined): string | undefined {
   if (raw === undefined || !/^\d{4}-\d{2}-\d{2}$/.test(raw.trim())) return undefined;
   return raw.trim();
+}
+
+/**
+ * Adres DOCX-a przypiętego draftu — to, co panel rejestru pokazuje w podglądzie.
+ *
+ * `null` znaczy „nie ma czego pokazać”: albo umowa nie wyszła z draftu (wpis
+ * ręczny), albo draft istnieje, ale dokumentu jeszcze nie wygenerowano. Front
+ * nie musi więc znać wewnętrznej ścieżki plików ani jej składać sam.
+ *
+ * `inline=1`, bo to podgląd w przeglądarce, a nie pobieranie pliku.
+ *
+ * Eksportowane — tej samej postaci adresu używa odpowiedź „Przenieś do
+ * rejestru” (src/routes/contract-drafts.ts).
+ */
+export function draftFileUrlOf(draftId: number | null, storedPath: string | null | undefined): string | null {
+  if (draftId === null || !storedPath) return null;
+  return `/api/contracts/drafts/${draftId}/file?inline=1`;
 }
 
 // Get all contracts
@@ -241,6 +265,9 @@ app.get("/", async (c) => {
       contract: schema.contracts,
       object: schema.objects,
       contractor: schema.contractors,
+      // Sam fakt istnienia pliku draftu — bez tego front nie odróżni „umowa
+      // z dokumentem" od „draft skasowany / jeszcze nie wygenerowany".
+      draftStoredPath: schema.contractDrafts.generatedStoredPath,
     })
     .from(schema.contracts)
     .leftJoin(schema.objects, eq(schema.contracts.objectId, schema.objects.id))
@@ -248,6 +275,7 @@ app.get("/", async (c) => {
       schema.contractors,
       eq(schema.objects.contractorId, schema.contractors.id)
     )
+    .leftJoin(schema.contractDrafts, eq(schema.contracts.draftId, schema.contractDrafts.id))
     .where(whereClause)
     .orderBy(...orderBy)
     .limit(pageSize)
@@ -279,6 +307,7 @@ app.get("/", async (c) => {
       ...c.contract,
       object: c.object,
       contractor: c.contractor,
+      draftFileUrl: draftFileUrlOf(c.contract.draftId, c.draftStoredPath),
     })),
     total,
     page,
@@ -300,6 +329,7 @@ app.get("/:id", async (c) => {
       contract: schema.contracts,
       object: schema.objects,
       contractor: schema.contractors,
+      draftStoredPath: schema.contractDrafts.generatedStoredPath,
     })
     .from(schema.contracts)
     .leftJoin(schema.objects, eq(schema.contracts.objectId, schema.objects.id))
@@ -307,6 +337,7 @@ app.get("/:id", async (c) => {
       schema.contractors,
       eq(schema.objects.contractorId, schema.contractors.id)
     )
+    .leftJoin(schema.contractDrafts, eq(schema.contracts.draftId, schema.contractDrafts.id))
     .where(eq(schema.contracts.id, id))
     .limit(1);
 
@@ -323,6 +354,7 @@ app.get("/:id", async (c) => {
       ...result[0].contract,
       object: result[0].object,
       contractor: result[0].contractor,
+      draftFileUrl: draftFileUrlOf(result[0].contract.draftId, result[0].draftStoredPath),
     },
   });
 });

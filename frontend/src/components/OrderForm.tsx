@@ -1,4 +1,17 @@
-import { useState, useEffect, useCallback } from "react";
+/**
+ * FORMULARZ ZLECENIA — usługi zakładanego obiektu jako OKRESY.
+ *
+ * Do września 2026 zlecenie opisywało usługi czterema checkboxami `objectHas*`,
+ * z których backend robił obiekt „od zawsze i na zawsze”. Kartoteka obiektu
+ * mówi dziś okresami (start wymagany, koniec opcjonalny), więc zlecenie —
+ * jedyne miejsce, gdzie obiekt powstaje automatycznie — musi umieć powiedzieć
+ * to samo. Stąd ten sam `ObjectServicesEditor`, co w kartotece, tylko `compact`.
+ *
+ * Flagi `objectHas*`/`objectCameraCount` nadal jadą w payloadzie (zgodność ze
+ * starszym backendem), ale są WYLICZANE z okresów przez `activeServiceFlagsOf` —
+ * nikt ich już nie klika.
+ */
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
@@ -38,12 +51,40 @@ import {
   Check,
   AlertCircle,
   Home,
+  ExternalLink,
+  Link2,
+  Loader2,
+  ShieldCheck,
 } from "lucide-react";
-import type { Order, OrderInput, Contractor, CompanyData, ObjectRecord, ObjectHistoryRecord } from "@/lib/api";
-import { getContractorObjects } from "@/lib/api";
-import { OBJECT_KINDS } from "@/lib/orderIntakeSteps";
+import type {
+  Order,
+  OrderInput,
+  Contractor,
+  CompanyData,
+  ObjectRecord,
+  ObjectHistoryRecord,
+  ObjectService,
+  ObjectServiceInput,
+} from "@/lib/api";
+import { getContractorObjects, getObject } from "@/lib/api";
+import { applyDefaultServiceStart, OBJECT_KINDS } from "@/lib/orderIntakeSteps";
 import { normalizeNIP, validateNIP } from "@/lib/nip";
-import { installationTypeLabels, statusLabels } from "@/lib/utils";
+import {
+  activeServiceFlagsOf,
+  installationTypeLabels,
+  isServicePeriodEnded,
+  servicePeriodLabel,
+  statusLabels,
+  todayIsoLocal,
+} from "@/lib/utils";
+import {
+  isDirectInput,
+  isGoogleMapsUrl,
+  parseCoords,
+  resolveMapsLink,
+  toMapsUrl,
+} from "@/lib/maps-url";
+import { ObjectServicesEditor } from "./ObjectServicesEditor";
 
 interface OrderFormProps {
   open: boolean;
@@ -73,7 +114,25 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
   const [contractorObjects, setContractorObjects] = useState<Array<ObjectRecord & { latestAction: ObjectHistoryRecord | null }>>([]);
   const [createObject, setCreateObject] = useState(!order);
   const [selectedObject, setSelectedObject] = useState<ObjectRecord | null>(null);
-  
+
+  /** Okresy usług zakładanego obiektu (pole `objectServices` zlecenia). */
+  const [objectServices, setObjectServices] = useState<ObjectServiceInput[]>([]);
+  const [servicesValid, setServicesValid] = useState(true);
+  /** Podpowiedź startu ostatnio rozdana wierszom — patrz `handleChange`. */
+  const prevDefaultStart = useRef(todayIsoLocal());
+
+  /**
+   * Okresy obiektu JUŻ ISTNIEJĄCEGO, tylko do odczytu. Zlecenie podpięte do
+   * obiektu z kartoteki niczego w nim nie zmienia (decyzja: kartoteka jest
+   * źródłem prawdy), ale handlowiec musi widzieć, co ten obiekt ma dziś.
+   */
+  const [linkedServices, setLinkedServices] = useState<ObjectService[] | null>(null);
+  const [linkedLoading, setLinkedLoading] = useState(false);
+
+  // Lokalizacja: nota pod polem linku + zajętość przycisku „Sprawdź link”.
+  const [locationNote, setLocationNote] = useState<string | null>(null);
+  const [locationBusy, setLocationBusy] = useState(false);
+
   // Form data
   const [formData, setFormData] = useState<OrderInput>({
     requesterName: "",
@@ -128,7 +187,35 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
       setCreateObject(!hasObject);
       setSelectedObject(order?.object || null);
       setError(null);
-      
+      setServicesValid(true);
+      setLocationNote(null);
+
+      /*
+       * Okresy usług: przy edycji bierzemy to, co zapamiętało zlecenie, a gdy
+       * pola jeszcze nie ma (zlecenie sprzed tej zmiany) — odtwarzamy je z
+       * odpowiedzi „montaż kamer” i „wideo recepcja”, dokładnie tak, jak zrobiłby
+       * to backend w fallbacku. SSWiN-u i ochrony fizycznej nie zgadujemy.
+       */
+      const defaultStart = (order?.serviceStartDate || "").trim() || todayIsoLocal();
+      prevDefaultStart.current = defaultStart;
+      const derived: ObjectServiceInput[] = [];
+      if (order?.isCameraInstallation) {
+        derived.push({
+          service: "kamery",
+          startDate: defaultStart,
+          endDate: null,
+          cameraCount: order.cameraCount ?? null,
+        });
+      }
+      if (order?.videoReception) {
+        derived.push({
+          service: "wideorecepcja",
+          startDate: defaultStart,
+          endDate: null,
+        });
+      }
+      setObjectServices(order?.objectServices ?? derived);
+
       setFormData({
         requesterName: order?.requesterName || "",
         requesterPhone: order?.requesterPhone || "",
@@ -257,6 +344,18 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
   ) => {
     const { name, value } = e.target;
     setFormData((prev) => ({ ...prev, [name]: value }));
+    /*
+     * „Początek usługi” jest domyślnym startem okresów, ale ludzie wypełniają
+     * formularz w dowolnej kolejności: najpierw dodają usługi (start = dziś),
+     * potem wpisują właściwą datę. Przestawiamy więc TYLKO te wiersze, które
+     * nadal trzymają poprzednią podpowiedź — ręczna poprawka zostaje.
+     */
+    if (name === "serviceStartDate") {
+      const prev = prevDefaultStart.current;
+      const next = value.trim() || todayIsoLocal();
+      prevDefaultStart.current = next;
+      setObjectServices((rows) => applyDefaultServiceStart(rows, prev, next));
+    }
   };
 
   const handleNumberChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -266,6 +365,100 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
       [name]: value === "" ? undefined : Number(value),
     }));
   };
+
+  /**
+   * Okresy podpiętego obiektu — tylko do odczytu. Wiersz z listy kontrahenta
+   * (`getContractorObjects`) usług nie niesie, więc dociągamy kartotekę.
+   */
+  const linkedObjectId = createObject ? null : formData.objectId ?? null;
+  useEffect(() => {
+    if (!open || linkedObjectId == null) {
+      setLinkedServices(null);
+      return;
+    }
+    let cancelled = false;
+    setLinkedLoading(true);
+    getObject(linkedObjectId)
+      .then((res) => {
+        if (!cancelled) setLinkedServices(res.data?.services ?? []);
+      })
+      .catch(() => {
+        // Brak usług w podglądzie nie może blokować zapisu zlecenia.
+        if (!cancelled) setLinkedServices([]);
+      })
+      .finally(() => {
+        if (!cancelled) setLinkedLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, linkedObjectId]);
+
+  // --- Lokalizacja: link Google Maps ------------------------------------------
+
+  const locationUrl = (formData.objectLocationUrl || "").trim();
+  /** Link spoza domen Google nie zapisze się później na obiekcie (`objects.maps_url`). */
+  const locationSuspicious = locationUrl !== "" && !isGoogleMapsUrl(locationUrl);
+
+  /**
+   * To, co człowiek wkleił w pole linku: gołe „szer, dł” zamieniamy na kanoniczny
+   * link Google (tak samo, jak robi to `LocationPicker`), link zostawiamy jak
+   * jest — od odczytania pinezki jest osobny przycisk.
+   */
+  const handleLocationInput = useCallback((raw: string) => {
+    const value = raw.trim();
+    if (!value) return;
+    const coords = parseCoords(value);
+    if (coords && !/^https?:\/\//i.test(value)) {
+      setFormData((prev) => ({
+        ...prev,
+        objectLocationUrl: toMapsUrl(coords.lat, coords.lng),
+      }));
+      setLocationNote(`Współrzędne: ${coords.lat}, ${coords.lng}`);
+      return;
+    }
+    setFormData((prev) => ({ ...prev, objectLocationUrl: value }));
+    if (coords) setLocationNote(`Współrzędne z linku: ${coords.lat}, ${coords.lng}`);
+  }, []);
+
+  /**
+   * „Sprawdź link” — parser, a gdy w tekście współrzędnych nie ma, prośba do
+   * serwera o rozwinięcie krótkiego linku (`maps.app.goo.gl`; przeglądarka nie
+   * pójdzie za tym przekierowaniem przez CORS).
+   */
+  const checkLocationLink = useCallback(async (raw: string) => {
+    const value = raw.trim();
+    if (!value) return;
+    setLocationBusy(true);
+    setLocationNote(null);
+    try {
+      const hit = await resolveMapsLink(value);
+      setLocationNote(
+        `${hit.source === "resolved" ? "Krótki link rozwinięty" : "Odczytano z linku"}: ${hit.lat}, ${hit.lng}`
+      );
+    } catch (e) {
+      setLocationNote(
+        e instanceof Error ? e.message : "Nie udało się odczytać pinezki z tego linku."
+      );
+    } finally {
+      setLocationBusy(false);
+    }
+  }, []);
+
+  // --- Usługi zakładanego obiektu ---------------------------------------------
+
+  /** Start podpowiadany nowym okresom: „Początek usługi” albo dziś. */
+  const defaultServiceStart =
+    (formData.serviceStartDate || "").trim() || todayIsoLocal();
+
+  /** Stan usług „na dziś” policzony z okresów — to samo, co zrobi backend. */
+  const serviceFlags = useMemo(
+    () => activeServiceFlagsOf(objectServices.filter((s) => !!s.startDate)),
+    [objectServices]
+  );
+
+  /** Czy pokazujemy edytor okresów (tylko przy zakładaniu nowego obiektu). */
+  const showServicesEditor = createObject && !order;
 
   const handleSelectObject = (obj: ObjectRecord) => {
     setSelectedObject(obj);
@@ -316,11 +509,15 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
         setError("Wybierz typ instalacji");
         return;
       }
+      if (!servicesValid) {
+        setError("Popraw okresy usług obiektu — sprawdź daty i liczbę kamer.");
+        return;
+      }
     } else if (!formData.objectId) {
       setError("Wybierz lub utwórz obiekt");
       return;
     }
-    
+
     setLoading(true);
     try {
       await onSubmit({
@@ -328,6 +525,14 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
         payerNip: normalizeNIP(formData.payerNip),
         createContractor,
         createObject,
+        // Okresy usług zakładanego obiektu; flagi `objectHas*` jadą obok tylko
+        // dla zgodności i są z nich WYLICZONE (`activeServiceFlagsOf`).
+        objectServices,
+        objectHasCameras: !!serviceFlags.hasCameras,
+        objectCameraCount: serviceFlags.cameraCount,
+        objectHasSswin: !!serviceFlags.hasSswin,
+        objectHasVideoreception: !!serviceFlags.hasVideoreception,
+        objectHasOfi: !!serviceFlags.hasOfi,
       });
       onClose();
     } catch (err: any) {
@@ -633,6 +838,59 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
                 </div>
               )}
 
+              {/* Usługi obiektu JUŻ ISTNIEJĄCEGO — tylko do odczytu. Zlecenie
+                  podpięte do kartoteki niczego w niej nie zmienia (kartoteka
+                  jest źródłem prawdy), więc pokazujemy stan, zamiast pozwalać
+                  edytować go w dwóch miejscach naraz. */}
+              {linkedObjectId != null && (
+                <div
+                  className="rounded-lg border border-slate-200 bg-white p-3 space-y-2"
+                  data-testid="order-object-services"
+                >
+                  <div className="flex flex-wrap items-baseline justify-between gap-2">
+                    <span className="flex items-center gap-1.5 text-sm font-medium text-slate-700">
+                      <ShieldCheck className="h-4 w-4 text-indigo-500" />
+                      Usługi tego obiektu
+                    </span>
+                    <a
+                      href={`/objects/${linkedObjectId}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 text-xs text-indigo-600 hover:underline"
+                      data-testid="order-object-link"
+                    >
+                      Kartoteka obiektu
+                      <ExternalLink className="h-3 w-3" aria-hidden />
+                    </a>
+                  </div>
+                  {linkedLoading ? (
+                    <p className="text-sm text-slate-500">Wczytywanie usług…</p>
+                  ) : linkedServices && linkedServices.length > 0 ? (
+                    <ul className="space-y-1 text-sm">
+                      {linkedServices.map((s) => (
+                        <li
+                          key={s.id}
+                          className={
+                            isServicePeriodEnded(s)
+                              ? "text-slate-400 line-through"
+                              : "text-slate-700"
+                          }
+                        >
+                          {servicePeriodLabel(s)}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="text-sm text-slate-500">
+                      Ten obiekt nie ma jeszcze zapisanych okresów usług.
+                    </p>
+                  )}
+                  <p className="text-xs text-slate-500">
+                    Usługi zmienisz w kartotece obiektu — zlecenie ich nie nadpisuje.
+                  </p>
+                </div>
+              )}
+
               {/* New Object Form */}
               {(createObject || isEditing) && (
                 <div className="p-4 bg-white border border-slate-200 rounded-lg space-y-4">
@@ -658,17 +916,72 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
                         className="bg-white"
                       />
                     </div>
+                    {/* Link do pinezki — przy zakładaniu obiektu ląduje w
+                        `objects.maps_url`, więc rozpoznajemy go tak samo, jak
+                        kartoteka: wklejone „szer, dł” zamieniamy na kanoniczny
+                        link, a domenę spoza Google sygnalizujemy przed zapisem. */}
                     <div className="space-y-2">
                       <Label htmlFor="objectLocationUrl">Lokalizacja Google (URL)</Label>
-                      <Input
-                        id="objectLocationUrl"
-                        name="objectLocationUrl"
-                        type="url"
-                        value={formData.objectLocationUrl}
-                        onChange={handleChange}
-                        placeholder="https://maps.google.com/..."
-                        className="bg-white"
-                      />
+                      <div className="flex items-center gap-2">
+                        <div className="relative min-w-0 flex-1">
+                          <Link2
+                            className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400"
+                            aria-hidden
+                          />
+                          <Input
+                            id="objectLocationUrl"
+                            name="objectLocationUrl"
+                            data-testid="order-location-url"
+                            value={formData.objectLocationUrl}
+                            onChange={handleChange}
+                            onPaste={(e) => {
+                              const text = e.clipboardData.getData("text");
+                              if (!isDirectInput(text)) return;
+                              e.preventDefault();
+                              handleLocationInput(text);
+                            }}
+                            // Druga furtka: wpisane ręcznie albo wklejone przez
+                            // menu kontekstowe (wtedy `onPaste` nie leci przez React).
+                            onBlur={(e) => {
+                              const v = e.target.value;
+                              if (isDirectInput(v)) handleLocationInput(v);
+                            }}
+                            placeholder="https://maps.app.goo.gl/… albo „szer, dł”"
+                            className="bg-white pl-7"
+                          />
+                        </div>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          data-testid="order-location-resolve"
+                          disabled={locationBusy || locationUrl === ""}
+                          onClick={() => void checkLocationLink(locationUrl)}
+                          title="Odczytaj współrzędne z linku — krótkie linki rozwija serwer."
+                        >
+                          {locationBusy ? (
+                            <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                          ) : (
+                            <MapPin className="h-4 w-4" aria-hidden />
+                          )}
+                          <span className="ml-1">Sprawdź link</span>
+                        </Button>
+                      </div>
+                      {locationSuspicious && (
+                        <p className="text-xs text-amber-600">
+                          To nie wygląda na link Google Maps — kartoteka obiektu
+                          przyjmie tylko google.com, google.pl, maps.app.goo.gl
+                          albo g.co.
+                        </p>
+                      )}
+                      {locationNote && (
+                        <p
+                          className="text-xs text-slate-500"
+                          data-testid="order-location-note"
+                        >
+                          {locationNote}
+                        </p>
+                      )}
                     </div>
                     <div className="space-y-2">
                       <Label htmlFor="objectKind">Rodzaj obiektu</Label>
@@ -692,101 +1005,32 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
                     </div>
                   </div>
                   
-                  {createObject && !isEditing && (
-                    <div className="grid grid-cols-2 gap-4">
-                      {/* Usługi zakładanego obiektu — cztery niezależne flagi
-                          zamiast jednego „typu ochrony”. Kamery i wideorecepcja
-                          są wstępnie zaznaczone z danych zlecenia, ale handlowiec
-                          może je poprawić: zlecenie opisuje montaż, a kartoteka
-                          to, co na obiekcie ostatecznie działa. */}
+                  {showServicesEditor && (
+                    <div className="grid grid-cols-1 gap-4">
+                      {/* Usługi zakładanego obiektu jako OKRESY — ten sam edytor,
+                          co w kartotece, tylko kompaktowy. Zlecenie opisuje
+                          montaż, kartoteka to, co na obiekcie działa, więc
+                          handlowiec może tu dołożyć SSWiN albo ochronę fizyczną,
+                          o które zlecenie w ogóle nie pyta. */}
                       <div className="space-y-2">
-                        <Label>Usługi na obiekcie</Label>
-                        <div className="grid grid-cols-2 gap-1.5">
-                          <label className="flex items-center gap-2 text-sm">
-                            <input
-                              type="checkbox"
-                              className="h-4 w-4 accent-indigo-600"
-                              checked={formData.objectHasCameras ?? false}
-                              onChange={(e) =>
-                                setFormData((prev) => ({
-                                  ...prev,
-                                  objectHasCameras: e.target.checked,
-                                  objectCameraCount: e.target.checked
-                                    ? prev.objectCameraCount ?? null
-                                    : null,
-                                }))
-                              }
-                            />
-                            Kamery
-                          </label>
-                          <label className="flex items-center gap-2 text-sm">
-                            <input
-                              type="checkbox"
-                              className="h-4 w-4 accent-indigo-600"
-                              checked={formData.objectHasSswin ?? false}
-                              onChange={(e) =>
-                                setFormData((prev) => ({ ...prev, objectHasSswin: e.target.checked }))
-                              }
-                            />
-                            SSWiN
-                          </label>
-                          <label className="flex items-center gap-2 text-sm">
-                            <input
-                              type="checkbox"
-                              className="h-4 w-4 accent-indigo-600"
-                              checked={formData.objectHasVideoreception ?? false}
-                              onChange={(e) =>
-                                setFormData((prev) => ({
-                                  ...prev,
-                                  objectHasVideoreception: e.target.checked,
-                                }))
-                              }
-                            />
-                            Wideorecepcja
-                          </label>
-                          <label className="flex items-center gap-2 text-sm">
-                            <input
-                              type="checkbox"
-                              className="h-4 w-4 accent-indigo-600"
-                              checked={formData.objectHasOfi ?? false}
-                              onChange={(e) =>
-                                setFormData((prev) => ({ ...prev, objectHasOfi: e.target.checked }))
-                              }
-                            />
-                            OFI (ochrona fizyczna)
-                          </label>
-                        </div>
-                        {/* Puste pole zostaje `null` — „kamery są, nikt ich nie
-                            policzył”, co nie jest tym samym, co zero kamer. */}
-                        <div className="flex items-center gap-2">
-                          <Label
-                            htmlFor="objectCameraCount"
-                            className={!formData.objectHasCameras ? "text-slate-400" : undefined}
-                          >
-                            Liczba kamer
+                        <div className="flex flex-wrap items-baseline justify-between gap-2">
+                          <Label className="flex items-center gap-1.5">
+                            <ShieldCheck className="h-4 w-4 text-indigo-500" />
+                            Usługi na obiekcie
                           </Label>
-                          <Input
-                            id="objectCameraCount"
-                            type="number"
-                            min="0"
-                            step="1"
-                            disabled={!formData.objectHasCameras}
-                            className="w-24 bg-white tabular-nums"
-                            placeholder="nie policzono"
-                            value={formData.objectCameraCount ?? ""}
-                            onChange={(e) =>
-                              setFormData((prev) => ({
-                                ...prev,
-                                objectCameraCount:
-                                  e.target.value.trim() === ""
-                                    ? null
-                                    : Math.max(0, parseInt(e.target.value, 10) || 0),
-                              }))
-                            }
-                          />
+                          <span className="text-xs text-slate-500">
+                            Start podpowiadamy z „Początku usługi” ({defaultServiceStart})
+                          </span>
                         </div>
+                        <ObjectServicesEditor
+                          compact
+                          value={objectServices}
+                          onChange={setObjectServices}
+                          defaultStartDate={defaultServiceStart}
+                          onValidityChange={setServicesValid}
+                        />
                       </div>
-                      <div className="space-y-2">
+                      <div className="space-y-2 sm:max-w-xs">
                         <Label>
                           Typ instalacji <span className="text-red-500">*</span>
                         </Label>

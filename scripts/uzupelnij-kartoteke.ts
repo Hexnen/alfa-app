@@ -5,7 +5,7 @@
  *   npx tsx scripts/uzupelnij-kartoteke.ts --report=<plik.md> # gdzie zapisać raport
  *
  * Honoruje ALFA_DB_PATH (src/db/index.ts) — pierwsze przebiegi rób na kopii bazy.
- * Skrypt jest IDEMPOTENTNY: dotyka wyłącznie pól pustych (objects.monthly_value IS NULL,
+ * Skrypt jest IDEMPOTENTNY: dotyka wyłącznie pól pustych (objects.monthly_zdw i monthly_ofi IS NULL,
  * objects.company_id IS NULL, hr_objects.object_id IS NULL, brakujące wiersze `companies`),
  * więc drugi przebieg nie ma już czego zmieniać.
  *
@@ -34,6 +34,7 @@ import { eq } from "drizzle-orm";
 import * as XLSX from "xlsx";
 import { db, schema } from "../src/db/index.js";
 import { isMfError, lookupCompanyByNip } from "../src/lib/mf-whitelist.js";
+import { monthlyValueOf, splitAbonament } from "../src/lib/abonament-split.js";
 import { normalizeNIP, validateNIP } from "../src/utils/nip.js";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -270,7 +271,7 @@ function pickPayment(
 }
 
 const ofiTargets = realObjects
-  .filter((o) => o.hasOfi && o.status === "active" && o.monthlyValue === null)
+  .filter((o) => o.hasOfi && o.status === "active" && o.monthlyZdw === null && o.monthlyOfi === null)
   .sort((a, b) => a.id - b.id);
 
 for (const o of ofiTargets) {
@@ -408,7 +409,11 @@ for (const r of bulk) {
 const monthlyOverride = new Map(setMonthly.map((s) => [s.id, s.value]));
 function monthlyOf(objectId: number): number | null {
   if (monthlyOverride.has(objectId)) return monthlyOverride.get(objectId)!;
-  return objectById.get(objectId)?.monthlyValue ?? null;
+  const o = objectById.get(objectId);
+  if (!o) return null;
+  // „Znana cena" to suma obu linii abonamentu — po rozbiciu (migracja 0082)
+  // pojedynczej kolumny `monthly_value` już się nie czyta.
+  return monthlyValueOf(o.monthlyZdw, o.monthlyOfi);
 }
 
 for (const g of groups) {
@@ -641,9 +646,25 @@ if (apply) {
   db.transaction((tx) => {
     for (const s of setMonthly) {
       const current = tx.select().from(schema.objects).where(eq(schema.objects.id, s.id)).get();
-      if (!current || current.monthlyValue !== null) continue; // idempotencja
+      // Idempotencja: obiekt z JAKĄKOLWIEK uzupełnioną linią abonamentu zostaje.
+      if (!current || current.monthlyZdw !== null || current.monthlyOfi !== null) continue;
       const notes = [current.notes?.trim(), s.note].filter(Boolean).join("\n");
-      tx.update(schema.objects).set({ monthlyValue: s.value, notes }).where(eq(schema.objects.id, s.id)).run();
+      // Kwotę zapisujemy ROZBITĄ na linie — tą samą regułą, co migracja 0082
+      // (src/lib/abonament-split.ts). Notatka `s.note` niesie pochodzenie ceny
+      // („wpływ bankowy” / „faktura zbiorcza [ZDV]”), więc karmi tę samą regułę,
+      // która rozstrzygała obiekty mieszane przy migracji.
+      const split = splitAbonament({
+        monthlyValue: s.value,
+        hasOfi: current.hasOfi,
+        hasCameras: current.hasCameras,
+        hasSswin: current.hasSswin,
+        hasVideoreception: current.hasVideoreception,
+        notes: [s.note, current.notes ?? ""].join("\n"),
+      });
+      tx.update(schema.objects)
+        .set({ monthlyZdw: split.monthlyZdw, monthlyOfi: split.monthlyOfi, notes })
+        .where(eq(schema.objects.id, s.id))
+        .run();
       stats.monthly++;
     }
 

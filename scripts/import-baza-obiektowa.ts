@@ -27,9 +27,10 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { eq, inArray } from "drizzle-orm";
 import { db, schema } from "../src/db/index.js";
+import { splitAbonament } from "../src/lib/abonament-split.js";
 import { removeStoredFiles } from "../src/lib/calendar-attachments.js";
 import { isMfError, lookupCompanyByNip } from "../src/lib/mf-whitelist.js";
-import { legacyObjectType } from "../src/lib/object-services.js";
+import { legacyObjectType, upsertServiceRowsFromFlags } from "../src/lib/object-services.js";
 import { normalizeNIP, validateNIP } from "../src/utils/nip.js";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -40,6 +41,8 @@ const OUT_DIR = join(ROOT, "obiekty");
 const apply = process.argv.includes("--apply");
 const rebuild = process.argv.includes("--rebuild");
 const TODAY = new Date().toISOString().slice(0, 10);
+/** Data w formacie kolumn dat (`YYYY-MM-DD`) — rejestr CMA bywa niechlujny. */
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const SOURCE_NOTE = "Źródło: KONTRAHENCI.XLSX 2026-09-07";
 const CMA_NOTE = "Źródło: raport CMA 2026-07-07";
 
@@ -377,6 +380,10 @@ interface PlannedObject {
   hasCameras: boolean;
   hasOfi: boolean;
   cameraCount: number | null;
+  /** Początek świadczenia usług — z rejestru CMA (`monitoring_start`); null = nieznany. */
+  serviceStart: string | null;
+  /** Koniec świadczenia — import buduje kartotekę OD ZERA, więc wolno domknąć okres. */
+  serviceEnd: string | null;
   status: "active" | "inactive";
   monthlyValue: number | null;
   companyName: string | null;
@@ -492,6 +499,13 @@ function buildPlanFromCma(d: CmaDecision, mo: MonitoredRow, nip: string, extraNo
     hasCameras,
     hasOfi,
     cameraCount: hasCameras ? (cameras > 0 ? cameras : null) : cameras > 0 ? cameras : null,
+    // Okres świadczenia wprost z rejestru CMA. Daty przepuszczamy przez wzorzec
+    // ISO — rejestr potrafi nieść pusty string albo datę w innym formacie, a
+    // `object_services.start_date` jest NOT NULL i musi dać się porównywać.
+    serviceStart: ISO_DATE_RE.test((mo.monitoringStart ?? "").trim())
+      ? (mo.monitoringStart ?? "").trim()
+      : null,
+    serviceEnd: ISO_DATE_RE.test(end) ? end : null,
     status,
     monthlyValue,
     companyName,
@@ -569,6 +583,9 @@ function newOfiPost(opts: { nip: string; name: string; hrName: string | null; so
     hasCameras: false,
     hasOfi: true,
     cameraCount: null,
+    // Posterunek z kadr nie ma daty startu w źródle — okres zaczyna się datą importu.
+    serviceStart: null,
+    serviceEnd: null,
     status: "active",
     monthlyValue: null,
     companyName: null,
@@ -820,7 +837,22 @@ if (apply) {
             installationType: "takeover",
             status: p.status,
             department: "technical",
-            monthlyValue: p.monthlyValue,
+            // Abonament trafia do kartoteki ROZBITY na linie (ZDW / OFI) — tą
+            // samą regułą, co migracja 0082 (src/lib/abonament-split.ts).
+            // Kwota z rejestru CMA (`extra_data1`) wycenia monitoring, więc
+            // obiekt mieszany dostaje ją na ZDW.
+            ...(() => {
+              const split = splitAbonament({
+                monthlyValue: p.monthlyValue,
+                hasOfi: p.hasOfi,
+                hasCameras: p.hasCameras,
+                hasSswin: p.hasSswin,
+                hasVideoreception: false,
+                notes: p.notes,
+                priceFromCma: p.origin === "cma",
+              });
+              return { monthlyZdw: split.monthlyZdw, monthlyOfi: split.monthlyOfi };
+            })(),
             notes: p.notes,
             latitude: p.latitude,
             longitude: p.longitude,
@@ -832,6 +864,26 @@ if (apply) {
         objectIdByPair.set(`${contractorId}:${norm(p.name)}`, objectId);
         objectCompanyById.set(objectId, companyId);
         stats.objectsInserted++;
+        /*
+         * OKRESY USŁUG (`object_services`) — źródło prawdy, z którego backend
+         * przelicza flagi `has_*`. Import buduje kartotekę OD ZERA, więc jako
+         * jedyny wolno mu domknąć okres datą `monitoring_end` z rejestru: to nie
+         * jest zmiana czyjegoś stanu, tylko przepisanie faktu ze źródła. Start
+         * bez daty w rejestrze = data importu — `start_date` jest NOT NULL.
+         *
+         * Taki zastępczy start leci z `startEstimated`, bo to data URUCHOMIENIA
+         * IMPORTU, a nie rozpoczęcia usługi. Bez tej flagi seria czasowa
+         * analityki pokazałaby całą wgraną kartotekę jako usługi „rozpoczęte"
+         * w miesiącu importu (dokładnie ten artefakt, który dla backfillu 0084
+         * naprawia migracja 0087).
+         */
+        upsertServiceRowsFromFlags(
+          tx,
+          objectId,
+          { hasCameras: p.hasCameras, hasSswin: p.hasSswin, hasOfi: p.hasOfi, cameraCount: p.cameraCount },
+          p.serviceStart ?? TODAY,
+          { endDate: p.serviceEnd, startEstimated: !p.serviceStart }
+        );
       } else {
         // Wiersz już jest (przebieg przyrostowy) — nie nadpisujemy, bo mógł być edytowany
         // w aplikacji. Uzupełniamy tylko puste powiązanie ze spółką.
@@ -886,7 +938,7 @@ const withCameras = afterObjects.filter((o) => o.hasCameras).length;
 const withOfi = afterObjects.filter((o) => o.hasOfi).length;
 const withSswin = afterObjects.filter((o) => o.hasSswin).length;
 const withCompany = afterObjects.filter((o) => o.companyId !== null).length;
-const withoutPrice = afterObjects.filter((o) => o.monthlyValue === null);
+const withoutPrice = afterObjects.filter((o) => o.monthlyZdw === null && o.monthlyOfi === null);
 const withoutCoords = afterObjects.filter((o) => o.latitude === null || o.longitude === null);
 const linkedMonitored = afterMonitored.filter((m) => m.objectId !== null).length;
 const linkedHr = afterHr.filter((h) => h.objectId !== null).length;
@@ -913,7 +965,7 @@ md.push(`| — z kamerami | ${withCameras} |`);
 md.push(`| — z OFI | ${withOfi} |`);
 md.push(`| — z SSWiN | ${withSswin} |`);
 md.push(`| — ze spółką fakturującą | ${withCompany} |`);
-md.push(`| — bez abonamentu (monthly_value NULL) | ${withoutPrice.length} |`);
+md.push(`| — bez abonamentu (monthly_zdw i monthly_ofi NULL) | ${withoutPrice.length} |`);
 md.push(`| — bez współrzędnych | ${withoutCoords.length} |`);
 md.push(`| monitored_objects powiązane z kartoteką | ${linkedMonitored} / ${afterMonitored.length} |`);
 md.push(`| hr_objects powiązane z kartoteką | ${linkedHr} / ${afterHr.length} |`);

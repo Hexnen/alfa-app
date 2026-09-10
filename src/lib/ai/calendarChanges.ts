@@ -28,6 +28,7 @@ import {
   type ParsedInput,
 } from "../calendar-mutations.js";
 import { conflictEventIds, loadEvent, loadEvents, techName, type CalendarEventJson } from "../calendar-queries.js";
+import { publishCalendarChange, type CalendarChangeKind } from "../calendar-live.js";
 import { diffMinutes, shiftLocal } from "../calendar-recurrence.js";
 import type { AssistantSettingsValues } from "./assistantConfig.js";
 import { addDays, localNow } from "./freeSlots.js";
@@ -357,6 +358,9 @@ function ddmm(date: string): string {
 /** ParsedInput → surowe body dla parseInput (ponowne scalanie z patchem). */
 function inputBodyOf(e: CalendarEventJson): Record<string, unknown> {
   return {
+    // Dział przepisujemy z wydarzenia: parseInput domyśla się „technical”, a zmiana
+    // działu w PUT jest zabroniona (400) — round-trip musi zwrócić to samo.
+    department: e.department,
     type: e.type,
     title: e.title,
     description: e.description,
@@ -416,6 +420,9 @@ export function resolveChange(dbx: DbOrTx, change: Change, index: number, opts: 
         const inPast = allDay ? startAt.slice(0, 10) <= today : startAt < now;
         const input = parseInput({
           ...ev,
+          // Asystent planuje wyłącznie w dziale technicznym — jawnie, bez polegania
+          // na wartości domyślnej parseInput.
+          department: "technical",
           allDay,
           startAt,
           endAt,
@@ -561,6 +568,15 @@ export function resolveChange(dbx: DbOrTx, change: Change, index: number, opts: 
 
 export const ASSISTANT_LOG_SUFFIX = "(przez asystenta)";
 
+/** PlannedOp.kind → rodzaj sygnału dla kalendarza „na żywo" (src/lib/calendar-live.ts). */
+const OP_CHANGE_KIND: Record<PlannedOp["kind"], CalendarChangeKind> = {
+  create: "created",
+  update: "updated",
+  note: "notes",
+  delete: "deleted",
+  restore: "restored",
+};
+
 /** Wykonuje zaplanowaną operację przez calendar-mutations; zwraca id wydarzenia. */
 export function executeOp(tx: Tx, op: PlannedOp, ctx: MutationCtx): number {
   switch (op.kind) {
@@ -586,13 +602,30 @@ export function executeOp(tx: Tx, op: PlannedOp, ctx: MutationCtx): number {
  * Zatwierdzenie jednej zmiany: ponowne rozwiązanie na aktualnym stanie + zapis w JEDNEJ transakcji.
  * Rzuca ApiError przy błędzie walidacji.
  */
-export function applyChange(change: Change, index: number, opts: ResolveOptions, ctx: MutationCtx): { eventId: number; event: CalendarEventJson; resolved: ResolvedChange } {
-  return db.transaction((tx) => {
+export function applyChange(
+  change: Change,
+  index: number,
+  opts: ResolveOptions,
+  ctx: MutationCtx,
+  /** Karta, która zatwierdziła zmianę (nagłówek X-Alfa-Client) — tylko ona pomija sygnał. */
+  actorClientId: string | null = null
+): { eventId: number; event: CalendarEventJson; resolved: ResolvedChange } {
+  const out = db.transaction((tx) => {
     const r = resolveChange(tx, change, index, opts);
     if (!r.op || r.resolved.error) throw new ApiError(400, r.resolved.error ?? "Zmiana niewykonalna");
     const eventId = executeOp(tx, r.op, { ...ctx, summarySuffix: ctx.summarySuffix ?? ASSISTANT_LOG_SUFFIX });
     const event = loadEvent(tx, eventId);
     if (!event) throw new ApiError(404, `Wydarzenie #${eventId} nie istnieje`);
-    return { eventId, event, resolved: r.resolved };
+    return { eventId, event, resolved: r.resolved, opKind: r.op.kind };
   });
+  // Kalendarz „na żywo": zmiana zatwierdzona w asystencie ma odświeżyć cudze karty
+  // tak samo jak zapis z dialogu. PO commicie — subskrybent od razu czyta bazę.
+  publishCalendarChange({
+    department: out.event.department,
+    kind: OP_CHANGE_KIND[out.opKind],
+    eventIds: [out.eventId],
+    actorUserId: ctx.user.id,
+    actorClientId,
+  });
+  return { eventId: out.eventId, event: out.event, resolved: out.resolved };
 }

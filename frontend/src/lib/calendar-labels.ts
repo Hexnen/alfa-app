@@ -11,19 +11,27 @@ import {
   CalendarCheck,
   CalendarClock,
   Check,
+  CheckSquare,
   CircleCheck,
   ClipboardList,
+  Handshake,
   Eye,
+  Flag,
   HardHat,
+  Mail,
   MoreHorizontal,
   Pencil,
+  Phone,
+  Presentation,
   Plus,
   Receipt,
   StickyNote,
   Trash2,
   TreePalm,
+  Trophy,
   Undo2,
   Unplug,
+  Users,
   UserMinus,
   UserPlus,
   Wrench,
@@ -32,6 +40,7 @@ import {
 import type {
   ActivityEntry,
   CalendarBilling,
+  CalendarDepartment,
   CalendarEvent,
   CalendarEventQuote,
   CalendarEventRealization,
@@ -61,6 +70,11 @@ export interface EventTypeMeta {
   cssVar: string;
 }
 
+/**
+ * WSZYSTKIE typy — kolejność do słowników i wyszukiwania, NIE do chipów filtra.
+ * Ekran zawsze bierze listę swojego działu z `DEPARTMENT_TYPE_ORDER`, inaczej
+ * kalendarz techniczny pokazałby typy handlowe (i odwrotnie).
+ */
 export const EVENT_TYPE_ORDER: CalendarEventType[] = [
   "serwis",
   "montaz",
@@ -69,9 +83,46 @@ export const EVENT_TYPE_ORDER: CalendarEventType[] = [
   "konserwacja",
   "przygotowanie",
   "biuro",
+  "spotkanie",
+  "telefon",
+  "email",
+  "zadanie",
+  "prezentacja",
+  "termin",
   "urlop",
   "notatka",
 ];
+
+/**
+ * Typy widoczne w danym dziale. `wizja` jest wspólna (ten sam byt — wizja
+ * lokalna u klienta), `urlop` i `notatka` działają wszędzie; reszta należy do
+ * jednego działu. To jest jedyne źródło prawdy dla chipów filtra i kolumn
+ * tablicy — patrz `CalendarConfig.typeOrder`.
+ */
+export const DEPARTMENT_TYPE_ORDER: Record<CalendarDepartment, CalendarEventType[]> = {
+  technical: [
+    "serwis",
+    "montaz",
+    "wizja",
+    "demontaz",
+    "konserwacja",
+    "przygotowanie",
+    "biuro",
+    "urlop",
+    "notatka",
+  ],
+  handlowy: [
+    "spotkanie",
+    "telefon",
+    "email",
+    "zadanie",
+    "prezentacja",
+    "wizja",
+    "termin",
+    "urlop",
+    "notatka",
+  ],
+};
 
 export const EVENT_TYPE_META: Record<CalendarEventType, EventTypeMeta> = {
   serwis: {
@@ -136,6 +187,50 @@ export const EVENT_TYPE_META: Record<CalendarEventType, EventTypeMeta> = {
     chip: "border-amber-600/50 text-amber-800 dark:text-amber-200",
     chipActive: "bg-amber-600 border-amber-600 text-white",
     cssVar: "--cal-notatka",
+  },
+  // --- Dział handlowy. Barwy dobrane tak, żeby odróżniały się od typów
+  // wspólnych (wizja/urlop/notatka), które widać w OBU kalendarzach.
+  spotkanie: {
+    label: "Spotkanie",
+    icon: Users,
+    chip: "border-indigo-500/50 text-indigo-700 dark:text-indigo-300",
+    chipActive: "bg-indigo-500 border-indigo-500 text-white",
+    cssVar: "--cal-spotkanie",
+  },
+  telefon: {
+    label: "Telefon",
+    icon: Phone,
+    chip: "border-cyan-500/50 text-cyan-700 dark:text-cyan-300",
+    chipActive: "bg-cyan-500 border-cyan-500 text-white",
+    cssVar: "--cal-telefon",
+  },
+  email: {
+    label: "E-mail",
+    icon: Mail,
+    chip: "border-fuchsia-500/50 text-fuchsia-700 dark:text-fuchsia-300",
+    chipActive: "bg-fuchsia-500 border-fuchsia-500 text-white",
+    cssVar: "--cal-email",
+  },
+  zadanie: {
+    label: "Zadanie",
+    icon: CheckSquare,
+    chip: "border-lime-600/50 text-lime-700 dark:text-lime-300",
+    chipActive: "bg-lime-600 border-lime-600 text-white",
+    cssVar: "--cal-zadanie",
+  },
+  prezentacja: {
+    label: "Prezentacja",
+    icon: Presentation,
+    chip: "border-blue-500/50 text-blue-700 dark:text-blue-300",
+    chipActive: "bg-blue-500 border-blue-500 text-white",
+    cssVar: "--cal-prezentacja",
+  },
+  termin: {
+    label: "Termin",
+    icon: Flag,
+    chip: "border-red-600/50 text-red-700 dark:text-red-300",
+    chipActive: "bg-red-600 border-red-600 text-white",
+    cssVar: "--cal-termin",
   },
 };
 
@@ -295,6 +390,12 @@ export const EVENT_TYPE_UI: Record<CalendarEventType, { bar: string; soft: strin
   konserwacja: { bar: "bg-teal-500", soft: "bg-teal-500/15 text-teal-700 dark:text-teal-300", dot: "bg-teal-500" },
   urlop: { bar: "bg-rose-500", soft: "bg-rose-500/15 text-rose-700 dark:text-rose-300", dot: "bg-rose-500" },
   notatka: { bar: "bg-amber-600", soft: "bg-amber-600/15 text-amber-800 dark:text-amber-300", dot: "bg-amber-600" },
+  spotkanie: { bar: "bg-indigo-500", soft: "bg-indigo-500/15 text-indigo-700 dark:text-indigo-300", dot: "bg-indigo-500" },
+  telefon: { bar: "bg-cyan-500", soft: "bg-cyan-500/15 text-cyan-700 dark:text-cyan-300", dot: "bg-cyan-500" },
+  email: { bar: "bg-fuchsia-500", soft: "bg-fuchsia-500/15 text-fuchsia-700 dark:text-fuchsia-300", dot: "bg-fuchsia-500" },
+  zadanie: { bar: "bg-lime-600", soft: "bg-lime-600/15 text-lime-700 dark:text-lime-300", dot: "bg-lime-600" },
+  prezentacja: { bar: "bg-blue-500", soft: "bg-blue-500/15 text-blue-700 dark:text-blue-300", dot: "bg-blue-500" },
+  termin: { bar: "bg-red-600", soft: "bg-red-600/15 text-red-700 dark:text-red-300", dot: "bg-red-600" },
 };
 
 export const eventStatusLabel = (s: string): string =>
@@ -539,6 +640,11 @@ export const ACTIVITY_ACTION_META: Record<string, { icon: LucideIcon; verb: stri
   note_added: { icon: StickyNote, verb: "Dodał(a) notatkę", tone: "text-amber-600 dark:text-amber-400" },
   note_updated: { icon: StickyNote, verb: "Zmienił(a) notatkę", tone: "text-amber-600 dark:text-amber-400" },
   note_deleted: { icon: StickyNote, verb: "Usunął(-ęła) notatkę", tone: "text-slate-500 dark:text-slate-400" },
+  // --- Oś czasu szansy sprzedaży (`entity_type = 'lead'`).
+  stage_changed: { icon: ArrowRightLeft, verb: "Zmienił(a) etap", tone: "text-violet-600 dark:text-violet-400" },
+  won: { icon: Trophy, verb: "Oznaczył(a) jako wygraną", tone: "text-emerald-600 dark:text-emerald-400" },
+  lost: { icon: Ban, verb: "Oznaczył(a) jako przegraną", tone: "text-red-600 dark:text-red-400" },
+  converted: { icon: Handshake, verb: "Przekształcił(a) w klienta", tone: "text-emerald-600 dark:text-emerald-400" },
 };
 
 /** Opcje filtra akcji w panelu Aktywność. */
@@ -568,6 +674,10 @@ export const ACTIVITY_ACTION_LABELS: Record<string, string> = {
   note_added: "dodał(a) notatkę",
   note_updated: "zmienił(a) notatkę",
   note_deleted: "usunął(-ęła) notatkę",
+  stage_changed: "zmienił(a) etap",
+  won: "oznaczył(a) szansę jako wygraną",
+  lost: "oznaczył(a) szansę jako przegraną",
+  converted: "przekształcił(a) szansę w klienta",
 };
 
 const NOTE_ACTIONS = new Set(["note_added", "note_updated", "note_deleted"]);
@@ -613,6 +723,21 @@ export const ACTIVITY_FIELD_LABELS: Record<string, string> = {
   billing: "rozliczenie",
   protocol_id: "protokół",
   protocolId: "protokół",
+  // --- Pola szansy sprzedaży (diff z `PUT /leads/:id`).
+  stage: "etap",
+  estimated_monthly: "abonament (MRR)",
+  estimatedMonthly: "abonament (MRR)",
+  estimated_setup: "wdrożenie",
+  estimatedSetup: "wdrożenie",
+  probability: "prawdopodobieństwo",
+  expected_close_date: "przewidywane zamknięcie",
+  expectedCloseDate: "przewidywane zamknięcie",
+  salesperson_id: "handlowca",
+  salespersonId: "handlowca",
+  lost_reason: "powód przegranej",
+  lostReason: "powód przegranej",
+  source: "źródło",
+  services: "usługi",
 };
 
 const quote = (v: string | null) => (v == null || v === "" ? "(puste)" : `„${v}”`);
@@ -1078,9 +1203,19 @@ export function quoteTip(e: {
   return `${num} — ${realizationMoneyExact(q.total)} (${pluralPl(q.filledItems, "pozycja", "pozycje", "pozycji")})`;
 }
 
-/** Deep-link do wydarzenia w kalendarzu (Calendar.tsx obsługuje ?event=ID&date=). */
-export const calendarEventHref = (id: number, startAt?: string | null): string =>
-  `/technical/kalendarz?event=${id}${startAt ? `&date=${startAt.slice(0, 10)}` : ""}`;
+/**
+ * Deep-link do wydarzenia w kalendarzu (strona obsługuje `?event=ID&date=`).
+ * Bez `department` link prowadzi do kalendarza technicznego — tak działały
+ * wszystkie dotychczasowe wywołania (karta obiektu, realizacje, asystent).
+ */
+export const calendarEventHref = (
+  id: number,
+  startAt?: string | null,
+  department: CalendarDepartment = "technical"
+): string =>
+  `${department === "handlowy" ? "/handlowy/kalendarz" : "/technical/kalendarz"}?event=${id}${
+    startAt ? `&date=${startAt.slice(0, 10)}` : ""
+  }`;
 
 // ---------------------------------------------------------------------------
 // Teksty tooltipów (hover) — wspólne dla siatki FullCalendar (natywny `title`),
@@ -1199,6 +1334,11 @@ export function eventTooltipText(
     protocol?: CalendarEvent["protocol"];
     realization?: CalendarEventRealization | null;
     technicians?: { firstName: string; lastName: string }[];
+    /**
+     * Przypisani handlowcy (dział handlowy). Wydarzenia techniczne tego pola
+     * nie mają, więc ich dymek wygląda dokładnie tak, jak przed dodaniem.
+     */
+    salespeople?: { firstName: string; lastName: string }[];
     series?: { freq: CalendarSeriesFreq; interval: number } | null;
     seriesId?: number | null;
     seriesIndex?: number;
@@ -1226,6 +1366,13 @@ export function eventTooltipText(
     lines.push(
       `${ev.technicians.length > 1 ? "Technicy" : "Technik"}: ${ev.technicians
         .map((t) => `${t.firstName} ${t.lastName}`.trim())
+        .join(", ")}`
+    );
+  }
+  if (ev.salespeople?.length) {
+    lines.push(
+      `${ev.salespeople.length > 1 ? "Handlowcy" : "Handlowiec"}: ${ev.salespeople
+        .map((s) => `${s.firstName} ${s.lastName}`.trim())
         .join(", ")}`
     );
   }
@@ -1329,6 +1476,13 @@ export function eventTipData(
       icon: "users",
       label: ev.technicians.length > 1 ? "Technicy" : "Technik",
       text: ev.technicians.map((t) => `${t.firstName} ${t.lastName}`.trim()).join(", "),
+    });
+  }
+  if (ev.salespeople?.length) {
+    rows.push({
+      icon: "users",
+      label: ev.salespeople.length > 1 ? "Handlowcy" : "Handlowiec",
+      text: ev.salespeople.map((s) => `${s.firstName} ${s.lastName}`.trim()).join(", "),
     });
   }
   if (ev.location) rows.push({ icon: "pin", label: "Lokalizacja", text: ev.location });

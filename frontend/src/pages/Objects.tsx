@@ -51,6 +51,8 @@ import {
   statusLabels,
   departmentLabels,
   formatCurrency,
+  formatDate,
+  todayIsoLocal,
   cn,
 } from "@/lib/utils";
 
@@ -76,6 +78,14 @@ type ValueMode = "all" | "with" | "without";
  */
 type CostMode = "all" | "with" | "without";
 
+/**
+ * Filtr „kończące się”: wszystkie albo horyzont w dniach. Jedyne wejście to dziś
+ * kafelek „Kończące się ≤ 90 dni” z analityki (/objects?endingIn=90), więc lista
+ * ma jedną wartość zamiast dowolnej liczby — ale trzymamy ją jako LICZBĘ DNI,
+ * bo tego oczekuje API i tak dokłada się kolejny horyzont bez zmiany kontraktu.
+ */
+type EndingMode = "all" | 90;
+
 /** Domyślny kierunek sortowania kolumny — kwoty ludzie czytają od największej. */
 const DEFAULT_DIR: Record<ObjectSortKey, "asc" | "desc"> = {
   name: "asc",
@@ -88,6 +98,8 @@ const DEFAULT_DIR: Record<ObjectSortKey, "asc" | "desc"> = {
   value: "desc",
   cost: "desc",
   profit: "desc",
+  // Przewidywane zakończenie czyta się od najbliższego — to lista rzeczy do zrobienia.
+  expectedEnd: "asc",
   created: "desc",
 };
 
@@ -102,9 +114,18 @@ export function Objects() {
   const [summary, setSummary] = useState({
     total: 0,
     value: 0,
+    // Rozbicie sumy przychodu na linie (ZDW / OFI / dzierżawa) — ta sama
+    // informacja, co pod kwotą w wierszu, tylko dla całego wyniku filtrowania.
+    valueZdw: 0,
+    valueOfi: 0,
+    valueRental: 0,
     withValue: 0,
     cost: 0,
     withCost: 0,
+    // Obiekty kończące się w horyzoncie filtra + zagrożony przychód (backend
+    // liczy je po CAŁYM wyniku filtrowania, nie po stronie).
+    endingCount: 0,
+    endingRevenue: 0,
   });
   const [contractors, setContractors] = useState<ContractorCatalogEntry[]>([]);
   const [salespeople, setSalespeople] = useState<Salesperson[]>([]);
@@ -134,6 +155,8 @@ export function Objects() {
   const [valueMode, setValueMode] = useState<ValueMode>("all");
   // Wejście z każdego kafelka analityki (/objects?hasCost=0 — „uzupełnij koszty”).
   const [costMode, setCostMode] = useState<CostMode>("all");
+  // Wejście z kafelka „Kończące się ≤ 90 dni” (/objects?endingIn=90).
+  const [endingMode, setEndingMode] = useState<EndingMode>("all");
 
   const [sort, setSort] = useState<ObjectSortKey>("name");
   const [dir, setDir] = useState<"asc" | "desc">("asc");
@@ -166,6 +189,11 @@ export function Objects() {
     const hasCost = params.get("hasCost");
     if (hasCost === "0") setCostMode("without");
     else if (hasCost === "1") setCostMode("with");
+    // `?endingIn=90` — kafelek „Kończące się ≤ 90 dni” z /analityka/obiekty.
+    // Dowolna dodatnia liczba dni z URL-a ląduje w jedynym horyzoncie, jaki ma UI:
+    // filtr ma pokazać, że lista JEST zawężona, a nie udawać pełnej kartoteki.
+    const endingIn = params.get("endingIn");
+    if (endingIn !== null && Number(endingIn) > 0) setEndingMode(90);
   }, []);
 
   useEffect(() => {
@@ -218,6 +246,7 @@ export function Objects() {
     range.max ?? "",
     valueMode,
     costMode,
+    endingMode,
     sort,
     dir,
   ].join("|");
@@ -243,6 +272,7 @@ export function Objects() {
         maxValue: range.max,
         hasValue: valueMode === "with" ? "1" : valueMode === "without" ? "0" : undefined,
         hasCost: costMode === "with" ? "1" : costMode === "without" ? "0" : undefined,
+        endingIn: endingMode === "all" ? undefined : endingMode,
         sort,
         dir,
         page,
@@ -253,9 +283,14 @@ export function Objects() {
       setSummary({
         total: res.total,
         value: res.totalMonthlyValue ?? 0,
+        valueZdw: res.totalMonthlyZdw ?? 0,
+        valueOfi: res.totalMonthlyOfi ?? 0,
+        valueRental: res.totalMonthlyRental ?? 0,
         withValue: res.withMonthlyValue ?? 0,
         cost: res.totalMonthlyCost ?? 0,
         withCost: res.withMonthlyCost ?? 0,
+        endingCount: res.endingSoonCount ?? 0,
+        endingRevenue: res.endingSoonRevenue ?? 0,
       });
       setTabCounts({ current: res.currentCount ?? 0, archived: res.archivedCount ?? 0 });
     } catch (error) {
@@ -276,6 +311,7 @@ export function Objects() {
     range.max,
     valueMode,
     costMode,
+    endingMode,
     sort,
     dir,
     page,
@@ -306,6 +342,7 @@ export function Objects() {
     contractorFilter !== undefined ||
     valueMode !== "all" ||
     costMode !== "all" ||
+    endingMode !== "all" ||
     minInput !== "" ||
     maxInput !== "";
 
@@ -319,6 +356,7 @@ export function Objects() {
     setCompanyFilter(undefined);
     setValueMode("all");
     setCostMode("all");
+    setEndingMode("all");
     setMinInput("");
     setMaxInput("");
   };
@@ -393,10 +431,21 @@ export function Objects() {
     );
   };
 
+  /** „Dziś” raz na render — porównanie dat w wierszach nie potrzebuje 500 obiektów Date. */
+  const today = todayIsoLocal();
+
   const summaryLine = useMemo(() => {
     const parts = [`${summary.total} ${summary.total === 1 ? "obiekt" : "obiektów"}`];
     if (summary.withValue > 0) {
-      parts.push(`suma abonamentów ${formatCurrency(summary.value)} / mies.`);
+      parts.push(`suma przychodu ${formatCurrency(summary.value)} / mies.`);
+      // Rozbicie tylko wtedy, gdy wynik miesza linie — przy jednej linii
+      // powtarzałoby liczbę sprzed chwili.
+      const split = [
+        summary.valueZdw > 0 ? `ZDW ${formatCurrency(summary.valueZdw)}` : null,
+        summary.valueOfi > 0 ? `OFI ${formatCurrency(summary.valueOfi)}` : null,
+        summary.valueRental > 0 ? `dzierżawa ${formatCurrency(summary.valueRental)}` : null,
+      ].filter((s): s is string => s !== null);
+      if (split.length > 1) parts.push(`w tym ${split.join(" + ")}`);
       parts.push(`z abonamentem: ${summary.withValue}`);
     }
     // Koszty pokazujemy tylko, gdy ktoś je w ogóle uzupełnił — inaczej „zysk”
@@ -416,6 +465,16 @@ export function Objects() {
         missingCost === 0 && summary.withCost > 0
           ? `zysk ${formatCurrency(summary.value - summary.cost)}`
           : `zysk — (brak kosztu w ${missingCost} ${missingCost === 1 ? "obiekcie" : "obiektach"})`
+      );
+    }
+    // Wygasające umowy to jedyna liczba na tym pasku mówiąca o PRZYSZŁOŚCI —
+    // dopisujemy ją tylko wtedy, gdy jest co ratować (zero kończących się
+    // obiektów nie jest informacją, tylko szumem).
+    if (summary.endingCount > 0) {
+      parts.push(
+        `${summary.endingCount} kończy się w 90 dni (${formatCurrency(
+          summary.endingRevenue
+        )}/mies.)`
       );
     }
     // Jedno zdanie o konwencji na ekran zamiast dopisku „netto” przy każdej
@@ -491,6 +550,23 @@ export function Objects() {
                 {label}
               </SelectItem>
             ))}
+          </SelectContent>
+        </Select>
+
+        {/* Horyzont wygasania stoi przy filtrze usług, bo mówi o tym samym:
+            co obiekt ma i JAK DŁUGO. Filtr musi być widoczny, a nie tylko
+            wczytany z URL-a — wejście z kafelka analityki zawęża listę i
+            użytkownik ma prawo wiedzieć, dlaczego nie widzi wszystkich obiektów. */}
+        <Select
+          value={endingMode === "all" ? "all" : String(endingMode)}
+          onValueChange={(v) => setEndingMode(v === "all" ? "all" : 90)}
+        >
+          <SelectTrigger className="w-[210px]" data-testid="objects-filter-ending">
+            <SelectValue placeholder="Kończące się" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">Kończące się: wszystkie</SelectItem>
+            <SelectItem value="90">Kończące się ≤ 90 dni</SelectItem>
           </SelectContent>
         </Select>
 
@@ -652,6 +728,10 @@ export function Objects() {
                         sortować, więc nagłówek jest zwykły (klucz `type`
                         zniknął też z SORT_COLUMNS na backendzie). */}
                     <th className="py-3 px-2 font-medium text-left">Usługi</th>
+                    {/* Przewidywane zakończenie obsługi CAŁEGO obiektu — plan
+                        biznesowy, niezależny od końców pojedynczych okresów
+                        usług. Puste daty backend trzyma na końcu w OBU kierunkach. */}
+                    <SortHeader label="Przew. zakończenie" sortKey="expectedEnd" />
                     <SortHeader label="Status" sortKey="status" />
                     <SortHeader label="Dzial" sortKey="department" />
                     <SortHeader label="Spółka" sortKey="company" />
@@ -693,6 +773,20 @@ export function Objects() {
                           policzył; brak liczby ma być widać tak samo, jak kreska
                           przy nieuzupełnionym koszcie. */}
                       <td className="py-3 px-2">{objectServicesLabel(obj)}</td>
+                      {/* Data w przeszłości = termin minął, a obiekt dalej jest
+                          obsługiwany — sygnał do sprawdzenia umowy, stąd amber
+                          (ta sama konwencja co ostrzeżenia w Ofertach). */}
+                      <td
+                        className={cn(
+                          "py-3 px-2 tabular-nums",
+                          obj.expectedEndDate && obj.expectedEndDate < today
+                            ? "text-amber-600 dark:text-amber-400"
+                            : undefined
+                        )}
+                        data-testid={`object-expected-end-${obj.id}`}
+                      >
+                        {obj.expectedEndDate ? formatDate(obj.expectedEndDate) : "—"}
+                      </td>
                       <td className="py-3 px-2">
                         <Badge variant={statusColors[obj.status]}>
                           {statusLabels[obj.status] || obj.status}
@@ -736,25 +830,35 @@ export function Objects() {
                           <span className="text-muted-foreground">-</span>
                         )}
                       </td>
-                      {/* Przychód = abonament + dzierżawa. Rozbicie pokazujemy
-                          pod kwotą tylko wtedy, gdy dzierżawa faktycznie jest —
-                          inaczej kolumna zaszumiłaby się przy wszystkich obiektach. */}
+                      {/* Przychód = abonament ZDW + abonament OFI + dzierżawa.
+                          Rozbicie pokazujemy pod kwotą tylko wtedy, gdy jest co
+                          rozbijać (więcej niż jedna wypełniona linia) — inaczej
+                          kolumna powtarzałaby tę samą liczbę dwa razy. */}
                       <td className="py-3 px-2 text-right tabular-nums">
-                        {/* Brak abonamentu i dzierżawy = nieuzupełniony, nie 0 zł
-                            (po imporcie z CMA połowa obiektów nie ma ceny). */}
-                        {obj.monthlyValue === null && obj.monthlyRental === null ? (
-                          <span className="text-muted-foreground">—</span>
-                        ) : (
-                          formatCurrency(
-                            (obj.monthlyValue ?? 0) + (obj.monthlyRental ?? 0)
-                          )
-                        )}
-                        {obj.monthlyRental ? (
-                          <div className="text-xs text-muted-foreground">
-                            {formatCurrency(obj.monthlyValue)} + dzierżawa{" "}
-                            {formatCurrency(obj.monthlyRental)}
-                          </div>
-                        ) : null}
+                        {/* Żadna z kwot = nieuzupełniony, nie 0 zł (po imporcie
+                            z CMA połowa obiektów nie ma ceny). */}
+                        {(() => {
+                          const parts = [
+                            obj.monthlyZdw != null ? `ZDW ${formatCurrency(obj.monthlyZdw)}` : null,
+                            obj.monthlyOfi != null ? `OFI ${formatCurrency(obj.monthlyOfi)}` : null,
+                            obj.monthlyRental != null
+                              ? `dzierżawa ${formatCurrency(obj.monthlyRental)}`
+                              : null,
+                          ].filter((s): s is string => s !== null);
+                          if (parts.length === 0) {
+                            return <span className="text-muted-foreground">—</span>;
+                          }
+                          return (
+                            <>
+                              {formatCurrency(
+                                (obj.monthlyZdw ?? 0) + (obj.monthlyOfi ?? 0) + (obj.monthlyRental ?? 0)
+                              )}
+                              {parts.length > 1 ? (
+                                <div className="text-xs text-muted-foreground">{parts.join(" + ")}</div>
+                              ) : null}
+                            </>
+                          );
+                        })()}
                       </td>
                       {/* Brak kosztu to „nieuzupełniony”, a nie 0 zł — stąd kreska
                           zamiast kwoty i pusty zysk zamiast całego abonamentu. */}
@@ -771,7 +875,8 @@ export function Objects() {
                         ) : (
                           (() => {
                             const profit =
-                              (obj.monthlyValue ?? 0) +
+                              (obj.monthlyZdw ?? 0) +
+                              (obj.monthlyOfi ?? 0) +
                               (obj.monthlyRental ?? 0) -
                               obj.monthlyCost;
                             return (

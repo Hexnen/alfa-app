@@ -30,6 +30,7 @@
     "autoprefixer": "^10.4.23",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "docx-preview": "^0.4.0",
     "gridjs": "^6.2.0",
     "gridjs-react": "^6.1.1",
     "lucide-react": "^0.563.0",

@@ -65,6 +65,24 @@ export function getUserId(c: Context): number {
 // z tych w `writeTabs`. Bez tego maxLevel() z „objects: edit" dawał prawo
 // edycji spółek i handlowców komuś, kto ma edytować tylko obiekty.
 const API_TAB_MAP: { prefix: string; tabs: string[]; writeTabs?: string[] }[] = [
+  // Słownik kontrahentów do selecta (GET /contractors/catalog: id + nazwa + NIP).
+  // MUSI stać PRZED szerszym "/contractors": find() bierze pierwsze dopasowanie,
+  // a bez tego wpisu handlowiec z samymi kluczami `handlowy/*` dostawał 403
+  // i nie mógł podpiąć szansy ani osoby kontaktowej pod istniejącą kartotekę.
+  // Zapis dalej wyłącznie z „contractors" (na samym /catalog nie ma zresztą
+  // żadnej trasy zapisu — writeTabs jest tu zabezpieczeniem na przyszłość).
+  {
+    prefix: "/contractors/catalog",
+    tabs: [
+      "contractors",
+      "objects",
+      "handlowy/leady",
+      "handlowy/kontakty",
+      "handlowy/kalendarz",
+      "orders",
+    ],
+    writeTabs: ["contractors"],
+  },
   { prefix: "/contractors", tabs: ["contractors"] },
   { prefix: "/objects", tabs: ["objects"] },
   // Historia zmian obiektu (stare/nowe wartości pól, w tym kwoty umów) — to
@@ -88,6 +106,11 @@ const API_TAB_MAP: { prefix: string; tabs: string[]; writeTabs?: string[] }[] = 
   { prefix: "/analytics/kontrahenci", tabs: ["analityka/kontrahenci"] },
   { prefix: "/analytics/obiekty", tabs: ["analityka/obiekty"] },
   { prefix: "/analytics/handlowcy", tabs: ["analityka/handlowcy"] },
+  // Lejek sprzedaży rysuje się W zakładce „Handlowcy" i mówi o wynikach imiennie
+  // (win rate per osoba), więc stoi pod tym samym kluczem. Bez tego wpisu trasa
+  // byłaby NIEOBJĘTA kontrolą — `tabPermissionGuard` przepuszcza wszystko, czego
+  // nie ma w tej mapie, a to znaczyłoby lejek dla każdego zalogowanego.
+  { prefix: "/analytics/lejek", tabs: ["analityka/handlowcy"] },
   // Skrócona lista pracowników kadr (id + nazwisko, bez płac) — czytają ją
   // formularze handlowca i technika, żeby powiązać osobę z listą płac.
   // MUSI stać PRZED "/hr": find() bierze pierwsze dopasowanie, więc szerszy
@@ -110,6 +133,10 @@ const API_TAB_MAP: { prefix: string; tabs: string[]; writeTabs?: string[] }[] = 
     ],
   },
   { prefix: "/cma/mail", tabs: ["cma/ustawienia"] },
+  // Grupy interwencyjne mają WŁASNY klucz i MUSZĄ stać przed szerszym "/cma":
+  // find() bierze pierwsze dopasowanie, więc bez tego właściciel klucza dostawałby
+  // 403, a ktoś z samymi „cma/raporty" czytałby warunki i stawki podwykonawców.
+  { prefix: "/cma/intervention-groups", tabs: ["cma/grupy-interwencyjne"] },
   { prefix: "/cma", tabs: ["cma/raporty", "cma/trendy", "cma/braki-kamer"] },
   { prefix: "/realizations", tabs: ["technical/realizacje"] },
   { prefix: "/protocols", tabs: ["technical/protokoly"] },
@@ -123,9 +150,32 @@ const API_TAB_MAP: { prefix: string; tabs: string[]; writeTabs?: string[] }[] = 
   // kosztowe (redactCosts w src/routes/offers.ts).
   { prefix: "/offers", tabs: ["technical/oferty"] },
   { prefix: "/technicians", tabs: ["technical/technicy", "technical/kalendarz"] },
+  // Szanse sprzedaży (lejek). Pulpit czyta tę samą listę, ale zapisuje wyłącznie
+  // właściciel klucza „handlowy/leady".
+  { prefix: "/leads", tabs: ["handlowy/leady", "handlowy/pulpit"], writeTabs: ["handlowy/leady"] },
+  // Osoby kontaktowe: własna zakładka, ale kartoteki kontrahenta i obiektu też je
+  // pokazują. Zapis — z Kontaktów albo z Leadów (kontakt zakłada się przy szansie).
+  {
+    prefix: "/contacts",
+    tabs: ["handlowy/kontakty", "handlowy/leady", "contractors", "objects"],
+    writeTabs: ["handlowy/kontakty", "handlowy/leady"],
+  },
   // Handlowcy: własna zakładka, ale listę czytają też formularze kontrahenta
-  // i obiektu. Zapis (stawki, prowizje, przypisania) — tylko z „handlowcy".
-  { prefix: "/salespeople", tabs: ["handlowcy", "contractors", "objects"], writeTabs: ["handlowcy"] },
+  // i obiektu oraz cały moduł handlowy (filtr „Moje”, przypisania w kalendarzu).
+  // Zapis (stawki, prowizje, przypisania) — tylko z „handlowcy".
+  {
+    prefix: "/salespeople",
+    tabs: [
+      "handlowcy",
+      "contractors",
+      "objects",
+      "handlowy/leady",
+      "handlowy/kalendarz",
+      "handlowy/pulpit",
+      "handlowy/aktywnosci",
+    ],
+    writeTabs: ["handlowcy"],
+  },
   // Spółki: własna zakładka; słownik czytają też formularz obiektu i kadry
   // (umowa/biuro wybierają spółkę z listy). Zapis — tylko z „spolki".
   {
@@ -143,7 +193,21 @@ const API_TAB_MAP: { prefix: string; tabs: string[]; writeTabs?: string[] }[] = 
   { prefix: "/monitoring", tabs: ["technical/projekty"] },
   { prefix: "/camera-models", tabs: ["technical/szablony"] },
   { prefix: "/warehouse", tabs: ["technical/magazyn"] },
-  { prefix: "/calendar", tabs: ["technical/kalendarz"] },
+  { prefix: "/manuals", tabs: ["technical/manuale"] },
+  // Kalendarz obsługuje DWA działy jednym routerem, więc ten wpis jest tylko grubą
+  // bramką „ma jakikolwiek kalendarz”. Właściwa kontrola jest WIERSZOWA, po
+  // `calendar_events.department` (src/lib/calendar-scope.ts) — bez niej ktoś
+  // z samym „handlowy/kalendarz" czytałby grafik techników.
+  {
+    prefix: "/calendar",
+    tabs: [
+      "technical/kalendarz",
+      "handlowy/kalendarz",
+      "handlowy/leady",
+      "handlowy/pulpit",
+      "handlowy/aktywnosci",
+    ],
+  },
 ];
 
 const READ_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);

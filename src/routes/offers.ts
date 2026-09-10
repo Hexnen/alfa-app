@@ -51,6 +51,7 @@ import {
   type OfferStatus,
   type OfferText,
   type OfferTextBlock,
+  type LeadStage,
 } from "../db/schema.js";
 import { getUser } from "../middleware/auth.js";
 import { canView } from "../lib/auth/permissions.js";
@@ -64,6 +65,7 @@ import {
   type PriceSource,
 } from "../lib/offer-packages.js";
 import { logActivity, logFieldDiffs } from "../lib/activity-log.js";
+import { touchLead } from "../lib/sales-leads.js";
 import { createRateLimiter, clientIp } from "../lib/rate-limit.js";
 import { createDocumentSync } from "./warehouse.js";
 import { generateOrderNumber } from "../services/orders.js";
@@ -411,6 +413,14 @@ export interface OfferDetail {
     preparedBy: string | null;
     /** To samo dla klienta: null zamiast loginu, gdy nie ma nazwy do pokazania. */
     preparedByPublic: string | null;
+    /** Tytuł powiązanej szansy — etykieta do pickera i linku w edytorze. */
+    leadTitle: string | null;
+    /**
+     * Etap tej szansy. Po akceptacji oferty front podpowiada „Oznacz szansę jako
+     * wygraną” — ale tylko wtedy, gdy nikt jeszcze tego nie zrobił, więc etap
+     * musi przyjść razem z dokumentem.
+     */
+    leadStage: LeadStage | null;
   };
   sections: OfferSection[];
   items: (OfferItem & {
@@ -523,6 +533,17 @@ function loadOfferSync(dbx: DbOrTx, id: number): OfferDetail {
   }
   const source = priceSourceSync(dbx, values.warehouseMarkup);
 
+  // Szansa stojąca za ofertą — tytuł na etykietę pickera, etap na podpowiedź
+  // „oznacz jako wygraną" po akceptacji.
+  const leadRow =
+    offer.leadId == null
+      ? null
+      : dbx
+          .select({ title: schema.leads.title, stage: schema.leads.stage })
+          .from(schema.leads)
+          .where(eq(schema.leads.id, offer.leadId))
+          .all()[0] ?? null;
+
   return {
     offer: {
       ...offer,
@@ -531,6 +552,8 @@ function loadOfferSync(dbx: DbOrTx, id: number): OfferDetail {
         offer.leaseMode === "y1" ? 12 : offer.leaseMode === "y2" ? 24 : offer.leaseMonths,
       preparedBy,
       preparedByPublic,
+      leadTitle: leadRow?.title ?? null,
+      leadStage: leadRow?.stage ?? null,
     },
     sections,
     items: items.map((it) => {
@@ -1141,6 +1164,9 @@ function parseOfferHead(
     site: keep("site", () => str(body.site), current?.site ?? ""),
     address: keep("address", () => str(body.address), current?.address ?? ""),
     salespersonId: keep("salespersonId", () => optId(body.salespersonId, "identyfikator handlowca"), current?.salespersonId ?? null),
+    // Szansa sprzedaży, z której oferta wyszła. `null` odpina — powiązanie jest
+    // luźne (jedna szansa może mieć wiele ofert i wersji), więc nie ma tu 409.
+    leadId: keep("leadId", () => optId(body.leadId, "identyfikator szansy"), current?.leadId ?? null),
     companyId: keep("companyId", () => optId(body.companyId, "identyfikator spółki"), current?.companyId ?? null),
     discountPct: keep("discountPct", () => pct(body.discountPct, "Rabat"), current?.discountPct ?? 0),
     // Przewidywany czas kontraktu: liczba miesięcy albo nic. `optId` pilnuje,
@@ -1223,6 +1249,11 @@ app.get("/", async (c) =>
     if (Number.isInteger(salespersonId) && salespersonId > 0) {
       filters.push(eq(schema.offers.salespersonId, salespersonId));
     }
+    // Oferty jednej szansy — karta szansy ciągnie tym swoją sekcję „Oferty”.
+    const leadId = Number(c.req.query("leadId"));
+    if (Number.isInteger(leadId) && leadId > 0) {
+      filters.push(eq(schema.offers.leadId, leadId));
+    }
 
     let rows = db
       .select()
@@ -1274,6 +1305,22 @@ app.get("/", async (c) =>
         .all()
         .map((u) => [u.email.toLowerCase(), u.displayName || u.email])
     );
+    /*
+     * Tytuły szans — tylko tych, które faktycznie stoją na widocznych ofertach.
+     * Kartoteka szans bywa duża, a lista ofert i tak nie stronicuje, więc
+     * ciągniemy je jednym `IN (...)`, a nie całą tabelę jak handlowców.
+     */
+    const leadIds = [...new Set(rows.map((r) => r.leadId).filter((v): v is number => v != null))];
+    const leadTitleById = new Map(
+      leadIds.length
+        ? db
+            .select({ id: schema.leads.id, title: schema.leads.title })
+            .from(schema.leads)
+            .where(inArray(schema.leads.id, leadIds))
+            .all()
+            .map((l) => [l.id, l.title])
+        : []
+    );
 
     const data = rows.map((r) => {
       const sections = allSections.filter((s) => s.offerId === r.id);
@@ -1284,6 +1331,7 @@ app.get("/", async (c) =>
         scope: scopeOf(r, sections, items),
         salespersonName:
           r.salespersonId === null ? null : salesById.get(r.salespersonId) ?? null,
+        leadTitle: r.leadId == null ? null : leadTitleById.get(r.leadId) ?? null,
         // Login zostaje, gdy konto zniknęło z bazy — lepszy ślad niż kreska.
         createdByLabel: r.createdBy
           ? userByEmail.get(r.createdBy.toLowerCase()) ?? r.createdBy
@@ -1309,6 +1357,43 @@ app.post("/", async (c) => {
     const head = parseOfferHead(body as Record<string, unknown>);
     const user = getUser(c);
     const created = db.transaction((tx) => {
+      /*
+       * OFERTA Z SZANSY — prefill, nie nadpisanie. Handlowiec klika „Nowa
+       * oferta” na karcie szansy i dostaje pusty dokument; wypełniamy w nim
+       * TYLKO to, czego wywołujący nie podał sam. Kontrahent z kartoteki bije
+       * dane prospekta, bo szansa bez `contractor_id` nosi jedynie nazwę wpisaną
+       * z ręki. Usunięta szansa nie prefilluje niczego (i nie jest błędem —
+       * dokument ma powstać, tylko bez linku).
+       */
+      if (head.leadId != null) {
+        const lead = tx.select().from(schema.leads).where(eq(schema.leads.id, head.leadId)).all()[0];
+        if (!lead || lead.deletedAt) {
+          head.leadId = null;
+        } else {
+          const contractor = lead.contractorId
+            ? tx
+                .select()
+                .from(schema.contractors)
+                .where(eq(schema.contractors.id, lead.contractorId))
+                .all()[0] ?? null
+            : null;
+          const fill = <K extends keyof NewOffer>(key: K, value: NewOffer[K], empty: boolean) => {
+            if (empty && value !== null && value !== undefined && value !== "") head[key] = value;
+          };
+          fill("contractorId", lead.contractorId, head.contractorId == null);
+          fill("clientName", contractor?.name ?? lead.prospectName ?? "", !head.clientName);
+          fill("clientNip", contractor?.nip ?? lead.prospectNip ?? "", !head.clientNip);
+          fill("objectId", lead.objectId, head.objectId == null);
+          fill("site", lead.title, !head.site);
+          fill(
+            "address",
+            [lead.address, lead.city].filter(Boolean).join(", "),
+            !head.address
+          );
+          fill("salespersonId", lead.salespersonId, head.salespersonId == null);
+        }
+      }
+
       const offer = tx
         .insert(schema.offers)
         .values({
@@ -1327,6 +1412,21 @@ app.post("/", async (c) => {
         action: "created",
         summary: `Utworzono ofertę ${offer.number}`,
       });
+      // Praca nad ofertą to aktywność na szansie — bez tego lejek, w którym
+      // właśnie powstał dokument, po tygodniu raportowałby się jako „gnijący”.
+      if (offer.leadId != null) {
+        logActivity(tx, {
+          entityType: "lead",
+          entityId: offer.leadId,
+          objectId: offer.objectId,
+          user,
+          action: "linked",
+          field: "offer",
+          newValue: offer.number,
+          summary: `Utworzono ofertę ${offer.number} z szansy`,
+        });
+        touchLead(tx, offer.leadId);
+      }
       return offer;
     });
     return c.json({ success: true, data: created, message: "Oferta utworzona" }, 201);
@@ -2620,6 +2720,18 @@ app.post("/:id/accept", async (c) => {
             .all()[0] ?? null
         : null;
 
+      /*
+       * SZANSA STOJĄCA ZA OFERTĄ. Czytamy ją tu, w transakcji akceptacji, bo
+       * decyduje o dwóch rzeczach naraz: czy zlecenie może wskazać ten lejek
+       * i czy jest gdzie dopisać wiersz osi czasu.
+       */
+      const lead =
+        offer.leadId == null
+          ? null
+          : tx.select().from(schema.leads).where(eq(schema.leads.id, offer.leadId)).all()[0] ?? null;
+      const openLead = lead && !lead.deletedAt ? lead : null;
+      const linkableLeadId = openLead && openLead.orderId === null ? openLead.id : null;
+
       // --- 1. Zlecenie ---
       // Numer bywa losowy (ZL-RRRR-NNNNN), więc kolizja na UNIQUE jest możliwa;
       // ponawiamy z nowym numerem, jak w src/services/orders.ts.
@@ -2650,6 +2762,15 @@ app.post("/:id/accept", async (c) => {
               invoiceIssuer: issuer?.name ?? null,
               status: "new",
               notes: `Z oferty ${offer.number}`,
+              /*
+               * Zlecenie dziedziczy handlowca z oferty, a szansę — tylko wtedy,
+               * gdy ta nie ma jeszcze swojego zlecenia (reguła „jedna szansa =
+               * jedno zlecenie” z `createOrderFromInput`). Przy szansie już
+               * obsłużonej zostaje sam handlowiec: dwa zlecenia wskazujące ten
+               * sam lejek nie miałyby jak się rozstrzygnąć w kartotece szansy.
+               */
+              salespersonId: offer.salespersonId,
+              leadId: linkableLeadId,
             })
             .returning()
             .get();
@@ -2764,6 +2885,34 @@ app.post("/:id/accept", async (c) => {
           `Oferta ${offer.number} zaakceptowana → zlecenie ${order.orderNumber}` +
           (docId ? ` + szkic WZ (${shippable.length} poz.)` : " (bez pozycji do wydania)"),
       });
+
+      /*
+       * OŚ CZASU SZANSY — bez automatycznej zmiany etapu. Akceptacja oferty to
+       * mocny sygnał, ale „wygrany” zamyka lejek i wpisuje `won_at`; to decyzja
+       * handlowca, nie skutek uboczny kliknięcia w Ofertach. Front podpowiada mu
+       * „Oznacz szansę jako wygraną” linkiem do karty.
+       */
+      if (openLead) {
+        logActivity(tx, {
+          entityType: "lead",
+          entityId: openLead.id,
+          objectId: offer.objectId,
+          user,
+          action: "linked",
+          field: "offer",
+          newValue: offer.number,
+          summary:
+            `Oferta ${offer.number} zaakceptowana` +
+            (linkableLeadId ? ` → zlecenie ${order.orderNumber}` : ""),
+        });
+        if (linkableLeadId) {
+          tx.update(schema.leads)
+            .set({ orderId: order.id, updatedAt: sql`(datetime('now'))` })
+            .where(eq(schema.leads.id, linkableLeadId))
+            .run();
+        }
+        touchLead(tx, openLead.id);
+      }
 
       return { orderId: order.id, orderNumber: order.orderNumber, warehouseDocId: docId };
     });

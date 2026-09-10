@@ -34,12 +34,24 @@ export const TABS: TabDef[] = [
   // działu są kosztem ogólnym, nie kosztem klienta.
   { key: "kadry/dzialy", label: "Działy", group: "Kadry" },
   { key: "kadry/normy", label: "Normy", group: "Kadry" },
+  // Dział handlowy — lejek szans, aktywności i własny kalendarz. Osobne klucze
+  // per podzakładka, bo pulpit i kalendarz nadaje się dać szerzej niż kartotekę
+  // szans z kwotami. Klucz „handlowcy" (słownik) zostaje w grupie Ogólne.
+  { key: "handlowy/pulpit", label: "Pulpit", group: "Handlowy" },
+  { key: "handlowy/leady", label: "Leady", group: "Handlowy" },
+  { key: "handlowy/kontakty", label: "Kontakty", group: "Handlowy" },
+  { key: "handlowy/aktywnosci", label: "Aktywności", group: "Handlowy" },
+  { key: "handlowy/kalendarz", label: "Kalendarz", group: "Handlowy" },
   { key: "cma/raporty", label: "Raporty", group: "CMA" },
   { key: "cma/trendy", label: "Trendy", group: "CMA" },
   { key: "cma/braki-kamer", label: "Braki kamer", group: "CMA" },
   // Mapowanie rejestru monitoringu na kartotekę obiektów — osobny klucz, bo to
   // ekran edycji powiązań, a nie kolejny raport.
   { key: "cma/obiekty", label: "Obiekty", group: "CMA" },
+  // Firmy grup interwencyjnych, warunki per obiekt i rejestr podjazdów —
+  // osobny klucz, bo dane widzi też karta obiektu (4. sekcja) i nie ma ich
+  // dostawać każdy, kto czyta raporty CMA.
+  { key: "cma/grupy-interwencyjne", label: "Grupy interwencyjne", group: "CMA" },
   { key: "cma/ustawienia", label: "Ustawienia", group: "CMA" },
   { key: "technical/realizacje", label: "Realizacje", group: "Techniczny" },
   { key: "technical/protokoly", label: "Protokoły", group: "Techniczny" },
@@ -54,6 +66,8 @@ export const TABS: TabDef[] = [
   { key: "technical/technicy", label: "Technicy", group: "Techniczny" },
   { key: "technical/obiekty", label: "Obiekty", group: "Techniczny" },
   { key: "technical/magazyn", label: "Magazyn", group: "Techniczny" },
+  // Lustro wpisu z src/lib/auth/permissions.ts — biblioteka manuali.
+  { key: "technical/manuale", label: "Manuale", group: "Techniczny" },
   { key: "technical/kalendarz", label: "Kalendarz", group: "Techniczny" },
   { key: "technical/projekty", label: "Projekty", group: "Techniczny" },
   { key: "technical/szablony", label: "Szablony", group: "Techniczny" },

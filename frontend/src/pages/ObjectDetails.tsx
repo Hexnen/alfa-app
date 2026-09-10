@@ -1,9 +1,36 @@
+/**
+ * KARTOTEKA OBIEKTU — stos sekcji zamiast zakładek.
+ *
+ * Strona odpowiada po kolei na cztery pytania: „ile ten obiekt zarabia?”
+ * (rząd KPI), „czym właściwie jest?” (karta obiektu), „co na nim świadczymy
+ * i od kiedy?” (okresy usług), „co się na nim działo?” (umowy, kalendarz
+ * i notatki, historia). Zakładki `Tabs` wyleciały, bo chowały połowę tych
+ * odpowiedzi za kliknięciem — a przy dziewięciu polach nie ma czego chować.
+ *
+ * Kalendarz i notatki stoją obok siebie w jednym `grid gap-4 lg:grid-cols-2`:
+ * pierwszy mówi, kiedy tam jedziemy, drugi — co o tym obiekcie wiadomo.
+ * Notatka wydarzenia z zaznaczonym „Zapisz też w obiekcie” ląduje w karcie po
+ * prawej, więc obie karty czyta się razem (`components/ObjectNotes.tsx`).
+ *
+ * Wzorce wizualne (konwencja repo — cytujemy źródło, nie wymyślamy drugiego
+ * stylu):
+ *  - lepki pasek dokumentu: `components/offers/OfferEditor.tsx:580`
+ *    (`ArrowLeft` ghost, tytuł `text-xl font-semibold`, pigułki, akcje `ml-auto`);
+ *  - definicje z ikonami: `components/CalendarEventDialog.tsx:2873`
+ *    (`<dl className="grid gap-3 text-sm sm:grid-cols-[120px_1fr]">`);
+ *  - kafelki i karty: `components/analytics/*` (`KpiRow`, `KpiTile`, `MarginGauge`,
+ *    `ChartCard`, `EmptyState`, `CoverageNote`, `DASH`);
+ *  - tabela okresów: `components/analytics/views/ObiektyView.tsx:646-700`
+ *    (`thead border-b bg-muted/50 text-xs uppercase`, `px-2 py-2`, `tabular-nums`);
+ *  - pigułki: `pillClass`/`PILL_TONE` z `lib/calendar-labels.ts:257-285` — jeden
+ *    zestaw tonów jasny/ciemny, bez surowych `slate-*` w tym pliku.
+ *
+ * Reguła kwot: `null` to „nikt nie uzupełnił”, a NIE 0 zł. Dlatego brak kosztu
+ * daje kreskę i notę pokrycia, a nie zero i marżę 100%.
+ */
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useParams, useNavigate, Link } from "react-router-dom";
+import { useParams, useNavigate, useSearchParams, Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Select,
   SelectContent,
@@ -24,15 +51,30 @@ import {
   ArrowLeft,
   ArrowRight,
   Building2,
+  CalendarClock,
   CalendarDays,
   CalendarPlus,
   ClockAlert,
+  ExternalLink,
   FileClock,
+  FileText,
+  Info,
+  Landmark,
+  MapPin,
+  Pencil,
   Plus,
   Repeat,
   Search,
   Send,
+  ShieldCheck,
+  StickyNote,
+  UserRound,
+  Wrench,
+  type LucideIcon,
 } from "lucide-react";
+import { ObjectInterventionSection } from "@/components/interventions/ObjectInterventionSection";
+import { ObjectContractDraftsSection } from "@/components/contracts/ObjectContractDraftsSection";
+import { SalesEntitySections } from "@/components/sales/SalesEntitySections";
 import { CalendarEventDialog, type CalendarDialogMode } from "@/components/CalendarEventDialog";
 import { BillingBadge, ProtocolBadge, QuoteBadge, RealizationBadge } from "@/components/CalendarEventBadges";
 import {
@@ -44,45 +86,95 @@ import {
   describeActivity,
   fmtRelative,
   initials,
+  pillClass,
   statusBadgeClass,
   fmtRange,
   fmtTimestamp,
   parseLocal,
   parseTimestamp,
   overdueTip,
+  type PillTone,
 } from "@/lib/calendar-labels";
+import {
+  ChartCard,
+  DASH,
+  EmptyState,
+  KpiRow,
+  KpiTile,
+  MarginGauge,
+} from "@/components/analytics";
 import { tip, tipAttrs } from "@/components/ui/tooltip";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
+import { ObjectForm } from "@/components/ObjectForm";
+import { ObjectNotes } from "@/components/ObjectNotes";
 import { usePerms } from "@/auth/permissions";
+import { fmtKm, travelSourceLabel, useTravel } from "@/lib/travel";
+import { toMapsUrl } from "@/lib/maps-url";
 import {
   activityApi,
   calendarApi,
   getObject,
   getObjectHistory,
+  salespersonName,
   transitionObject,
+  updateObject,
   type ActivityEntry,
   type CalendarEvent,
+  type ObjectInput,
+  type ObjectService,
+  type ObjectServiceKind,
   type ObjectWithDetails,
   type ObjectHistoryRecord,
   type WorkflowTransition,
 } from "@/lib/api";
 import {
-  objectServicesLabel,
+  activeServiceFlagsOf,
   installationTypeLabels,
+  isServicePeriodEnded,
+  isServicePeriodPlanned,
+  objectServiceLabels,
+  objectServicesOf,
   statusLabels,
   departmentLabels,
   contractStatusLabels,
   formatCurrency,
   formatDate,
+  todayIsoLocal,
 } from "@/lib/utils";
 
-const statusColors: Record<string, "warning" | "info" | "success" | "secondary"> = {
-  pending: "warning",
-  in_progress: "info",
-  active: "success",
-  inactive: "secondary",
+/**
+ * Tony pigułek statusu obiektu. Te same barwy, co na liście i w analityce:
+ * oczekujący bursztynowy (czeka na człowieka), w realizacji błękitny (trwa),
+ * aktywny zielony, nieaktywny szary.
+ */
+const STATUS_TONE: Record<string, PillTone> = {
+  pending: "amber",
+  in_progress: "sky",
+  active: "emerald",
+  inactive: "neutral",
+};
+
+/** Statusy umów — szkic szary, aktywna zielona, wygasła bursztynowa, rozwiązana czerwona. */
+const CONTRACT_TONE: Record<string, PillTone> = {
+  draft: "neutral",
+  active: "emerald",
+  expired: "amber",
+  terminated: "red",
+};
+
+/**
+ * Tony rodzajów usług — kopia mapy z `components/ObjectServicesEditor.tsx:47`,
+ * żeby ta sama usługa miała ten sam kolor w edytorze i w kartotece. Kopia, a nie
+ * import: plik edytora eksportuje wyłącznie komponent (reguła
+ * react-refresh/only-export-components).
+ */
+const SERVICE_TONE: Record<ObjectServiceKind, PillTone> = {
+  kamery: "sky",
+  sswin: "amber",
+  wideorecepcja: "violet",
+  ofi: "emerald",
 };
 
 const workflowOptions: Record<
@@ -93,17 +185,64 @@ const workflowOptions: Record<
     {
       status: "in_progress",
       department: "technical",
-      label: "Przekaz do dzialu technicznego",
+      label: "Przekaż do działu technicznego",
     },
   ],
   "in_progress-technical": [
-    { status: "active", department: "accounting", label: "Zakoncz wdrozenie" },
-    { status: "pending", department: "sales", label: "Zwroc do handlowego" },
+    { status: "active", department: "accounting", label: "Zakończ wdrożenie" },
+    { status: "pending", department: "sales", label: "Zwróć do handlowego" },
   ],
   "active-accounting": [
     { status: "inactive", department: "accounting", label: "Dezaktywuj" },
   ],
 };
+
+/**
+ * „za 42 dni” / „jutro” / „3 dni temu” — dopisek przy przewidywanym zakończeniu.
+ *
+ * Dlaczego nie `fmtRelative` z kalendarza (którym opisujemy znaczniki czasu
+ * niżej): ta funkcja liczy WYŁĄCZNIE wstecz. Dla daty w przyszłości różnica
+ * wychodzi ujemna i odpowiada „przed chwilą”, a dla przeszłości starszej niż
+ * tydzień oddaje samą datę — czyli dokładnie to, co stoi już obok. Przewidywane
+ * zakończenie leży zwykle w przyszłości, więc obie strony liczymy tutaj, w dniach
+ * kalendarzowych (daty są kalendarzowe, nie chwilowe).
+ */
+function expectedEndRelative(iso: string, today: string): string {
+  const days = Math.round((Date.parse(iso) - Date.parse(today)) / 86_400_000);
+  if (Number.isNaN(days)) return "";
+  if (days === 0) return "dziś";
+  if (days === 1) return "jutro";
+  if (days === -1) return "wczoraj";
+  const abs = Math.abs(days);
+  const span = abs < 60 ? `${abs} dni` : `${Math.round(abs / 30)} mies.`;
+  return days > 0 ? `za ${span}` : `${span} temu`;
+}
+
+/** Wiersz definicji karty obiektu: ikona + etykieta po lewej, treść po prawej. */
+function Row({
+  icon: Icon,
+  label,
+  children,
+}: {
+  icon: LucideIcon;
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <>
+      {/* `items-start`, a nie `items-center`: przy długich uwagach wyśrodkowana
+          etykieta odjeżdżała na środek akapitu i wyglądała, jakby opisywała
+          jego drugą połowę. */}
+      <dt className="flex items-start gap-1.5 text-muted-foreground">
+        <Icon className="mt-0.5 h-3.5 w-3.5 shrink-0" /> {label}
+      </dt>
+      <dd className="min-w-0">{children}</dd>
+    </>
+  );
+}
+
+/** Kreska „nie wiemy” — jedno miejsce na brak danych w całej karcie. */
+const Empty = () => <span className="text-muted-foreground">{DASH}</span>;
 
 export function ObjectDetails() {
   const { id } = useParams<{ id: string }>();
@@ -122,6 +261,8 @@ export function ObjectDetails() {
   const [calDialogMode, setCalDialogMode] = useState<CalendarDialogMode>("create");
   const [calDialogEvent, setCalDialogEvent] = useState<CalendarEvent | null>(null);
   const [calNonce, setCalNonce] = useState(0);
+  /** Podbijane po zapisie wydarzenia — z dialogu można skopiować notatkę do obiektu. */
+  const [notesNonce, setNotesNonce] = useState(0);
 
   const loadCalendar = useCallback(async (objectId: number) => {
     // Historia (activity_log) jest czytelna dla każdego zalogowanego;
@@ -157,6 +298,7 @@ export function ObjectDetails() {
 
   // Znacznik "teraz" ustalony przy montażu (czysty render — bez Date.now w useMemo).
   const [nowTs] = useState(() => Date.now());
+  const [today] = useState(() => todayIsoLocal());
   const { upcoming, past } = useMemo(() => {
     const now = nowTs;
     const up: CalendarEvent[] = [];
@@ -171,10 +313,15 @@ export function ObjectDetails() {
 
   /** Scalona historia: object_history + activity_log, sort. malejąco po dacie. */
   const mergedHistory = useMemo(() => {
-    type Row =
+    type HistoryRow =
       | { key: string; at: number; kind: "object"; item: ObjectHistoryRecord }
-      | { key: string; at: number; kind: "calendar"; item: ActivityEntry };
-    const rows: Row[] = [
+      | { key: string; at: number; kind: "calendar"; item: ActivityEntry }
+      // Dziennik po `object_id` niesie też wpisy, które NIE są wydarzeniem
+      // kalendarza — notatki kartoteki (`entity_type = "object"`). Bez własnego
+      // rodzaju lądowałyby pod nagłówkiem „Wydarzenie w kalendarzu”, w którym
+      // nie ma czego kliknąć, i wypadałyby z filtra „Tylko obiekt”.
+      | { key: string; at: number; kind: "objectActivity"; item: ActivityEntry };
+    const rows: HistoryRow[] = [
       ...history.map((item) => ({
         key: `h-${item.id}`,
         at: parseTimestamp(item.createdAt).getTime(),
@@ -184,14 +331,14 @@ export function ObjectDetails() {
       ...activity.map((item) => ({
         key: `a-${item.id}`,
         at: parseTimestamp(item.createdAt).getTime(),
-        kind: "calendar" as const,
+        kind: item.entityType === "calendar_event" ? ("calendar" as const) : ("objectActivity" as const),
         item,
       })),
     ];
     rows.sort((a, b) => b.at - a.at);
     // Agregacja: kilka pól zmienionych w jednej operacji (ten sam event, autor,
     // sekunda) → jeden wpis „zmienił N pól” (pattern audit-feed).
-    const out: (Row & { more?: ActivityEntry[] })[] = [];
+    const out: (HistoryRow & { more?: ActivityEntry[] })[] = [];
     for (const r of rows) {
       const last = out[out.length - 1];
       if (
@@ -211,7 +358,7 @@ export function ObjectDetails() {
 
   // Filtry historii: źródło, aktor, szukaj
   const [histSource, setHistSource] = useState<"all" | "calendar" | "object">("all");
-  const [histActor, setHistActor] = useState<string>("");
+  const [histActor, setHistActor] = useState<string>("all");
   const [histQuery, setHistQuery] = useState("");
   const [histLimit, setHistLimit] = useState(30);
   const actors = useMemo(() => {
@@ -225,14 +372,19 @@ export function ObjectDetails() {
   const filteredHistory = useMemo(() => {
     const q = histQuery.trim().toLowerCase();
     return mergedHistory.filter((r) => {
-      if (histSource !== "all" && r.kind !== histSource) return false;
+      // Notatki kartoteki idą pod „Tylko obiekt” razem z object_history — dla
+      // czytającego to jedno źródło: zmiany w kartotece, nie w kalendarzu.
+      const source = r.kind === "calendar" ? "calendar" : "object";
+      if (histSource !== "all" && source !== histSource) return false;
       const who = r.kind === "object" ? r.item.changedBy : r.item.userLabel;
-      if (histActor && who !== histActor) return false;
+      if (histActor !== "all" && who !== histActor) return false;
       if (q) {
         const text =
           r.kind === "object"
             ? `${r.item.action} ${r.item.description ?? ""} ${who ?? ""}`
-            : `${r.item.event?.title ?? ""} ${describeActivity(r.item)}`;
+            : r.kind === "objectActivity"
+              ? `${r.item.summary ?? describeActivity(r.item)} ${who ?? ""}`
+              : `${r.item.event?.title ?? ""} ${describeActivity(r.item)}`;
         if (!text.toLowerCase().includes(q)) return false;
       }
       return true;
@@ -240,591 +392,905 @@ export function ObjectDetails() {
   }, [mergedHistory, histSource, histActor, histQuery]);
   const [loading, setLoading] = useState(true);
   const [transitionOpen, setTransitionOpen] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
+  /**
+   * `?edit=1` otwiera od razu edycję kartoteki. Wchodzi się tak z formularza
+   * nowej umowy („Przypisz spółkę w karcie obiektu”) — bez tego użytkownik
+   * lądowałby na karcie i musiał sam znaleźć przycisk „Edytuj”.
+   *
+   * Parametr KASUJEMY zaraz po otwarciu: gdyby został w adresie, odświeżenie
+   * strony albo powrót „wstecz” otwierałyby dialog jeszcze raz.
+   */
+  const [searchParams, setSearchParams] = useSearchParams();
+  useEffect(() => {
+    if (searchParams.get("edit") !== "1") return;
+    setEditOpen(true);
+    const next = new URLSearchParams(searchParams);
+    next.delete("edit");
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
   const [transitionData, setTransitionData] = useState<WorkflowTransition>({
     newStatus: "pending",
     newDepartment: "sales",
     description: "",
   });
 
+  /** Przeładowanie kartoteki po zapisie (edycja, przejście workflow). */
+  const reload = useCallback(async (objectId: number) => {
+    const [objRes, historyRes] = await Promise.all([
+      getObject(objectId),
+      getObjectHistory(objectId),
+    ]);
+    setObject(objRes.data!);
+    setHistory(historyRes.data);
+  }, []);
+
   useEffect(() => {
     if (!id) return;
-    Promise.all([getObject(parseInt(id)), getObjectHistory(parseInt(id))])
-      .then(([objRes, historyRes]) => {
-        setObject(objRes.data!);
-        setHistory(historyRes.data);
-      })
+    reload(parseInt(id))
       .catch(console.error)
       .finally(() => setLoading(false));
-  }, [id]);
+  }, [id, reload]);
+
+  /**
+   * Dojazd biuro → obiekt liczy backend (`GET /company/travel`) — ten sam hook,
+   * co w dialogu wydarzenia (`CalendarEventDialog.tsx:2191`) i w kalendarzu, więc
+   * kilometry w obu miejscach zawsze zgadzają się co do przecinka.
+   */
+  const { travel, loading: travelLoading } = useTravel(object?.id, !!object);
 
   const handleTransition = async () => {
     if (!editable) return;
     if (!object) return;
     try {
       await transitionObject(object.id, transitionData);
-      const [objRes, historyRes] = await Promise.all([
-        getObject(object.id),
-        getObjectHistory(object.id),
-      ]);
-      setObject(objRes.data!);
-      setHistory(historyRes.data);
+      await reload(object.id);
       setTransitionOpen(false);
     } catch (error) {
       console.error("Error transitioning object:", error);
     }
   };
 
+  const handleEditSubmit = async (data: ObjectInput) => {
+    if (!editable || !object) return;
+    await updateObject(object.id, data);
+    await reload(object.id);
+  };
+
   if (loading) {
-    return <div className="text-center py-8">Ladowanie...</div>;
+    return <div className="py-8 text-center text-muted-foreground">Ładowanie…</div>;
   }
 
   if (!object) {
-    return <div className="text-center py-8">Obiekt nie znaleziony</div>;
+    return <div className="py-8 text-center text-muted-foreground">Obiekt nie znaleziony</div>;
   }
 
   const currentWorkflowKey = `${object.status}-${object.department}`;
   const availableTransitions = workflowOptions[currentWorkflowKey] || [];
 
-  // Ekonomia obiektu. `monthlyCost === null` znaczy „nikt tego nie uzupełnił”,
+  // --- Usługi: źródłem prawdy są okresy, flagi `hasX` to tylko cache stanu na
+  // dziś. Starszy backend okresów nie odsyła (`services?`), więc pigułki „co
+  // obiekt ma dziś” liczymy z okresów, gdy są, a w przeciwnym razie z flag.
+  const periods: ObjectService[] = object.services ?? [];
+  const flags =
+    periods.length > 0
+      ? activeServiceFlagsOf(periods, today)
+      : {
+          hasCameras: object.hasCameras,
+          hasSswin: object.hasSswin,
+          hasVideoreception: object.hasVideoreception,
+          hasOfi: object.hasOfi,
+          cameraCount: object.cameraCount,
+        };
+  const activeServiceKeys = objectServicesOf(flags);
+  /** Okresy w kolejności: trwające i zaplanowane najpierw, zakończone na dole. */
+  const sortedPeriods = [...periods].sort((a, b) => {
+    const ea = isServicePeriodEnded(a, today) ? 1 : 0;
+    const eb = isServicePeriodEnded(b, today) ? 1 : 0;
+    if (ea !== eb) return ea - eb;
+    return b.startDate.localeCompare(a.startDate);
+  });
+
+  // --- Ekonomia obiektu. `monthlyCost === null` znaczy „nikt tego nie uzupełnił”,
   // więc zysku ani marży nie liczymy — inaczej każdy pusty obiekt miałby 100%.
   const monthlyCost = object.monthlyCost ?? null;
   const setupCost = object.setupCost ?? null;
-  // Przychód miesięczny = abonament + dzierżawa sprzętu (klient płaci obie pozycje).
-  const monthlyRevenue = (object.monthlyValue ?? 0) + (object.monthlyRental ?? 0);
-  // Pusty abonament i pusta dzierżawa to „nieuzupełnione”, a nie 0 zł — tak samo
-  // jak przy koszcie niżej. Bez tego obiekt bez kwot chwalił się „0,00 zł
-  // przychodu” obok kreski w koszcie, jakby przychód ktoś ustalił na zero.
-  const hasRevenue = object.monthlyValue != null || object.monthlyRental != null;
+  // Przychód miesięczny = abonament ZDW + abonament OFI + dzierżawa sprzętu
+  // (klient płaci wszystkie trzy pozycje).
+  const monthlyRevenue =
+    (object.monthlyZdw ?? 0) + (object.monthlyOfi ?? 0) + (object.monthlyRental ?? 0);
+  // Puste kwoty to „nieuzupełnione”, a nie 0 zł — tak samo jak przy koszcie
+  // niżej. Bez tego obiekt bez kwot chwaliłby się „0,00 zł przychodu” obok
+  // kreski w koszcie, jakby przychód ktoś ustalił na zero.
+  const hasRevenue =
+    object.monthlyZdw != null || object.monthlyOfi != null || object.monthlyRental != null;
+  /** Rozbicie pod kwotą — pokazujemy tylko wypełnione linie, kreski nic nie wnoszą. */
+  const revenueParts = [
+    object.monthlyZdw != null ? `ZDW ${formatCurrency(object.monthlyZdw)}` : null,
+    object.monthlyOfi != null ? `OFI ${formatCurrency(object.monthlyOfi)}` : null,
+    object.monthlyRental != null ? `dzierżawa ${formatCurrency(object.monthlyRental)}` : null,
+  ].filter((s): s is string => s !== null);
   const monthlyProfit = monthlyCost === null ? null : monthlyRevenue - monthlyCost;
   const marginPct =
     monthlyProfit === null || !monthlyRevenue
       ? null
       : Math.round((monthlyProfit / monthlyRevenue) * 100);
+  const paybackMonths =
+    setupCost === null || monthlyProfit === null
+      ? null
+      : monthlyProfit <= 0
+        ? Infinity
+        : Math.ceil(setupCost / monthlyProfit);
+
+  // --- Lokalizacja
+  const hasCoords = object.latitude != null && object.longitude != null;
+  const mapsHref =
+    object.mapsUrl ??
+    (hasCoords ? toMapsUrl(object.latitude as number, object.longitude as number) : null);
+
+  const expectedEnd = object.expectedEndDate;
+  const expectedEndPast = !!expectedEnd && expectedEnd < today;
 
   const actionLabels: Record<string, string> = {
     created: "Utworzono",
     updated: "Zaktualizowano",
     transition: "Zmieniono status",
-    contract_created: "Dodano umowe",
-    contract_updated: "Zaktualizowano umowe",
-    contract_deleted: "Usunieto umowe",
+    contract_created: "Dodano umowę",
+    contract_updated: "Zaktualizowano umowę",
+    contract_deleted: "Usunięto umowę",
   };
 
   return (
-    <div className="space-y-6">
-      {!editable && <ReadOnlyBanner className="mb-4" />}
-      <div className="flex items-center gap-4">
-        <Button variant="ghost" size="icon" onClick={() => navigate(-1)}>
-          <ArrowLeft className="h-5 w-5" />
+    <div className="space-y-4">
+      {/* Pasek obiektu — lepki, żeby nazwa, status i akcje były pod ręką także
+          pod historią (wzorzec: offers/OfferEditor.tsx:580). */}
+      <div className="sticky top-0 z-20 -mx-3 flex flex-wrap items-center gap-2 border-b bg-background/95 px-3 py-2 backdrop-blur lg:-mx-4 lg:px-4">
+        <Button variant="ghost" size="sm" onClick={() => navigate("/objects")}>
+          <ArrowLeft className="mr-1 h-4 w-4" /> Obiekty
         </Button>
-        <h1 className="text-3xl font-bold">{object.name}</h1>
-        <Badge variant={statusColors[object.status]} className="ml-2">
+        <h1 className="text-xl font-semibold">{object.name}</h1>
+        <span className={pillClass(STATUS_TONE[object.status] ?? "neutral")}>
           {statusLabels[object.status]}
-        </Badge>
+        </span>
+        {/* Pigułki usług = stan NA DZIŚ (okresy zakończone tu nie wchodzą);
+            pełna historia okresów jest w sekcji „Usługi”. */}
+        {activeServiceKeys.map((k) => (
+          <span key={k} className={pillClass(SERVICE_TONE[k])}>
+            {k === "kamery"
+              ? `Kamery ${flags.cameraCount ?? "(ilość?)"}`
+              : objectServiceLabels[k]}
+          </span>
+        ))}
+        <span
+          className={pillClass("muted")}
+          {...tip("Dział, który obecnie prowadzi obiekt")}
+        >
+          {departmentLabels[object.department]}
+        </span>
+
+        <div className="ml-auto flex flex-wrap items-center gap-2">
+          {mapsHref && (
+            <a
+              href={mapsHref}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1 whitespace-nowrap text-xs text-primary hover:underline"
+              {...tip(
+                object.mapsUrl
+                  ? "Link do pinezki zapisany w kartotece"
+                  : "Mapa dla współrzędnych obiektu"
+              )}
+              data-testid="object-maps-link"
+            >
+              <ExternalLink className="h-3.5 w-3.5" /> Otwórz w Google Maps
+            </a>
+          )}
+          {editable && (
+            <Button size="sm" variant="outline" onClick={() => setEditOpen(true)}>
+              <Pencil className="mr-1 h-4 w-4" /> Edytuj
+            </Button>
+          )}
+          {/* Przejścia workflow tam, gdzie reszta akcji dokumentu — osobna karta
+              „Akcje workflow” zajmowała trzecią część ekranu na dwa przyciski. */}
+          {editable &&
+            availableTransitions.map((transition, i) => (
+              <Button
+                key={`${transition.status}-${transition.department}`}
+                size="sm"
+                variant={i === 0 ? "default" : "outline"}
+                onClick={() => {
+                  setTransitionData({
+                    newStatus: transition.status as WorkflowTransition["newStatus"],
+                    newDepartment: transition.department as WorkflowTransition["newDepartment"],
+                    description: "",
+                  });
+                  setTransitionOpen(true);
+                }}
+              >
+                <Send className="mr-1 h-4 w-4" />
+                {transition.label}
+              </Button>
+            ))}
+        </div>
       </div>
 
-      <div className="grid gap-6 lg:grid-cols-3">
-        {/* Main info */}
-        <Card className="lg:col-span-2">
-          <CardHeader>
-            <CardTitle>Informacje o obiekcie</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <dl className="grid grid-cols-2 gap-4">
-              <div>
-                <dt className="text-sm text-muted-foreground">Kontrahent</dt>
-                <dd className="font-medium">{object.contractor?.name || "-"}</dd>
-              </div>
-              <div>
-                <dt className="text-sm text-muted-foreground">NIP</dt>
-                <dd>{object.contractor?.nip || "-"}</dd>
-              </div>
-              <div>
-                <dt className="text-sm text-muted-foreground">Adres</dt>
-                <dd>{object.address || "-"}</dd>
-              </div>
-              <div>
-                <dt className="text-sm text-muted-foreground">Miasto</dt>
-                <dd>{object.city || "-"}</dd>
-              </div>
-              <div>
-                {/* Usługi zamiast jednego „typu ochrony” — jedna pozycja za
-                    jedną, więc dwukolumnowa siatka `<dl>` zostaje parzysta.
-                    „Kamery (ilość?)” = usługa jest, ale kamer nikt nie policzył. */}
-                <dt className="text-sm text-muted-foreground">Usługi</dt>
-                <dd>{objectServicesLabel(object)}</dd>
-              </div>
-              <div>
-                <dt className="text-sm text-muted-foreground">Typ instalacji</dt>
-                <dd>{installationTypeLabels[object.installationType]}</dd>
-              </div>
-              <div>
-                <dt className="text-sm text-muted-foreground">Dzial</dt>
-                <dd>
-                  <Badge variant="outline">
-                    {departmentLabels[object.department]}
-                  </Badge>
-                </dd>
-              </div>
-              <div>
-                <dt className="text-sm text-muted-foreground">
-                  Przychód miesięczny
-                </dt>
-                <dd className="font-medium">
-                  {hasRevenue ? (
-                    formatCurrency(monthlyRevenue)
-                  ) : (
-                    <span className="text-muted-foreground">—</span>
-                  )}
-                  {object.monthlyRental ? (
-                    <div className="text-xs font-normal text-muted-foreground">
-                      abonament {formatCurrency(object.monthlyValue)} + dzierżawa{" "}
-                      {formatCurrency(object.monthlyRental)}
-                    </div>
-                  ) : null}
-                </dd>
-              </div>
-              {/* Koszty: pusty koszt to „nieuzupełniony”, a nie 0 zł — dlatego
-                  zamiast kwoty i 100% marży pokazujemy kreskę. Cztery pozycje,
-                  żeby siatka `grid-cols-2` została parzysta. */}
-              <div>
-                <dt
-                  className="text-sm text-muted-foreground"
-                  title="Koszty poza wynagrodzeniami (monitoring, sprzęt, abonamenty). Pensje załogi dolicza Analityka z Kadr."
-                >
-                  Koszt miesięczny (pozostały)
-                </dt>
-                <dd className="font-medium">
-                  {monthlyCost === null ? (
-                    <span className="text-muted-foreground">—</span>
-                  ) : (
-                    formatCurrency(monthlyCost)
-                  )}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-sm text-muted-foreground">Zysk miesięczny</dt>
-                <dd className="font-medium">
-                  {monthlyProfit === null ? (
-                    <span className="text-muted-foreground">—</span>
-                  ) : (
-                    <>
-                      <span
-                        className={cn(
-                          monthlyProfit > 0 && "text-emerald-700",
-                          monthlyProfit < 0 && "text-red-600"
-                        )}
-                      >
-                        {formatCurrency(monthlyProfit)}
-                      </span>
-                      {marginPct !== null && (
-                        <span className="block text-xs font-normal text-muted-foreground">
-                          (marża {marginPct}%)
-                        </span>
-                      )}
-                    </>
-                  )}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-sm text-muted-foreground">Koszt instalacji</dt>
-                <dd className="font-medium">
-                  {setupCost === null ? (
-                    <span className="text-muted-foreground">—</span>
-                  ) : (
-                    formatCurrency(setupCost)
-                  )}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-sm text-muted-foreground">Okres zwrotu</dt>
-                <dd className="font-medium">
-                  {setupCost === null || monthlyProfit === null ? (
-                    <span className="text-muted-foreground">—</span>
-                  ) : monthlyProfit <= 0 ? (
-                    <span className="text-red-600">nigdy</span>
-                  ) : (
-                    `${Math.ceil(setupCost / monthlyProfit)} mies.`
-                  )}
-                </dd>
-              </div>
-              {object.notes && (
-                <div className="col-span-2">
-                  <dt className="text-sm text-muted-foreground">Uwagi</dt>
-                  <dd className="whitespace-pre-wrap">{object.notes}</dd>
+      {!editable && <ReadOnlyBanner />}
+
+      {/* --- Ekonomia obiektu w jednym rzędzie --- */}
+      <KpiRow>
+        <KpiTile
+          label="Przychód mies."
+          value={hasRevenue ? formatCurrency(monthlyRevenue) : DASH}
+          sub={
+            // Rozbicie mówi, Z CZEGO ta kwota jest — a to informacja także przy
+            // jednej wypełnionej linii („9 543 zł” z samego ZDW to co innego niż
+            // z samej dzierżawy). Znika dopiero, gdy nie ma ani jednej kwoty.
+            revenueParts.length > 0 ? (
+              <span data-testid="object-revenue-breakdown">{revenueParts.join(" · ")}</span>
+            ) : undefined
+          }
+          tip="Abonament ZDW + abonament OFI + dzierżawa sprzętu (netto)"
+        />
+        <KpiTile
+          label="Koszt mies."
+          value={monthlyCost === null ? DASH : formatCurrency(monthlyCost)}
+          tip="Koszty poza wynagrodzeniami (monitoring, sprzęt, abonamenty). Pensje załogi dolicza Analityka z Kadr."
+          // Nota pokrycia stoi TYLKO przy koszcie — to jedyna luka, którą da się
+          // tu wypełnić. Powtarzanie jej pod zyskiem, marżą i zwrotem czyniłoby
+          // z jednego braku cztery ostrzeżenia.
+          coverage={{ known: monthlyCost === null ? 0 : 1, total: 1, noun: "obiektu" }}
+        />
+        <KpiTile
+          label="Zysk mies."
+          value={monthlyProfit === null ? DASH : formatCurrency(monthlyProfit)}
+          tone={
+            monthlyProfit === null ? "neutral" : monthlyProfit >= 0 ? "good" : "bad"
+          }
+          sub={monthlyProfit === null ? "brak kosztu" : undefined}
+        />
+        <KpiTile label="Marża" value={<MarginGauge value={marginPct} size="lg" />} />
+        <KpiTile
+          label="Koszt instalacji"
+          value={setupCost === null ? DASH : formatCurrency(setupCost)}
+          tip="Jednorazowy nakład na wdrożenie"
+        />
+        <KpiTile
+          label="Zwrot"
+          value={
+            paybackMonths === null
+              ? DASH
+              : paybackMonths === Infinity
+                ? "nigdy"
+                : `${paybackMonths} mies.`
+          }
+          tone={paybackMonths === Infinity ? "bad" : "neutral"}
+          tip="Ile miesięcy zysku pokrywa koszt instalacji"
+        />
+      </KpiRow>
+      {/* Jedno zdanie o konwencji na całą stronę zamiast dopisku „netto” przy
+          każdej kwocie. Druga połowa jest ważniejsza: zysk i marża stoją tu
+          WYŁĄCZNIE na koszcie pozostałym — koszt osobowy z Kadr dokłada dopiero
+          Analityka, więc marża z tej karty jest zawyżona dla każdego obiektu,
+          na którym stoją ludzie. */}
+      <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
+        <Info className="mt-0.5 h-3 w-3 shrink-0" />
+        Wszystkie kwoty są netto (bez VAT). Zysk i marża liczone są z samego kosztu
+        pozostałego — koszt osobowy z Kadr dolicza dopiero Analityka.
+      </p>
+
+      <div className="grid gap-3 lg:grid-cols-[1fr_360px]">
+        <div className="space-y-3">
+          {/* --- Karta obiektu: kto, gdzie, czyje --- */}
+          <ChartCard
+            title="Karta obiektu"
+            description={`Kartoteka #${object.id} · zaktualizowana ${fmtRelative(object.updatedAt)}`}
+          >
+            <dl className="grid gap-3 text-sm sm:grid-cols-[120px_1fr]">
+              <Row icon={Building2} label="Kontrahent">
+                {object.contractor ? (
+                  <>
+                    <Link
+                      to={`/objects?contractorId=${object.contractor.id}`}
+                      className="font-medium text-primary hover:underline"
+                      {...tip("Pokaż wszystkie obiekty tego kontrahenta")}
+                    >
+                      {object.contractor.name}
+                    </Link>
+                    {object.contractor.nip && (
+                      <div className="text-xs tabular-nums text-muted-foreground">
+                        NIP {object.contractor.nip}
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <Empty />
+                )}
+              </Row>
+
+              <Row icon={MapPin} label="Adres">
+                {object.address || object.city ? (
+                  <div className="font-medium">
+                    {[object.address, object.city].filter(Boolean).join(", ")}
+                  </div>
+                ) : (
+                  <Empty />
+                )}
+                {hasCoords && (
+                  <div className="text-xs tabular-nums text-muted-foreground">
+                    {object.latitude!.toFixed(5)}, {object.longitude!.toFixed(5)}
+                  </div>
+                )}
+                {mapsHref && (
+                  <a
+                    href={mapsHref}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                  >
+                    <ExternalLink className="h-3 w-3" /> Google Maps
+                  </a>
+                )}
+                {/* Dojazd z biura — ta sama linia, co w dialogu wydarzenia. */}
+                <div className="text-xs text-muted-foreground">
+                  {travel?.error
+                    ? travel.error
+                    : travel?.km != null
+                      ? `${fmtKm(travel.km)} z biura${
+                          travelSourceLabel(travel, travelLoading)
+                            ? ` · ${travelSourceLabel(travel, travelLoading)}`
+                            : ""
+                        }`
+                      : travelLoading
+                        ? "dojazd: liczę…"
+                        : ""}
                 </div>
+              </Row>
+
+              <Row icon={Wrench} label="Instalacja">
+                {installationTypeLabels[object.installationType] ?? <Empty />}
+              </Row>
+
+              <Row icon={ArrowRight} label="Dział">
+                <span className={pillClass("muted")}>
+                  {departmentLabels[object.department]}
+                </span>
+              </Row>
+
+              <Row icon={Landmark} label="Spółka">
+                {object.company?.name ?? <Empty />}
+              </Row>
+
+              <Row icon={UserRound} label="Handlowiec">
+                {object.salesperson ? (
+                  <span className="inline-flex flex-wrap items-center gap-1.5">
+                    <span className="font-medium">{salespersonName(object.salesperson)}</span>
+                    {object.salesperson.inherited && (
+                      <span
+                        className={pillClass("muted", { compact: true })}
+                        {...tip("Opiekun kontrahenta — obiekt nie ma własnego handlowca")}
+                      >
+                        dziedziczony
+                      </span>
+                    )}
+                  </span>
+                ) : (
+                  <Empty />
+                )}
+              </Row>
+
+              <Row icon={CalendarClock} label="Przew. zakończenie">
+                {/* Testid siedzi na kontenerze, a nie w gałęzi z datą — inaczej
+                    znikałby dla obiektów bezterminowych i test nie miałby czego
+                    sprawdzić poza obecnością wiersza. */}
+                <span
+                  data-testid="object-expected-end"
+                  className={cn(
+                    "inline-flex flex-wrap items-baseline gap-1.5",
+                    // Data w przeszłości to sygnał do działania (przedłużyć albo
+                    // domknąć obiekt), a nie zwykła informacja — stąd bursztyn.
+                    expectedEndPast && "text-amber-700 dark:text-amber-300"
+                  )}
+                >
+                  {expectedEnd ? (
+                    <>
+                      <span className="font-medium tabular-nums">{formatDate(expectedEnd)}</span>
+                      <span className={cn("text-xs", !expectedEndPast && "text-muted-foreground")}>
+                        {expectedEndRelative(expectedEnd, today)}
+                        {expectedEndPast ? " · termin minął" : ""}
+                      </span>
+                    </>
+                  ) : (
+                    <span className="text-muted-foreground">bezterminowo</span>
+                  )}
+                </span>
+              </Row>
+
+              {object.notes && (
+                <Row icon={StickyNote} label="Uwagi">
+                  <p className="whitespace-pre-wrap">{object.notes}</p>
+                </Row>
               )}
             </dl>
-            {/* Jedno zdanie o konwencji na całą kartę zamiast dopisku „netto”
-                przy każdej kwocie. Druga połowa jest ważniejsza: zysk i marża
-                stoją tu WYŁĄCZNIE na koszcie pozostałym — koszt osobowy z Kadr
-                dokłada dopiero Analityka, więc marża z tej karty jest zawyżona
-                dla każdego obiektu, na którym stoją ludzie. */}
-            <p className="mt-4 text-xs text-muted-foreground">
-              Wszystkie kwoty są netto (bez VAT). Zysk i marża liczone są z
-              samego kosztu pozostałego — koszt osobowy z Kadr dolicza dopiero
-              Analityka.
-            </p>
-          </CardContent>
-        </Card>
+          </ChartCard>
 
-        {/* Workflow actions */}
-        <Card>
-          <CardHeader>
-            <CardTitle>Akcje workflow</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {availableTransitions.length === 0 || !editable ? (
-              <p className="text-sm text-muted-foreground">
-                Brak dostepnych akcji dla obecnego statusu
-              </p>
-            ) : (
-              availableTransitions.map((transition) => (
-                <Button
-                  key={`${transition.status}-${transition.department}`}
-                  className="w-full"
-                  onClick={() => {
-                    setTransitionData({
-                      newStatus: transition.status as WorkflowTransition["newStatus"],
-                      newDepartment: transition.department as WorkflowTransition["newDepartment"],
-                      description: "",
-                    });
-                    setTransitionOpen(true);
-                  }}
-                >
-                  <Send className="h-4 w-4 mr-2" />
-                  {transition.label}
+          {/* --- Okresy usług --- */}
+          <ChartCard
+            title="Usługi"
+            description="Okresy świadczenia. Zakończony okres zostaje w kartotece, ale nie liczy się do flag, filtrów ani analityki."
+            controls={
+              editable ? (
+                <Button size="sm" variant="outline" onClick={() => setEditOpen(true)}>
+                  <Plus className="mr-1 h-4 w-4" /> Dodaj usługę
                 </Button>
-              ))
-            )}
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* Tabs for contracts and history */}
-      <Tabs defaultValue="contracts">
-        <TabsList>
-          <TabsTrigger value="contracts">
-            Umowy ({object.contracts.length})
-          </TabsTrigger>
-          <TabsTrigger value="calendar">
-            Kalendarz{calEvents.length ? ` (${calEvents.length})` : ""}
-          </TabsTrigger>
-          <TabsTrigger value="history">Historia</TabsTrigger>
-        </TabsList>
-        <TabsContent value="contracts">
-          <Card>
-            <CardContent className="pt-6">
-              {object.contracts.length === 0 ? (
-                <p className="text-center text-muted-foreground py-4">
-                  Brak umow dla tego obiektu
-                </p>
-              ) : (
-                <table className="w-full">
-                  <thead>
-                    <tr className="border-b">
-                      <th className="text-left py-2 font-medium">Nr umowy</th>
-                      <th className="text-left py-2 font-medium">
-                        Data rozpoczecia
-                      </th>
-                      <th className="text-left py-2 font-medium">
-                        Data zakonczenia
-                      </th>
-                      <th className="text-right py-2 font-medium">Wartosc</th>
-                      <th className="text-left py-2 font-medium">Status</th>
+              ) : undefined
+            }
+          >
+            {sortedPeriods.length === 0 ? (
+              <EmptyState
+                icon={ShieldCheck}
+                title="Brak okresów usług"
+                description={
+                  editable
+                    ? "Dodaj pierwszy okres („Dodaj usługę”), żeby kartoteka wiedziała, co i od kiedy świadczymy na tym obiekcie."
+                    : "Nikt nie zapisał jeszcze, co i od kiedy świadczymy na tym obiekcie."
+                }
+              />
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm" data-testid="object-services-list">
+                  <thead className="border-b bg-muted/50 text-xs uppercase tracking-wide text-muted-foreground">
+                    <tr>
+                      <th className="px-2 py-2 text-left font-medium">Usługa</th>
+                      <th className="px-2 py-2 text-left font-medium">Od</th>
+                      <th className="px-2 py-2 text-left font-medium">Do</th>
+                      <th className="px-2 py-2 text-right font-medium">Kamery</th>
+                      <th className="px-2 py-2 text-left font-medium">Status</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {object.contracts.map((contract) => (
-                      <tr key={contract.id} className="border-b">
-                        <td className="py-2">{contract.contractNumber}</td>
-                        <td className="py-2">{formatDate(contract.startDate)}</td>
-                        <td className="py-2">
-                          {formatDate(contract.endDate) || "-"}
-                        </td>
-                        <td className="py-2 text-right">
-                          {formatCurrency(contract.value)}
-                        </td>
-                        <td className="py-2">
-                          <Badge variant="outline">
-                            {contractStatusLabels[contract.status]}
-                          </Badge>
-                        </td>
-                      </tr>
-                    ))}
+                    {sortedPeriods.map((p) => {
+                      const ended = isServicePeriodEnded(p, today);
+                      const planned = isServicePeriodPlanned(p, today);
+                      return (
+                        <tr
+                          key={p.id}
+                          className={cn("border-b last:border-0", ended && "opacity-60")}
+                        >
+                          <td className="px-2 py-2">
+                            <span className={pillClass(SERVICE_TONE[p.service])}>
+                              {objectServiceLabels[p.service]}
+                            </span>
+                          </td>
+                          <td className="px-2 py-2 tabular-nums">{formatDate(p.startDate)}</td>
+                          <td className="px-2 py-2 tabular-nums">
+                            {p.endDate ? (
+                              formatDate(p.endDate)
+                            ) : (
+                              <span className="text-muted-foreground">bezterminowo</span>
+                            )}
+                          </td>
+                          <td className="px-2 py-2 text-right tabular-nums">
+                            {p.service !== "kamery" ? (
+                              <span className="text-muted-foreground">·</span>
+                            ) : p.cameraCount == null ? (
+                              // Brak liczby to „nikt nie policzył”, a nie zero —
+                              // od niej zależy waga obiektu w koszcie centrum.
+                              <span
+                                className="text-muted-foreground"
+                                {...tip("Usługa jest, ale kamer nikt nie policzył")}
+                              >
+                                (ilość?)
+                              </span>
+                            ) : (
+                              p.cameraCount
+                            )}
+                          </td>
+                          <td className="px-2 py-2">
+                            {ended ? (
+                              <span className={pillClass("muted")}>zakończona</span>
+                            ) : planned ? (
+                              <span className={pillClass("indigo")}>zaplanowana</span>
+                            ) : (
+                              <span className={pillClass("emerald")}>trwa</span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
-              )}
-            </CardContent>
-          </Card>
-        </TabsContent>
-        <TabsContent value="calendar">
-          <Card>
-            <CardContent className="space-y-5 pt-5">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <h2 className="flex items-center gap-2 text-base font-semibold">
-                    <CalendarDays className="h-4 w-4 text-muted-foreground" />
-                    Kalendarz obiektu
-                  </h2>
-                  <p className="text-xs text-muted-foreground">
-                    {upcoming.length} nadchodzących · {past.length} przeszłych · wydarzenia działu technicznego
-                  </p>
-                </div>
-                {calEditable && (
-                  <Button size="sm" onClick={openCalCreate}>
-                    <Plus className="mr-1 h-4 w-4" /> Zaplanuj
-                  </Button>
-                )}
               </div>
-              {!calViewable ? (
-                <p className="py-4 text-center text-sm text-muted-foreground">
-                  Brak uprawnień do kalendarza działu technicznego.
-                </p>
-              ) : calEvents.length === 0 ? (
-                <div className="flex flex-col items-center gap-2 rounded-md border border-dashed px-4 py-8 text-center">
-                  <CalendarPlus className="h-8 w-8 text-muted-foreground/60" />
-                  <p className="text-sm font-medium">Brak zaplanowanych wydarzeń</p>
-                  <p className="max-w-sm text-xs text-muted-foreground">
-                    Serwisy, montaże i konserwacje powiązane z tym obiektem pojawią się tutaj.
-                  </p>
-                  {calEditable && (
-                    <Button size="sm" variant="outline" className="mt-1" onClick={openCalCreate}>
-                      <Plus className="mr-1 h-4 w-4" /> Zaplanuj pierwsze
-                    </Button>
-                  )}
-                </div>
-              ) : (
-                <>
-                  <ObjectEventList
-                    title="Nadchodzące"
-                    count={upcoming.length}
-                    events={upcoming}
-                    nowTs={nowTs}
-                    onOpen={openCalEvent}
-                    emptyText="Nic nie jest zaplanowane."
-                  />
-                  <ObjectEventList
-                    title="Przeszłe"
-                    count={past.length}
-                    events={past}
-                    nowTs={nowTs}
-                    onOpen={openCalEvent}
-                    emptyText="Brak wcześniejszych wydarzeń."
-                    muted
-                  />
-                </>
+            )}
+          </ChartCard>
+        </div>
+
+        {/* --- Umowy: wąska kolumna, bo to lista odnośników, nie tabela --- */}
+        <ChartCard
+          title="Umowy"
+          description={
+            object.contracts.length > 0
+              ? `${object.contracts.length} w kartotece`
+              : undefined
+          }
+          className="h-fit"
+        >
+          {object.contracts.length === 0 ? (
+            <EmptyState
+              icon={FileText}
+              title="Brak umów"
+              description="Umowy podpięte do tego obiektu pojawią się tutaj."
+            />
+          ) : (
+            <ul className="divide-y rounded-md border" data-testid="object-contracts-list">
+              {object.contracts.map((contract) => (
+                <li key={contract.id} className="space-y-1 px-3 py-2 text-sm">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="truncate font-medium">{contract.contractNumber}</span>
+                    <span className={pillClass(CONTRACT_TONE[contract.status] ?? "neutral")}>
+                      {contractStatusLabels[contract.status]}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                    <span className="tabular-nums">
+                      {formatDate(contract.startDate)}
+                      {contract.endDate ? ` – ${formatDate(contract.endDate)}` : " – bezterminowo"}
+                    </span>
+                    <span className="tabular-nums">
+                      {contract.value == null ? DASH : formatCurrency(contract.value)}
+                    </span>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </ChartCard>
+      </div>
+
+      {/* --- Co się dzieje na obiekcie: kalendarz obok notatek ---
+          Para kart w tym samym rytmie, co pozostałe pary na tej stronie
+          (`grid gap-4 lg:grid-cols-2`). Kalendarz odpowiada „kiedy tam
+          jedziemy”, notatki — „co o tym obiekcie wiadomo”; obie odpowiedzi
+          czyta się razem, a notatka z kalendarza ląduje właśnie tu obok. */}
+      <div className="grid gap-4 lg:grid-cols-2">
+        <ChartCard
+          title={
+            <span className="flex items-center gap-2">
+              <CalendarDays className="h-4 w-4 text-muted-foreground" />
+              Kalendarz
+            </span>
+          }
+          description={`${upcoming.length} nadchodzących · ${past.length} przeszłych · wydarzenia działu technicznego`}
+          controls={
+            calEditable ? (
+              <Button size="sm" onClick={openCalCreate}>
+                <Plus className="mr-1 h-4 w-4" /> Zaplanuj
+              </Button>
+            ) : undefined
+          }
+          bodyClassName="space-y-5"
+        >
+          {!calViewable ? (
+            <p className="py-4 text-center text-sm text-muted-foreground">
+              Brak uprawnień do kalendarza działu technicznego.
+            </p>
+          ) : calEvents.length === 0 ? (
+            <div className="flex flex-col items-center gap-2 rounded-md border border-dashed px-4 py-8 text-center">
+              <CalendarPlus className="h-8 w-8 text-muted-foreground/60" />
+              <p className="text-sm font-medium">Brak zaplanowanych wydarzeń</p>
+              <p className="max-w-sm text-xs text-muted-foreground">
+                Serwisy, montaże i konserwacje powiązane z tym obiektem pojawią się tutaj.
+              </p>
+              {calEditable && (
+                <Button size="sm" variant="outline" className="mt-1" onClick={openCalCreate}>
+                  <Plus className="mr-1 h-4 w-4" /> Zaplanuj pierwsze
+                </Button>
               )}
-            </CardContent>
-          </Card>
-        </TabsContent>
-        <TabsContent value="history">
-          <Card>
-            <CardContent className="space-y-4 pt-5">
-              <div className="flex flex-wrap items-center gap-2">
-                <div
-                  role="radiogroup"
-                  aria-label="Źródło wpisów"
-                  className="flex rounded-md border p-0.5 text-xs"
-                >
-                  {(
-                    [
-                      ["all", "Wszystko"],
-                      ["calendar", "Tylko kalendarz"],
-                      ["object", "Tylko obiekt"],
-                    ] as const
-                  ).map(([v, l]) => (
-                    <button
-                      key={v}
-                      type="button"
-                      role="radio"
-                      aria-checked={histSource === v}
-                      onClick={() => setHistSource(v)}
-                      className={cn(
-                        "rounded px-2.5 py-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                        histSource === v
-                          ? "bg-primary text-primary-foreground"
-                          : "text-muted-foreground hover:bg-muted"
-                      )}
-                    >
-                      {l}
-                    </button>
-                  ))}
-                </div>
-                {actors.length > 1 && (
-                  <select
-                    aria-label="Autor wpisu"
-                    value={histActor}
-                    onChange={(e) => setHistActor(e.target.value)}
-                    className="h-8 rounded-md border border-input bg-background px-2 text-xs"
+            </div>
+          ) : (
+            <>
+              <ObjectEventList
+                title="Nadchodzące"
+                count={upcoming.length}
+                events={upcoming}
+                nowTs={nowTs}
+                onOpen={openCalEvent}
+                emptyText="Nic nie jest zaplanowane."
+              />
+              <ObjectEventList
+                title="Przeszłe"
+                count={past.length}
+                events={past}
+                nowTs={nowTs}
+                onOpen={openCalEvent}
+                emptyText="Brak wcześniejszych wydarzeń."
+                muted
+              />
+            </>
+          )}
+        </ChartCard>
+
+        {/* Notatki kartoteki — także kopie notatek z wydarzeń („Zapisz też w obiekcie”).
+            `notesNonce` przeładowuje listę po zapisie w dialogu kalendarza. */}
+        {canView("objects") && (
+          <ObjectNotes objectId={object.id} canEdit={editable} reloadKey={notesNonce} />
+        )}
+      </div>
+
+      {/* --- Lejek handlowy: szanse i osoby kontaktowe tego obiektu ---
+          Każda sekcja za własnym kluczem (`handlowy/leady`, `handlowy/kontakty`);
+          bez żadnego z nich komponent nie renderuje niczego. */}
+      <SalesEntitySections
+        objectId={object.id}
+        editable={canEdit("objects")}
+        className="grid gap-4 lg:grid-cols-2"
+      />
+
+      {/* --- Grupa interwencyjna: warunki i podjazdy ---
+          Osobna sekcja za WŁASNYM kluczem uprawnień (`cma/grupy-interwencyjne`):
+          kto go nie ma, nie widzi ani tabel, ani zapytań, które je zasilają. */}
+      {canView("cma/grupy-interwencyjne") && (
+        <ObjectInterventionSection
+          object={{
+            id: object.id,
+            name: object.name,
+            address: object.address ?? null,
+            city: object.city ?? null,
+            contractorName: object.contractor?.name ?? null,
+          }}
+          editable={canEdit("cma/grupy-interwencyjne")}
+        />
+      )}
+
+      {/* --- Umowy (drafty) ---
+          Za kluczem `contracts`, tak jak cała zakładka Umowy: kto go nie ma, nie
+          widzi ani tabeli, ani zapytania, które ją zasila. */}
+      {canView("contracts") && (
+        <ObjectContractDraftsSection
+          object={{
+            id: object.id,
+            name: object.name,
+            address: object.address ?? null,
+            city: object.city ?? null,
+            contractorName: object.contractor?.name ?? null,
+            companyId: object.company?.id ?? null,
+            companyName: object.company?.name ?? null,
+          }}
+          editable={canEdit("contracts")}
+        />
+      )}
+
+      {/* --- Historia: object_history + activity_log w jednej osi czasu --- */}
+      <ChartCard
+        title={
+          <span className="flex items-center gap-2">
+            <FileClock className="h-4 w-4 text-muted-foreground" />
+            Historia
+          </span>
+        }
+        description="Zmiany kartoteki i wydarzeń kalendarza, od najnowszych."
+      >
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Segmented control — ten sam idiom, co przełączniki w dziale
+              technicznym: obwódka + tło `bg-muted/50` i aktywny klawisz. */}
+          <div
+            role="radiogroup"
+            aria-label="Źródło wpisów"
+            className="inline-flex gap-0.5 rounded-md border bg-muted/50 p-0.5 text-xs"
+          >
+            {(
+              [
+                ["all", "Wszystko"],
+                ["calendar", "Tylko kalendarz"],
+                ["object", "Tylko obiekt"],
+              ] as const
+            ).map(([v, l]) => (
+              <button
+                key={v}
+                type="button"
+                role="radio"
+                aria-checked={histSource === v}
+                onClick={() => setHistSource(v)}
+                className={cn(
+                  "rounded px-2.5 py-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                  histSource === v
+                    ? "bg-background font-medium text-foreground shadow-sm"
+                    : "text-muted-foreground hover:bg-background/60"
+                )}
+              >
+                {l}
+              </button>
+            ))}
+          </div>
+          {actors.length > 1 && (
+            <Select value={histActor} onValueChange={setHistActor}>
+              <SelectTrigger className="h-8 w-auto min-w-[10rem] text-xs" aria-label="Autor wpisu">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Wszyscy autorzy</SelectItem>
+                {actors.map((a) => (
+                  <SelectItem key={a} value={a}>
+                    {a}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+          <div className="relative ml-auto w-full sm:w-56">
+            <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              aria-label="Szukaj w historii"
+              value={histQuery}
+              onChange={(e) => setHistQuery(e.target.value)}
+              placeholder="Szukaj w historii…"
+              className="h-8 pl-7 text-xs"
+            />
+          </div>
+        </div>
+        {filteredHistory.length === 0 ? (
+          <p className="py-6 text-center text-sm text-muted-foreground">
+            {mergedHistory.length === 0
+              ? "Brak historii dla tego obiektu"
+              : "Brak wpisów pasujących do filtra."}
+          </p>
+        ) : (
+          <ol className="relative ml-3 border-l pl-5">
+            {filteredHistory.slice(0, histLimit).map((row) => {
+              const when = row.item.createdAt;
+              const who = row.kind === "object" ? row.item.changedBy : row.item.userLabel;
+              const evRef = row.kind === "calendar" ? row.item.event : null;
+              const typeUi = evRef ? EVENT_TYPE_UI[evRef.type] : null;
+              const TypeIcon = evRef ? EVENT_TYPE_META[evRef.type]?.icon : null;
+              const ActIcon =
+                row.kind === "object" ? FileClock : activityIcon(row.item.action);
+              return (
+                <li key={row.key} className="relative pb-4 last:pb-0">
+                  <span
+                    aria-hidden
+                    className={cn(
+                      "absolute -left-[1.6rem] top-1 flex h-4 w-4 items-center justify-center rounded-full ring-4 ring-background",
+                      typeUi ? typeUi.dot : "bg-muted-foreground/60"
+                    )}
                   >
-                    <option value="">Wszyscy autorzy</option>
-                    {actors.map((a) => (
-                      <option key={a} value={a}>
-                        {a}
-                      </option>
-                    ))}
-                  </select>
-                )}
-                <div className="relative ml-auto w-full sm:w-56">
-                  <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-                  <Input
-                    aria-label="Szukaj w historii"
-                    value={histQuery}
-                    onChange={(e) => setHistQuery(e.target.value)}
-                    placeholder="Szukaj w historii…"
-                    className="h-8 pl-7 text-xs"
-                  />
-                </div>
-              </div>
-              {filteredHistory.length === 0 ? (
-                <p className="py-6 text-center text-sm text-muted-foreground">
-                  {mergedHistory.length === 0
-                    ? "Brak historii dla tego obiektu"
-                    : "Brak wpisów pasujących do filtra."}
-                </p>
-              ) : (
-                <ol className="relative ml-3 border-l pl-5">
-                  {filteredHistory.slice(0, histLimit).map((row) => {
-                    const when = row.kind === "object" ? row.item.createdAt : row.item.createdAt;
-                    const who =
-                      row.kind === "object" ? row.item.changedBy : row.item.userLabel;
-                    const evRef = row.kind === "calendar" ? row.item.event : null;
-                    const typeUi = evRef ? EVENT_TYPE_UI[evRef.type] : null;
-                    const TypeIcon = evRef ? EVENT_TYPE_META[evRef.type]?.icon : null;
-                    const ActIcon =
-                      row.kind === "calendar" ? activityIcon(row.item.action) : FileClock;
-                    return (
-                      <li key={row.key} className="relative pb-4 last:pb-0">
-                        <span
-                          aria-hidden
-                          className={cn(
-                            "absolute -left-[1.6rem] top-1 flex h-4 w-4 items-center justify-center rounded-full ring-4 ring-background",
-                            typeUi ? typeUi.dot : "bg-muted-foreground/60"
+                    {TypeIcon ? (
+                      <TypeIcon className="h-2.5 w-2.5 text-white" />
+                    ) : (
+                      <Building2 className="h-2.5 w-2.5 text-white" />
+                    )}
+                  </span>
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0 space-y-0.5">
+                      {row.kind === "object" ? (
+                        <>
+                          <p className="flex items-center gap-1.5 text-sm">
+                            <ActIcon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                            <span className="font-medium">
+                              {actionLabels[row.item.action] || row.item.action}
+                            </span>
+                            <span className="rounded bg-muted px-1.5 py-px text-[10px] uppercase tracking-wide text-muted-foreground">
+                              obiekt
+                            </span>
+                          </p>
+                          {row.item.description && (
+                            <p className="text-sm text-muted-foreground">
+                              {row.item.description}
+                            </p>
                           )}
-                        >
-                          {TypeIcon ? (
-                            <TypeIcon className="h-2.5 w-2.5 text-white" />
-                          ) : (
-                            <Building2 className="h-2.5 w-2.5 text-white" />
-                          )}
-                        </span>
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0 space-y-0.5">
-                            {row.kind === "object" ? (
-                              <>
-                                <p className="flex items-center gap-1.5 text-sm">
-                                  <ActIcon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                                  <span className="font-medium">
-                                    {actionLabels[row.item.action] || row.item.action}
-                                  </span>
-                                  <span className="rounded bg-muted px-1.5 py-px text-[10px] uppercase tracking-wide text-muted-foreground">
-                                    obiekt
-                                  </span>
-                                </p>
-                                {row.item.description && (
-                                  <p className="text-sm text-muted-foreground">
-                                    {row.item.description}
-                                  </p>
-                                )}
-                              </>
-                            ) : (
-                              <>
-                                <p className="flex flex-wrap items-center gap-1.5 text-sm">
-                                  <ActIcon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                                  {evRef ? (
-                                    <button
-                                      type="button"
-                                      className="text-left font-medium hover:underline"
-                                      onClick={() => {
-                                        const ev = calEvents.find((e) => e.id === evRef.id);
-                                        if (ev) openCalEvent(ev);
-                                      }}
-                                    >
-                                      {evRef.title}
-                                    </button>
-                                  ) : (
-                                    <span className="font-medium">Wydarzenie w kalendarzu</span>
-                                  )}
-                                  {evRef && (
-                                    <span
-                                      className={cn(
-                                        "rounded px-1.5 py-px text-[10px] uppercase tracking-wide",
-                                        typeUi?.soft
-                                      )}
-                                    >
-                                      {EVENT_TYPE_META[evRef.type]?.label}
-                                    </span>
-                                  )}
-                                  {evRef?.deletedAt && (
-                                    <span className="text-xs text-red-600 dark:text-red-400">
-                                      (usunięte)
-                                    </span>
-                                  )}
-                                </p>
-                                {row.more ? (
-                                  <div className="text-sm text-muted-foreground">
-                                    <span className="font-medium text-foreground/80">
-                                      {row.item.userLabel || "System"}
-                                    </span>{" "}
-                                    zmienił(a) {row.more.length + 1} pola
-                                    <ul className="mt-0.5 space-y-0.5 text-xs">
-                                      {[row.item, ...row.more].map((e) => (
-                                        <li key={e.id}>
-                                          {e.summary ?? describeActivity(e).replace(/^[^—]*— /, "")}
-                                        </li>
-                                      ))}
-                                    </ul>
-                                  </div>
-                                ) : (
-                                  <p className="text-sm text-muted-foreground">
-                                    {describeActivity(row.item)}
-                                  </p>
-                                )}
-                                {evRef && (
-                                  <p className="text-xs text-muted-foreground">
-                                    {fmtRange(evRef.startAt, evRef.endAt, evRef.allDay)}
-                                  </p>
-                                )}
-                              </>
-                            )}
-                          </div>
-                          <div className="flex shrink-0 items-center gap-1.5">
-                            {who && (
-                              <span
-                                {...tip(`Autor zmiany: ${who}`)}
-                                className="hidden h-5 w-5 items-center justify-center rounded-full bg-muted text-[9px] font-semibold uppercase text-muted-foreground sm:inline-flex"
+                        </>
+                      ) : row.kind === "objectActivity" ? (
+                        /* Notatka kartoteki — wpis dziennika bez wydarzenia:
+                           własny nagłówek, żeby nie udawał kalendarza. Treść
+                           niesie `summary` („Dodano notatkę obiektu: …”). */
+                        <>
+                          <p className="flex items-center gap-1.5 text-sm">
+                            <ActIcon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                            <span className="font-medium">
+                              {row.item.field === "note" ? "Notatka kartoteki" : "Zmiana w kartotece"}
+                            </span>
+                            <span className="rounded bg-muted px-1.5 py-px text-[10px] uppercase tracking-wide text-muted-foreground">
+                              obiekt
+                            </span>
+                          </p>
+                          {/* Autora niesie awatar po prawej — tak samo jak przy
+                              wpisach z object_history, więc tu zostaje sama treść. */}
+                          <p className="text-sm text-muted-foreground">
+                            {row.item.summary ?? describeActivity(row.item)}
+                          </p>
+                        </>
+                      ) : (
+                        <>
+                          <p className="flex flex-wrap items-center gap-1.5 text-sm">
+                            <ActIcon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                            {evRef ? (
+                              <button
+                                type="button"
+                                className="text-left font-medium hover:underline"
+                                onClick={() => {
+                                  const ev = calEvents.find((e) => e.id === evRef.id);
+                                  if (ev) openCalEvent(ev);
+                                }}
                               >
-                                {initials(who)}
+                                {evRef.title}
+                              </button>
+                            ) : (
+                              <span className="font-medium">Wydarzenie w kalendarzu</span>
+                            )}
+                            {evRef && (
+                              <span
+                                className={cn(
+                                  "rounded px-1.5 py-px text-[10px] uppercase tracking-wide",
+                                  typeUi?.soft
+                                )}
+                              >
+                                {EVENT_TYPE_META[evRef.type]?.label}
                               </span>
                             )}
-                            <time
-                              dateTime={when}
-                              {...tip(fmtTimestamp(when))}
-                              className="whitespace-nowrap text-xs text-muted-foreground"
-                            >
-                              {fmtRelative(when)}
-                            </time>
-                          </div>
-                        </div>
-                      </li>
-                    );
-                  })}
-                </ol>
-              )}
-              {filteredHistory.length > histLimit && (
-                <button
-                  type="button"
-                  onClick={() => setHistLimit((l) => l + 30)}
-                  className="w-full rounded-md border border-dashed py-1.5 text-xs text-muted-foreground hover:bg-muted"
-                >
-                  Pokaż więcej ({filteredHistory.length - histLimit})
-                </button>
-              )}
-            </CardContent>
-          </Card>
-        </TabsContent>
-      </Tabs>
+                            {evRef?.deletedAt && (
+                              <span className="text-xs text-red-600 dark:text-red-400">
+                                (usunięte)
+                              </span>
+                            )}
+                          </p>
+                          {row.more ? (
+                            <div className="text-sm text-muted-foreground">
+                              <span className="font-medium text-foreground/80">
+                                {row.item.userLabel || "System"}
+                              </span>{" "}
+                              zmienił(a) {row.more.length + 1} pola
+                              <ul className="mt-0.5 space-y-0.5 text-xs">
+                                {[row.item, ...row.more].map((e) => (
+                                  <li key={e.id}>
+                                    {e.summary ?? describeActivity(e).replace(/^[^—]*— /, "")}
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                          ) : (
+                            <p className="text-sm text-muted-foreground">
+                              {describeActivity(row.item)}
+                            </p>
+                          )}
+                          {evRef && (
+                            <p className="text-xs text-muted-foreground">
+                              {fmtRange(evRef.startAt, evRef.endAt, evRef.allDay)}
+                            </p>
+                          )}
+                        </>
+                      )}
+                    </div>
+                    <div className="flex shrink-0 items-center gap-1.5">
+                      {who && (
+                        <span
+                          {...tip(`Autor zmiany: ${who}`)}
+                          className="hidden h-5 w-5 items-center justify-center rounded-full bg-muted text-[9px] font-semibold uppercase text-muted-foreground sm:inline-flex"
+                        >
+                          {initials(who)}
+                        </span>
+                      )}
+                      <time
+                        dateTime={when}
+                        {...tip(fmtTimestamp(when))}
+                        className="whitespace-nowrap text-xs text-muted-foreground"
+                      >
+                        {fmtRelative(when)}
+                      </time>
+                    </div>
+                  </div>
+                </li>
+              );
+            })}
+          </ol>
+        )}
+        {filteredHistory.length > histLimit && (
+          <button
+            type="button"
+            onClick={() => setHistLimit((l) => l + 30)}
+            className="w-full rounded-md border border-dashed py-1.5 text-xs text-muted-foreground hover:bg-muted"
+          >
+            Pokaż więcej ({filteredHistory.length - histLimit})
+          </button>
+        )}
+      </ChartCard>
 
       {/* Dialog wydarzenia kalendarza (prewypełniony obiektem) */}
       <CalendarEventDialog
@@ -833,8 +1299,17 @@ export function ObjectDetails() {
         mode={calDialogMode}
         event={calDialogEvent}
         prefill={{ objectId: object.id }}
-        onClose={() => setCalDialogOpen(false)}
-        onSaved={() => loadCalendar(object.id)}
+        onClose={() => {
+          setCalDialogOpen(false);
+          // Notatki w dialogu zapisują się natychmiast, bez „Zapisz” — po zamknięciu
+          // kartoteka musi zobaczyć ewentualną świeżą kopię.
+          setNotesNonce((n) => n + 1);
+        }}
+        onSaved={() => {
+          loadCalendar(object.id);
+          // Notatka wydarzenia mogła zostać skopiowana do kartoteki — przeładuj kartę.
+          setNotesNonce((n) => n + 1);
+        }}
         onDeleted={() => loadCalendar(object.id)}
         onEdit={
           calEditable && calDialogEvent && !calDialogEvent.deletedAt
@@ -846,7 +1321,20 @@ export function ObjectDetails() {
         }
       />
 
-      {/* Transition dialog */}
+      {/* Edycja kartoteki — ten sam formularz, co na liście obiektów. Montujemy
+          dopiero na otwarcie i z kluczem po `updatedAt`, bo formularz czyta
+          `object` wyłącznie w inicjalizatorze stanu (wzorzec z Objects.tsx:963). */}
+      {editOpen && (
+        <ObjectForm
+          key={object.updatedAt}
+          open={editOpen}
+          onClose={() => setEditOpen(false)}
+          onSubmit={handleEditSubmit}
+          object={object}
+        />
+      )}
+
+      {/* Dialog przejścia workflow */}
       <Dialog open={transitionOpen} onOpenChange={setTransitionOpen}>
         <DialogContent>
           <DialogHeader>
@@ -878,7 +1366,7 @@ export function ObjectDetails() {
                 </Select>
               </div>
               <div className="space-y-2">
-                <Label>Nowy dzial</Label>
+                <Label>Nowy dział</Label>
                 <Select
                   value={transitionData.newDepartment}
                   onValueChange={(value) =>
@@ -919,7 +1407,7 @@ export function ObjectDetails() {
             <Button variant="outline" onClick={() => setTransitionOpen(false)}>
               Anuluj
             </Button>
-            <Button onClick={handleTransition}>Zatwierdz zmiane</Button>
+            <Button onClick={handleTransition}>Zatwierdź zmianę</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -1010,7 +1498,7 @@ function ObjectEventList({
                     </span>
                     {overdue && (
                       <span
-                        className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-700 dark:text-amber-300"
+                        className={pillClass("amber")}
                         {...tip(overdueTip(ev))}
                       >
                         <ClockAlert className="h-3 w-3" /> po terminie

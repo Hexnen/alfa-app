@@ -12,7 +12,9 @@ import {
   Wrench,
   IdCard,
   FolderKanban,
+  Handshake,
   CalendarCog,
+  Mail,
   ChevronDown,
   Menu,
   X,
@@ -36,8 +38,10 @@ type NavChild = {
   /** Podpis zakładki (ten sam co nagłówek strony) — dymek nad etykietą sekcji. */
   desc?: string;
   // Optional custom active matcher (needed when sibling paths overlap, e.g.
-  // "/orders" is a prefix of "/orders/formularz").
-  isActive?: (pathname: string) => boolean;
+  // "/orders" is a prefix of "/orders/formularz"). Drugi argument to
+  // `location.search` — panele na jednej ścieżce (`/contracts?panel=drafty`)
+  // rozróżnia dopiero query.
+  isActive?: (pathname: string, search: string) => boolean;
   /** Opcjonalna ikona podzakładki (np. w grupie Administracja). */
   icon?: LucideIcon;
 };
@@ -72,7 +76,36 @@ const topLevel: NavItem[] = [
     icon: Landmark,
     desc: "Spółki grupy — słownik wspólny z kadrami",
   },
-  { name: "Umowy", href: "/contracts", icon: FileText, desc: "Umowy serwisowe i monitoringu" },
+  {
+    name: "Umowy",
+    href: "/contracts",
+    icon: FileText,
+    desc: "Umowy serwisowe i monitoringu",
+    children: [
+      {
+        name: "Rejestr umów",
+        href: "/contracts?panel=rejestr",
+        desc: "Zawarte umowy: numery, okresy i wartości",
+        // Rejestr jest panelem domyślnym, więc łapie też wejście bez query i
+        // karty pojedynczej umowy (/contracts/:id).
+        isActive: (p, s) =>
+          (p === "/contracts" && !["drafty", "wzory"].includes(new URLSearchParams(s).get("panel") ?? "")) ||
+          p.startsWith("/contracts/"),
+      },
+      {
+        name: "Drafty umów",
+        href: "/contracts?panel=drafty",
+        desc: "Generator umów z szablonu Worda",
+        isActive: (p, s) => p === "/contracts" && new URLSearchParams(s).get("panel") === "drafty",
+      },
+      {
+        name: "Wzory umów",
+        href: "/contracts?panel=wzory",
+        desc: "Zarejestrowane szablony Worda i ich pola",
+        isActive: (p, s) => p === "/contracts" && new URLSearchParams(s).get("panel") === "wzory",
+      },
+    ],
+  },
   {
     name: "Zlecenia",
     href: "/orders",
@@ -144,6 +177,55 @@ const sections: NavItem[] = [
     ],
   },
   {
+    // Miejsce pracy handlowca: lejek szans, aktywności i własny kalendarz.
+    // Stoi po Kadrach, bo to sprzedaż „przed" obiektem, a nie raport z niego.
+    name: "Handlowy",
+    href: "/handlowy",
+    icon: Handshake,
+    desc: "Szanse sprzedaży, aktywności i kalendarz handlowca",
+    children: [
+      { name: "Pulpit", href: "/handlowy/pulpit", desc: "Agenda dnia, zaległości i stan lejka" },
+      {
+        name: "Leady",
+        href: "/handlowy/leady",
+        desc: "Szanse sprzedaży — lejek i lista",
+        // Karta szansy (/handlowy/leady/12) ma podświetlać Leady.
+        isActive: (p) => p === "/handlowy/leady" || p.startsWith("/handlowy/leady/"),
+      },
+      {
+        name: "Kalendarz",
+        href: "/handlowy/kalendarz",
+        desc: "Spotkania, telefony i zadania działu handlowego",
+      },
+      {
+        name: "Aktywności",
+        href: "/handlowy/aktywnosci",
+        desc: "Zaległe, dzisiejsze i nadchodzące zadania handlowca",
+      },
+      {
+        name: "Kontakty",
+        href: "/handlowy/kontakty",
+        desc: "Osoby kontaktowe u kontrahentów i w szansach",
+      },
+      // Skróty do zakładek spoza sekcji — chowają się same, gdy użytkownik
+      // nie ma do nich uprawnień (filterNav liczy klucz z href). Aktywności
+      // celowo nie dopasowują adresu: te ekrany należą do swoich sekcji i
+      // podświetlenie dwóch sekcji naraz wyglądałoby na błąd.
+      {
+        name: "Oferty",
+        href: "/technical/oferty",
+        desc: "Oferty dla klientów: pakiety sprzętu, abonament i dzierżawa",
+        isActive: () => false,
+      },
+      {
+        name: "Handlowcy",
+        href: "/handlowcy",
+        desc: "Opiekunowie handlowi kontrahentów i obiektów",
+        isActive: () => false,
+      },
+    ],
+  },
+  {
     name: "CMA",
     href: "/cma",
     icon: Cctv,
@@ -153,6 +235,11 @@ const sections: NavItem[] = [
       { name: "Trendy", href: "/cma/trendy", desc: "Trendy z zaimportowanych raportów" },
       { name: "Braki kamer", href: "/cma/braki-kamer", desc: "Aktualne braki obrazu z kamer" },
       { name: "Obiekty", href: "/cma/obiekty", desc: "Powiązanie rejestru monitoringu z kartoteką obiektów" },
+      {
+        name: "Grupy interwencyjne",
+        href: "/cma/grupy-interwencyjne",
+        desc: "Firmy interwencyjne, warunki i rejestr podjazdów",
+      },
       { name: "Ustawienia", href: "/cma/ustawienia", desc: "Ustawienia poczty i importu raportów" },
     ],
   },
@@ -176,6 +263,7 @@ const sections: NavItem[] = [
       { name: "Technicy", href: "/technical/technicy", desc: "Technicy, stawki i przypisania" },
       { name: "Obiekty", href: "/technical/obiekty", desc: "Obiekty obsługiwane przez dział techniczny" },
       { name: "Magazyn", href: "/technical/magazyn", desc: "Dokumenty PZ/WZ/RW/MM i stany magazynowe" },
+      { name: "Manuale", href: "/technical/manuale", desc: "Instrukcje i dokumentacja sprzętu oraz usług" },
       { name: "Projekty", href: "/technical/projekty", desc: "Projekty i oferty systemów CCTV" },
       { name: "Szablony", href: "/technical/szablony", desc: "Modele kamer i szablony wyposażenia" },
     ],
@@ -213,6 +301,12 @@ const adminSection: NavItem = {
       href: "/admin/firma",
       icon: Building2,
       desc: "Adres biura, stawki i zakres automatu liczącego realizacje",
+    },
+    {
+      name: "Poczta",
+      href: "/admin/poczta",
+      icon: Mail,
+      desc: "Serwer SMTP, nadawca i adresaci maili ze zleceń",
     },
     {
       name: "Asystent AI",
@@ -329,7 +423,10 @@ export function Layout({ children }: LayoutProps) {
   // uprawnienie z nadrzędnej zakładki (/orders → "orders").
   const tabKeySet = useMemo(() => new Set(TABS.map((t) => t.key)), []);
   const keyFor = (href: string): string | null => {
-    let key = href.replace(/^\//, "");
+    // Podzakładki-panele mają query w href (`/contracts?panel=drafty`) — bez
+    // obcięcia go klucz „contracts?panel=drafty” nie trafiłby w katalog i wpis
+    // pokazałby się KAŻDEMU (brak klucza = pozycja zawsze widoczna).
+    let key = href.replace(/^\//, "").split("?")[0].replace(/\/$/, "");
     while (key) {
       if (tabKeySet.has(key)) return key;
       const i = key.lastIndexOf("/");
@@ -370,7 +467,7 @@ export function Layout({ children }: LayoutProps) {
 
   const isChildActive = (child: NavChild) =>
     child.isActive
-      ? child.isActive(location.pathname)
+      ? child.isActive(location.pathname, location.search)
       : location.pathname === child.href ||
         location.pathname.startsWith(child.href + "/");
 
@@ -401,7 +498,7 @@ export function Layout({ children }: LayoutProps) {
       desc: child?.desc ?? hit.desc ?? null,
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [location.pathname, visibleTopLevel, visibleSections, perms.isAdmin]);
+  }, [location.pathname, location.search, visibleTopLevel, visibleSections, perms.isAdmin]);
 
   // Pionowy napis w pasku ikon: writing-mode + obrót o 180° (czytany z dołu do
   // góry); will-change/geometricPrecision wymuszają rasteryzację w pełnej

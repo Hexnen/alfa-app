@@ -1,0 +1,21 @@
+-- ---------------------------------------------------------------------------
+-- REJESTR UMÓW ← DRAFT UMOWY (contracts.draft_id)
+--
+-- `contract_drafts` to DOKUMENT (plik DOCX złożony ze wzoru Worda), a
+-- `contracts` to UMOWA JAKO FAKT handlowy (numer, okres, wartość). Dotąd te
+-- dwa rejestry nie wiedziały o sobie nic, więc wiersz w rejestrze nie miał
+-- czego pokazać w podglądzie — a to właśnie draft niesie plik.
+--
+-- Powiązanie jest LUŹNE i JEDNOKIERUNKOWE: rejestr wskazuje na draft, z
+-- którego powstał („Przenieś do rejestru”). Umowy wpisane ręcznie zostają
+-- z `draft_id` NULL i po prostu nie mają dokumentu.
+--
+-- ON DELETE SET NULL, a nie CASCADE: skasowanie draftu (dokumentu) nie może
+-- usuwać faktu handlowego z rejestru — umowa dalej obowiązuje, traci tylko
+-- podgląd pliku.
+--
+-- Migracja pisana RĘCZNIE (jak 0089, 0090, 0091) — drizzle-kit generate przy
+-- tej bazie potrafi zaproponować przebudowę niezwiązanych tabel.
+-- ---------------------------------------------------------------------------
+ALTER TABLE `contracts` ADD `draft_id` integer REFERENCES contract_drafts(id) ON DELETE SET NULL;--> statement-breakpoint
+CREATE INDEX `contracts_draft_idx` ON `contracts` (`draft_id`);

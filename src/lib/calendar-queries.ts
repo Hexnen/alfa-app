@@ -11,25 +11,36 @@ import type { DbOrTx } from "./activity-log.js";
 import { attachmentsByNote, type NoteAttachmentJson } from "./calendar-attachments.js";
 import { parseMentions } from "./note-mentions.js";
 import { zonedToday } from "./tz.js";
-import type { CalendarBilling, CalendarEventNote, CalendarEventStatus, CalendarEventType, CalendarNoteSource, CalendarSeriesFreq } from "../db/schema.js";
+import { asDepartment } from "./calendar-scope.js";
+import type { CalendarBilling, CalendarDepartment, CalendarEventNote, CalendarEventStatus, CalendarEventType, CalendarNoteSource, CalendarSeriesFreq, LeadStage } from "../db/schema.js";
 
 /**
  * Id wydarzeń kolidujących z zakresem [startAt, endAt) dla podanych techników
- * (bez usuniętych i anulowanych; opcjonalnie z pominięciem edytowanego eventu).
- * Porównanie leksykalne ISO działa też między "YYYY-MM-DD" a "YYYY-MM-DDTHH:MM".
+ * i/albo handlowców (bez usuniętych i anulowanych; opcjonalnie z pominięciem
+ * edytowanego eventu). Porównanie leksykalne ISO działa też między "YYYY-MM-DD"
+ * a "YYYY-MM-DDTHH:MM". Podanie obu list daje SUMĘ kolizji (każda z osób zajęta).
  */
 export function conflictEventIds(
   dbx: DbOrTx,
-  params: { technicianIds: number[]; startAt: string; endAt: string; excludeId?: number | null }
+  params: { technicianIds?: number[]; salespersonIds?: number[]; startAt: string; endAt: string; excludeId?: number | null }
 ): number[] {
-  const { technicianIds, startAt, endAt, excludeId } = params;
-  if (technicianIds.length === 0 || !startAt || !endAt) return [];
+  const { startAt, endAt, excludeId } = params;
+  const technicianIds = params.technicianIds ?? [];
+  const salespersonIds = params.salespersonIds ?? [];
+  if ((technicianIds.length === 0 && salespersonIds.length === 0) || !startAt || !endAt) return [];
+  const who = [];
+  if (technicianIds.length) {
+    who.push(sql`${schema.calendarEvents.id} IN (SELECT event_id FROM calendar_event_assignees WHERE technician_id IN (${sql.join(technicianIds.map((id) => sql`${id}`), sql`, `)}))`);
+  }
+  if (salespersonIds.length) {
+    who.push(sql`${schema.calendarEvents.id} IN (SELECT event_id FROM calendar_event_salespeople WHERE salesperson_id IN (${sql.join(salespersonIds.map((id) => sql`${id}`), sql`, `)}))`);
+  }
   const conds = [
     isNull(schema.calendarEvents.deletedAt),
     ne(schema.calendarEvents.status, "cancelled"),
     lt(schema.calendarEvents.startAt, endAt),
     gt(schema.calendarEvents.endAt, startAt),
-    sql`${schema.calendarEvents.id} IN (SELECT event_id FROM calendar_event_assignees WHERE technician_id IN (${sql.join(technicianIds.map((id) => sql`${id}`), sql`, `)}))`,
+    who.length === 1 ? who[0] : sql`(${who[0]} OR ${who[1]})`,
   ];
   if (excludeId != null && Number.isInteger(excludeId)) conds.push(ne(schema.calendarEvents.id, excludeId));
   return dbx
@@ -108,11 +119,62 @@ export function listActiveTechnicians(dbx: DbOrTx = db): TechnicianBrief[] {
 }
 
 // ---------------------------------------------------------------------------
+// Handlowcy — słownik dla kalendarza handlowego i filtru „Moje”
+// ---------------------------------------------------------------------------
+
+export interface SalespersonBrief {
+  id: number;
+  name: string;
+  active: boolean;
+}
+
+/** Wszyscy handlowcy (aktywni najpierw, potem po nazwisku) — jak listActiveTechnicians. */
+export function listActiveSalespeople(dbx: DbOrTx = db): SalespersonBrief[] {
+  return dbx
+    .select({
+      id: schema.salespeople.id,
+      firstName: schema.salespeople.firstName,
+      lastName: schema.salespeople.lastName,
+      active: schema.salespeople.active,
+    })
+    .from(schema.salespeople)
+    .orderBy(desc(schema.salespeople.active), asc(schema.salespeople.lastName), asc(schema.salespeople.firstName))
+    .all()
+    .map((s) => ({ id: s.id, name: `${s.firstName} ${s.lastName}`.trim(), active: s.active }));
+}
+
+/**
+ * Handlowiec zalogowanego użytkownika — WYŁĄCZNIE po `salespeople.user_id`.
+ * Świadomie bez heurystyki nazwiskowej (jaką ma `findTechnicianForUser`): filtr „Moje”
+ * decyduje, czyj lejek widać, więc zgadywanie po `displayName` byłoby tu wyciekiem.
+ */
+export function findSalespersonForUser(user: { id: number }, dbx: DbOrTx = db): SalespersonBrief | null {
+  const s = dbx
+    .select({
+      id: schema.salespeople.id,
+      firstName: schema.salespeople.firstName,
+      lastName: schema.salespeople.lastName,
+      active: schema.salespeople.active,
+    })
+    .from(schema.salespeople)
+    .where(eq(schema.salespeople.userId, user.id))
+    .get();
+  return s ? { id: s.id, name: `${s.firstName} ${s.lastName}`.trim(), active: s.active } : null;
+}
+
+// ---------------------------------------------------------------------------
 // Serializacja wydarzeń: wiersze → CalendarEventJson (batch, 4 zapytania).
 // Wspólne dla tras kalendarza, narzędzi asystenta i mutacji (calendar-mutations.ts).
 // ---------------------------------------------------------------------------
 
 export interface TechnicianRef {
+  id: number;
+  firstName: string;
+  lastName: string;
+}
+
+/** Przypisany handlowiec (kształt równoległy do TechnicianRef). */
+export interface SalespersonRef {
   id: number;
   firstName: string;
   lastName: string;
@@ -170,7 +232,8 @@ export interface CalendarEventJson {
   endAt: string;
   allDay: boolean;
   status: CalendarEventStatus;
-  department: string;
+  /** Dział wiersza — decyduje o widoczności (src/lib/calendar-scope.ts). */
+  department: CalendarDepartment;
   objectId: number | null;
   objectName: string | null;
   orderId: number | null;
@@ -192,6 +255,17 @@ export interface CalendarEventJson {
   seriesId: number | null;
   series: SeriesRef | null;
   technicians: TechnicianRef[];
+  /** Przypisani handlowcy (dział handlowy; techniczny ma zawsze pustą listę). */
+  salespeople: SalespersonRef[];
+  /** Szansa sprzedaży aktywności (dział handlowy) + migawka jej tytułu i etapu. */
+  leadId: number | null;
+  leadTitle: string | null;
+  leadStage: LeadStage | null;
+  /** Osoba kontaktowa aktywności + jej nazwa („Imię Nazwisko”). */
+  contactId: number | null;
+  contactName: string | null;
+  /** Telefon osoby kontaktowej — lista aktywności robi z niego link `tel:`. */
+  contactPhone: string | null;
   createdBy: number | null;
   createdByLabel: string | null;
   updatedBy: number | null;
@@ -260,6 +334,14 @@ export interface Note {
   mentions: NoteMentionJson[];
   /** Wszystkie żywe kafelki „notatka” tej notatki — także podpięte ręcznie. */
   linkedEventIds: number[];
+  /**
+   * Id ŻYWEJ kopii tej notatki w kartotece obiektu (`object_notes.id`) albo null.
+   * Wypełniają je TRASY (src/routes/calendar.ts → `withObjectNoteIds`), a nie ta
+   * warstwa: `src/lib/object-notes.ts` importuje `parseNoteText`/`noteSummary`
+   * z calendar-mutations, które importuje ten plik — sięgnięcie stąd po
+   * `objectNoteIdsForCalendarNotes` zamknęłoby cykl importów. Domyślnie null.
+   */
+  objectNoteId: number | null;
 }
 
 /** Kafelki „notatka” wskazujące daną notatkę (żywe): id per klucz wzmianki + wszystkie id. */
@@ -386,6 +468,8 @@ export function noteOfRow(
       eventId: links.byMention.get(m.key) ?? null,
     })),
     linkedEventIds: links.ids,
+    // Uzupełniane przez trasy (withObjectNoteIds) — patrz komentarz przy polu.
+    objectNoteId: null,
   };
 }
 
@@ -415,13 +499,21 @@ export function loadNotes(dbx: DbOrTx, eventId: number, limit = 500): Note[] {
  * Wyszukiwarka notatek do przypięcia kafelka (GET /calendar/notes/search):
  * nieskasowane notatki nieskasowanych wydarzeń typu ≠ „notatka”, od najnowszych.
  * `q` szuka w treści notatki i w tytule wydarzenia (LIKE bez rozróżniania wielkości liter).
+ *
+ * `departments` ZAWĘŻA wynik do działów, które wolno oglądać wołającemu — bez tego
+ * wyszukiwarka notatek byłaby najprostszą drogą do cudzych danych (treść notatki
+ * i tytuł wydarzenia w jednym wierszu).
  */
-export function searchNotes(dbx: DbOrTx, q: string, limit = 20): NoteBrief[] {
+export function searchNotes(dbx: DbOrTx, q: string, limit = 20, departments?: readonly CalendarDepartment[]): NoteBrief[] {
   const conds = [
     isNull(schema.calendarEventNotes.deletedAt),
     isNull(schema.calendarEvents.deletedAt),
     ne(schema.calendarEvents.type, "notatka"),
   ];
+  if (departments) {
+    if (departments.length === 0) return [];
+    conds.push(inArray(schema.calendarEvents.department, [...departments]));
+  }
   const needle = q.trim().toLowerCase();
   if (needle) {
     const pattern = `%${needle.replace(/[%_]/g, (ch) => `\\${ch}`)}%`;
@@ -474,6 +566,11 @@ export function loadEvents(dbx: DbOrTx, ids: number[]): CalendarEventJson[] {
     .select({
       ev: schema.calendarEvents,
       objectName: schema.objects.name,
+      leadTitle: schema.leads.title,
+      leadStage: schema.leads.stage,
+      contactFirstName: schema.contacts.firstName,
+      contactLastName: schema.contacts.lastName,
+      contactPhone: schema.contacts.phone,
       createdByEmail: createdUsers.email,
       createdByName: createdUsers.displayName,
       updatedByEmail: updatedUsers.email,
@@ -481,6 +578,8 @@ export function loadEvents(dbx: DbOrTx, ids: number[]): CalendarEventJson[] {
     })
     .from(schema.calendarEvents)
     .leftJoin(schema.objects, eq(schema.calendarEvents.objectId, schema.objects.id))
+    .leftJoin(schema.leads, eq(schema.calendarEvents.leadId, schema.leads.id))
+    .leftJoin(schema.contacts, eq(schema.calendarEvents.contactId, schema.contacts.id))
     .leftJoin(createdUsers, eq(schema.calendarEvents.createdBy, createdUsers.id))
     .leftJoin(updatedUsers, eq(schema.calendarEvents.updatedBy, updatedUsers.id))
     .where(inArray(schema.calendarEvents.id, ids))
@@ -503,6 +602,26 @@ export function loadEvents(dbx: DbOrTx, ids: number[]): CalendarEventJson[] {
     const list = techByEvent.get(t.eventId) ?? [];
     list.push({ id: t.id, firstName: t.firstName, lastName: t.lastName });
     techByEvent.set(t.eventId, list);
+  }
+
+  // Handlowcy — osobna tabela przypisań, ten sam batch (bez N+1).
+  const salesRows = dbx
+    .select({
+      eventId: schema.calendarEventSalespeople.eventId,
+      id: schema.salespeople.id,
+      firstName: schema.salespeople.firstName,
+      lastName: schema.salespeople.lastName,
+    })
+    .from(schema.calendarEventSalespeople)
+    .innerJoin(schema.salespeople, eq(schema.calendarEventSalespeople.salespersonId, schema.salespeople.id))
+    .where(inArray(schema.calendarEventSalespeople.eventId, ids))
+    .orderBy(asc(schema.salespeople.lastName), asc(schema.salespeople.firstName))
+    .all();
+  const salesByEvent = new Map<number, SalespersonRef[]>();
+  for (const s of salesRows) {
+    const list = salesByEvent.get(s.eventId) ?? [];
+    list.push({ id: s.id, firstName: s.firstName, lastName: s.lastName });
+    salesByEvent.set(s.eventId, list);
   }
 
   const seriesIds = [...new Set(rows.map((r) => r.ev.seriesId).filter((x): x is number => x != null))];
@@ -606,7 +725,7 @@ export function loadEvents(dbx: DbOrTx, ids: number[]): CalendarEventJson[] {
       endAt: e.endAt,
       allDay: e.allDay,
       status: e.status,
-      department: e.department,
+      department: asDepartment(e.department),
       objectId: e.objectId,
       objectName: r.objectName ?? null,
       orderId: e.orderId,
@@ -621,6 +740,13 @@ export function loadEvents(dbx: DbOrTx, ids: number[]): CalendarEventJson[] {
       seriesId: e.seriesId,
       series: e.seriesId != null ? (seriesById.get(e.seriesId) ?? null) : null,
       technicians: techByEvent.get(e.id) ?? [],
+      salespeople: salesByEvent.get(e.id) ?? [],
+      leadId: e.leadId,
+      leadTitle: r.leadTitle ?? null,
+      leadStage: r.leadStage ?? null,
+      contactId: e.contactId,
+      contactName: `${r.contactFirstName ?? ""} ${r.contactLastName ?? ""}`.trim() || null,
+      contactPhone: r.contactPhone ?? null,
       createdBy: e.createdBy,
       createdByLabel: label(r.createdByEmail, r.createdByName),
       updatedBy: e.updatedBy,

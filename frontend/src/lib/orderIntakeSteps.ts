@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { validateNIP } from "./nip";
+import { todayIsoLocal } from "./utils";
+import type { ObjectServiceInput } from "./api";
 
 /**
  * Shared 8-step config for BOTH order-intake forms (internal
@@ -63,6 +65,18 @@ export interface OrderIntakeFormState {
   installationStartDate: string;
   serviceStartDate: string;
   notes: string;
+  /**
+   * OKRESY USŁUG ZAKŁADANEGO OBIEKTU (Część 3 planu). Zlecenie zakłada obiekt,
+   * a obiekt opisuje usługi okresami, nie flagami — więc lista musi powstać już
+   * tutaj, razem ze zleceniem.
+   *
+   * Wewnętrzny wizard edytuje ją wprost (`ObjectServicesEditor` w kroku
+   * „Zakres”); publiczny formularz jej NIE pokazuje — klient odpowiada tylko na
+   * pytania o montaż kamer i wideorecepcję, a okresy powstają z tych odpowiedzi
+   * dopiero w payloadzie (i tak samo, awaryjnie, na backendzie —
+   * src/routes/public.ts:240).
+   */
+  objectServices: ObjectServiceInput[];
 }
 
 export const emptyIntakeState: OrderIntakeFormState = {
@@ -95,7 +109,58 @@ export const emptyIntakeState: OrderIntakeFormState = {
   installationStartDate: "",
   serviceStartDate: "",
   notes: "",
+  objectServices: [],
 };
+
+/**
+ * Okresy usług wyprowadzone z odpowiedzi formularza (montaż kamer +
+ * wideorecepcja). SSWiN-u i ochrony fizycznej nie zgadujemy: formularz o nie nie
+ * pyta, a usługa wpisana „na wszelki wypadek” jest gorsza niż jej brak.
+ *
+ * Publiczny formularz buduje tym payload (klient nie widzi edytora okresów),
+ * a wewnętrzny wizard — prefill listy, zanim ktokolwiek dotknie edytora.
+ */
+export function servicesFromAnswers(
+  form: Pick<
+    OrderIntakeFormState,
+    "isCameraInstallation" | "cameraCount" | "videoReception" | "serviceStartDate"
+  >
+): ObjectServiceInput[] {
+  const startDate = form.serviceStartDate.trim() || todayIsoLocal();
+  const raw = form.cameraCount.trim();
+  const cameras = raw === "" || !Number.isFinite(Number(raw)) ? null : Number(raw);
+  const out: ObjectServiceInput[] = [];
+  if (form.isCameraInstallation) {
+    out.push({ service: "kamery", startDate, endDate: null, cameraCount: cameras });
+  }
+  if (form.videoReception) {
+    out.push({ service: "wideorecepcja", startDate, endDate: null });
+  }
+  return out;
+}
+
+/**
+ * Przestawienie startu w wierszach, które nadal trzymają STARĄ podpowiedź.
+ *
+ * „Początek usługi” z sekcji Terminy jest domyślnym startem okresów, ale ludzie
+ * wypełniają formularz w dowolnej kolejności: najpierw dodają usługi (start =
+ * dziś), potem wpisują właściwą datę. Wiersz zmieniony ręcznie ma inną datę niż
+ * poprzednia podpowiedź, więc zostaje nietknięty.
+ */
+export function applyDefaultServiceStart(
+  services: ObjectServiceInput[],
+  prevDefault: string,
+  nextDefault: string
+): ObjectServiceInput[] {
+  if (prevDefault === nextDefault) return services;
+  let changed = false;
+  const next = services.map((s) => {
+    if (s.startDate !== prevDefault) return s;
+    changed = true;
+    return { ...s, startDate: nextDefault };
+  });
+  return changed ? next : services;
+}
 
 /** A required text field within a step, with a human label for error messages. */
 export interface StepRequiredField {
@@ -174,6 +239,9 @@ export const ORDER_INTAKE_STEPS: OrderIntakeStep[] = [
   {
     id: "terms",
     title: "Terminy",
+    // `serviceStartDate` jest wymagane WARUNKOWO — dopiero gdy zlecenie zakłada
+    // obiektowi jakąkolwiek usługę. `required` opisuje pola wymagane zawsze,
+    // więc reguła siedzi w `validateStep` niżej, nie tutaj.
     required: [],
   },
 ];
@@ -200,6 +268,26 @@ export function validateStep(
     const value = form[field.key];
     if (typeof value === "string" && value.trim() === "") {
       return { ok: false, message: `Uzupełnij pole: ${field.label}.` };
+    }
+  }
+  if (step.id === "terms") {
+    /*
+     * Okres usługi bez daty startu nie istnieje (backend odrzuci go 400), a start
+     * podpowiadany jest właśnie z tego pola — więc gdy zlecenie zakłada obiektowi
+     * jakąkolwiek usługę, „Początek usługi” przestaje być opcjonalny. Warunek
+     * łapie oba formularze: wewnętrzny ma jawną listę okresów, publiczny tylko
+     * odpowiedzi, z których ta lista dopiero powstanie (`servicesFromAnswers`).
+     */
+    const needsStart =
+      form.objectServices.length > 0 ||
+      form.isCameraInstallation ||
+      form.videoReception;
+    if (needsStart && form.serviceStartDate.trim() === "") {
+      return {
+        ok: false,
+        message:
+          "Podaj przewidywany termin rozpoczęcia usługi — od tej daty liczą się okresy usług obiektu.",
+      };
     }
   }
   if (step.id === "payer") {

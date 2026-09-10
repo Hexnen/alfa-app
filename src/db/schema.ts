@@ -16,7 +16,7 @@ import { sql } from "drizzle-orm";
  * Wszystkie kwoty handlowe w tej bazie są NETTO, w sensie „bez VAT": abonamenty,
  * umowy, wyceny, cennik, realizacje, magazyn. Wynika to ze źródła — formularz
  * zlecenia przyjmuje „Abonament (zł netto)", a konwersja zlecenia na obiekt
- * przepisuje tę kwotę wprost do `objects.monthly_value` (src/services/orders.ts).
+ * przepisuje tę kwotę wprost do abonamentu obiektu (src/services/orders.ts).
  *
  * UWAGA NA PUŁAPKĘ: w module kadr „netto" znaczy coś INNEGO — kwotę na rękę,
  * po podatku i składkach pracownika. Kwoty z `hr_payroll` / `hr_office_payroll`
@@ -113,18 +113,40 @@ export const objects = sqliteTable("objects", {
   })
     .default("sales")
     .notNull(),
-  /** Abonament miesięczny w zł NETTO (bez VAT) — przepisywany z kwoty ze zlecenia. */
+  /**
+   * @deprecated Zastąpione rozbiciem na `monthly_zdw` + `monthly_ofi` (migracja
+   * 0082 + scripts/migrate-abonament-split.ts). Jeden abonament nie dawał się
+   * przypisać do linii usługowej: obiekt z kamerami I wartownikiem wchodził
+   * całą kwotą do OBU przekrojów Analityki, więc „ZDV + OFI" wychodziło więcej
+   * niż „wszystko". Kolumna ZOSTAJE do czasu, aż nic jej już nie czyta, ale NIE
+   * JEST ŹRÓDŁEM PRAWDY — backend liczy `monthlyValue` jako sumę zdw + ofi i
+   * zapisuje wyłącznie te dwa pola. Nie dopisuj tu nowych zapisów.
+   */
   monthlyValue: real("monthly_value"),
   /**
-   * Dzierżawa sprzętu w zł NETTO/mies. — druga część tego, co klient płaci co
+   * Abonament za ZDALNY DOZÓR WIZYJNY w zł NETTO/mies. — kamery, SSWiN,
+   * wideorecepcja, czyli wszystko, co obsługuje centrum monitorowania.
+   * NULL = nieuzupełniony, i to NIE to samo, co 0 zł (obiekt bez tej usługi
+   * po prostu nie ma tu kwoty; zero znaczyłoby „robimy to za darmo").
+   */
+  monthlyZdw: real("monthly_zdw"),
+  /**
+   * Abonament za OCHRONĘ FIZYCZNĄ w zł NETTO/mies. — ludzie stojący na obiekcie.
+   * NULL = nieuzupełniony (patrz `monthly_zdw`).
+   */
+  monthlyOfi: real("monthly_ofi"),
+  /**
+   * Dzierżawa sprzętu w zł NETTO/mies. — trzecia część tego, co klient płaci co
    * miesiąc, przepisywana ze zlecenia (`orders.rental_amount`).
    *
-   * OSOBNA KOLUMNA, a nie doliczenie do `monthly_value`, żeby dało się odróżnić
-   * abonament za usługę od najmu sprzętu; Analityka sumuje obie pozycje
-   * (`revenue = monthly_value + monthly_rental`). Do wersji z sierpnia 2026
-   * kwota dzierżawy w ogóle nie docierała do obiektu i przychód takich obiektów
-   * był zaniżony — dlatego dla danych sprzed migracji ta kolumna jest NULL,
-   * a nie 0: nie ma z czego jej odtworzyć.
+   * OSOBNA KOLUMNA, a nie doliczenie do abonamentu, żeby dało się odróżnić
+   * opłatę za usługę od najmu sprzętu; Analityka sumuje wszystkie pozycje
+   * (`revenue = monthly_zdw + monthly_ofi + monthly_rental`). Dzierżawiony
+   * sprzęt to sprzęt monitoringu, więc w przekroju usługowym dzierżawa liczy
+   * się do linii ZDV. Do wersji z sierpnia 2026 kwota dzierżawy w ogóle nie
+   * docierała do obiektu i przychód takich obiektów był zaniżony — dlatego dla
+   * danych sprzed migracji ta kolumna jest NULL, a nie 0: nie ma z czego jej
+   * odtworzyć.
    */
   monthlyRental: real("monthly_rental"),
   /**
@@ -142,6 +164,21 @@ export const objects = sqliteTable("objects", {
   monthlyCost: real("monthly_cost"),
   /** Jednorazowy koszt instalacji / wdrożenia w zł NETTO (bez VAT). NULL = nieuzupełniony. */
   setupCost: real("setup_cost"),
+  /**
+   * PRZEWIDYWANE ZAKOŃCZENIE OBSŁUGI CAŁEGO OBIEKTU (YYYY-MM-DD).
+   *
+   * To PLAN biznesowy, a nie fakt: niezależny od końców pojedynczych okresów
+   * usług (`object_services.end_date`). Obiekt może mieć kamery bezterminowo,
+   * a mimo to datę „do kiedy w ogóle go obsługujemy" — i odwrotnie.
+   * NULL = bezterminowo.
+   */
+  expectedEndDate: text("expected_end_date"),
+  /**
+   * Link do pinezki w Google Maps. Walidowany po HOŚCIE (src/lib/maps-url.ts —
+   * tylko domeny Google), bo trafia prosto do klikalnego linku w karcie obiektu;
+   * dowolny adres w tym polu byłby przekierowaniem z zaufanego UI.
+   */
+  mapsUrl: text("maps_url"),
   notes: text("notes"),
   // Współrzędne obiektu (WGS84). NULL = jeszcze nieustalone; uzupełniane leniwie
   // geokoderem przy pierwszej kalkulacji dystansu (src/lib/geo.ts) albo ręcznie
@@ -168,6 +205,70 @@ export const objects = sqliteTable("objects", {
     .notNull(),
 });
 
+/**
+ * OKRESY ŚWIADCZENIA USŁUG NA OBIEKCIE — źródło prawdy dla `objects.has_*`.
+ *
+ * Flagi na obiekcie odpowiadają na pytanie „czy DZIŚ", a kartoteka musi też
+ * odpowiadać na „od kiedy" i „czy jeszcze". Ta sama usługa potrafi wystąpić na
+ * obiekcie wielokrotnie (kamery 2020–2022, przerwa, znów od 2024) — jeden wiersz
+ * na usługę tego nie zapisze, dlatego to osobna tabela, a flagi zostają jako
+ * CACHE przeliczany z okresów aktywnych (src/lib/object-services.ts).
+ *
+ * AKTYWNY okres = `end_date IS NULL OR end_date >= dziś`. Start w przyszłości
+ * NADAL liczy się do flag („zaplanowana") — literówka w roku nie może wyrzucić
+ * obiektu z analityki; UI pokazuje to badge'em.
+ */
+export const objectServices = sqliteTable(
+  "object_services",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    objectId: integer("object_id")
+      .notNull()
+      .references(() => objects.id, { onDelete: "cascade" }),
+    service: text("service", {
+      enum: ["kamery", "sswin", "wideorecepcja", "ofi"],
+    }).notNull(),
+    /** YYYY-MM-DD — wymagana. Usługa bez daty startu nie jest okresem. */
+    startDate: text("start_date").notNull(),
+    /** YYYY-MM-DD albo NULL = trwa bezterminowo. */
+    endDate: text("end_date"),
+    /**
+     * 1 = data startu NIEZNANA, wstawiona z daty założenia kartoteki przy
+     * backfillu migracji 0084 (obiekt bez umowy z datą i bez `monitoring_start`
+     * w rejestrze CMA). Taki wiersz NIE liczy się jako „rozpoczęcie" w seriach
+     * czasowych analityki — inaczej dzień importu kartoteki wygląda na miesiąc,
+     * w którym firma pozyskała 147 usług naraz. Usługa nadal jest AKTYWNA:
+     * wchodzi do flag, przychodu i mianowników, bo ona istnieje — nie wiemy
+     * tylko OD KIEDY. UI dopisuje przy takiej dacie „data szacowana".
+     *
+     * Wpisanie daty startu w formularzu gasi flagę: skoro ktoś ją wpisał, to ją zna.
+     */
+    startEstimated: integer("start_estimated", { mode: "boolean" })
+      .default(false)
+      .notNull(),
+    /**
+     * Liczba kamer w TYM okresie (tylko `service = 'kamery'`). NULL = „usługa
+     * jest, ale nikt kamer nie policzył" — to NIE jest zero (zero wyrzuciłoby
+     * obiekt z wagi kosztu centrum monitorowania, udając wiedzę, której nie ma).
+     */
+    cameraCount: integer("camera_count"),
+    notes: text("notes"),
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+    updatedAt: text("updated_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+  },
+  (t) => ({
+    objectIdIdx: index("object_services_object_id_idx").on(t.objectId),
+    objectServiceIdx: index("object_services_object_service_idx").on(
+      t.objectId,
+      t.service
+    ),
+  })
+);
+
 // Contracts table
 export const contracts = sqliteTable("contracts", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -180,6 +281,17 @@ export const contracts = sqliteTable("contracts", {
   /** Wartość umowy w zł NETTO (bez VAT). */
   value: real("value"),
   filePath: text("file_path"),
+  /**
+   * Draft (dokument DOCX), z którego powstał ten wpis — nadaje go akcja
+   * „Przenieś do rejestru” w panelu draftów. Umowy wpisane ręcznie mają tu
+   * NULL i nie pokazują dokumentu. ON DELETE SET NULL: skasowanie dokumentu
+   * nie usuwa faktu handlowego z rejestru.
+   *
+   * Bez `.references()` w drizzle, bo `contractDrafts` deklarujemy dopiero na
+   * końcu pliku; klucz obcy zakłada migracja 0092 i pilnuje go SQLite
+   * (`foreign_keys = ON` w src/db/index.ts).
+   */
+  draftId: integer("draft_id"),
   status: text("status", {
     enum: ["draft", "active", "expired", "terminated"],
   })
@@ -256,6 +368,29 @@ export const orders = sqliteTable("orders", {
   invoiceIssuer: text("invoice_issuer"),
   
   // Status i daty
+  /**
+   * OKRESY USŁUG zakładanego obiektu (`ObjectServiceInput[]` jako JSON).
+   *
+   * Do wersji z września 2026 flagi `objectHas*` z formularza były polami
+   * PRZEJŚCIOWYMI: zużywała je konwersja na obiekt i ginęły — edycja zlecenia,
+   * jego szczegóły i mail nie miały już z czego pokazać zakresu. Lista siedzi
+   * więc NA ZLECENIU, niezależnie od kartoteki obiektu (edycja zlecenia z
+   * założenia nie zmienia obiektu).
+   */
+  objectServices: text("object_services", { mode: "json" }),
+
+  /**
+   * Szansa sprzedaży, z której zlecenie powstało. Kierunek jest JEDNOSTRONNY:
+   * szansa → zlecenie. Formularz publiczny nigdy tego pola nie ustawia.
+   */
+  leadId: integer("lead_id").references((): AnySQLiteColumn => leads.id, {
+    onDelete: "set null",
+  }),
+  /** Handlowiec prowadzący zlecenie (domyślnie właściciel szansy). */
+  salespersonId: integer("salesperson_id").references((): AnySQLiteColumn => salespeople.id, {
+    onDelete: "set null",
+  }),
+
   status: text("status", {
     enum: ["new", "in_progress", "completed", "cancelled"],
   })
@@ -717,43 +852,58 @@ export type NewTechnician = typeof technicians.$inferInsert;
  * kontrahenta (opiekun klienta) i pojedynczy obiekt (`objects.salesperson_id`),
  * bo bywa, że konkretną lokalizację prowadzi kto inny niż całą firmę.
  */
-export const salespeople = sqliteTable("salespeople", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  firstName: text("first_name").default("").notNull(),
-  lastName: text("last_name").default("").notNull(),
-  phone: text("phone"),
-  email: text("email"),
-  /** Region / obszar działania — czysty opis, bez słownika. */
-  region: text("region"),
-  /**
-   * Ile handlowiec kosztuje firmę miesięcznie: wynagrodzenie, auto, telefon.
-   * Kwota wpisywana ręcznie — podawaj ją w tej samej skali, co wypłaty z kadr,
-   * czyli NETTO na rękę (aplikacja nie zna składek pracodawcy). Gdy handlowiec
-   * jest powiązany z pracownikiem (`employeeId`), to pole jest ignorowane, a koszt
-   * bierze się wprost z wypłat. NULL = nieuzupełniony.
-   */
-  monthlyCost: real("monthly_cost"),
-  /** Prowizja w % od przychodu prowadzonego portfela (0–100). NULL = brak prowizji. */
-  commissionRate: real("commission_rate"),
-  /**
-   * Ta sama osoba w kartotece kadrowej. NULL = handlowiec spoza listy płac
-   * (np. na własnej działalności) i wtedy liczy się `monthlyCost` wpisany ręcznie.
-   * Gdy powiązanie ISTNIEJE, koszt własny bierze się z wypłat, a pole ręczne jest
-   * ignorowane — inaczej ten sam człowiek kosztowałby firmę dwa razy: raz
-   * w Kadrach, raz w Analityce.
-   */
-  employeeId: integer("employee_id").references(() => hrEmployees.id, {
-    onDelete: "set null",
-  }),
-  notes: text("notes"),
-  active: integer("active", { mode: "boolean" }).default(true).notNull(),
-  createdAt: text("created_at")
-    .default(sql`(datetime('now'))`)
-    .notNull(),
-  updatedAt: text("updated_at")
-    .default(sql`(datetime('now'))`)
-    .notNull(),
-});
+export const salespeople = sqliteTable(
+  "salespeople",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    firstName: text("first_name").default("").notNull(),
+    lastName: text("last_name").default("").notNull(),
+    phone: text("phone"),
+    email: text("email"),
+    /** Region / obszar działania — czysty opis, bez słownika. */
+    region: text("region"),
+    /**
+     * Ile handlowiec kosztuje firmę miesięcznie: wynagrodzenie, auto, telefon.
+     * Kwota wpisywana ręcznie — podawaj ją w tej samej skali, co wypłaty z kadr,
+     * czyli NETTO na rękę (aplikacja nie zna składek pracodawcy). Gdy handlowiec
+     * jest powiązany z pracownikiem (`employeeId`), to pole jest ignorowane, a koszt
+     * bierze się wprost z wypłat. NULL = nieuzupełniony.
+     */
+    monthlyCost: real("monthly_cost"),
+    /** Prowizja w % od przychodu prowadzonego portfela (0–100). NULL = brak prowizji. */
+    commissionRate: real("commission_rate"),
+    /**
+     * Ta sama osoba w kartotece kadrowej. NULL = handlowiec spoza listy płac
+     * (np. na własnej działalności) i wtedy liczy się `monthlyCost` wpisany ręcznie.
+     * Gdy powiązanie ISTNIEJE, koszt własny bierze się z wypłat, a pole ręczne jest
+     * ignorowane — inaczej ten sam człowiek kosztowałby firmę dwa razy: raz
+     * w Kadrach, raz w Analityce.
+     */
+    employeeId: integer("employee_id").references(() => hrEmployees.id, {
+      onDelete: "set null",
+    }),
+    /**
+     * Konto w aplikacji. Po TYM polu (i wyłącznie po nim — bez heurystyki nazwiskowej,
+     * jaką ma `findTechnicianForUser`) rozpoznajemy „Moje" w module handlowym: `/api/auth/me`
+     * oddaje `salespersonId`, a filtr `salespersonId=me` bez dopasowania zwraca pustkę.
+     * Jeden użytkownik = najwyżej jeden handlowiec (unikalny indeks częściowy).
+     */
+    userId: integer("user_id").references(() => users.id, { onDelete: "set null" }),
+    notes: text("notes"),
+    active: integer("active", { mode: "boolean" }).default(true).notNull(),
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+    updatedAt: text("updated_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+  },
+  (t) => ({
+    userIdUidx: uniqueIndex("salespeople_user_id_uidx")
+      .on(t.userId)
+      .where(sql`user_id IS NOT NULL`),
+  })
+);
 
 export type Salesperson = typeof salespeople.$inferSelect;
 export type NewSalesperson = typeof salespeople.$inferInsert;
@@ -806,6 +956,25 @@ export const companies = sqliteTable("companies", {
   employerMarkupZlecenieZua: real("employer_markup_zlecenie_zua"),
   /** Zlecenie zgłoszone tylko na ZZA — samo zdrowotne, pracodawca do ZUS nie dopłaca nic. */
   employerMarkupZlecenieZza: real("employer_markup_zlecenie_zza"),
+  /*
+   * DANE DO UMÓW (moduł „Drafty umów”, src/routes/contract-drafts.ts).
+   *
+   * Osobne kolumny, a nie recykling istniejących, bo dokument potrzebuje form,
+   * których w kartotece MF nie ma: `full_name` z wykazu VAT przychodzi
+   * WERSALIKAMI („ALFA GROUP SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ”), a treść
+   * umowy wymaga zapisu z małych liter, reprezentant musi stać w dopełniaczu
+   * („reprezentowaną przez: Sławomira Jaworskiego”), a kapitał zakładowy nie jest
+   * w wykazie w ogóle. NULL = nieuzupełnione i to NIE to samo, co pusty napis —
+   * bez `contract_code` moduł draftów odmawia nadania numeru.
+   */
+  /** Kod spółki w numerze umowy (`12/ZDW/2026`). NULL = spółka nie numeruje umów. */
+  contractCode: text("contract_code"),
+  /** Nazwa spółki w treści umowy, np. „Alfa Group Sp. z o.o.”. */
+  contractName: text("contract_name"),
+  /** Reprezentant w DOPEŁNIACZU, np. „Sławomira Jaworskiego - Prezesa Zarządu”. */
+  representativeLine: text("representative_line"),
+  /** Kapitał zakładowy jako gotowy napis, np. „50 000,00 zł”. */
+  shareCapital: text("share_capital"),
   active: integer("active", { mode: "boolean" }).default(true).notNull(),
   createdAt: text("created_at")
     .default(sql`(datetime('now'))`)
@@ -1948,6 +2117,9 @@ export const offers = sqliteTable(
       .default(false)
       .notNull(),
 
+    /** Szansa sprzedaży, z której powstała oferta (NULL = oferta bez lejka). */
+    leadId: integer("lead_id").references(() => leads.id, { onDelete: "set null" }),
+
     // --- Ślady po akceptacji ---
     orderId: integer("order_id").references(() => orders.id, {
       onDelete: "set null",
@@ -1981,6 +2153,7 @@ export const offers = sqliteTable(
     objectIdIdx: index("offers_object_id_idx").on(t.objectId),
     statusIdx: index("offers_status_idx").on(t.status),
     parentIdIdx: index("offers_parent_id_idx").on(t.parentId),
+    leadIdIdx: index("offers_lead_id_idx").on(t.leadId),
     // Unikalny, ale kolumna jest nullowalna — w SQLite wiele NULL-i nie koliduje,
     // więc oferty nieudostępnione nie blokują się nawzajem.
     shareTokenIdx: uniqueIndex("offers_share_token_uidx").on(t.shareToken),
@@ -2314,8 +2487,160 @@ export type OfferTextBlock = typeof offerTextBlocks.$inferSelect;
 export type NewOfferTextBlock = typeof offerTextBlocks.$inferInsert;
 
 // ============================================================================
-// KALENDARZ (dział techniczny) — wydarzenia, serie cykliczne, przypisani technicy
+// MODUŁ HANDLOWY — szanse sprzedaży (leads) i osoby kontaktowe (contacts)
+//
+// Lejek: nowy → kontakt → wizja → oferta → negocjacje → wygrany/przegrany.
+// Zasada „activity-based selling": każda OTWARTA szansa ma zaplanowaną następną
+// aktywność (wydarzenie kalendarza z `department='handlowy'` i `lead_id`); brak
+// takiej aktywności albo cisza dłuższa niż SALES_ROT_DAYS = szansa „gnijąca"
+// (src/lib/sales-leads.ts).
 // ============================================================================
+
+export const LEAD_STAGES = ["nowy", "kontakt", "wizja", "oferta", "negocjacje", "wygrany", "przegrany"] as const;
+export type LeadStage = (typeof LEAD_STAGES)[number];
+
+/** Etapy OTWARTE — tylko one wchodzą do lejka, prognozy i liczenia „gnicia". */
+export const LEAD_OPEN_STAGES = LEAD_STAGES.slice(0, 5) as readonly LeadStage[];
+
+export const LEAD_SOURCES = ["polecenie", "www", "formularz", "telefon", "targi", "inne"] as const;
+export type LeadSource = (typeof LEAD_SOURCES)[number];
+
+/** Usługi rozważane w szansie; mapują się 1:1 na usługi obiektu (`ochrona` → OFI). */
+export const LEAD_SERVICES = ["kamery", "sswin", "wideorecepcja", "ofi", "ochrona"] as const;
+export type LeadService = (typeof LEAD_SERVICES)[number];
+
+export const LEAD_LOST_REASONS = ["cena", "konkurencja", "brak_decyzji", "brak_potrzeby", "brak_kontaktu", "inne"] as const;
+export type LeadLostReason = (typeof LEAD_LOST_REASONS)[number];
+
+/**
+ * Szansa sprzedaży. Klient bywa DWOJAKI: albo wskazany kontrahent z kartoteki
+ * (`contractor_id`), albo jeszcze nieistniejący prospekt (`prospect_*`) — kartoteka
+ * powstaje dopiero przy konwersji na wygraną, żeby lejek nie zaśmiecał bazy klientami,
+ * którzy nigdy nic nie podpisali.
+ */
+export const leads = sqliteTable(
+  "leads",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    title: text("title").notNull(),
+    stage: text("stage", { enum: LEAD_STAGES }).default("nowy").notNull(),
+    source: text("source", { enum: LEAD_SOURCES }),
+    /** Klient z kartoteki (NULL = prospekt, patrz `prospect_*`). */
+    contractorId: integer("contractor_id").references(() => contractors.id, { onDelete: "set null" }),
+    prospectName: text("prospect_name"),
+    prospectNip: text("prospect_nip"),
+    prospectPhone: text("prospect_phone"),
+    prospectEmail: text("prospect_email"),
+    /** Rodzaj obiektu — te same wartości, co OBJECT_KINDS w formularzu zlecenia. */
+    objectKind: text("object_kind"),
+    address: text("address"),
+    city: text("city"),
+    mapsUrl: text("maps_url"),
+    lat: real("lat"),
+    lng: real("lng"),
+    /** `LeadService[]` jako JSON — zakres rozważanych usług. */
+    services: text("services", { mode: "json" }),
+    /** MRR: abonament w zł NETTO za miesiąc (jak wszystkie kwoty handlowe w bazie). */
+    estimatedMonthly: real("estimated_monthly"),
+    /** Jednorazowe wdrożenie w zł NETTO. */
+    estimatedSetup: real("estimated_setup"),
+    /** Szansa powodzenia 0–100 (%) — do lejka ważonego. */
+    probability: integer("probability"),
+    expectedCloseDate: text("expected_close_date"), // YYYY-MM-DD
+    salespersonId: integer("salesperson_id").references(() => salespeople.id, { onDelete: "set null" }),
+    /** Obiekt założony przy konwersji (NULL = jeszcze nie skonwertowana). */
+    objectId: integer("object_id").references(() => objects.id, { onDelete: "set null" }),
+    /** Zlecenie utworzone z szansy (kierunek jest jednostronny: szansa → zlecenie). */
+    orderId: integer("order_id").references(() => orders.id, { onDelete: "set null" }),
+    wonAt: text("won_at"),
+    lostAt: text("lost_at"),
+    lostReason: text("lost_reason", { enum: LEAD_LOST_REASONS }),
+    lostNote: text("lost_note"),
+    /**
+     * DENORMALIZACJA: moment ostatniego ruchu na szansie (mutacja kalendarza z `lead_id`,
+     * notatka, zmiana etapu, edycja). Ustawiana wyłącznie przez `touchLead`
+     * (src/lib/sales-leads.ts); `recomputeLastActivity` odtwarza ją do asercji w testach.
+     */
+    lastActivityAt: text("last_activity_at"),
+    notes: text("notes"),
+    createdBy: integer("created_by").references(() => users.id, { onDelete: "set null" }),
+    updatedBy: integer("updated_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+    updatedAt: text("updated_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+    deletedAt: text("deleted_at"), // soft delete
+  },
+  (t) => ({
+    stageIdx: index("leads_stage_idx").on(t.stage),
+    salespersonStageIdx: index("leads_salesperson_stage_idx").on(t.salespersonId, t.stage),
+    contractorIdIdx: index("leads_contractor_id_idx").on(t.contractorId),
+    objectIdIdx: index("leads_object_id_idx").on(t.objectId),
+    deletedAtIdx: index("leads_deleted_at_idx").on(t.deletedAt),
+    lastActivityAtIdx: index("leads_last_activity_at_idx").on(t.lastActivityAt),
+    expectedCloseDateIdx: index("leads_expected_close_date_idx").on(t.expectedCloseDate),
+  })
+);
+
+export type Lead = typeof leads.$inferSelect;
+export type NewLead = typeof leads.$inferInsert;
+
+/**
+ * Osoba kontaktowa — pełnoprawna encja, w odróżnieniu od jednego pola
+ * `contractors.contact_person` (które zostaje; migracji danych w v1 nie ma).
+ * Kontakt wisi przy kontrahencie, szansie albo obiekcie — router wymaga nazwiska
+ * i co najmniej jednego powiązania.
+ */
+export const contacts = sqliteTable(
+  "contacts",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    contractorId: integer("contractor_id").references(() => contractors.id, { onDelete: "cascade" }),
+    leadId: integer("lead_id").references(() => leads.id, { onDelete: "set null" }),
+    objectId: integer("object_id").references(() => objects.id, { onDelete: "set null" }),
+    firstName: text("first_name").default("").notNull(),
+    lastName: text("last_name").default("").notNull(),
+    /** Stanowisko / rola („kierownik obiektu", „księgowość") — czysty opis. */
+    role: text("role"),
+    phone: text("phone"),
+    email: text("email"),
+    /** Kontakt główny kontrahenta — jeden na kontrahenta (unikalny indeks częściowy). */
+    isPrimary: integer("is_primary", { mode: "boolean" }).default(false).notNull(),
+    notes: text("notes"),
+    active: integer("active", { mode: "boolean" }).default(true).notNull(),
+    createdBy: integer("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+    updatedAt: text("updated_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+  },
+  (t) => ({
+    contractorIdIdx: index("contacts_contractor_id_idx").on(t.contractorId),
+    leadIdIdx: index("contacts_lead_id_idx").on(t.leadId),
+    objectIdIdx: index("contacts_object_id_idx").on(t.objectId),
+    nameIdx: index("contacts_name_idx").on(t.lastName, t.firstName),
+    primaryUidx: uniqueIndex("contacts_primary_uidx")
+      .on(t.contractorId)
+      .where(sql`is_primary = 1 AND contractor_id IS NOT NULL`),
+  })
+);
+
+export type Contact = typeof contacts.$inferSelect;
+export type NewContact = typeof contacts.$inferInsert;
+
+// ============================================================================
+// KALENDARZ — wydarzenia, serie cykliczne, przypisani technicy i handlowcy.
+// Jeden silnik dla dwóch działów: `calendar_events.department` decyduje, czyj
+// jest wiersz (technical | handlowy) i kto go widzi (src/lib/calendar-scope.ts).
+// ============================================================================
+
+/** Działy korzystające z kalendarza. Wartość siedzi w `calendar_events.department`. */
+export const CALENDAR_DEPARTMENTS = ["technical", "handlowy"] as const;
+export type CalendarDepartment = (typeof CALENDAR_DEPARTMENTS)[number];
 
 export const CALENDAR_EVENT_TYPES = [
   "serwis",
@@ -2331,8 +2656,25 @@ export const CALENDAR_EVENT_TYPES = [
   // treści (@piątek, @15.09 — src/lib/note-mentions.ts). Zawsze całodniowy, bez techników,
   // bez serii, bez realizacji/protokołu/wyceny.
   "notatka",
+  // --- Typy działu handlowego (dopisane NA KOŃCU: kolejność jest kontraktem UI) ---
+  "spotkanie",
+  "telefon",
+  "email",
+  "zadanie",
+  "prezentacja",
+  "termin",
 ] as const;
 export type CalendarEventType = (typeof CALENDAR_EVENT_TYPES)[number];
+
+/**
+ * Typy dozwolone w danym dziale. `wizja` jest WSPÓLNA (ten sam byt — oględziny obiektu),
+ * `urlop` i `notatka` też działają w obu działach; przekazanie wizji technikom robi się
+ * nowym wydarzeniem, bo zmiana działu jest zabroniona (src/lib/calendar-mutations.ts).
+ */
+export const DEPARTMENT_EVENT_TYPES: Record<CalendarDepartment, readonly CalendarEventType[]> = {
+  technical: ["serwis", "montaz", "wizja", "demontaz", "biuro", "przygotowanie", "konserwacja", "urlop", "notatka"],
+  handlowy: ["spotkanie", "telefon", "email", "zadanie", "prezentacja", "wizja", "termin", "urlop", "notatka"],
+};
 
 export const CALENDAR_EVENT_STATUSES = [
   "planned",
@@ -2396,10 +2738,20 @@ export const calendarEvents = sqliteTable(
     status: text("status", { enum: CALENDAR_EVENT_STATUSES })
       .default("planned")
       .notNull(),
-    department: text("department").default("technical").notNull(),
+    /**
+     * Czyj jest wiersz: `technical` (serwis/montaż/…) albo `handlowy` (spotkania,
+     * telefony, zadania). Działu NIE da się zmienić edycją — przekazanie sprawy
+     * drugiemu działowi robi się nowym wydarzeniem (src/lib/calendar-mutations.ts).
+     * Widoczność i prawo edycji wiersza: src/lib/calendar-scope.ts.
+     */
+    department: text("department", { enum: CALENDAR_DEPARTMENTS }).default("technical").notNull(),
     objectId: integer("object_id").references(() => objects.id, {
       onDelete: "set null",
     }),
+    /** Szansa sprzedaży, do której należy aktywność (tylko dział handlowy). */
+    leadId: integer("lead_id").references(() => leads.id, { onDelete: "set null" }),
+    /** Osoba kontaktowa spotkania/telefonu (tylko dział handlowy). */
+    contactId: integer("contact_id").references(() => contacts.id, { onDelete: "set null" }),
     orderId: integer("order_id").references(() => orders.id, {
       onDelete: "set null",
     }),
@@ -2457,6 +2809,7 @@ export const calendarEvents = sqliteTable(
     deletedAtIdx: index("calendar_events_deleted_at_idx").on(t.deletedAt),
     seriesIdIdx: index("calendar_events_series_id_idx").on(t.seriesId),
     noteIdIdx: index("calendar_events_note_id_idx").on(t.noteId),
+    leadIdIdx: index("calendar_events_lead_id_idx").on(t.leadId),
     // Realizacja ↔ wydarzenie 1:1 (indeks częściowy — wiele wydarzeń bez realizacji jest OK).
     realizationIdIdx: uniqueIndex("calendar_events_realization_id_uidx")
       .on(t.realizationId)
@@ -2485,6 +2838,30 @@ export const calendarEventAssignees = sqliteTable(
 
 export type CalendarEventAssignee = typeof calendarEventAssignees.$inferSelect;
 export type NewCalendarEventAssignee = typeof calendarEventAssignees.$inferInsert;
+
+/**
+ * Przypisanie handlowców do wydarzenia (N:M) — RÓWNOLEGLE do
+ * `calendar_event_assignees`, a nie polimorficznie. Osobna tabela zamiast jednej
+ * z kolumną „rodzaj": klucze obce zostają prawdziwymi kluczami obcymi, a zapytania
+ * o kolizje i urlopy nie muszą filtrować po dyskryminatorze.
+ */
+export const calendarEventSalespeople = sqliteTable(
+  "calendar_event_salespeople",
+  {
+    eventId: integer("event_id")
+      .notNull()
+      .references(() => calendarEvents.id, { onDelete: "cascade" }),
+    salespersonId: integer("salesperson_id")
+      .notNull()
+      .references(() => salespeople.id, { onDelete: "cascade" }),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.eventId, t.salespersonId] }),
+  })
+);
+
+export type CalendarEventSalesperson = typeof calendarEventSalespeople.$inferSelect;
+export type NewCalendarEventSalesperson = typeof calendarEventSalespeople.$inferInsert;
 
 // Notatki do wydarzenia — dziennik (wiele wpisów, z autorem i czasem). `description`
 // wydarzenia pozostaje stałym opisem; notatki dopisują użytkownicy i asystent (source).
@@ -2519,6 +2896,56 @@ export const calendarEventNotes = sqliteTable(
 
 export type CalendarEventNote = typeof calendarEventNotes.$inferSelect;
 export type NewCalendarEventNote = typeof calendarEventNotes.$inferInsert;
+
+/**
+ * Notatki KARTOTEKI OBIEKTU — dziennik przy obiekcie, niezależny od kalendarza.
+ * Ta sama konwencja co `calendar_event_notes` (autor + snapshot etykiety, soft
+ * delete, limit CALENDAR_NOTE_MAX), ale wiszą przy obiekcie, a nie przy dacie.
+ *
+ * `source_event_id` / `source_note_id` są niepuste, gdy notatka POWSTAŁA jako
+ * kopia notatki wydarzenia („Zapisz też w obiekcie"). Kopia jest samodzielnym
+ * wierszem — edycja oryginału w kalendarzu jej nie zmienia (i odwrotnie); łącze
+ * służy wyłącznie do pokazania źródła i do IDEMPOTENCJI kopiowania: partial
+ * unique index pilnuje, że jedna notatka kalendarza ma najwyżej JEDNĄ żywą
+ * kopię. Soft delete kopii zwalnia miejsce — można skopiować ponownie.
+ */
+export const objectNotes = sqliteTable(
+  "object_notes",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    objectId: integer("object_id")
+      .notNull()
+      .references(() => objects.id, { onDelete: "cascade" }),
+    userId: integer("user_id").references(() => users.id, { onDelete: "set null" }),
+    /** Snapshot autora (displayName || email) — odporny na usunięcie konta. */
+    userLabel: text("user_label"),
+    text: text("text").notNull(),
+    /** Wydarzenie, z którego notatkę skopiowano (NULL = notatka napisana wprost w kartotece). */
+    sourceEventId: integer("source_event_id").references((): AnySQLiteColumn => calendarEvents.id, {
+      onDelete: "set null",
+    }),
+    /** Notatka kalendarza, z której to kopia (partial UNIQUE — jedna żywa kopia). */
+    sourceNoteId: integer("source_note_id").references((): AnySQLiteColumn => calendarEventNotes.id, {
+      onDelete: "set null",
+    }),
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+    updatedAt: text("updated_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+    deletedAt: text("deleted_at"), // soft delete
+  },
+  (t) => ({
+    objectCreatedIdx: index("object_notes_object_created_idx").on(t.objectId, t.createdAt),
+    sourceNoteUidx: uniqueIndex("object_notes_source_note_uidx")
+      .on(t.sourceNoteId)
+      .where(sql`source_note_id IS NOT NULL AND deleted_at IS NULL`),
+  })
+);
+
+export type ObjectNote = typeof objectNotes.$inferSelect;
+export type NewObjectNote = typeof objectNotes.$inferInsert;
 
 /**
  * Załączniki do notatek wydarzeń — pliki leżą na dysku (data/attachments/<eventId>/<uuid>.<ext>,
@@ -2608,6 +3035,12 @@ export const ACTIVITY_ACTIONS = [
   // Powiązanie encji (wydarzenie kalendarza ↔ realizacja tworzona automatycznie)
   "linked",
   "unlinked",
+  // Lejek handlowy (entity_type = "lead"): zmiana etapu, zamknięcie i konwersja
+  // szansy na kontrahenta + obiekt.
+  "stage_changed",
+  "won",
+  "lost",
+  "converted",
 ] as const;
 export type ActivityAction = (typeof ACTIVITY_ACTIONS)[number];
 
@@ -2730,6 +3163,51 @@ export const appSettings = sqliteTable("app_settings", {
 export type AppSetting = typeof appSettings.$inferSelect;
 
 // ============================================================================
+// DZIENNIK POCZTY WYCHODZĄCEJ (src/services/mail-sender.ts)
+// Jeden wiersz na PRÓBĘ wysyłki — także nieudaną. To nie jest kopia activity_log:
+// tam ląduje fakt „człowiek wysłał mail", tutaj techniczne szczegóły (adresaci,
+// temat, messageId serwera, treść błędu SMTP), po których da się odpowiedzieć
+// klientowi „wysłaliśmy 12.03 o 9:41 na ten adres". Adresatów trzymamy jako
+// tekst rozdzielony przecinkami — logu nikt nie joinuje, a lista ma być czytelna
+// dokładnie taka, jaka poszła na serwer.
+// ============================================================================
+
+export const MAIL_LOG_STATUSES = ["sent", "failed"] as const;
+export type MailLogStatus = (typeof MAIL_LOG_STATUSES)[number];
+
+export const mailLog = sqliteTable(
+  "mail_log",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    // "order" — dziś jedyny konsument; kolumna jest tekstem, żeby kolejne moduły
+    // (oferty, protokoły) dopisywały się bez migracji.
+    entityType: text("entity_type").notNull(),
+    entityId: integer("entity_id").notNull(),
+    // "client" | "internal" | "test" — który szablon poszedł.
+    variant: text("variant"),
+    toAddr: text("to_addr").notNull(),
+    ccAddr: text("cc_addr"),
+    bccAddr: text("bcc_addr"),
+    subject: text("subject").notNull(),
+    status: text("status", { enum: MAIL_LOG_STATUSES }).notNull(),
+    error: text("error"),
+    messageId: text("message_id"),
+    userId: integer("user_id").references(() => users.id, { onDelete: "set null" }),
+    // Snapshot nazwy/emaila — odporny na usunięcie konta (jak w activity_log).
+    userLabel: text("user_label"),
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+  },
+  (t) => ({
+    entityIdx: index("mail_log_entity_idx").on(t.entityType, t.entityId),
+  })
+);
+
+export type MailLogEntry = typeof mailLog.$inferSelect;
+export type NewMailLogEntry = typeof mailLog.$inferInsert;
+
+// ============================================================================
 // CACHE GEOKODERA I TRAS (src/lib/geo.ts)
 // Każde zapytanie do Nominatim/OSRM idzie przez tę tabelę — aplikacja i testy
 // nigdy nie zależą twardo od sieci. TTL 90 dni (GEO_CACHE_TTL_DAYS), klucze:
@@ -2748,3 +3226,484 @@ export const geoCache = sqliteTable("geo_cache", {
 
 export type GeoCacheRow = typeof geoCache.$inferSelect;
 export type NewGeoCacheRow = typeof geoCache.$inferInsert;
+
+// ============================================================================
+// MODUŁ MANUALE (Techniczny → /technical/manuale)
+// Biblioteka instrukcji i dokumentacji sprzętu oraz usług: tytuł, opis,
+// załączniki (pliki na dysku jak w notatkach kalendarza — src/lib/calendar-attachments.ts)
+// i powiązania z kartoteką magazynu (warehouse_items) oraz katalogiem usług (services).
+// Trasy: src/routes/manuals.ts.
+// ============================================================================
+
+export const manuals = sqliteTable("manuals", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  title: text("title").notNull(),
+  description: text("description"),
+  /** Kto założył manual — login (email), jak `offers.created_by`. */
+  createdBy: text("created_by"),
+  /** Kto ostatni zapisał manual — login (email). */
+  updatedBy: text("updated_by"),
+  createdAt: text("created_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+  updatedAt: text("updated_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+});
+
+export type Manual = typeof manuals.$inferSelect;
+export type NewManual = typeof manuals.$inferInsert;
+
+/**
+ * Punkty i podpunkty manuala — treść uporządkowana jak w instrukcji („1.", „1.1").
+ * Maksymalnie dwa poziomy: punkt ma `parentId` = NULL, podpunkt wskazuje na punkt
+ * (głębszego zagnieżdżenia pilnuje src/routes/manuals.ts, baza sama tego nie ograniczy).
+ * Punkt ma opcjonalny tytuł, opcjonalny tekst i 0..n załączników (`manual_attachments.section_id`).
+ * `position` = kolejność wśród rodzeństwa (0, 1, 2…), przepisywana przy każdym PUT /:id/sections.
+ */
+export const manualSections = sqliteTable(
+  "manual_sections",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    manualId: integer("manual_id")
+      .notNull()
+      .references(() => manuals.id, { onDelete: "cascade" }),
+    /** NULL = punkt najwyższego poziomu; inaczej id punktu-rodzica (kasowanie kaskadą). */
+    parentId: integer("parent_id").references((): AnySQLiteColumn => manualSections.id, {
+      onDelete: "cascade",
+    }),
+    position: integer("position").notNull().default(0),
+    title: text("title"),
+    body: text("body"),
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+    updatedAt: text("updated_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+  },
+  (t) => ({
+    manualIdx: index("manual_sections_manual_idx").on(t.manualId),
+    parentIdx: index("manual_sections_parent_idx").on(t.parentId),
+  })
+);
+
+export type ManualSection = typeof manualSections.$inferSelect;
+export type NewManualSection = typeof manualSections.$inferInsert;
+
+/**
+ * Załączniki manuala — bliźniak `calendar_note_attachments`: pliki leżą na dysku
+ * (data/attachments/manuals/<manualId>/<uuid>.<ext>), w bazie tylko metadane.
+ * Obrazki są ZAWSZE konwertowane do WebP, stąd `width`/`height` tylko dla kind = "image".
+ */
+export const manualAttachments = sqliteTable(
+  "manual_attachments",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    manualId: integer("manual_id")
+      .notNull()
+      .references(() => manuals.id, { onDelete: "cascade" }),
+    /**
+     * Punkt, do którego plik należy. NULL = plik „luzem" (stare manuale sprzed
+     * punktów albo plik wyrzucony z punktu) — front pokazuje takie jako „Pozostałe pliki".
+     * ON DELETE SET NULL: skasowanie punktu NIE kasuje plików.
+     */
+    sectionId: integer("section_id").references((): AnySQLiteColumn => manualSections.id, {
+      onDelete: "set null",
+    }),
+    /** Kolejność pliku w obrębie punktu (0, 1, 2…); poza punktem bez znaczenia. */
+    position: integer("position").notNull().default(0),
+    /** Oryginalna nazwa pliku; dla obrazków rozszerzenie zamienione na .webp. */
+    fileName: text("file_name").notNull(),
+    mime: text("mime").notNull(),
+    /** Bajty zapisane na dysku (po konwersji, nie surowy upload). */
+    size: integer("size").notNull(),
+    /** Ścieżka relatywna wewnątrz katalogu załączników, np. `manuals/12/3f0a….webp`. */
+    storedPath: text("stored_path").notNull(),
+    kind: text("kind", { enum: CALENDAR_ATTACHMENT_KINDS }).notNull(),
+    width: integer("width"),
+    height: integer("height"),
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+  },
+  (t) => ({
+    manualIdx: index("manual_attachments_manual_idx").on(t.manualId),
+  })
+);
+
+export type ManualAttachment = typeof manualAttachments.$inferSelect;
+export type NewManualAttachment = typeof manualAttachments.$inferInsert;
+
+/**
+ * Powiązanie manuala z towarem magazynu ALBO usługą — dokładnie jedno z pól jest
+ * wypełnione (walidacja w src/routes/manuals.ts; SQLite nie ma CHECK-a w drizzle).
+ * Pary UNIQUE pilnują, żeby ten sam towar/usługa nie wpadły do manuala dwa razy
+ * (NULL-e w SQLite nie kolidują ze sobą, więc dwa wpisy usługowe są OK).
+ */
+export const manualLinks = sqliteTable(
+  "manual_links",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    manualId: integer("manual_id")
+      .notNull()
+      .references(() => manuals.id, { onDelete: "cascade" }),
+    warehouseItemId: integer("warehouse_item_id").references(() => warehouseItems.id, {
+      onDelete: "cascade",
+    }),
+    serviceId: integer("service_id").references(() => services.id, { onDelete: "cascade" }),
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+  },
+  (t) => ({
+    manualIdx: index("manual_links_manual_idx").on(t.manualId),
+    itemUnique: uniqueIndex("manual_links_manual_item_unique").on(t.manualId, t.warehouseItemId),
+    serviceUnique: uniqueIndex("manual_links_manual_service_unique").on(t.manualId, t.serviceId),
+  })
+);
+
+export type ManualLink = typeof manualLinks.$inferSelect;
+export type NewManualLink = typeof manualLinks.$inferInsert;
+
+// ============================================================================
+// GRUPY INTERWENCYJNE (CMA → /cma/grupy-interwencyjne)
+// Firmy świadczące usługę grupy interwencyjnej (podwykonawcy dojeżdżający na
+// alarm), WARUNKI tej usługi per obiekt i REJESTR wykonanych podjazdów.
+//
+// Trzy tabele główne + trzy tabele załączników (klony `manual_attachments`,
+// po jednej na właściciela — dyskryminatora `owner_type` nie da się objąć
+// kluczem obcym, a chcemy kaskadę FK zamiast sprzątania w kodzie).
+//
+// DLACZEGO WIELE WIERSZY WARUNKÓW NA OBIEKT: firmy się zmieniają, a rejestr
+// podjazdów sprzed dwóch lat ma się rozliczać stawkami, które wtedy obowiązywały.
+// Wiersz warunków to okres (`start_date` … `end_date`), okresy tego samego obiektu
+// nie mogą się nakładać (kontrola w src/lib/intervention-terms.ts), a interwencja
+// zapisuje `term_id` z dnia zdarzenia. „Zakończenie" współpracy to DATA
+// wypowiedzenia, nie kwota.
+//
+// KWOTY: złote NETTO, `real`. NULL = nieuzupełnione i to NIE to samo, co 0
+// (podjazd za 0 zł znaczyłby „jeździmy za darmo"). Rozliczenie liczy się PRZY
+// ODCZYCIE (src/lib/intervention-terms.ts), żeby korekta warunków przeliczała
+// historię, zamiast zostawiać zamrożone kwoty w wierszach interwencji.
+//
+// Trasy: src/routes/intervention-groups.ts. Szablony maili: app_settings
+// (`interventions.rfq.*`, `interventions.termination.*`) — bez migracji.
+// ============================================================================
+
+export const interventionCompanies = sqliteTable(
+  "intervention_companies",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    /** Nazwa firmy. Unikalność case-insensitive pilnuje trasa (SQLite nie ma tu indeksu). */
+    name: text("name").notNull(),
+    /** Obszar działania („Warszawa i okolice", „woj. mazowieckie"). */
+    area: text("area"),
+    contactPerson: text("contact_person"),
+    phone: text("phone"),
+    email: text("email"),
+    notes: text("notes"),
+    /** Miękkie archiwum — firma z historią warunków nie znika, tylko przestaje być wybieralna. */
+    active: integer("active", { mode: "boolean" }).default(true).notNull(),
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+    updatedAt: text("updated_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+  },
+  (t) => ({
+    activeNameIdx: index("intervention_companies_active_name_idx").on(t.active, t.name),
+  })
+);
+
+export type InterventionCompany = typeof interventionCompanies.$inferSelect;
+export type NewInterventionCompany = typeof interventionCompanies.$inferInsert;
+
+/**
+ * Warunki usługi grupy interwencyjnej dla obiektu w danym okresie.
+ * `end_date` NULL = umowa trwa. Firma ma `onDelete: restrict` — skasowanie firmy
+ * z historią warunków musi być świadomym przepięciem, nie efektem ubocznym.
+ */
+export const interventionTerms = sqliteTable(
+  "intervention_terms",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    objectId: integer("object_id")
+      .notNull()
+      .references(() => objects.id, { onDelete: "cascade" }),
+    companyId: integer("company_id")
+      .notNull()
+      .references(() => interventionCompanies.id, { onDelete: "restrict" }),
+    /** Początek obowiązywania, YYYY-MM-DD. */
+    startDate: text("start_date").notNull(),
+    /** Koniec obowiązywania (data wypowiedzenia), YYYY-MM-DD. NULL = trwa. */
+    endDate: text("end_date"),
+    /** Kwota jednego płatnego podjazdu, zł netto. */
+    calloutFee: real("callout_fee"),
+    /** Abonament miesięczny za gotowość, zł netto. */
+    subscriptionFee: real("subscription_fee"),
+    /** Ile podjazdów w miesiącu mieści się w abonamencie (0/NULL = żaden). */
+    freeCallouts: integer("free_callouts"),
+    /** Stawka za godzinę postoju na obiekcie, zł netto. */
+    hourlyStandbyFee: real("hourly_standby_fee"),
+    notes: text("notes"),
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+    updatedAt: text("updated_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+  },
+  (t) => ({
+    objectIdx: index("intervention_terms_object_idx").on(t.objectId, t.startDate),
+    companyIdx: index("intervention_terms_company_idx").on(t.companyId),
+  })
+);
+
+export type InterventionTerm = typeof interventionTerms.$inferSelect;
+export type NewInterventionTerm = typeof interventionTerms.$inferInsert;
+
+/**
+ * Pojedynczy podjazd grupy interwencyjnej. `company_id` jest DENORMALIZACJĄ
+ * z warunków — rozwiązane raz, przy zapisie, żeby rejestr dało się filtrować
+ * po firmie bez joinu i żeby przepięcie obiektu na inną firmę nie przepisywało
+ * historii. Kwoty NIE są zapisywane: liczy je odczyt z aktualnych warunków.
+ */
+export const interventions = sqliteTable(
+  "interventions",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    objectId: integer("object_id")
+      .notNull()
+      .references(() => objects.id, { onDelete: "cascade" }),
+    termId: integer("term_id")
+      .notNull()
+      .references(() => interventionTerms.id, { onDelete: "restrict" }),
+    companyId: integer("company_id")
+      .notNull()
+      .references(() => interventionCompanies.id, { onDelete: "restrict" }),
+    /** Data i godzina podjazdu, ISO bez sekund: `YYYY-MM-DDTHH:MM`. */
+    happenedAt: text("happened_at").notNull(),
+    reason: text("reason"),
+    /** Kto zgłosił podjazd (operator CMA, klient). */
+    reportedBy: text("reported_by"),
+    /** Godziny postoju na obiekcie (1.5 = półtorej godziny). NULL = bez postoju/nieuzupełnione. */
+    standbyHours: real("standby_hours"),
+    notes: text("notes"),
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+    updatedAt: text("updated_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+  },
+  (t) => ({
+    objectIdx: index("interventions_object_idx").on(t.objectId, t.happenedAt),
+    termIdx: index("interventions_term_idx").on(t.termId, t.happenedAt),
+    companyIdx: index("interventions_company_idx").on(t.companyId),
+  })
+);
+
+export type Intervention = typeof interventions.$inferSelect;
+export type NewIntervention = typeof interventions.$inferInsert;
+
+/**
+ * Umowy ramowe firmy interwencyjnej — bliźniak `manual_attachments`
+ * (scope katalogu: `interventions/companies/<companyId>`).
+ */
+export const interventionCompanyAttachments = sqliteTable(
+  "intervention_company_attachments",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    companyId: integer("company_id")
+      .notNull()
+      .references(() => interventionCompanies.id, { onDelete: "cascade" }),
+    fileName: text("file_name").notNull(),
+    mime: text("mime").notNull(),
+    size: integer("size").notNull(),
+    storedPath: text("stored_path").notNull(),
+    kind: text("kind", { enum: CALENDAR_ATTACHMENT_KINDS }).notNull(),
+    width: integer("width"),
+    height: integer("height"),
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+  },
+  (t) => ({
+    companyIdx: index("intervention_company_attachments_company_idx").on(t.companyId),
+  })
+);
+
+export type InterventionCompanyAttachment = typeof interventionCompanyAttachments.$inferSelect;
+export type NewInterventionCompanyAttachment = typeof interventionCompanyAttachments.$inferInsert;
+
+/** Umowa na obiekt przy wierszu warunków (scope: `interventions/terms/<termId>`). */
+export const interventionTermAttachments = sqliteTable(
+  "intervention_term_attachments",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    termId: integer("term_id")
+      .notNull()
+      .references(() => interventionTerms.id, { onDelete: "cascade" }),
+    fileName: text("file_name").notNull(),
+    mime: text("mime").notNull(),
+    size: integer("size").notNull(),
+    storedPath: text("stored_path").notNull(),
+    kind: text("kind", { enum: CALENDAR_ATTACHMENT_KINDS }).notNull(),
+    width: integer("width"),
+    height: integer("height"),
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+  },
+  (t) => ({
+    termIdx: index("intervention_term_attachments_term_idx").on(t.termId),
+  })
+);
+
+export type InterventionTermAttachment = typeof interventionTermAttachments.$inferSelect;
+export type NewInterventionTermAttachment = typeof interventionTermAttachments.$inferInsert;
+
+/** Dokumentacja podjazdu — zdjęcia, notatka z interwencji (scope: `interventions/interventions/<id>`). */
+export const interventionAttachments = sqliteTable(
+  "intervention_attachments",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    interventionId: integer("intervention_id")
+      .notNull()
+      .references(() => interventions.id, { onDelete: "cascade" }),
+    fileName: text("file_name").notNull(),
+    mime: text("mime").notNull(),
+    size: integer("size").notNull(),
+    storedPath: text("stored_path").notNull(),
+    kind: text("kind", { enum: CALENDAR_ATTACHMENT_KINDS }).notNull(),
+    width: integer("width"),
+    height: integer("height"),
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+  },
+  (t) => ({
+    interventionIdx: index("intervention_attachments_intervention_idx").on(t.interventionId),
+  })
+);
+
+export type InterventionAttachment = typeof interventionAttachments.$inferSelect;
+export type NewInterventionAttachment = typeof interventionAttachments.$inferInsert;
+
+// ============================================================================
+// DRAFTY UMÓW — generowanie umowy z oryginalnego szablonu Word (moduł „Umowy”,
+// panel „Drafty umów”). Tabele stoją NA KOŃCU pliku, bo załączniki draftu są
+// klonem `intervention_attachments` i potrzebują CALENDAR_ATTACHMENT_KINDS.
+//
+// Rejestr `contracts` (numer, daty, wartość) zostaje osobnym bytem: tam jest
+// UMOWA JAKO FAKT handlowy, tu — DOKUMENT, który dopiero powstaje. Draft nie
+// blokuje kasowania obiektu (kaskada FK), umowa z rejestru blokuje.
+// ============================================================================
+
+export const CONTRACT_DRAFT_STATUSES = ["draft", "sent", "signed", "rejected", "archived"] as const;
+export type ContractDraftStatus = (typeof CONTRACT_DRAFT_STATUSES)[number];
+
+/** Etykiety PL — front nie trzyma własnego słownika (kontrakt z api.ts). */
+export const CONTRACT_DRAFT_STATUS_LABELS: Record<ContractDraftStatus, string> = {
+  draft: "Szkic",
+  sent: "Wysłana do klienta",
+  signed: "Podpisana",
+  rejected: "Odrzucona",
+  archived: "Archiwalna",
+};
+
+export const contractDrafts = sqliteTable(
+  "contract_drafts",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    objectId: integer("object_id")
+      .notNull()
+      .references(() => objects.id, { onDelete: "cascade" }),
+    /**
+     * Kontrahent jest SNAPSHOTEM z chwili założenia draftu (dane i tak siedzą
+     * w `fields`), więc usunięcie kartoteki nie kasuje dokumentu — zeruje tylko
+     * odsyłacz.
+     */
+    contractorId: integer("contractor_id").references(() => contractors.id, { onDelete: "set null" }),
+    /**
+     * Spółka, która NADAŁA NUMER. `restrict`, bo skasowanie spółki rozsypałoby
+     * licznik: kolejny draft dostałby seq 1 i wpadł w duplikat numeru z archiwum.
+     */
+    companyId: integer("company_id")
+      .notNull()
+      .references(() => companies.id, { onDelete: "restrict" }),
+    /** Klucz szablonu z rejestru (src/lib/contract-templates/registry.ts). */
+    templateKey: text("template_key").notNull(),
+    /** Pełny numer `seq/KOD/rok` — jedyne miejsce formatu: contract-numbering.ts. */
+    contractNumber: text("contract_number").notNull().unique(),
+    seq: integer("seq").notNull(),
+    year: integer("year").notNull(),
+    /** Data zawarcia ("YYYY-MM-DD"); do DOCX idzie jako DD.MM.RRRR. */
+    contractDate: text("contract_date").notNull(),
+    status: text("status", { enum: CONTRACT_DRAFT_STATUSES }).default("draft").notNull(),
+    /** Wartości pól formularza jako JSON `Record<string, string>`. */
+    fields: text("fields").default("{}").notNull(),
+    notes: text("notes"),
+    /** Nazwa pliku pokazywana użytkownikowi, np. „Umowa ZDW 12-ZDW-2026.docx”. */
+    generatedFileName: text("generated_file_name"),
+    /** Ścieżka względem katalogu załączników: `contract-drafts/<id>/<uuid>.docx`. */
+    generatedStoredPath: text("generated_stored_path"),
+    generatedAt: text("generated_at"),
+    /**
+     * Skrót pól z chwili generacji. Różny od skrótu bieżących `fields` znaczy
+     * „plik jest nieaktualny” — liczone PRZY ODCZYCIE, nie trzymane jako flaga.
+     */
+    generatedHash: text("generated_hash"),
+    generatedBy: integer("generated_by").references(() => users.id, { onDelete: "set null" }),
+    createdBy: integer("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+    updatedAt: text("updated_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+  },
+  (t) => ({
+    objectIdx: index("contract_drafts_object_idx").on(t.objectId),
+    companyYearIdx: index("contract_drafts_company_year_idx").on(t.companyId, t.year),
+    statusIdx: index("contract_drafts_status_idx").on(t.status),
+    /** Właściwa gwarancja braku dziur i duplikatów w liczniku (wyścig dwóch POST-ów). */
+    seqUidx: uniqueIndex("contract_drafts_company_year_seq_uidx").on(t.companyId, t.year, t.seq),
+  })
+);
+
+export type ContractDraft = typeof contractDrafts.$inferSelect;
+export type NewContractDraft = typeof contractDrafts.$inferInsert;
+
+/**
+ * Skany podpisanej umowy, aneksy, korespondencja — bliźniak
+ * `intervention_attachments` (scope katalogu: `contract-drafts/<draftId>`,
+ * ten sam, w którym leży wygenerowany DOCX).
+ */
+export const contractDraftAttachments = sqliteTable(
+  "contract_draft_attachments",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    draftId: integer("draft_id")
+      .notNull()
+      .references(() => contractDrafts.id, { onDelete: "cascade" }),
+    fileName: text("file_name").notNull(),
+    mime: text("mime").notNull(),
+    size: integer("size").notNull(),
+    storedPath: text("stored_path").notNull(),
+    kind: text("kind", { enum: CALENDAR_ATTACHMENT_KINDS }).notNull(),
+    width: integer("width"),
+    height: integer("height"),
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+  },
+  (t) => ({
+    draftIdx: index("contract_draft_attachments_draft_idx").on(t.draftId),
+  })
+);
+
+export type ContractDraftAttachment = typeof contractDraftAttachments.$inferSelect;
+export type NewContractDraftAttachment = typeof contractDraftAttachments.$inferInsert;

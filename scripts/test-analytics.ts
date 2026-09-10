@@ -22,10 +22,19 @@
 import { db, schema } from "../src/db/index.js";
 import { eq, inArray, like } from "drizzle-orm";
 import analyticsApp from "../src/routes/analytics.js";
+import objectsApp from "../src/routes/objects.js";
 import {
   clearPersonnelCostCache,
   fullMonths,
+  type MonthKey,
 } from "../src/lib/object-personnel-cost.js";
+import {
+  isoPlusDays,
+  monthBounds,
+  syncObjectServiceFlags,
+  todayIso,
+  upsertServiceRowsFromFlags,
+} from "../src/lib/object-services.js";
 import { COMPANY_FIELDS } from "../src/lib/company-config.js";
 import { deleteSetting, getSetting, setSetting } from "../src/lib/settings.js";
 
@@ -168,6 +177,10 @@ function cleanup() {
     .map((r) => r.id);
   if (objIds.length) {
     db.delete(schema.objectHistory).where(inArray(schema.objectHistory.objectId, objIds)).run();
+    // Okresy usług kasujemy JAWNIE, mimo ON DELETE CASCADE: kaskada działa tylko
+    // przy `foreign_keys = ON`, a wiersze fikstur w tabeli mianownika CMA to
+    // ostatnia rzecz, którą wolno zostawić po teście w prawdziwej bazie.
+    db.delete(schema.objectServices).where(inArray(schema.objectServices.objectId, objIds)).run();
     db.delete(schema.objects).where(inArray(schema.objects.id, objIds)).run();
   }
   db.delete(schema.contractors).where(like(schema.contractors.name, `${PREFIX}%`)).run();
@@ -226,8 +239,25 @@ async function main() {
     .returning()
     .all();
 
-  const obj = (v: Partial<typeof schema.objects.$inferInsert>) =>
-    db
+  /*
+   * Obiekt fikstury + JEGO OKRESY USŁUG.
+   *
+   * Od migracji 0084 flagi `has_*` są tylko cache'em, a mianownik kosztu CMA per
+   * miesiąc i seria czasowa analityki liczą się z wierszy `object_services`.
+   * Fikstura musi więc mieć jedno i drugie — inaczej testowałaby ścieżkę D3
+   * („obiekt bez okresów, liczony z flag") zamiast normalnego obiektu kartoteki.
+   *
+   * Domyślny start (`SERVICE_START`) leży przed każdym oknem, jakie analityka
+   * liczy (12 miesięcy kosztu, 12 miesięcy serii czasowej), więc wszystkie
+   * dotychczasowe asercje dostają dokładnie te same liczby, co przed zmianą.
+   * Obiekt bez ani jednej usługi (O1..O7) nie dostaje żadnego wiersza.
+   */
+  const SERVICE_START = "2019-01-01";
+  const obj = (
+    v: Partial<typeof schema.objects.$inferInsert>,
+    services: { startDate?: string; endDate?: string | null; startEstimated?: boolean } = {}
+  ) => {
+    const row = db
       .insert(schema.objects)
       .values({
         contractorId: c1.id,
@@ -239,18 +269,24 @@ async function main() {
       })
       .returning()
       .all()[0];
+    upsertServiceRowsFromFlags(db, row.id, row, services.startDate ?? SERVICE_START, {
+      endDate: services.endDate ?? null,
+      startEstimated: services.startEstimated ?? false,
+    });
+    return row;
+  };
 
   // O1 — własny handlowiec A (nadpisuje opiekuna kontrahenta): 20 000 przychodu, 8 000 kosztu.
-  obj({ name: `${PREFIX}O1`, monthlyValue: 20000, monthlyCost: 8000, salespersonId: spA.id });
+  obj({ name: `${PREFIX}O1`, monthlyZdw: 20000, monthlyCost: 8000, salespersonId: spA.id });
   // O2 — koszt NULL („nieuzupełniony”). O3 — koszt 0 zł (uzupełniony fakt). Oba dziedziczą B.
-  obj({ name: `${PREFIX}O2`, monthlyValue: 1000, monthlyCost: null });
-  obj({ name: `${PREFIX}O3`, monthlyValue: 1000, monthlyCost: 0 });
+  obj({ name: `${PREFIX}O2`, monthlyZdw: 1000, monthlyCost: null });
+  obj({ name: `${PREFIX}O3`, monthlyZdw: 1000, monthlyCost: 0 });
   // O4 — zwrot z instalacji: 12 000 / (2 000 − 1 000) = 12 miesięcy.
-  obj({ name: `${PREFIX}O4`, monthlyValue: 2000, monthlyCost: 1000, setupCost: 12000 });
+  obj({ name: `${PREFIX}O4`, monthlyZdw: 2000, monthlyCost: 1000, setupCost: 12000 });
   // O5 — archiwalny: widoczny tylko w scope=all.
-  obj({ name: `${PREFIX}O5`, monthlyValue: 999, monthlyCost: 1, status: "inactive" });
+  obj({ name: `${PREFIX}O5`, monthlyZdw: 999, monthlyCost: 1, status: "inactive" });
   // O6 — kontrahent bez opiekuna → „Bez handlowca”.
-  obj({ name: `${PREFIX}O6`, contractorId: c2.id, monthlyValue: 700, monthlyCost: 200 });
+  obj({ name: `${PREFIX}O6`, contractorId: c2.id, monthlyZdw: 700, monthlyCost: 200 });
 
   // Kontrahent 3 — ŻADEN jego obiekt nie ma kosztu. To stan „dnia pierwszego”:
   // zysk równa się przychodowi tylko dlatego, że koszty policzyliśmy jako zero,
@@ -260,7 +296,7 @@ async function main() {
     .values({ name: `${PREFIX}Kontrahent3`, nip: `${PREFIX}3`, salespersonId: null })
     .returning()
     .all();
-  obj({ name: `${PREFIX}O7`, contractorId: c3.id, monthlyValue: 3000, monthlyCost: null });
+  obj({ name: `${PREFIX}O7`, contractorId: c3.id, monthlyZdw: 3000, monthlyCost: null });
 
   /* --- Fikstury kosztu OSOBOWEGO (Kadry → obiekt) --------------------------
    * Osobny kontrahent, osobny obiekt i osobny handlowiec — celowo NIE dokładamy
@@ -303,7 +339,7 @@ async function main() {
   const o8 = obj({
     name: `${PREFIX}O8`,
     contractorId: c4.id,
-    monthlyValue: 10000,
+    monthlyZdw: 10000,
     monthlyCost: 2000,
   });
 
@@ -369,8 +405,11 @@ async function main() {
     .values({ name: `${PREFIX}Kontrahent5`, nip: `${PREFIX}5` })
     .returning()
     .all();
-  const cmaObj = (name: string, v: Partial<typeof schema.objects.$inferInsert>) =>
-    obj({ name: `${PREFIX}${name}`, contractorId: c5.id, monthlyValue: 0, ...v });
+  const cmaObj = (
+    name: string,
+    v: Partial<typeof schema.objects.$inferInsert>,
+    services: { startDate?: string; endDate?: string | null; startEstimated?: boolean } = {}
+  ) => obj({ name: `${PREFIX}${name}`, contractorId: c5.id, monthlyZdw: 0, ...v }, services);
 
   const oCam4 = cmaObj("CAM4", { hasCameras: true, cameraCount: 4 }); // 4 jednostki
   const oCam2 = cmaObj("CAM2", { hasCameras: true, cameraCount: 2 }); // 2 jednostki
@@ -383,6 +422,46 @@ async function main() {
   const oNoCount = cmaObj("BEZLICZBY", { hasCameras: true, cameraCount: null, hasSswin: true });
   // OFI + SSWiN — obie ścieżki naraz: własna załoga PLUS udział w centrum.
   const oBoth = cmaObj("OFICMA", { hasOfi: true, hasSswin: true });
+
+  /* --- Fikstury OKRESÓW: seria czasowa, mianownik per miesiąc, „kończące się"
+   *
+   * Wszystkie liczone względem DZISIAJ w strefie aplikacji — tej samej, w której
+   * analityka wyznacza miesiące serii i horyzont „kończy się wkrótce".
+   */
+  const TODAY = todayIso();
+  /** Miesiąc oddalony o `offset` od bieżącego (offset ujemny = wstecz). */
+  const monthAt = (offset: number): MonthKey => {
+    const idx = Number(TODAY.slice(0, 4)) * 12 + Number(TODAY.slice(5, 7)) - 1 + offset;
+    return { year: Math.floor(idx / 12), month: (idx % 12) + 1 };
+  };
+  const mStarted = monthAt(-2); // miesiąc rozpoczęcia usługi „świeżego" obiektu
+  const mPrev = monthAt(-1); // zeszły miesiąc = miesiąc zakończenia usługi
+  const startedFrom = monthBounds(mStarted.year, mStarted.month).from;
+  const endedOn = monthBounds(mPrev.year, mPrev.month).to;
+
+  // SWIEZY — 2 kamery od pierwszego dnia miesiąca sprzed dwóch. Tyle samo jednostek,
+  // co CAM2, ale krótsza historia: przy oknie 12 miesięcy jego udział w koszcie
+  // centrum MUSI być mniejszy, bo przez większość okna centrum go nie dozorowało.
+  const oFresh = cmaObj("SWIEZY", { hasCameras: true, cameraCount: 2 }, { startDate: startedFrom });
+  // ZAKONCZONY — jedyny okres domknięty w ZESZŁYM miesiącu: wchodzi do `ended`
+  // tamtego miesiąca i NIE jest „kończący się" (już się skończył, nie kończy).
+  const oEnded = cmaObj(
+    "ZAKONCZONY",
+    { hasCameras: true, cameraCount: 1 },
+    { endDate: endedOn }
+  );
+  // Cache flag musi znać koniec okresu — w aplikacji robi to trasa zapisu.
+  syncObjectServiceFlags(db, oEnded.id);
+  // KONCZY — bez usług, ale z wpisanym przewidywanym zakończeniem za 30 dni:
+  // druga, niezależna ścieżka predykatu „kończy się".
+  obj({
+    name: `${PREFIX}KONCZY`,
+    contractorId: c5.id,
+    monthlyZdw: 700,
+    expectedEndDate: isoPlusDays(TODAY, 30),
+  });
+  // DLUGI — jedyny okres kończy się za 200 dni: poza horyzontem 90 dni, w horyzoncie 365.
+  cmaObj("DLUGI", { hasCameras: true, cameraCount: 1 }, { endDate: isoPlusDays(TODAY, 200) });
 
   // Pula centrum monitorowania — DZIAŁ, nie pozycja obiektowa. Godziny działowe
   // z definicji nie należą do żadnego obiektu; pula rozdziela ich koszt po
@@ -408,7 +487,8 @@ async function main() {
   const singlePosition = (
     name: string,
     amount: number,
-    assignment: { objectId?: number; departmentId?: number }
+    assignment: { objectId?: number; departmentId?: number },
+    month: MonthKey = m1
   ) => {
     const [e] = db
       .insert(schema.hrEmployees)
@@ -429,15 +509,15 @@ async function main() {
       .returning()
       .all();
     db.insert(schema.hrPayroll)
-      .values({ contractId: ct.id, year: m1.year, month: m1.month, mainAmount: amount })
+      .values({ contractId: ct.id, year: month.year, month: month.month, mainAmount: amount })
       .run();
     db.insert(schema.hrHours)
       .values({
         employeeId: e.id,
         objectId: assignment.objectId ?? null,
         departmentId: assignment.departmentId ?? null,
-        year: m1.year,
-        month: m1.month,
+        year: month.year,
+        month: month.month,
         workedHours: 100,
       })
       .run();
@@ -445,6 +525,51 @@ async function main() {
   };
   singlePosition("Dyzurny", 3600, { departmentId: depCma.id }); // cały koszt idzie do puli CMA
   singlePosition("Ofi", 2000, { objectId: hroOfi.id }); // cały koszt idzie WPROST na oBoth
+  // Dyżurny w NAJSTARSZYM miesiącu okna 12 — bez niego pula centrum w dawnych
+  // miesiącach jest zerowa i nie da się pokazać, że mianownik liczy się PER MIESIĄC
+  // (obiekt podłączony niedawno nie może dostać udziału za miesiąc sprzed roku).
+  const mOldest = fullMonths(12)[0];
+  singlePosition("DyzurnyStary", 3600, { departmentId: depCma.id }, mOldest);
+
+  /* --- Fikstura HISTORII PŁAC: okna 3 i 12 muszą mieć czym się różnić ------
+   *
+   * Miesiąc wchodzi do średniej tylko wtedy, gdy ma WPROWADZONE KWOTY wypłat
+   * (`hasPayrollAmounts` w src/lib/object-personnel-cost.ts). Prawdziwa kartoteka
+   * kadrowa w bazie bywa rozliczona tylko za ostatni miesiąc — wtedy `monthsUsed`
+   * wychodzi 1 dla KAŻDEGO okna i asercje o uśrednianiu (1 < 3 ≤ 12) padają na
+   * danych, a nie na kodzie. Test nie może zależeć od tego, co księgowa zdążyła
+   * wprowadzić, więc rozliczenie brakujących miesięcy dokłada sobie sam.
+   *
+   * Pracownik NIE MA GODZIN, więc jego koszt zostaje kosztem ogólnym firmy i nie
+   * zmienia ani jednej kwoty na obiekcie — jedynym efektem jest to, że miesiąc
+   * liczy się jako rozliczony i wchodzi do mianownika średniej.
+   */
+  const [histEmp] = db
+    .insert(schema.hrEmployees)
+    .values({ fullName: `${PREFIX}Historia`, kind: "ochrona", active: true })
+    .returning()
+    .all();
+  const [histContract] = db
+    .insert(schema.hrContracts)
+    .values({
+      employeeId: histEmp.id,
+      company: comp.name,
+      contractType: "zlecenie",
+      zua: "tak",
+      mainChannel: "przelew",
+      bonusType: "brak",
+      active: true,
+    })
+    .returning()
+    .all();
+  for (const m of fullMonths(12)) {
+    // Ostatni pełny miesiąc jest już rozliczony fiksturą główną; dokładanie mu
+    // drugiej wypłaty zmieniłoby audyt składek bez żadnego zysku dla testu.
+    if (m.year === m1.year && m.month === m1.month) continue;
+    db.insert(schema.hrPayroll)
+      .values({ contractId: histContract.id, year: m.year, month: m.month, mainAmount: 1000 })
+      .run();
+  }
 
   clearPersonnelCostCache();
 
@@ -753,7 +878,26 @@ async function main() {
     cmaRow("BEZLICZBY"));
   ok("Brak liczby kamer jest RAPORTOWANY, a nie połykany",
     cma.objectsMissingCameraCount >= 1, cma);
-  db.update(schema.objects).set({ cameraCount: 3 }).where(eq(schema.objects.id, oNoCount.id)).run();
+  /*
+   * Liczbę kamer uzupełnia się dziś na OKRESIE USŁUGI, a flagi obiektu przelicza
+   * z niego `syncObjectServiceFlags` — dokładnie tak, jak robi to trasa zapisu.
+   * Cache kosztu osobowego celowo NIE jest czyszczony: odcisk musi obejmować
+   * także tabelę `object_services`, inaczej edycja okresu serwowałaby stary koszt.
+   */
+  const noCountPeriod = db
+    .select({ id: schema.objectServices.id, service: schema.objectServices.service })
+    .from(schema.objectServices)
+    .where(eq(schema.objectServices.objectId, oNoCount.id))
+    .all()
+    .find((r) => r.service === "kamery")!;
+  const setNoCountCameras = (cameraCount: number | null) => {
+    db.update(schema.objectServices)
+      .set({ cameraCount, updatedAt: new Date().toISOString() })
+      .where(eq(schema.objectServices.id, noCountPeriod.id))
+      .run();
+    syncObjectServiceFlags(db, oNoCount.id);
+  };
+  setNoCountCameras(3);
   const counted = await cmaCall(); // znowu bez clearPersonnelCostCache()
   const countedRow = counted.rows.find((r: any) => r.name === `${PREFIX}BEZLICZBY`);
   ok("Uzupełnienie liczby kamer podnosi wagę do 4 i zdejmuje obiekt z listy braków",
@@ -761,7 +905,10 @@ async function main() {
       counted.totals.personnel.cma.objectsMissingCameraCount === cma.objectsMissingCameraCount - 1 &&
       countedRow?.personnelCmaCost > cmaRow("BEZLICZBY")?.personnelCmaCost,
     { units: countedRow?.serviceUnits, missing: counted.totals.personnel.cma.objectsMissingCameraCount });
-  db.update(schema.objects).set({ cameraCount: null }).where(eq(schema.objects.id, oNoCount.id)).run();
+  ok("Edycja SAMEGO okresu usługi unieważnia cache kosztu (odcisk zna object_services)",
+    countedRow?.personnelCmaCost !== cmaRow("BEZLICZBY")?.personnelCmaCost,
+    { przed: cmaRow("BEZLICZBY")?.personnelCmaCost, po: countedRow?.personnelCmaCost });
+  setNoCountCameras(null);
 
   // (e) obie ścieżki SIĘ SUMUJĄ, a nie zastępują
   const both = cmaRow("OFICMA");
@@ -826,8 +973,11 @@ async function main() {
    * `service` zawęża CAŁĄ analitykę do jednej z nich PRZED agregacją.
    *
    * Dwie rzeczy, które muszą być tu przybite gwoździami:
-   *  1. przekrój NIE JEST ROZŁĄCZNY — obiekt z OFI i kamerami wchodzi do obu,
-   *     więc „zdv" + „ofi" ma być WIĘKSZE niż „all", a nie równe;
+   *  1. obiekt z OFI i kamerami POLICZY SIĘ w obu przekrojach (licznik obiektów
+   *     się dubluje), ale wchodzi tam tylko SWOJĄ CZĘŚCIĄ abonamentu — więc
+   *     przychód „zdv" + „ofi" NIE jest większy od „all". Od rozbicia abonamentu
+   *     (migracja 0082) jest mu równy, pomniejszony wyłącznie o obiekty bez ani
+   *     jednej usługi, które nie należą do żadnej linii;
    *  2. koszt osobowy zmienia SKŁAD, nie tylko zbiór wierszy: w „ofi" liczą się
    *     wyłącznie godziny na obiekcie, w „zdv" wyłącznie udział w puli CMA.
    */
@@ -837,11 +987,13 @@ async function main() {
     .returning()
     .all();
   // Mieszany: ochrona fizyczna PLUS kamera, z przychodem i wpisanym kosztem
-  // pozostałym — na nim widać, że obie strony liczą go w całości.
+  // pozostałym. Abonament jest ROZBITY (3 000 za dozór + 2 000 za wartownika) —
+  // na nim widać, że przychód idzie za linią, a koszt pozostały nie.
   const oMix = obj({
     name: `${PREFIX}MIESZANY`,
     contractorId: c6.id,
-    monthlyValue: 5000,
+    monthlyZdw: 3000,
+    monthlyOfi: 2000,
     monthlyCost: 400,
     hasOfi: true,
     hasCameras: true,
@@ -851,7 +1003,7 @@ async function main() {
   obj({
     name: `${PREFIX}TYLKOOFI`,
     contractorId: c6.id,
-    monthlyValue: 1200,
+    monthlyOfi: 1200,
     monthlyCost: 100,
     hasOfi: true,
   });
@@ -911,41 +1063,38 @@ async function main() {
       mixedCount,
     });
 
-  // (b) przychód: podwójne liczenie mieszanych jest CELOWE
-  ok("Przychód zdv + ofi ≥ przychód all (mieszane po obu stronach)",
-    vZdv.totals.revenue + vOfi.totals.revenue >= vAll.totals.revenue - 0.001,
-    { zdv: vZdv.totals.revenue, ofi: vOfi.totals.revenue, all: vAll.totals.revenue });
-  /*
-   * Nadwyżka nie bierze się znikąd: to DOKŁADNIE przychód obiektów mieszanych
-   * (policzonych po obu stronach) minus przychód obiektów bez żadnej usługi
-   * (nie policzonych po żadnej). Zapisane wprost, żeby nikt nie „naprawił" tej
-   * nierówności, myląc ją z błędem sumowania.
+  /* (b) przychód: NIE MA już podwójnego liczenia mieszanych.
+   *
+   * Do rozbicia abonamentu (migracja 0082) mieszany obiekt wchodził do obu
+   * przekrojów CAŁĄ kwotą i „zdv" + „ofi" wychodziło więcej, niż firma ma. Teraz
+   * jedyną różnicą wobec „all" są obiekty bez ANI JEDNEJ usługi — nie należą do
+   * żadnej linii, więc ich przychód nie pojawia się w żadnym przekroju.
    */
-  const mixedRevenue = vAll.rows
-    .filter((r: any) => r.services.ofi && isZdv(r))
-    .reduce((s: number, r: any) => s + r.revenue, 0);
   const noServiceRevenue = vAll.rows
     .filter((r: any) => !r.services.ofi && !isZdv(r))
     .reduce((s: number, r: any) => s + r.revenue, 0);
-  ok("Nadwyżka „zdv + ofi” nad „all” = przychód mieszanych − przychód bezusługowych",
-    mixedRevenue > 0 &&
-      near(
-        vZdv.totals.revenue + vOfi.totals.revenue - vAll.totals.revenue,
-        mixedRevenue - noServiceRevenue,
-        0.011
-      ),
+  ok("Przychód zdv + ofi = przychód all − obiekty bez żadnej usługi",
+    near(
+      vZdv.totals.revenue + vOfi.totals.revenue,
+      vAll.totals.revenue - noServiceRevenue,
+      0.011
+    ),
     {
-      diff: vZdv.totals.revenue + vOfi.totals.revenue - vAll.totals.revenue,
-      mixedRevenue,
+      zdv: vZdv.totals.revenue,
+      ofi: vOfi.totals.revenue,
+      all: vAll.totals.revenue,
       noServiceRevenue,
     });
-  ok("Przychód i koszt pozostały obiektu mieszanego są w KAŻDYM przekroju te same",
+  ok("Przychód zdv + ofi NIE przekracza przychodu all (koniec podwójnego liczenia)",
+    vZdv.totals.revenue + vOfi.totals.revenue <= vAll.totals.revenue + 0.001,
+    { zdv: vZdv.totals.revenue, ofi: vOfi.totals.revenue, all: vAll.totals.revenue });
+  ok("Obiekt mieszany dzieli przychód między linie (3 000 + 2 000 = 5 000), koszt pozostały zostaje w całości",
     row(vAll, "MIESZANY")?.revenue === 5000 &&
-      row(vZdv, "MIESZANY")?.revenue === 5000 &&
-      row(vOfi, "MIESZANY")?.revenue === 5000 &&
+      row(vZdv, "MIESZANY")?.revenue === 3000 &&
+      row(vOfi, "MIESZANY")?.revenue === 2000 &&
       row(vZdv, "MIESZANY")?.otherCost === 400 &&
       row(vOfi, "MIESZANY")?.otherCost === 400,
-    { zdv: row(vZdv, "MIESZANY"), ofi: row(vOfi, "MIESZANY") });
+    { all: row(vAll, "MIESZANY"), zdv: row(vZdv, "MIESZANY"), ofi: row(vOfi, "MIESZANY") });
 
   // (c) koszt osobowy zmienia SKŁAD, nie tylko zbiór
   const mixAll = row(vAll, "MIESZANY");
@@ -969,9 +1118,12 @@ async function main() {
   ok("zdv + ofi składają się z powrotem na koszt osobowy z „all”",
     near(mixZdv.personnelCost + mixOfi.personnelCost, mixAll.personnelCost, 0.011),
     { zdv: mixZdv.personnelCost, ofi: mixOfi.personnelCost, all: mixAll.personnelCost });
-  ok("Zysk przekroju liczy się z jego własnego kosztu",
-    near(mixOfi?.profit, 5000 - 1000 - 400) &&
-      near(mixZdv?.profit, 5000 - mixAll.personnelCmaCost - 400, 0.011),
+  // Zysk przekroju liczy się z JEGO WŁASNEGO przychodu i JEGO WŁASNEGO kosztu:
+  // ofi = 2 000 − 1 000 (godziny) − 400 (koszt pozostały),
+  // zdv = 3 000 − udział w puli CMA − 400.
+  ok("Zysk przekroju liczy się z jego własnego przychodu i kosztu",
+    near(mixOfi?.profit, 2000 - 1000 - 400) &&
+      near(mixZdv?.profit, 3000 - mixAll.personnelCmaCost - 400, 0.011),
     { ofi: mixOfi?.profit, zdv: mixZdv?.profit });
 
   // (d) `hasCost` liczy się na nowo: godziny wartowników nie czynią kosztu
@@ -1011,6 +1163,278 @@ async function main() {
       near(hOfi.totals.revenue, vOfi.totals.revenue, 0.011) &&
       near(hOfi.totals.cost, vOfi.totals.cost, 0.011),
     { handlowcy: hOfi.totals.revenue, obiekty: vOfi.totals.revenue });
+
+  /* --- Mianownik kosztu CMA liczony PER MIESIĄC ---------------------------
+   * Do września 2026 dwunastomiesięczny koszt centrum dzielił się DZISIEJSZYMI
+   * kamerami: obiekt podłączony dwa miesiące temu dostawał udział także za
+   * miesiące, w których centrum go nie dozorowało. Od czasu okresów usług każdy
+   * miesiąc okna dzieli swoją pulę po usługach aktywnych W TYM MIESIĄCU.
+   */
+  const wide = (w: number) => call(`/obiekty?scope=all&costWindow=${w}&limit=5000`);
+  const w1 = await wide(1);
+  const w12 = await wide(12);
+  const rowOf = (v: any, n: string) => v.rows.find((r: any) => r.name === `${PREFIX}${n}`);
+
+  ok("okno 1 mies.: świeży obiekt i CAM2 mają po 2 jednostki i równy udział w puli",
+    rowOf(w1, "SWIEZY")?.personnelCmaCost > 0 &&
+      near(rowOf(w1, "SWIEZY")?.personnelCmaCost, rowOf(w1, "CAM2")?.personnelCmaCost, CENT),
+    { swiezy: rowOf(w1, "SWIEZY")?.personnelCmaCost, cam2: rowOf(w1, "CAM2")?.personnelCmaCost });
+  ok("okno 12 mies.: obiekt podłączony 2 mies. temu NIE dzieli kosztu sprzed roku",
+    rowOf(w12, "CAM2")?.personnelCmaCost > 0 &&
+      rowOf(w12, "SWIEZY")?.personnelCmaCost < rowOf(w12, "CAM2")?.personnelCmaCost - 0.01,
+    { swiezy: rowOf(w12, "SWIEZY")?.personnelCmaCost, cam2: rowOf(w12, "CAM2")?.personnelCmaCost });
+  /*
+   * Odwrotny kierunek tej samej reguły: obiekt, którego usługa skończyła się
+   * z końcem zeszłego miesiąca, NIE MA dziś ani jednej aktywnej usługi (flagi
+   * zgaszone, zero jednostek na dziś) — a mimo to dostaje udział w koszcie
+   * centrum za miesiąc, w którym centrum go jeszcze dozorowało. Przy mianowniku
+   * z „dzisiejszego stanu usług" jego udział wynosiłby zero, a koszt tamtego
+   * miesiąca rozpłynąłby się po obiektach, które go nie wygenerowały.
+   */
+  ok("Obiekt z usługą zakończoną w zeszłym miesiącu dostaje udział ZA TAMTEN miesiąc",
+    rowOf(w1, "ZAKONCZONY")?.services.cameras === false &&
+      rowOf(w1, "ZAKONCZONY")?.serviceUnits === 0 &&
+      rowOf(w1, "ZAKONCZONY")?.personnelCmaCost > 0,
+    rowOf(w1, "ZAKONCZONY"));
+
+  /*
+   * Odcisk cache'u musi obejmować `object_services`: przesunięcie STARTU okresu
+   * nie zmienia w tabeli `objects` ANI JEDNEJ kolumny (usługa nadal trwa), więc
+   * bez tych liczników admin poprawiłby datę i zobaczył stary koszt.
+   */
+  const freshPeriod = db
+    .select({ id: schema.objectServices.id })
+    .from(schema.objectServices)
+    .where(eq(schema.objectServices.objectId, oFresh.id))
+    .all()[0];
+  db.update(schema.objectServices)
+    .set({ startDate: SERVICE_START, updatedAt: new Date().toISOString() })
+    .where(eq(schema.objectServices.id, freshPeriod.id))
+    .run();
+  const w12moved = await wide(12); // BEZ clearPersonnelCostCache()
+  ok("Przesunięcie startu okresu przelicza udział w CMA bez czyszczenia cache’u",
+    rowOf(w12moved, "SWIEZY")?.personnelCmaCost > rowOf(w12, "SWIEZY")?.personnelCmaCost &&
+      // Po cofnięciu startu obiekt ma tę samą historię, co CAM2 — i ten sam udział.
+      // Porównujemy w RAMACH JEDNEJ odpowiedzi: dołożenie jednostek do dawnych
+      // miesięcy obniża udział wszystkim pozostałym, więc kwota CAM2 też się zmienia.
+      near(
+        rowOf(w12moved, "SWIEZY")?.personnelCmaCost,
+        rowOf(w12moved, "CAM2")?.personnelCmaCost,
+        CENT
+      ),
+    {
+      przed: rowOf(w12, "SWIEZY")?.personnelCmaCost,
+      po: rowOf(w12moved, "SWIEZY")?.personnelCmaCost,
+      cam2: rowOf(w12moved, "CAM2")?.personnelCmaCost,
+    });
+  db.update(schema.objectServices)
+    .set({ startDate: startedFrom, updatedAt: new Date().toISOString() })
+    .where(eq(schema.objectServices.id, freshPeriod.id))
+    .run();
+  clearPersonnelCostCache();
+
+  /* --- „Kończące się" obiekty (endingSoon) --------------------------------
+   * Predykat mieszka w src/lib/object-services.ts i jest JEDEN dla listy obiektów
+   * (SQL) i dla analityki (JS) — kafelek linkuje do listy z tym samym horyzontem,
+   * więc dwie różne liczby byłyby widoczne od razu.
+   */
+  /*
+   * SZACOWANY — okres, którego data startu została ZGADNIĘTA: backfill migracji
+   * 0084 wpisał datę założenia kartoteki, a 0087 oznaczył ją `start_estimated`.
+   * Data wypada w BIEŻĄCYM miesiącu, więc bez flagi obiekt zameldowałby się
+   * w serii czasowej jako świeże pozyskanie — dokładnie ten artefakt (147 sztuk
+   * jednego dnia), przez który flaga powstała.
+   *
+   * Usługa to OFI, bo jako jedyna nie ma wagi w mianowniku kosztu centrum
+   * monitorowania: fikstura ma sprawdzać serię czasową, a nie przesuwać udziały
+   * policzone w asercjach wyżej.
+   */
+  const mNow = monthAt(0);
+  const mNowBounds = monthBounds(mNow.year, mNow.month);
+  const estimatedFrom = mNowBounds.from;
+  cmaObj("SZACOWANY", { hasOfi: true }, { startDate: estimatedFrom, startEstimated: true });
+
+  const view90 = await call("/obiekty?scope=all&limit=5000");
+  const view365 = await call("/obiekty?scope=all&limit=5000&horizonDays=365");
+  /** Niezależna implementacja reguły — celowo napisana tu od zera, nie zaimportowana. */
+  const endingLocal = (v: any, days: number) => {
+    const limit = isoPlusDays(TODAY, days);
+    return v.rows.filter((r: any) => {
+      if (r.expectedEndDate && r.expectedEndDate <= limit) return true;
+      const live = (r.servicePeriods ?? []).filter((p: any) => !p.endDate || p.endDate >= TODAY);
+      return live.length > 0 && live.every((p: any) => p.endDate && p.endDate <= limit);
+    });
+  };
+  const local90 = endingLocal(view90, 90);
+  const named = (list: any[], n: string) => list.some((r) => r.name === `${PREFIX}${n}`);
+
+  ok("Wiersz analityki niesie okresy usług i przewidywane zakończenie",
+    Array.isArray(rowOf(view90, "CAM2")?.servicePeriods) &&
+      rowOf(view90, "CAM2").servicePeriods.length === 1 &&
+      rowOf(view90, "CAM2").servicePeriods[0].service === "kamery" &&
+      rowOf(view90, "KONCZY")?.expectedEndDate === isoPlusDays(TODAY, 30),
+    { okresy: rowOf(view90, "CAM2")?.servicePeriods, koniec: rowOf(view90, "KONCZY")?.expectedEndDate });
+  ok("endingSoon: domyślny horyzont to 90 dni", view90.endingSoon?.horizonDays === 90, view90.endingSoon);
+  ok("endingSoon: licznik i przychód zagrożony zgodne z wierszami odpowiedzi",
+    view90.endingSoon.count === local90.length &&
+      near(view90.endingSoon.revenue, local90.reduce((s: number, r: any) => s + r.revenue, 0), 0.011),
+    { api: view90.endingSoon, lokalnie: local90.length });
+  ok("Przewidywane zakończenie za 30 dni → obiekt się kończy",
+    named(local90, "KONCZY"), local90.map((r: any) => r.name).slice(0, 5));
+  ok("Okres kończący się za 200 dni: poza horyzontem 90, w horyzoncie 365",
+    !named(local90, "DLUGI") && named(endingLocal(view365, 365), "DLUGI") &&
+      view365.endingSoon.count > view90.endingSoon.count,
+    { h90: view90.endingSoon.count, h365: view365.endingSoon.count });
+  ok("Obiekt z WSZYSTKIMI okresami zakończonymi już się nie „kończy”",
+    !named(local90, "ZAKONCZONY") && !named(endingLocal(view365, 365), "ZAKONCZONY"));
+
+  // Ta sama definicja po obu stronach: lista obiektów liczy predykat w SQL-u.
+  const listRes = await objectsApp.request("/?pageSize=1");
+  const list = (await listRes.json()) as any;
+  ok("Lista obiektów i analityka liczą „kończące się” tak samo",
+    list.endingSoonDays === 90 &&
+      list.endingSoonCount === view90.endingSoon.count &&
+      near(list.endingSoonRevenue, view90.endingSoon.revenue, 0.011),
+    { lista: { count: list.endingSoonCount, revenue: list.endingSoonRevenue }, analityka: view90.endingSoon });
+
+  /* --- Seria czasowa usług (timeline) -------------------------------------
+   * 12 miesięcy wstecz WŁĄCZNIE z bieżącym, liczone z okresów, ale kwotami
+   * bieżącymi (historii cen kartoteka nie ma). Asercje porównują agregaty API
+   * z niezależnym przeliczeniem po tych samych wierszach odpowiedzi.
+   */
+  const tl = view90.timeline as any[];
+  const ym = (m: MonthKey) => `${m.year}-${String(m.month).padStart(2, "0")}`;
+  ok("timeline: 12 punktów, po jednym na miesiąc, ostatni to miesiąc bieżący",
+    tl?.length === 12 &&
+      tl[11].month === ym(monthAt(0)) &&
+      tl[0].month === ym(monthAt(-11)) &&
+      new Set(tl.map((p) => p.month)).size === 12,
+    tl?.map((p) => p.month));
+  ok("timeline: wszystkie wiersze zakresu są w odpowiedzi (agregaty da się sprawdzić)",
+    view90.rows.length === view90.totals.objects,
+    { rows: view90.rows.length, objects: view90.totals.objects });
+
+  const point = (m: MonthKey) => tl.find((p) => p.month === ym(m));
+  /** Przeliczenie punktu serii wprost z wierszy — reguła napisana tu od zera. */
+  const expectPoint = (m: MonthKey) => {
+    const { from, to } = monthBounds(m.year, m.month);
+    let activeObjects = 0;
+    let started = 0;
+    let startedEstimated = 0;
+    let ended = 0;
+    let revenue = 0;
+    let kamery = 0;
+    for (const r of view90.rows as any[]) {
+      const periods = r.servicePeriods ?? [];
+      if (periods.length === 0) {
+        // D3: obiekt bez okresów liczy się jako aktywny w każdym miesiącu.
+        activeObjects += 1;
+        revenue += r.revenue;
+        if (r.services.cameras) kamery += r.services.cameraCount ?? 0;
+        continue;
+      }
+      for (const p of periods) {
+        // Data szacowana to nie rozpoczęcie usługi — liczy się osobno.
+        if (p.startDate >= from && p.startDate <= to) {
+          if (p.startEstimated) startedEstimated += 1;
+          else started += 1;
+        }
+        if (p.endDate && p.endDate >= from && p.endDate <= to) ended += 1;
+      }
+      const live = periods.filter(
+        (p: any) => p.startDate <= to && (!p.endDate || p.endDate >= from)
+      );
+      if (live.length === 0) continue;
+      activeObjects += 1;
+      revenue += r.revenue;
+      const cams = live.filter((p: any) => p.service === "kamery");
+      if (cams.length > 0 && cams.every((p: any) => p.cameraCount != null)) {
+        kamery += cams.reduce((s: number, p: any) => s + p.cameraCount, 0);
+      }
+    }
+    return { activeObjects, started, startedEstimated, ended, revenue, kamery };
+  };
+
+  const samples: MonthKey[] = [monthAt(0), monthAt(-1), monthAt(-2), monthAt(-11)];
+  for (const m of samples) {
+    const got = point(m);
+    const want = expectPoint(m);
+    ok(`timeline ${ym(m)}: aktywne obiekty, rozpoczęcia, zakończenia, kamery i przychód`,
+      got?.activeObjects === want.activeObjects &&
+        got?.started === want.started &&
+        got?.startedEstimated === want.startedEstimated &&
+        got?.ended === want.ended &&
+        got?.activeUnits.kamery === want.kamery &&
+        near(got?.revenue, want.revenue, 0.011),
+      { api: got, oczekiwane: want });
+  }
+  ok("timeline: usługa rozpoczęta 2 mies. temu wchodzi do `started` swojego miesiąca",
+    (point(monthAt(-2))?.started ?? 0) >= 1 &&
+      expectPoint(monthAt(-2)).started === point(monthAt(-2))?.started,
+    point(monthAt(-2)));
+
+  /* --- Daty startu SZACOWANE (backfill 0084 → flaga z 0087) ----------------
+   * Wiersz z `startEstimated` mówi „usługa jest, ale nie wiemy od kiedy". Nie
+   * może więc udawać pozyskania w miesiącu importu — ale nie wolno go też
+   * wyrzucić z aktywnych, bo obiekt realnie jest obsługiwany.
+   */
+  const estRow = rowOf(view90, "SZACOWANY");
+  const estPeriods = (estRow?.servicePeriods ?? []) as any[];
+  const nowPoint = point(monthAt(0));
+  ok("API zwraca `startEstimated` w okresach usług",
+    estPeriods.length === 1 && estPeriods[0].startEstimated === true &&
+      estPeriods[0].startDate === estimatedFrom,
+    estPeriods);
+  // Ile okresów o dacie szacowanej wypada w bieżącym miesiącu — liczone tu od zera.
+  const estStartsNow = (view90.rows as any[]).reduce(
+    (n: number, r: any) =>
+      n + ((r.servicePeriods ?? []) as any[]).filter(
+        (p) => p.startEstimated && p.startDate >= mNowBounds.from && p.startDate <= mNowBounds.to
+      ).length,
+    0
+  );
+  ok("timeline: okres z datą szacowaną NIE wchodzi do `started`",
+    estStartsNow >= 1 && nowPoint?.started === expectPoint(monthAt(0)).started &&
+      nowPoint?.started === (view90.rows as any[]).reduce(
+        (n: number, r: any) =>
+          n + ((r.servicePeriods ?? []) as any[]).filter(
+            (p) => !p.startEstimated && p.startDate >= mNowBounds.from && p.startDate <= mNowBounds.to
+          ).length,
+        0
+      ),
+    { punkt: nowPoint, szacowane: estStartsNow });
+  ok("timeline: pominięte rozpoczęcia są policzone w `startedEstimated`",
+    nowPoint?.startedEstimated === estStartsNow && estStartsNow > 0,
+    { punkt: nowPoint, szacowane: estStartsNow });
+  // Aktywność liczymy bez tego obiektu i sprawdzamy, że API ma o jeden więcej:
+  // usługa z nieznanym startem jest usługą świadczoną, nie duchem.
+  const activeNowWithoutEst = (view90.rows as any[]).filter((r: any) => {
+    if (r.name === `${PREFIX}SZACOWANY`) return false;
+    const periods = (r.servicePeriods ?? []) as any[];
+    if (periods.length === 0) return true;
+    return periods.some(
+      (p) => p.startDate <= mNowBounds.to && (!p.endDate || p.endDate >= mNowBounds.from)
+    );
+  }).length;
+  ok("timeline: obiekt z datą szacowaną nadal liczy się do `activeObjects`",
+    nowPoint?.activeObjects === activeNowWithoutEst + 1,
+    { api: nowPoint?.activeObjects, bezSzacowanego: activeNowWithoutEst });
+  const freshRow = rowOf(view90, "SWIEZY");
+  const freshActiveIn = (offset: number) => {
+    const m = monthAt(offset);
+    const { from, to } = monthBounds(m.year, m.month);
+    return (freshRow.servicePeriods as any[]).some(
+      (p) => p.startDate <= to && (!p.endDate || p.endDate >= from)
+    );
+  };
+  // Punkty serii są już sprawdzone co do liczby (asercje wyżej), więc wystarczy
+  // pokazać, że TEN obiekt wchodzi dokładnie do trzech ostatnich miesięcy.
+  ok("timeline: obiekt z usługą od 2 mies. jest aktywny w 3 ostatnich miesiącach, wcześniej nie",
+    freshActiveIn(0) && freshActiveIn(-1) && freshActiveIn(-2) && !freshActiveIn(-3),
+    { start: startedFrom, okresy: freshRow?.servicePeriods });
+  ok("timeline: usługa zamknięta w zeszłym miesiącu wchodzi do `ended` tamtego miesiąca",
+    (point(mPrev)?.ended ?? 0) >= 1 && point(mPrev)?.ended === expectPoint(mPrev).ended,
+    point(mPrev));
 
   /* --- Składki pracodawcy -------------------------------------------------
    * Od tego miejsca narzuty są RÓŻNE (MK), więc każda kwota kosztu osobowego to

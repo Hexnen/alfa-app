@@ -26,6 +26,7 @@ import { ErrorBox, Field, SectionCard, Switch, Tile } from "@/components/admin-a
 import { deepEq, errMsg, selectClass, useFlash } from "@/components/admin-assistant/helpers";
 import { tip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { parseCoords, toMapsUrl } from "@/lib/maps-url";
 import {
   adminCompanyApi,
   AUTOFILL_FIELD_LABEL,
@@ -55,18 +56,13 @@ const markupExample = (m: number) =>
 
 type Draft = Partial<CompanySettingsValues>;
 
-/** „lat, lng" → URL Google Maps, którym karmimy `LocationPicker`. */
-const toMapsUrl = (lat: number | null, lng: number | null) =>
-  lat == null || lng == null ? "" : `https://www.google.com/maps?q=${lat},${lng}`;
-
-/** Odczyt współrzędnych z URL-a zwróconego przez `LocationPicker`. */
-function parseMapsUrl(url: string): { lat: number; lng: number } | null {
-  const m = url.match(/[?&]q=(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)/);
-  if (!m) return null;
-  const lat = parseFloat(m[1]);
-  const lng = parseFloat(m[2]);
-  return Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : null;
-}
+/**
+ * „lat, lng" → URL Google Maps, którym karmimy `LocationPicker`. Puste współrzędne
+ * dają pusty string (picker startuje wtedy bez pinezki), stąd własny wrapper
+ * zamiast gołego `toMapsUrl` z @/lib/maps-url.
+ */
+const officeMapsUrl = (lat: number | null, lng: number | null) =>
+  lat == null || lng == null ? "" : toMapsUrl(lat, lng);
 
 export function AdminCompany() {
   const [settings, setSettings] = useState<AdminCompanySettings | null>(null);
@@ -399,9 +395,9 @@ export function AdminCompany() {
         {mapOpen && (
           <div data-testid="company-map">
             <LocationPicker
-              value={toMapsUrl(lat, lng)}
+              value={officeMapsUrl(lat, lng)}
               onChange={(url) => {
-                const c = parseMapsUrl(url);
+                const c = parseCoords(url);
                 if (!c) return;
                 setField("officeLat", c.lat);
                 setField("officeLng", c.lng);

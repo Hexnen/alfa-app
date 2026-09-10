@@ -6,33 +6,46 @@
  * Wodospad pokazuje ją dosłownie, słupki rozbijają ją na osoby, a ranking ROI
  * odpowiada na najkrótszą wersję pytania: ile złotych marży przynosi złotówka
  * wydana na handlowca.
+ *
+ * Pod spodem mieszka DRUGI, niezależny przekrój: „Lejek sprzedaży”
+ * (`SalesFunnelSection`). Tamten liczy pieniądze z obiektów, ten drogę szansy
+ * przez etapy — celowo nie mieszają się w jednej karcie ani w jednym żądaniu:
+ * lejek ma własny zakres czasu (kohorta), a pasek narzędzi Analityki go nie zna.
  */
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { Funnel } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import {
+  errStatus,
+  getAnalyticsFunnel,
   getAnalyticsSalespeople,
+  type AnalyticsFunnelData,
   type AnalyticsSalespeopleData,
   type AnalyticsSalespersonRow,
   type AnalyticsScope,
   type AnalyticsService,
   type CostWindow,
 } from "@/lib/api";
+import { LEAD_STAGE_META, lostReasonLabel } from "@/lib/sales-labels";
 import {
   ChartCard,
   COLOR_COST,
   COLOR_LOSS,
   COLOR_PROFIT,
+  COLOR_REVENUE,
   COLOR_SETUP,
   CoverageNote,
   DASH,
+  EmptyState,
   KpiRow,
   KpiTile,
   MarginGauge,
   RankBar,
   StackedBarChart,
   WaterfallChart,
+  nf,
   pct,
   plnFull,
   serviceTag,
@@ -45,6 +58,7 @@ import {
   tintOf,
   useAnalyticsResource,
   type AnalyticsViewProps,
+  type LoadState,
 } from "./shared";
 import { PersonnelFootnote, ResourceNotice, SortHeader } from "./parts";
 
@@ -730,6 +744,10 @@ export function HandlowcyView({
           </table>
         </CardContent>
       </Card>
+
+      {/* Lejek stoi POD rentownością, bo odpowiada na inne pytanie („skąd wezmą
+          się następne obiekty”) i ma własny zakres czasu. */}
+      <SalesFunnelSection reloadKey={reloadKey} />
     </div>
   );
 }
@@ -865,5 +883,329 @@ function SalespersonRow({
         {roiLabel(roi)}
       </td>
     </tr>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Lejek sprzedaży                                                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Zakres kohorty — w miesiącach wstecz od dziś. Pasek narzędzi Analityki ma
+ * „zakres obiektów” i „okno kosztu osobowego”, ale ani jedno, ani drugie nie
+ * znaczy tu nic sensownego: lejek pyta o szanse UTWORZONE w okresie. Dlatego
+ * własny, lokalny przełącznik, a nie doklejanie parametru do wspólnego paska.
+ */
+const FUNNEL_RANGES = [3, 6, 12] as const;
+type FunnelRange = (typeof FUNNEL_RANGES)[number];
+
+const RANGE_LABELS: Record<FunnelRange, string> = {
+  3: "3 miesiące",
+  6: "6 miesięcy",
+  12: "12 miesięcy",
+};
+
+/** Pierwszy dzień okna: dziś minus `months` miesięcy (YYYY-MM-DD). */
+function monthsAgo(months: number): string {
+  const d = new Date();
+  d.setMonth(d.getMonth() - months);
+  return d.toISOString().slice(0, 10);
+}
+
+/** „12 dni” / „1,5 dnia” — czas w etapie bywa ułamkowy, a „0 dni” to wynik. */
+function daysLabel(v: number | null): string {
+  if (v === null || !Number.isFinite(v)) return DASH;
+  const rounded = v < 10 ? Math.round(v * 10) / 10 : Math.round(v);
+  return `${rounded.toLocaleString("pl-PL", { maximumFractionDigits: 1 })} dni`;
+}
+
+/**
+ * Sekcja „Lejek sprzedaży”: skąd wezmą się następne obiekty i gdzie szanse
+ * przepadają. Pobiera własny zasób (`GET /analytics/lejek`) — stoi pod tym
+ * samym uprawnieniem co reszta zakładki, więc 403 tu nie ma prawa wystąpić,
+ * ale stan błędu i tak obsługujemy wspólnym `ResourceNotice`.
+ */
+function SalesFunnelSection({ reloadKey }: { reloadKey: number }) {
+  const navigate = useNavigate();
+  const [range, setRange] = useState<FunnelRange>(12);
+  const [state, setState] = useState<LoadState>("loading");
+  const [data, setData] = useState<AnalyticsFunnelData | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    setState("loading");
+    getAnalyticsFunnel({ from: monthsAgo(range) })
+      .then((res) => {
+        if (!alive) return;
+        setData(res.data ?? null);
+        setState("ready");
+      })
+      .catch((e) => {
+        if (!alive) return;
+        setData(null);
+        setState(errStatus(e) === 403 ? "forbidden" : "error");
+      });
+    return () => {
+      alive = false;
+    };
+  }, [range, reloadKey]);
+
+  const rangeChips = (
+    <div className="flex flex-wrap items-center gap-2">
+      {FUNNEL_RANGES.map((r) => (
+        <FocusChip key={r} active={range === r} label={RANGE_LABELS[r]} onClick={() => setRange(r)} />
+      ))}
+    </div>
+  );
+
+  const header = (
+    <div className="flex flex-wrap items-end justify-between gap-3 px-1 pt-2">
+      <div>
+        <h2 className="text-base font-semibold text-slate-800">Lejek sprzedaży</h2>
+        <p className="text-sm text-muted-foreground">
+          Szanse <strong>utworzone</strong> w wybranym okresie — ile z nich doszło do
+          którego etapu, jak długo tam stały i czym się skończyły.
+        </p>
+      </div>
+      {rangeChips}
+    </div>
+  );
+
+  if (state !== "ready" || !data) {
+    return (
+      <div className="space-y-3">
+        {header}
+        <ResourceNotice state={state === "ready" ? "error" : state} />
+      </div>
+    );
+  }
+
+  if (data.leads === 0) {
+    return (
+      <div className="space-y-3">
+        {header}
+        <Card>
+          <CardContent className="p-4">
+            <EmptyState
+              icon={Funnel}
+              title="Brak szans w tym okresie"
+              description="W wybranym zakresie nikt nie założył ani jednej szansy sprzedaży, więc lejka nie ma z czego zbudować."
+              actionLabel="Przejdź do lejka szans"
+              actionHref="/handlowy/leady"
+            />
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  // Skalę wyznacza NAJSZERSZY etap, a nie pierwszy: przy szansach zakładanych
+  // od razu na „kontakcie” pierwszy słupek bywa krótszy od następnego.
+  const maxReached = Math.max(1, ...data.funnel.map((s) => s.reached));
+  const maxLost = Math.max(1, ...data.lost.byReason.map((r) => r.count));
+  const noHistory = data.coverage.leads - data.coverage.leadsWithHistory;
+  const lostShare = (n: number) => (data.lost.count > 0 ? (n / data.lost.count) * 100 : null);
+
+  return (
+    <div className="space-y-3">
+      {header}
+
+      <KpiRow>
+        <KpiTile
+          label="Skuteczność (win rate)"
+          value={pct(data.winRate)}
+          sub={
+            data.winRate === null
+              ? "nic jeszcze się nie zamknęło"
+              : `${nf(data.won.count)} wygranych / ${nf(data.lost.count)} przegranych`
+          }
+          tip="Wygrane podzielone przez wszystkie ZAMKNIĘTE szanse z tego okresu (wygrane + przegrane). Szanse wciąż otwarte nie liczą się do żadnej strony."
+        />
+        <KpiTile
+          label="Wygrane MRR"
+          value={plnFull(data.won.monthly)}
+          tone={data.won.monthly > 0 ? "good" : "neutral"}
+          sub={`${nf(data.won.count)} szans · wdrożenia ${plnFull(data.won.setup)}`}
+          tip="Suma miesięcznych abonamentów (netto) z szans wygranych w tym okresie. Wdrożenie jest jednorazowe, więc stoi osobno."
+        />
+        <KpiTile
+          label="Mediana dni do wygranej"
+          value={daysLabel(data.won.medianDaysToWin)}
+          sub="od założenia szansy do wygranej"
+          tip="Mediana, nie średnia: jedna szansa ciągnięta rok nie ma prawa zniekształcić obrazu typowej sprzedaży."
+        />
+        <KpiTile
+          label="Gnijące szanse"
+          value={`${nf(data.rotting)} / ${nf(data.openNow)}`}
+          tone={data.rotting > 0 ? "bad" : "good"}
+          sub={data.rotting > 0 ? "bez następnej aktywności lub bez ruchu" : "każda otwarta szansa ma następny krok"}
+          tip="STAN NA TERAZ, nie z okresu lejka: otwarte szanse bez zaplanowanej następnej aktywności albo z ciszą dłuższą niż 7 dni. Kliknij, żeby przejść do lejka szans."
+          onClick={() => navigate("/handlowy/leady")}
+        />
+      </KpiRow>
+
+      <div className="grid gap-3 xl:grid-cols-2">
+        <ChartCard
+          title="Etapy i konwersja"
+          description="Długość paska to liczba szans, które KIEDYKOLWIEK dotarły do etapu — cofnięcie szansy nie odbiera jej dotarcia."
+          tableData={{
+            headers: ["Etap", "Dotarło", "Teraz", "Konwersja dalej", "Śr. czas w etapie", "MRR w etapie"],
+            rows: data.funnel.map((s) => [
+              LEAD_STAGE_META[s.stage]?.label ?? s.stage,
+              nf(s.reached),
+              nf(s.current),
+              s.conversion === null ? DASH : pct(s.conversion),
+              s.avgDays === null ? DASH : daysLabel(s.avgDays),
+              plnFull(s.monthly),
+            ]),
+          }}
+        >
+          <div className="space-y-3">
+            <div className="space-y-1">
+              {data.funnel.map((s) => (
+                <RankBar
+                  key={s.stage}
+                  label={LEAD_STAGE_META[s.stage]?.label ?? s.stage}
+                  subLabel={s.current > 0 ? `teraz na etapie: ${nf(s.current)}` : undefined}
+                  value={s.reached}
+                  max={maxReached}
+                  valueLabel={nf(s.reached)}
+                  detail={
+                    s.reached === 0
+                      ? "nikt tu nie dotarł"
+                      : s.conversion === null
+                        ? `${plnFull(s.monthly)} MRR`
+                        : `dalej ${pct(s.conversion)} · ${
+                            s.avgDays === null ? "czas nieznany" : `średnio ${daysLabel(s.avgDays)}`
+                          }`
+                  }
+                  // Wygrany domyka lejek i jest jedynym etapem, który przynosi
+                  // pieniądze — dostaje barwę zysku, reszta barwę przychodu.
+                  color={s.stage === "wygrany" ? COLOR_PROFIT : COLOR_REVENUE}
+                />
+              ))}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              „Konwersja dalej” zestawia dotarcia do <strong>następnego</strong>{" "}
+              etapu z dotarciami do bieżącego — to proporcja lejka, a nie ścieżka
+              pojedynczej szansy: etapy wolno przeskakiwać, więc wartość potrafi
+              przekroczyć 100%. Średni czas liczy się wyłącznie z pobytów{" "}
+              <strong>zakończonych</strong> — szansa, która stoi na etapie do dziś,
+              nie zaniża wyniku.
+            </p>
+            {/* Bez historii zmian etapu zostaje sam etap bieżący: czas w etapie
+                jest wtedy policzony z mniejszej próbki, niż wygląda. */}
+            <CoverageNote
+              known={data.coverage.leadsWithHistory}
+              total={data.coverage.leads}
+              noun="szans"
+              label="historia etapów znana dla"
+              linkLabel="zobacz szanse"
+              href="/handlowy/leady"
+              withIcon
+            />
+            {noHistory > 0 && (
+              <p className="text-xs text-muted-foreground">
+                Pozostałe (np. z importu) nie mają w dzienniku ani jednej zmiany
+                etapu — wchodzą do lejka wyłącznie z etapem bieżącym, więc czas
+                w etapie stoi na mniejszej próbce, niż wygląda.
+              </p>
+            )}
+          </div>
+        </ChartCard>
+
+        <ChartCard
+          title="Dlaczego przegrywamy"
+          description="Powody zamknięcia szans jako przegrane — z tego samego okresu co lejek."
+          tableData={{
+            headers: ["Powód", "Szans", "Udział"],
+            rows: data.lost.byReason.map((r) => [
+              lostReasonLabel(r.reason),
+              nf(r.count),
+              pct(lostShare(r.count)),
+            ]),
+          }}
+          empty={
+            <p className="py-8 text-center text-sm text-slate-500">
+              Żadna szansa z tego okresu nie została przegrana.
+            </p>
+          }
+        >
+          <div className="space-y-1">
+            {data.lost.byReason.map((r) => (
+              <RankBar
+                key={r.reason ?? "brak"}
+                label={lostReasonLabel(r.reason)}
+                subLabel={r.reason === null ? "powód nieuzupełniony" : undefined}
+                value={r.count}
+                max={maxLost}
+                valueLabel={nf(r.count)}
+                detail={`${pct(lostShare(r.count))} przegranych`}
+                color={COLOR_LOSS}
+              />
+            ))}
+          </div>
+        </ChartCard>
+      </div>
+
+      <Card>
+        <CardContent className="overflow-x-auto p-0">
+          <table className="w-full min-w-[720px] text-sm">
+            <caption className="px-2 pt-3 text-left text-sm font-medium text-slate-700">
+              Skuteczność per handlowiec{" "}
+              <span className="font-normal text-muted-foreground">
+                (szanse z okresu {data.from} – {data.to})
+              </span>
+            </caption>
+            <thead className="border-b bg-muted/50 text-xs uppercase tracking-wide text-muted-foreground">
+              <tr>
+                <th className="px-2 py-2 text-left font-medium">Handlowiec</th>
+                <th className="px-2 py-2 text-right font-medium">Szanse</th>
+                <th className="px-2 py-2 text-right font-medium">Otwarte</th>
+                <th className="px-2 py-2 text-right font-medium">Wygrane</th>
+                <th className="px-2 py-2 text-right font-medium">Przegrane</th>
+                <th
+                  className="px-2 py-2 text-right font-medium"
+                  title="Wygrane / (wygrane + przegrane); „—” = nic jeszcze nie zamknięte"
+                >
+                  Skuteczność
+                </th>
+                <th className="px-2 py-2 text-right font-medium">Wygrane MRR</th>
+                <th className="px-2 py-2 text-right font-medium">Śr. dni do wygranej</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.bySalesperson.map((r) => (
+                <tr
+                  key={r.salespersonId ?? "none"}
+                  className={cn(
+                    "border-b transition-colors last:border-0",
+                    r.salespersonId === null && "bg-amber-50/60"
+                  )}
+                >
+                  <td className="px-2 py-2 font-medium text-slate-800">{r.name}</td>
+                  <td className="px-2 py-2 text-right tabular-nums">{nf(r.leads)}</td>
+                  <td className="px-2 py-2 text-right tabular-nums">{nf(r.open)}</td>
+                  <td className="px-2 py-2 text-right tabular-nums">{nf(r.won)}</td>
+                  <td className="px-2 py-2 text-right tabular-nums">{nf(r.lost)}</td>
+                  <td
+                    className={cn(
+                      "px-2 py-2 text-right font-medium tabular-nums",
+                      r.winRate !== null && r.winRate < 50 && "text-red-600"
+                    )}
+                  >
+                    {pct(r.winRate)}
+                  </td>
+                  <td className="px-2 py-2 text-right tabular-nums">{plnFull(r.wonMonthly)}</td>
+                  <td className="px-2 py-2 text-right tabular-nums text-muted-foreground">
+                    {daysLabel(r.avgDaysToWin)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </CardContent>
+      </Card>
+    </div>
   );
 }

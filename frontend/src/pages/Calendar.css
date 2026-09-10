@@ -22,6 +22,17 @@
   --cal-konserwacja: 173 80% 40%;    /* teal-500 */
   --cal-urlop: 350 89% 60%;          /* rose-500 */
   --cal-notatka: 32 95% 44%;         /* amber-600 */
+
+  /*
+   * Typy działu handlowego. Barwy celowo spoza palety technicznej — w kalendarzu
+   * handlowym obok nich stoją tylko wizja, urlop i notatka.
+   */
+  --cal-spotkanie: 239 84% 67%;      /* indigo-500 */
+  --cal-telefon: 188 94% 43%;        /* cyan-500 */
+  --cal-email: 292 84% 61%;          /* fuchsia-500 */
+  --cal-zadanie: 84 81% 40%;         /* lime-600 */
+  --cal-prezentacja: 217 91% 60%;    /* blue-500 */
+  --cal-termin: 0 72% 51%;           /* red-600 */
   --cal-overdue: 0 84% 60%;          /* red-500 */
 
   /*
@@ -53,6 +64,13 @@
   --cal-konserwacja: 173 70% 50%;
   --cal-urlop: 350 89% 70%;
   --cal-notatka: 38 92% 58%;
+
+  --cal-spotkanie: 234 89% 74%;
+  --cal-telefon: 187 85% 58%;
+  --cal-email: 292 91% 73%;
+  --cal-zadanie: 82 78% 55%;
+  --cal-prezentacja: 213 94% 68%;
+  --cal-termin: 0 91% 71%;
   --cal-overdue: 0 84% 68%;
 
   --cal-veh-1: 217 91% 68%;
@@ -288,6 +306,18 @@
 .alfa-calendar .cal-type-urlop { --ev: var(--cal-urlop); }
 .alfa-calendar .fc .cal-type-notatka,
 .alfa-calendar .cal-type-notatka { --ev: var(--cal-notatka); }
+.alfa-calendar .fc .cal-type-spotkanie,
+.alfa-calendar .cal-type-spotkanie { --ev: var(--cal-spotkanie); }
+.alfa-calendar .fc .cal-type-telefon,
+.alfa-calendar .cal-type-telefon { --ev: var(--cal-telefon); }
+.alfa-calendar .fc .cal-type-email,
+.alfa-calendar .cal-type-email { --ev: var(--cal-email); }
+.alfa-calendar .fc .cal-type-zadanie,
+.alfa-calendar .cal-type-zadanie { --ev: var(--cal-zadanie); }
+.alfa-calendar .fc .cal-type-prezentacja,
+.alfa-calendar .cal-type-prezentacja { --ev: var(--cal-prezentacja); }
+.alfa-calendar .fc .cal-type-termin,
+.alfa-calendar .cal-type-termin { --ev: var(--cal-termin); }
 
 /* Statusy — niezależnie od koloru: przekreślenie, przerywana ramka, ✓ */
 .alfa-calendar .fc .cal-status-cancelled {

@@ -160,7 +160,7 @@ async function runCase(name: string): Promise<void> {
 
       raw
         .prepare(
-          `insert into objects (contractor_id, name, type, installation_type, status, notes, monthly_value)
+          `insert into objects (contractor_id, name, type, installation_type, status, notes, monthly_zdw)
            values (?, 'Obiekt użytkownika (test bezpieczeństwa)', 'monitoring', 'wlasna', 'active', 'wpisane ręcznie', 900)`,
         )
         .run(contractorId);

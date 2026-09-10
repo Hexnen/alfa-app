@@ -5,8 +5,8 @@
  * stronę i podajemy w dół: edytor odpytuje je przy każdym wyszukiwaniu pozycji,
  * a są to małe słowniki, które w trakcie składania oferty i tak się nie zmieniają.
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   AlignLeft,
   Archive,
@@ -14,6 +14,7 @@ import {
   ArrowUp,
   ChevronsUpDown,
   FileText,
+  Handshake,
   Package,
   Pencil,
   Plus,
@@ -82,6 +83,7 @@ type OfferSortKey =
   | "scope"
   | "status"
   | "salesperson"
+  | "lead"
   | "created"
   | "updated"
   | "oneTime"
@@ -101,6 +103,7 @@ const DEFAULT_DIR: Record<OfferSortKey, "asc" | "desc"> = {
   scope: "asc",
   status: "asc",
   salesperson: "asc",
+  lead: "asc",
   created: "desc",
   updated: "desc",
   oneTime: "desc",
@@ -145,6 +148,12 @@ export function Oferty() {
    */
   const { slug } = useParams<{ slug: string }>();
   const navigate = useNavigate();
+  /*
+   * WEJŚCIA Z KARTY SZANSY. `?leadId=` zakłada nową ofertę powiązaną z lejkiem
+   * (backend uzupełnia klienta, NIP, obiekt, adres i handlowca), `?offerId=`
+   * otwiera istniejącą — karta szansy linkuje ofertę po id, bo nie zna slugu.
+   */
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const [tab, setTab] = useState("oferty");
   const [rows, setRows] = useState<OfferListRow[]>([]);
@@ -159,6 +168,7 @@ export function Oferty() {
   const [kindFilter, setKindFilter] = useState("all");
   const [scopeFilter, setScopeFilter] = useState("all");
   const [salespersonFilter, setSalespersonFilter] = useState("all");
+  const [leadFilter, setLeadFilter] = useState("all");
   const [companyFilter, setCompanyFilter] = useState("all");
   const [valueMode, setValueMode] = useState<ValueMode>("all");
   const [minInput, setMinInput] = useState("");
@@ -304,11 +314,64 @@ export function Oferty() {
     };
   }, [slug, navigate]);
 
+  /*
+   * `?offerId=` i `?leadId=` obsługujemy RAZ (ref), a po zadziałaniu czyścimy
+   * parametr z adresu — inaczej „wstecz” z otwartej oferty zakładałoby kolejną.
+   */
+  const queryHandled = useRef(false);
+  useEffect(() => {
+    if (queryHandled.current) return;
+    const offerId = Number(searchParams.get("offerId"));
+    const leadId = Number(searchParams.get("leadId"));
+    if (!Number.isInteger(offerId) && !Number.isInteger(leadId)) return;
+    queryHandled.current = true;
+    (async () => {
+      try {
+        if (Number.isInteger(offerId) && offerId > 0) {
+          const res = await offersApi.get(offerId);
+          setSearchParams({}, { replace: true });
+          if (res.data) navigate(`/technical/oferty/${offerSlug(res.data.offer.number)}`, { replace: true });
+          return;
+        }
+        if (Number.isInteger(leadId) && leadId > 0) {
+          // Nowa oferta Z SZANSY: klient, NIP, obiekt, adres i handlowca
+          // uzupełnia backend (POST /offers z `leadId`), żeby prefill działał
+          // tak samo z każdego miejsca, które ofertę zakłada.
+          const res = await offersApi.create({
+            date: new Date().toISOString().slice(0, 10),
+            leadId,
+          });
+          setSearchParams({}, { replace: true });
+          await loadOffers();
+          if (res.data) navigate(`/technical/oferty/${offerSlug(res.data.number)}`, { replace: true });
+        }
+      } catch (err) {
+        setSearchParams({}, { replace: true });
+        alertError(err, "Nie udało się otworzyć oferty z karty szansy");
+      }
+    })();
+  }, [searchParams, setSearchParams, navigate, loadOffers]);
+
   /**
    * Znaczniki zakresu do selecta budujemy z danych, a nie ze słownika: backend
    * liczy je z treści oferty (`scopeOf`) i może dorzucić tag spoza
    * `OFFER_SCOPE_LABEL` — wtedy i tak da się po nim odfiltrować.
    */
+  /**
+   * Szanse do selecta budujemy Z WIDOCZNYCH OFERT, a nie z kartoteki szans:
+   * lejek stoi za osobnym uprawnieniem, a filtr ma pokazywać dokładnie te
+   * szanse, które w tej liście da się wybrać.
+   */
+  const leadOptions = useMemo(() => {
+    const m = new Map<number, string>();
+    for (const o of rows) {
+      if (o.leadId != null) m.set(o.leadId, o.leadTitle || `Szansa #${o.leadId}`);
+    }
+    return [...m.entries()]
+      .map(([id, title]) => ({ id, title }))
+      .sort((a, b) => a.title.localeCompare(b.title, "pl"));
+  }, [rows]);
+
   const scopeTags = useMemo(
     () =>
       Array.from(new Set(rows.flatMap((o) => o.scope ?? []))).sort((a, b) =>
@@ -344,6 +407,15 @@ export function Oferty() {
           return false;
         }
       }
+      if (leadFilter !== "all") {
+        if (
+          leadFilter === NONE
+            ? o.leadId != null
+            : String(o.leadId ?? "") !== leadFilter
+        ) {
+          return false;
+        }
+      }
       if (companyFilter !== "all") {
         if (
           companyFilter === NONE
@@ -373,7 +445,9 @@ export function Oferty() {
             ? OFFER_KIND_LABEL[o.kind]
             : sort === "status"
               ? OFFER_STATUS_META[o.status].label
-              : (o.salespersonName ?? "");
+              : sort === "lead"
+                ? (o.leadTitle ?? "")
+                : (o.salespersonName ?? "");
     /** Liczba do sortowania; `null` = w tabeli jest kreska, czyli wartość pusta. */
     const number = (o: OfferListRow): number | null => {
       switch (sort) {
@@ -432,6 +506,7 @@ export function Oferty() {
     kindFilter,
     scopeFilter,
     salespersonFilter,
+    leadFilter,
     companyFilter,
     valueMode,
     minInput,
@@ -456,6 +531,7 @@ export function Oferty() {
     kindFilter !== "all" ||
     scopeFilter !== "all" ||
     salespersonFilter !== "all" ||
+    leadFilter !== "all" ||
     companyFilter !== "all" ||
     valueMode !== "all" ||
     minInput !== "" ||
@@ -467,6 +543,7 @@ export function Oferty() {
     setKindFilter("all");
     setScopeFilter("all");
     setSalespersonFilter("all");
+    setLeadFilter("all");
     setCompanyFilter("all");
     setValueMode("all");
     setMinInput("");
@@ -716,6 +793,25 @@ export function Oferty() {
           {/* Druga linia filtrów: spółka wystawiająca i kwota miesięczna
               (abonament + rata dzierżawy) — tryb i widełki. */}
           <div className="flex flex-wrap items-center gap-2">
+            {/* Szansa sprzedaży, z której oferta wyszła. „Bez szansy” to
+                dokumenty spoza lejka (rozbudowy, serwisy dla stałych klientów). */}
+            {leadOptions.length > 0 && (
+              <Select value={leadFilter} onValueChange={setLeadFilter}>
+                <SelectTrigger className="w-[200px]" data-testid="oferty-filter-lead">
+                  <SelectValue placeholder="Szansa" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">Wszystkie szanse</SelectItem>
+                  <SelectItem value={NONE}>Bez szansy</SelectItem>
+                  {leadOptions.map((l) => (
+                    <SelectItem key={l.id} value={String(l.id)}>
+                      {l.title}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
+
             <Select value={companyFilter} onValueChange={setCompanyFilter}>
               <SelectTrigger className="w-[180px]" data-testid="oferty-filter-company">
                 <SelectValue placeholder="Spółka" />
@@ -802,6 +898,11 @@ export function Oferty() {
                         sortKey="salesperson"
                         title="Oferty bez opiekuna idą na koniec"
                       />
+                      <SortHeader
+                        label="Szansa"
+                        sortKey="lead"
+                        title="Oferty spoza lejka handlowego idą na koniec"
+                      />
                       <SortHeader label="Utworzył" sortKey="created" />
                       <SortHeader
                         label="Zmieniono"
@@ -823,7 +924,7 @@ export function Oferty() {
                     {loading ? (
                       <tr>
                         <td
-                          colSpan={editable ? 11 : 10}
+                          colSpan={editable ? 12 : 11}
                           className="px-3 py-8 text-center text-muted-foreground"
                         >
                           Ładowanie…
@@ -832,7 +933,7 @@ export function Oferty() {
                     ) : visible.length === 0 ? (
                       <tr>
                         <td
-                          colSpan={editable ? 11 : 10}
+                          colSpan={editable ? 12 : 11}
                           className="px-3 py-8 text-center text-muted-foreground"
                         >
                           {filtersActive
@@ -878,6 +979,24 @@ export function Oferty() {
                             </td>
                             <td className="px-3 py-2 text-xs">
                               {o.salespersonName || <span className="text-muted-foreground">—</span>}
+                            </td>
+                            {/* Link prowadzi do karty szansy, więc klik nie może
+                                otworzyć jeszcze oferty pod spodem (wiersz jest klikalny). */}
+                            <td className="px-3 py-2 text-xs" onClick={(e) => e.stopPropagation()}>
+                              {o.leadId ? (
+                                <Link
+                                  to={`/handlowy/leady/${o.leadId}`}
+                                  className="inline-flex items-center gap-1 text-primary hover:underline"
+                                  data-testid="oferty-lead-link"
+                                >
+                                  <Handshake className="h-3 w-3 shrink-0" />
+                                  <span className="max-w-[12rem] truncate">
+                                    {o.leadTitle || `#${o.leadId}`}
+                                  </span>
+                                </Link>
+                              ) : (
+                                <span className="text-muted-foreground">—</span>
+                              )}
                             </td>
                             {/* Autor i data powstania w jednej kolumnie: to jedna
                                 informacja („kto i kiedy to założył"), a osobna

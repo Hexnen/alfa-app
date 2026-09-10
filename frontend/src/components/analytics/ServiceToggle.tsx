@@ -12,9 +12,11 @@
  * liczby. Idiom (`rounded-full` + `bg-primary` na aktywnym) jest ten sam, co
  * pigułki filtrów w Kalendarzu.
  *
- * UWAGA na czytanie liczb: przekrój NIE JEST ROZŁĄCZNY. Obiekt z OFI i kamerami
- * wchodzi do obu przekrojów w całości, więc przychodu z „ZDV" i „OFI" nie wolno
- * dodawać — wyjdzie więcej, niż firma ma.
+ * UWAGA na czytanie liczb: LICZBA OBIEKTÓW nie jest rozłączna — obiekt z OFI i
+ * kamerami policzy się w obu przekrojach. PRZYCHÓD już tak: od rozbicia
+ * abonamentu (wrzesień 2026) obiekt wchodzi do przekroju tylko tą częścią
+ * kwoty, która do danej linii należy, więc „ZDV" plus „OFI" daje dokładnie tyle,
+ * co „Oba".
  */
 import { Camera, Layers, Shield } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -31,6 +33,7 @@ const OPTIONS: Array<{
     icon: Camera,
     tip:
       "Zdalny dozór wizyjny: obiekty z kamerami, SSWiN-em albo wideorecepcją.\n" +
+      "Przychód = abonament ZDW plus dzierżawa sprzętu.\n" +
       "Koszt osobowy = wyłącznie udział w puli centrum monitorowania.",
   },
   {
@@ -38,6 +41,7 @@ const OPTIONS: Array<{
     icon: Shield,
     tip:
       "Ochrona fizyczna: obiekty z OFI.\n" +
+      "Przychód = abonament OFI.\n" +
       "Koszt osobowy = wyłącznie wypłaty za godziny przepracowane na obiekcie.",
   },
   {
@@ -45,7 +49,8 @@ const OPTIONS: Array<{
     icon: Layers,
     tip:
       "Obie linie razem — pełny obraz firmy.\n" +
-      "Uwaga: obiekt z OFI i kamerami należy do OBU przekrojów, więc sumy „ZDV” i „OFI” nie dodają się do tej liczby.",
+      "Obiekt z OFI i kamerami należy do OBU przekrojów (licznik obiektów się dubluje),\n" +
+      "ale jego abonament jest rozbity, więc przychód „ZDV” plus „OFI” równa się tej liczbie.",
   },
 ];
 

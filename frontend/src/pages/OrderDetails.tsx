@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import { useParams, useNavigate, Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -15,12 +15,20 @@ import {
   Volume2,
   Calendar,
   Banknote,
-  FileText
+  FileText,
+  ShieldCheck,
+  ExternalLink,
+  Handshake
 } from "lucide-react";
+import { isServicePeriodEnded, servicePeriodLabel } from "@/lib/utils";
 import {
   getOrder,
+  getOrderMailLog,
+  isMissingEndpoint,
+  type MailLogEntry,
   type Order,
 } from "@/lib/api";
+import { MailLogTable } from "@/components/MailLogTable";
 import { usePerms } from "@/auth/permissions";
 import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
 
@@ -45,6 +53,9 @@ export function OrderDetails() {
   const editable = canEdit("orders");
   const [order, setOrder] = useState<Order | null>(null);
   const [loading, setLoading] = useState(true);
+  /** Dziennik wysyłek tego zlecenia — pusty także wtedy, gdy backend go nie ma. */
+  const [mailLog, setMailLog] = useState<MailLogEntry[]>([]);
+  const [mailLogError, setMailLogError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!id) return;
@@ -54,6 +65,13 @@ export function OrderDetails() {
       })
       .catch(console.error)
       .finally(() => setLoading(false));
+    getOrderMailLog(parseInt(id))
+      .then(setMailLog)
+      .catch((e) =>
+        setMailLogError(
+          isMissingEndpoint(e) ? null : "Nie udało się wczytać historii wysyłek.",
+        ),
+      );
   }, [id]);
 
   if (loading) {
@@ -89,6 +107,38 @@ export function OrderDetails() {
           {orderStatusLabels[order.status]}
         </Badge>
       </div>
+
+      {/* Pochodzenie z lejka handlowego — pasek nad treścią, nie karta na dole:
+          to kontekst całego dokumentu („skąd to zlecenie"), a nie jego pole. */}
+      {(order.leadId || order.salespersonName) && (
+        <div
+          className="flex flex-wrap items-center gap-x-6 gap-y-1 rounded-md border border-indigo-200 bg-indigo-50 px-4 py-2 text-sm text-indigo-900"
+          data-testid="zlecenie-lead-box"
+        >
+          <span className="flex items-center gap-2">
+            <Handshake className="h-4 w-4" />
+            {order.leadId ? (
+              <>
+                Szansa:{" "}
+                <Link
+                  to={`/handlowy/leady/${order.leadId}`}
+                  className="font-semibold underline underline-offset-2"
+                  data-testid="zlecenie-lead-link"
+                >
+                  {order.leadTitle || `#${order.leadId}`}
+                </Link>
+              </>
+            ) : (
+              <span>Zlecenie spoza lejka handlowego</span>
+            )}
+          </span>
+          {order.salespersonName && (
+            <span>
+              Handlowiec: <strong>{order.salespersonName}</strong>
+            </span>
+          )}
+        </div>
+      )}
 
       {/* Main content grid */}
       <div className="grid gap-6 lg:grid-cols-3">
@@ -138,7 +188,21 @@ export function OrderDetails() {
               <div className="grid grid-cols-2 gap-6">
                 <div className="space-y-1">
                   <dt className="text-sm text-muted-foreground">Nazwa obiektu</dt>
-                  <dd className="font-medium">{order.objectName}</dd>
+                  <dd className="font-medium flex flex-wrap items-center gap-2">
+                    {order.objectName}
+                    {/* Zlecenie zakłada albo podpina obiekt — stąd skrót do
+                        kartoteki, gdzie usługi da się faktycznie zmienić. */}
+                    {order.objectId != null && (
+                      <Link
+                        to={`/objects/${order.objectId}`}
+                        className="inline-flex items-center gap-1 text-xs font-normal text-primary hover:underline"
+                        data-testid="order-object-link"
+                      >
+                        Kartoteka obiektu
+                        <ExternalLink className="h-3 w-3" aria-hidden />
+                      </Link>
+                    )}
+                  </dd>
                 </div>
                 <div className="space-y-1">
                   <dt className="text-sm text-muted-foreground">Rodzaj obiektu</dt>
@@ -154,6 +218,44 @@ export function OrderDetails() {
                 <div className="space-y-1">
                   <dt className="text-sm text-muted-foreground">Miasto</dt>
                   <dd className="font-medium">{order.objectCity || "-"}</dd>
+                </div>
+                {/* USŁUGI ZE ZLECENIA — okresy zapamiętane przy jego tworzeniu
+                    (kolumna `orders.object_services`). Zlecenia sprzed tej zmiany
+                    pola nie mają, więc wtedy pokazujemy to, co dało się z nich
+                    odczytać: montaż kamer i wideorecepcję. */}
+                <div className="space-y-1 col-span-2">
+                  <dt className="text-sm text-muted-foreground flex items-center gap-2">
+                    <ShieldCheck className="h-4 w-4" />
+                    Usługi
+                  </dt>
+                  <dd className="font-medium" data-testid="order-object-services">
+                    {order.objectServices && order.objectServices.length > 0 ? (
+                      <ul className="space-y-0.5">
+                        {order.objectServices.map((s, i) => (
+                          <li
+                            key={s.id ?? `${s.service}-${s.startDate}-${i}`}
+                            data-testid={`order-service-${i}`}
+                            className={
+                              isServicePeriodEnded(s)
+                                ? "text-muted-foreground line-through"
+                                : undefined
+                            }
+                          >
+                            {servicePeriodLabel(s)}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      [
+                        order.isCameraInstallation
+                          ? `Kamery: ${order.cameraCount ?? 0} szt.`
+                          : null,
+                        order.videoReception ? "Wideo recepcja" : null,
+                      ]
+                        .filter(Boolean)
+                        .join(" · ") || "-"
+                    )}
+                  </dd>
                 </div>
                 {order.objectLocationUrl && (
                   <div className="space-y-1">
@@ -257,6 +359,27 @@ export function OrderDetails() {
               </CardHeader>
               <CardContent>
                 <p className="whitespace-pre-wrap">{order.notes}</p>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Wysłane maile — ten sam dziennik co w oknie „Podgląd maila".
+              Karta stoi w szerokiej kolumnie: w wąskiej bocznej tabela ucinałaby
+              status i użytkownika. */}
+          {(mailLog.length > 0 || mailLogError) && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Mail className="h-5 w-5 text-indigo-600" />
+                  Wysłane maile
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                {mailLogError ? (
+                  <p className="text-sm text-muted-foreground">{mailLogError}</p>
+                ) : (
+                  <MailLogTable items={mailLog} compact />
+                )}
               </CardContent>
             </Card>
           )}

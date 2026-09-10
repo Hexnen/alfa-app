@@ -17,6 +17,12 @@ export interface CoverageProps {
   total: number;
   /** Dopełniacz liczby mnogiej: „obiektów", „spółek", „handlowców". */
   noun?: string;
+  /**
+   * Czego dotyczy pokrycie. Domyślnie kosztu — bo o niego chodzi w całej
+   * analityce finansowej — ale lejek sprzedaży mierzy pokrycie HISTORIĄ ETAPÓW
+   * i zdanie „koszt uzupełniony dla 6 z 7 szans" byłoby tam po prostu nieprawdą.
+   */
+  label?: string;
   /** Docelowy filtr braków, np. `/objects?hasCost=0`. */
   href?: string;
   linkLabel?: string;
@@ -29,6 +35,7 @@ export function CoverageNote({
   known,
   total,
   noun = "obiektów",
+  label = "koszt uzupełniony",
   href,
   linkLabel = "uzupełnij",
   withIcon = false,
@@ -48,7 +55,7 @@ export function CoverageNote({
     >
       {withIcon && <AlertTriangle className="h-3 w-3 shrink-0" />}
       <span>
-        koszt uzupełniony dla {known} z {total} {noun} ({share}%)
+        {label} dla {known} z {total} {noun} ({share}%)
       </span>
       {href && (
         <Link

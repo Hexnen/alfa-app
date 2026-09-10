@@ -1,8 +1,16 @@
 import { db, schema } from "../db/index.js";
 import { eq } from "drizzle-orm";
-import type { OrderInput, OrderStatus } from "../types/index.js";
+import type { ObjectServiceInput, OrderInput, OrderStatus } from "../types/index.js";
 import { normalizeNIP, validateNIP } from "../utils/nip.js";
-import { legacyObjectType } from "../lib/object-services.js";
+import {
+  flagsFromServices,
+  legacyObjectType,
+  syncObjectServiceFlags,
+  todayIso,
+} from "../lib/object-services.js";
+import { parseObjectServices } from "../lib/object-services-validate.js";
+import { logActivity, type ActivityUser } from "../lib/activity-log.js";
+import { splitAbonament } from "../lib/abonament-split.js";
 import {
   asRecord,
   compact,
@@ -74,6 +82,9 @@ export function parseOrderFields(raw: unknown) {
     rentalLengthMonths: parseNumber(b.rentalLengthMonths, { label: "Długość dzierżawy (mies.)", integer: true, max: 1200 }),
     invoiceIssuer: parseString(b.invoiceIssuer, { label: "Wystawca faktury", max: STR.NAME }),
     status: parseEnum(b.status, ORDER_STATUSES, "Status"),
+    // Okresy usług zakładanego obiektu — zapisywane NA ZLECENIU (kolumna
+    // `orders.object_services`), a nie tylko zużywane przy konwersji.
+    objectServices: parseObjectServices(b.objectServices, "Usługi obiektu"),
     serviceStartDate: parseDate(b.serviceStartDate, "Data rozpoczęcia usługi"),
     installationStartDate: parseDate(b.installationStartDate, "Data rozpoczęcia montażu"),
     notes: parseString(b.notes, { label: "Uwagi", max: STR.NOTES, keepWhitespace: true }),
@@ -129,9 +140,15 @@ export function parseOrderInput(raw: unknown): OrderInput {
     rentalLengthMonths: f.rentalLengthMonths ?? undefined,
     invoiceIssuer: f.invoiceIssuer ?? undefined,
     status: f.status,
+    objectServices: f.objectServices,
     serviceStartDate: f.serviceStartDate ?? undefined,
     installationStartDate: f.installationStartDate ?? undefined,
     notes: f.notes ?? undefined,
+    // Powiązanie z lejkiem handlowym. Istnienie szansy sprawdza dopiero
+    // `createOrderFromInput` — razem z regułą „jedna szansa = jedno zlecenie”,
+    // która musi paść w tej samej transakcji, co INSERT zlecenia.
+    leadId: parseId(b.leadId, "Szansa") ?? undefined,
+    salespersonId: parseFk(b.salespersonId, "salespeople", "Handlowiec") ?? undefined,
     createContractor,
     createObject,
     contractorAddress: parseString(b.contractorAddress, { label: "Adres kontrahenta", max: STR.ADDRESS }) ?? undefined,
@@ -154,21 +171,35 @@ export function parseOrderInput(raw: unknown): OrderInput {
  * Łatka `PUT /orders/:id`: jawna lista pól (bez `id`, `orderNumber`, `createdAt`,
  * flag tworzenia). Klucze obce muszą istnieć. Puste body → 400.
  */
+/** Kolumny NOT NULL tabeli `orders` — PUT nie może ich wyczyścić jawnym `null`. */
+const ORDER_REQUIRED_FIELDS = [
+  ["requesterName", "Osoba zlecająca"],
+  ["requesterPhone", "Telefon zlecającego"],
+  ["requesterEmail", "E-mail zlecającego"],
+  ["payerName", "Nazwa płatnika"],
+  ["payerNip", "NIP płatnika"],
+  ["objectName", "Nazwa obiektu"],
+  ["contactPerson", "Osoba kontaktowa"],
+  ["contactPhone", "Telefon kontaktowy"],
+] as const;
+
+type OrderRequiredField = (typeof ORDER_REQUIRED_FIELDS)[number][0];
+
+/**
+ * Wynik `parseOrderFields` PO sprawdzeniu pól NOT NULL: `null` jest z nich
+ * wykluczony. Bez tego zawężenia `.set()` drizzle nie przyjmuje łatki (kolumna
+ * NOT NULL nie ma typu `null`), a pętla niżej i tak nie wypuszcza takiej wartości.
+ */
+type OrderPatchFields = Omit<ReturnType<typeof parseOrderFields>, OrderRequiredField> & {
+  [K in OrderRequiredField]?: Exclude<ReturnType<typeof parseOrderFields>[K], null>;
+};
+
 export function parseOrderPatch(raw: unknown) {
   const b = asRecord(raw);
   rejectReadonlyFields(b, ["orderNumber"]);
   const f = parseOrderFields(b);
   // Pola NOT NULL nie mogą zostać wyczyszczone jawnym `null`.
-  for (const [key, label] of [
-    ["requesterName", "Osoba zlecająca"],
-    ["requesterPhone", "Telefon zlecającego"],
-    ["requesterEmail", "E-mail zlecającego"],
-    ["payerName", "Nazwa płatnika"],
-    ["payerNip", "NIP płatnika"],
-    ["objectName", "Nazwa obiektu"],
-    ["contactPerson", "Osoba kontaktowa"],
-    ["contactPhone", "Telefon kontaktowy"],
-  ] as const) {
+  for (const [key, label] of ORDER_REQUIRED_FIELDS) {
     if (f[key] === null) throw new ValidationError(`Pole „${label}” nie może być puste`);
   }
   if (f.payerNip) {
@@ -177,12 +208,54 @@ export function parseOrderPatch(raw: unknown) {
     f.payerNip = nip;
   }
   const patch = compact({
-    ...f,
+    ...(f as OrderPatchFields),
     payerContractorId: parseFk(b.payerContractorId, "contractors", "Kontrahent"),
     objectId: parseFk(b.objectId, "objects", "Obiekt"),
+    // Handlowiec prowadzący da się zmienić z karty zlecenia (`null` odpina).
+    // `leadId` NIE — powiązanie z szansą powstaje raz, przy tworzeniu zlecenia,
+    // i przepięcie go łatką rozjechałoby `leads.order_id` z `orders.lead_id`.
+    salespersonId: parseFk(b.salespersonId, "salespeople", "Handlowiec"),
   });
   if (Object.keys(patch).length === 0) throw new ValidationError("Brak pól do zmiany");
   return patch;
+}
+
+/**
+ * Okresy usług zakładanego obiektu: albo wprost ze zlecenia, albo — dla
+ * publicznego formularza i starszych klientów — odtworzone z flag `objectHas*`.
+ *
+ * Start okresu: `serviceStartDate` (kiedy usługa ma ruszyć) → `installationStartDate`
+ * (kiedy wchodzi montaż) → dziś. Nigdy pusty: `start_date` jest NOT NULL, a data
+ * „nie wiadomo” fałszowałaby historię obiektu bardziej niż data przyjęcia zlecenia.
+ */
+export function orderObjectServices(body: OrderInput): ObjectServiceInput[] {
+  if (body.objectServices !== undefined) return body.objectServices;
+  const startDate = body.serviceStartDate || body.installationStartDate || todayIso();
+  const out: ObjectServiceInput[] = [];
+  if (body.objectHasCameras) {
+    out.push({ service: "kamery", startDate, endDate: null, cameraCount: body.objectCameraCount ?? null });
+  }
+  if (body.objectHasSswin) out.push({ service: "sswin", startDate, endDate: null });
+  if (body.objectHasVideoreception) out.push({ service: "wideorecepcja", startDate, endDate: null });
+  if (body.objectHasOfi) out.push({ service: "ofi", startDate, endDate: null });
+  return out;
+}
+
+/**
+ * Data przesunięta o N miesięcy (`2026-01-31` + 1 mies. → `2026-02-28`).
+ * Przewidywane zakończenie obiektu ze zlecenia to start usługi + długość umowy.
+ */
+export function addMonths(dateIso: string, months: number): string | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateIso);
+  if (!m || !Number.isFinite(months)) return null;
+  const [, y, mo, d] = m;
+  const base = new Date(Date.UTC(Number(y), Number(mo) - 1, 1));
+  base.setUTCMonth(base.getUTCMonth() + Math.trunc(months));
+  // Dzień przycięty do długości miesiąca docelowego — inaczej 31 stycznia
+  // + 1 miesiąc przeskakuje na marzec.
+  const lastDay = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth() + 1, 0)).getUTCDate();
+  base.setUTCDate(Math.min(Number(d), lastDay));
+  return base.toISOString().slice(0, 10);
 }
 
 /** Status z `PATCH /orders/:id/status` — tylko wartości ze słownika. */
@@ -223,9 +296,19 @@ export type CreateOrderResult =
  */
 export async function createOrderFromInput(
   body: OrderInput,
-  options: { source?: "internal" | "public" } = {}
+  options: { source?: "internal" | "public"; user?: ActivityUser } = {}
 ): Promise<CreateOrderResult> {
   const source = options.source ?? "internal";
+
+  /*
+   * LEJEK HANDLOWY NIE ISTNIEJE DLA FORMULARZA PUBLICZNEGO. Kierunek jest
+   * jednostronny (szansa → zlecenie), a zgłoszenie z internetu nie ma prawa
+   * wskazać cudzej szansy ani przypisać sobie handlowca. Whitelist w
+   * `src/routes/public.ts` i tak tych pól nie przepuszcza — to druga bramka,
+   * na wypadek gdyby ktoś dopisał je kiedyś do listy pól publicznych.
+   */
+  const leadId = source === "public" ? undefined : body.leadId;
+  let salespersonId = source === "public" ? undefined : body.salespersonId;
 
   // NIP z body sprawdzamy tylko wtedy, gdy ma zostać zapisany: przy wskazanym
   // kontrahencie NIP i nazwa płatnika przepisują się z kartoteki (niżej), więc
@@ -264,6 +347,12 @@ export async function createOrderFromInput(
     };
   }
 
+  // Zakres usług zlecenia: lista z body albo odtworzona z flag `objectHas*`.
+  // Liczona RAZ — trafia i na zlecenie (JSON), i do zakładanego obiektu, więc
+  // dwa wyliczenia mogłyby się rozjechać na dacie „dziś” o północy.
+  const orderPeriods = orderObjectServices(body);
+  const orderServicesJson = orderPeriods.length > 0 ? JSON.stringify(orderPeriods) : null;
+
   // Use SQLite transaction for atomicity
   // better-sqlite3 uses synchronous API
   let contractorId: number;
@@ -276,6 +365,37 @@ export async function createOrderFromInput(
   sqlite.exec("BEGIN TRANSACTION");
 
   try {
+    /*
+     * Step 0: SZANSA SPRZEDAŻY. Sprawdzamy ją W TRANSAKCJI, bo reguła „jedna
+     * szansa = jedno zlecenie” jest wyścigiem: dwa równoległe kliknięcia
+     * „Utwórz zlecenie” z tej samej karty przeszłyby kontrolę poza transakcją.
+     */
+    if (leadId !== undefined) {
+      const lead = sqlite
+        .prepare("SELECT id, title, order_id, salesperson_id, deleted_at FROM leads WHERE id = ? LIMIT 1")
+        .get(leadId) as
+        | { id: number; title: string; order_id: number | null; salesperson_id: number | null; deleted_at: string | null }
+        | undefined;
+
+      if (!lead || lead.deleted_at) {
+        sqlite.exec("ROLLBACK");
+        return { ok: false, status: 400, error: "Szansa sprzedaży nie istnieje" };
+      }
+      if (lead.order_id !== null) {
+        sqlite.exec("ROLLBACK");
+        return {
+          ok: false,
+          status: 409,
+          error: `Szansa „${lead.title}” ma już zlecenie — otwórz istniejące zamiast zakładać drugie`,
+        };
+      }
+      // Handlowiec ze zlecenia ma pierwszeństwo; bez niego dziedziczy się
+      // właściciel szansy (to on ten lejek prowadzi).
+      if (salespersonId === undefined && lead.salesperson_id !== null) {
+        salespersonId = lead.salesperson_id;
+      }
+    }
+
     // Step 1: Handle contractor (create new or use existing)
     if (body.createContractor) {
       // Check if NIP already exists (inside transaction for consistency)
@@ -351,30 +471,57 @@ export async function createOrderFromInput(
     // Step 2: Handle object (create new or use existing)
     if (body.createObject) {
       // Create new object
-      // Usługi obiektu przepisujemy ze zlecenia. Kolumna `type` jest @deprecated
-      // i wciąż NOT NULL, więc wyliczamy ją z tych samych usług (jawny objectType
-      // ze starszych klientów API ma pierwszeństwo).
-      const objectServices = {
-        hasCameras: body.objectHasCameras ?? false,
-        hasSswin: body.objectHasSswin ?? false,
-        hasVideoreception: body.objectHasVideoreception ?? false,
-        hasOfi: body.objectHasOfi ?? false,
-      };
-      // `?? null`, nie `|| null`: 0 kamer to wpis, null = „nikt nie policzył”.
-      const objectCameraCount = objectServices.hasCameras
-        ? body.objectCameraCount ?? null
-        : null;
+      // Usługi obiektu przepisujemy ze zlecenia JAKO OKRESY (`object_services`),
+      // a flagi `has_*` i `type` są z nich WYLICZANE — dokładnie tak, jak przy
+      // zapisie z kartoteki. Jawny `objectType` ze starszych klientów API ma
+      // pierwszeństwo tylko dla @deprecated kolumny `type`.
+      const periods = orderPeriods;
+      const objectServices = flagsFromServices(periods);
+      const objectCameraCount = objectServices.cameraCount;
 
       const insertObjectStmt = sqlite.prepare(`
-        INSERT INTO objects (contractor_id, name, address, city, type, has_cameras, camera_count, has_sswin, has_videoreception, has_ofi, installation_type, status, department, monthly_value, monthly_rental, notes, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+        INSERT INTO objects (contractor_id, name, address, city, maps_url, expected_end_date, type, has_cameras, camera_count, has_sswin, has_videoreception, has_ofi, installation_type, status, department, monthly_zdw, monthly_ofi, monthly_rental, notes, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
       `);
+
+      /*
+       * ROZBICIE ABONAMENTU ZE ZLECENIA. Zlecenie niesie JEDNĄ kwotę
+       * (`monthlyAmount`), a obiekt trzyma abonament rozbity na ZDW i OFI, więc
+       * kwotę trzeba przypisać do linii — tą samą regułą, co migracja 0082
+       * (src/lib/abonament-split.ts): decydują usługi zaznaczone na zleceniu.
+       *
+       * TODO: formularz zlecenia nie rozróżnia, ile z kwoty idzie za dozór, a ile
+       * za ochronę fizyczną. Zlecenie mieszane (OFI + kamery) trafia więc w
+       * całości na ZDW — do rozstrzygnięcia przez handlowca w kartotece. Docelowo
+       * formularz powinien przyjmować dwie kwoty; wtedy to miejsce znika.
+       */
+      const abonament = splitAbonament({
+        monthlyValue: body.monthlyAmount || null,
+        hasOfi: objectServices.hasOfi,
+        hasCameras: objectServices.hasCameras,
+        hasSswin: objectServices.hasSswin,
+        hasVideoreception: objectServices.hasVideoreception,
+      });
+
+      /*
+       * PRZEWIDYWANE ZAKOŃCZENIE OBIEKTU = start usługi + długość umowy. Liczymy
+       * je tylko wtedy, gdy zlecenie niesie OBA składniki — data wzięta z samej
+       * długości umowy (od „dziś”) byłaby zmyślona, a puste pole jest uczciwe.
+       */
+      const expectedEndDate =
+        body.serviceStartDate && body.contractLengthMonths
+          ? addMonths(body.serviceStartDate, body.contractLengthMonths)
+          : null;
 
       const objectInsert = insertObjectStmt.run(
         contractorId,
         body.objectName,
         body.objectAddress || null,
         body.objectCity || null,
+        // Pinezka ze zlecenia trafia do kartoteki — dotąd link zostawał na
+        // zleceniu, a obiekt nie miał jak pokazać „Otwórz w Google Maps”.
+        body.objectLocationUrl || null,
+        expectedEndDate,
         body.objectType ?? legacyObjectType(objectServices),
         objectServices.hasCameras ? 1 : 0,
         objectCameraCount,
@@ -384,8 +531,9 @@ export async function createOrderFromInput(
         body.objectInstallationType,
         "pending",
         "technical",
-        body.monthlyAmount || null,
-        // Dzierżawa to druga część miesięcznego przychodu obiektu. Bez tej
+        abonament.monthlyZdw,
+        abonament.monthlyOfi,
+        // Dzierżawa to trzecia część miesięcznego przychodu obiektu. Bez tej
         // linii kwota ze zlecenia zostawała wyłącznie na zleceniu, a Analityka
         // pokazywała zaniżony przychód obiektów ze sprzętem w najmie.
         body.rentalAmount || null,
@@ -395,13 +543,47 @@ export async function createOrderFromInput(
       objectId = Number(objectInsert.lastInsertRowid);
       createdObject = true;
 
+      /*
+       * OKRESY USŁUG w tej samej transakcji, co obiekt. Blok chodzi na surowym
+       * better-sqlite3 (`sqlite.exec("BEGIN")` wyżej), ale drizzle dzieli z nim
+       * TO SAMO połączenie (`(db as any).$client`), więc sync flag niżej też
+       * jest objęty tą transakcją — obiekt bez okresów nie zdąży się pokazać.
+       */
+      const insertServiceStmt = sqlite.prepare(`
+        INSERT INTO object_services (object_id, service, start_date, end_date, camera_count, notes, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+      `);
+      for (const p of periods) {
+        insertServiceStmt.run(
+          objectId,
+          p.service,
+          p.startDate,
+          p.endDate ?? null,
+          p.service === "kamery" ? p.cameraCount ?? null : null,
+          p.notes ?? null
+        );
+      }
+      // Flagi policzyliśmy już przy INSERT-cie; sync jest jedynym miejscem, które
+      // zna regułę cache'u, więc przechodzimy przez nie także tutaj.
+      if (periods.length > 0) syncObjectServiceFlags(db, objectId);
+
       // Add history entry for the new object
       const objectData = JSON.stringify({
         id: objectId,
         contractorId,
         name: body.objectName,
-        ...objectServices,
+        hasCameras: objectServices.hasCameras,
+        hasSswin: objectServices.hasSswin,
+        hasVideoreception: objectServices.hasVideoreception,
+        hasOfi: objectServices.hasOfi,
         cameraCount: objectCameraCount,
+        expectedEndDate,
+        services: periods.map((p) => ({
+          service: p.service,
+          startDate: p.startDate,
+          endDate: p.endDate ?? null,
+          cameraCount: p.service === "kamery" ? p.cameraCount ?? null : null,
+        })),
         status: "pending",
         department: "technical",
       });
@@ -460,8 +642,10 @@ export async function createOrderFromInput(
         is_camera_installation, camera_count, megaphone_count, vtools_offer_number,
         internet_included, intervention_group, video_reception,
         monthly_amount, contract_length_months, rental_amount, rental_length_months, invoice_issuer,
+        object_services,
+        lead_id, salesperson_id,
         status, service_start_date, installation_start_date, notes, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
     `);
 
     // generateOrderNumber() draws a random suffix, so two concurrent creates in
@@ -469,6 +653,9 @@ export async function createOrderFromInput(
     // Regenerate and retry a bounded number of times before giving up, so a
     // birthday-paradox collision no longer surfaces as a 500 / rolled-back order.
     let orderInsert: Database.RunResult | undefined;
+    // Numer, który faktycznie wszedł do bazy — potrzebny do wpisu w dzienniku
+    // szansy („Utworzono zlecenie ZL-… z szansy”).
+    let insertedNumber = "";
     for (let attempt = 0; attempt < 10; attempt++) {
       const orderNumber = generateOrderNumber();
       try {
@@ -502,11 +689,18 @@ export async function createOrderFromInput(
           body.rentalAmount || null,
           body.rentalLengthMonths || null,
           body.invoiceIssuer || null,
+          // Zakres usług ZOSTAJE NA ZLECENIU (JSON) — niezależnie od tego, czy
+          // powstał z niego obiekt. Bez tego edycja zlecenia, jego szczegóły
+          // i mail nie mają skąd wziąć „Kamery 8 szt., od 2026-10-01”.
+          orderServicesJson,
+          leadId ?? null,
+          salespersonId ?? null,
           body.status || "new",
           body.serviceStartDate || null,
           body.installationStartDate || null,
           body.notes || null
         );
+        insertedNumber = orderNumber;
         break;
       } catch (err) {
         // A constraint violation aborts only this statement, not the
@@ -524,6 +718,43 @@ export async function createOrderFromInput(
     }
 
     orderId = Number(orderInsert.lastInsertRowid);
+
+    /*
+     * Step 4: LINK W DRUGĄ STRONĘ. Szansa dostaje numer zlecenia, a przy okazji
+     * kontrahenta i obiekt, jeśli ich jeszcze nie miała (`COALESCE` — zlecenie
+     * nie przepina szansy, która wskazuje już inną kartotekę). `last_activity_at`
+     * przesuwamy, bo założenie zlecenia to najmocniejsza aktywność, jaka się
+     * szansie może przydarzyć — inaczej lejek zaraz po wygranej zaczyna „gnić”.
+     */
+    if (leadId !== undefined) {
+      sqlite
+        .prepare(
+          `UPDATE leads
+              SET order_id = ?,
+                  object_id = COALESCE(object_id, ?),
+                  contractor_id = COALESCE(contractor_id, ?),
+                  last_activity_at = datetime('now'),
+                  updated_at = datetime('now')
+            WHERE id = ?`
+        )
+        .run(orderId, objectId, contractorId, leadId);
+
+      /*
+       * Oś czasu szansy. `logActivity` chodzi po drizzle, ale drizzle dzieli
+       * z tym blokiem TO SAMO połączenie better-sqlite3 (`(db as any).$client`),
+       * więc wpis jest objęty tą samą transakcją, co zlecenie.
+       */
+      logActivity(db, {
+        entityType: "lead",
+        entityId: leadId,
+        objectId,
+        user: options.user ?? null,
+        action: "linked",
+        field: "order_id",
+        newValue: String(orderId),
+        summary: `Utworzono zlecenie ${insertedNumber} z szansy`,
+      });
+    }
 
     // Commit transaction
     sqlite.exec("COMMIT");

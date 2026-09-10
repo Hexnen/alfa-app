@@ -6,6 +6,7 @@
  * rozjechać, a jedyne miejsce, w którym trzeba poprawić wzór, to offer-calc.ts.
  */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Link } from "react-router-dom";
 import {
   AlertTriangle,
   AlignLeft,
@@ -18,6 +19,7 @@ import {
   CopyPlus,
   Eye,
   FileText,
+  Handshake,
   Link2,
   Lock,
   Plus,
@@ -37,6 +39,8 @@ import { cn } from "@/lib/utils";
 import { blockTooltips, tip } from "@/components/ui/tooltip";
 import { ContextMenu, type ContextMenuItem } from "@/components/ui/context-menu";
 import { ContractorPicker } from "@/components/ContractorPicker";
+import { LeadPicker } from "@/components/sales/LeadPicker";
+import { usePerms } from "@/auth/permissions";
 import {
   offersApi,
   offerShareUrl,
@@ -129,6 +133,9 @@ export function OfferEditor({
   // zmiany robi się przez nową wersję (pilnuje tego też backend, zwracając 409).
   const frozen = offer.status !== "draft";
   const canEdit = editable && !frozen;
+  // Lejek handlowy stoi za własnym kluczem — bez niego pole „Szansa” znika,
+  // zamiast strzelać do /leads na 403.
+  const canSeeLeads = usePerms().canView("handlowy/leady");
   const showCosts = totals.margin !== undefined || items.some((i) => i.unitCost !== undefined);
 
   /**
@@ -157,6 +164,7 @@ export function OfferEditor({
     site: o.site,
     address: o.address,
     salespersonId: o.salespersonId,
+    leadId: o.leadId ?? null,
     companyId: o.companyId,
     discountPct: o.discountPct,
     contractMonths: o.contractMonths,
@@ -177,6 +185,7 @@ export function OfferEditor({
     site: offer.site,
     address: offer.address,
     salespersonId: offer.salespersonId,
+    leadId: offer.leadId ?? null,
     companyId: offer.companyId,
     discountPct: offer.discountPct,
     contractMonths: offer.contractMonths as number | null,
@@ -590,6 +599,11 @@ export function OfferEditor({
         {offer.version > 1 && (
           <span className={pillClass("neutral")}>wersja {offer.version}</span>
         )}
+        {offer.leadId && (
+          <Link to={`/handlowy/leady/${offer.leadId}`} className={pillClass("indigo")}>
+            szansa →
+          </Link>
+        )}
         {offer.orderId && (
           <a href={`/orders/${offer.orderId}`} className={pillClass("emerald")}>
             zlecenie →
@@ -602,6 +616,28 @@ export function OfferEditor({
         )}
         <div className="ml-auto">{docActions}</div>
       </div>
+
+      {/* PO AKCEPTACJI LEJEK ZOSTAJE OTWARTY. Backend świadomie nie przestawia
+          etapu szansy — „wygrany” zamyka lejek i wpisuje datę, a to decyzja
+          handlowca. Podpowiadamy ją tutaj, jeden klik od karty szansy. */}
+      {offer.status === "accepted" && offer.leadId && offer.leadStage !== "wygrany" && (
+        <div
+          className="flex flex-wrap items-center gap-2 rounded-md border border-emerald-300 bg-emerald-50 p-3 text-sm text-emerald-900 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200"
+          data-testid="oferta-lead-won-hint"
+        >
+          <Handshake className="h-4 w-4 shrink-0" />
+          <span>
+            Oferta zaakceptowana, a szansa „{offer.leadTitle || `#${offer.leadId}`}” wciąż jest
+            otwarta.
+          </span>
+          <Link
+            to={`/handlowy/leady/${offer.leadId}`}
+            className="font-semibold underline underline-offset-2"
+          >
+            Oznacz szansę jako wygraną →
+          </Link>
+        </div>
+      )}
 
       {frozen && (
         <div className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200">
@@ -666,6 +702,25 @@ export function OfferEditor({
               onBlur={() => form.address !== offer.address && save({ address: form.address })}
             />
           </Field>
+
+          {/* Szansa sprzedaży — pole widoczne tylko dla kogoś, kto lejek widzi;
+              bez uprawnienia picker odpytywałby /leads na 403. */}
+          {canSeeLeads && (
+            <Field label="Szansa" htmlFor="of-lead">
+              <LeadPicker
+                inputId="of-lead"
+                includeClosed
+                disabled={!canEdit}
+                value={
+                  form.leadId
+                    ? { id: form.leadId, title: offer.leadTitle || `Szansa #${form.leadId}` }
+                    : null
+                }
+                onPick={(picked) => save({ leadId: picked.id })}
+                onClear={() => save({ leadId: null })}
+              />
+            </Field>
+          )}
 
         </div>
         </AutoCollapse>

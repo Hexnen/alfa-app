@@ -4,6 +4,7 @@ import { eq, like, or, and, sql, desc, asc } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import type { ContractorInput, ApiResponse } from "../types/index.js";
 import { normalizeNIP, validateNIP } from "../utils/nip.js";
+import { monthlyValueOf } from "../lib/abonament-split.js";
 
 const app = new Hono();
 
@@ -55,7 +56,7 @@ app.get("/by-nip/:nip", async (c) => {
  * się po GROUP BY — SQLite dopuszcza funkcje agregujące w ORDER BY grupowanego
  * zapytania, więc nie trzeba powtarzać ich jako aliasu ani opakowywać w podzapytanie.
  *
- * Nazwy kolumn w agregatach piszemy DOSŁOWNIE (`objects.monthly_value`), bo coalesce
+ * Nazwy kolumn w agregatach piszemy DOSŁOWNIE (`objects.monthly_zdw`), bo coalesce
  * z dwóch kolumn tej samej tabeli i tak nie skorzysta z aliasu drizzle — a zapis
  * kwalifikowany jest jednoznaczny (ten sam wzorzec co w routes/objects.ts).
  */
@@ -66,9 +67,9 @@ const SORT_COLUMNS = {
   salesperson: sql`lower(coalesce(${schema.salespeople.lastName}, 'zzzz'))`,
   objects: sql`count(${schema.objects.id})`,
   // Przychód miesięczny portfela = abonament + dzierżawa sprzętu ze wszystkich obiektów.
-  value: sql`coalesce(sum(coalesce(objects.monthly_value, 0) + coalesce(objects.monthly_rental, 0)), 0)`,
+  value: sql`coalesce(sum(coalesce(objects.monthly_zdw, 0) + coalesce(objects.monthly_ofi, 0) + coalesce(objects.monthly_rental, 0)), 0)`,
   cost: sql`coalesce(sum(objects.monthly_cost), 0)`,
-  profit: sql`coalesce(sum(coalesce(objects.monthly_value, 0) + coalesce(objects.monthly_rental, 0)), 0) - coalesce(sum(objects.monthly_cost), 0)`,
+  profit: sql`coalesce(sum(coalesce(objects.monthly_zdw, 0) + coalesce(objects.monthly_ofi, 0) + coalesce(objects.monthly_rental, 0)), 0) - coalesce(sum(objects.monthly_cost), 0)`,
   created: sql`${schema.contractors.createdAt}`,
 } as const;
 
@@ -145,11 +146,11 @@ app.get("/", async (c) => {
   // w WHERE, więc jeden `whereClause` obsługuje listę, licznik `total`, sumy i liczniki
   // zakładek naraz. Przez HAVING trzeba by powtórzyć grupowanie w każdej z tych czterech
   // kwerend i pilnować, żeby się nie rozjechały — a rozjazd widać od razu w paginacji.
-  const portfolioValueSql = sql`(select coalesce(sum(coalesce(o_value.monthly_value, 0) + coalesce(o_value.monthly_rental, 0)), 0) from objects o_value where o_value.contractor_id = contractors.id)`;
+  const portfolioValueSql = sql`(select coalesce(sum(coalesce(o_value.monthly_zdw, 0) + coalesce(o_value.monthly_ofi, 0) + coalesce(o_value.monthly_rental, 0)), 0) from objects o_value where o_value.contractor_id = contractors.id)`;
   // Kontrahent bez ANI JEDNEJ wpisanej kwoty nie wpada w widełki — brak wartości to nie
   // jest zero, więc „do 500 zł" nie może łapać portfela, któremu nikt nic nie wycenił
   // (ta sama zasada, co na liście obiektów).
-  const hasAnyRevenueSql = sql`exists (select 1 from objects o_value where o_value.contractor_id = contractors.id and (o_value.monthly_value is not null or o_value.monthly_rental is not null))`;
+  const hasAnyRevenueSql = sql`exists (select 1 from objects o_value where o_value.contractor_id = contractors.id and (o_value.monthly_zdw is not null or o_value.monthly_ofi is not null or o_value.monthly_rental is not null))`;
   const minValueClause =
     minValue !== undefined
       ? sql`${hasAnyRevenueSql} and ${portfolioValueSql} >= ${minValue}`
@@ -197,9 +198,9 @@ app.get("/", async (c) => {
   // Agregat daje im 0 (coalesce), więc „puste" rozpoznajemy osobno: po tym, czy jest choć
   // jeden obiekt z uzupełnioną kwotą. Kontrahent bez obiektów też jest „pusty".
   const NULLS_LAST: Partial<Record<ContractorSortKey, SQL>> = {
-    value: sql`case when sum(case when objects.monthly_value is not null or objects.monthly_rental is not null then 1 else 0 end) = 0 then 1 else 0 end`,
+    value: sql`case when sum(case when objects.monthly_zdw is not null or objects.monthly_ofi is not null or objects.monthly_rental is not null then 1 else 0 end) = 0 then 1 else 0 end`,
     cost: sql`case when sum(case when objects.monthly_cost is not null then 1 else 0 end) = 0 then 1 else 0 end`,
-    profit: sql`case when sum(case when objects.monthly_value is not null or objects.monthly_rental is not null or objects.monthly_cost is not null then 1 else 0 end) = 0 then 1 else 0 end`,
+    profit: sql`case when sum(case when objects.monthly_zdw is not null or objects.monthly_ofi is not null or objects.monthly_rental is not null or objects.monthly_cost is not null then 1 else 0 end) = 0 then 1 else 0 end`,
   };
   const column = SORT_COLUMNS[sort];
   const direction = dir === "desc" ? desc : asc;
@@ -220,7 +221,7 @@ app.get("/", async (c) => {
       },
       objectsCount: sql<number>`count(${schema.objects.id})`,
       activeObjectsCount: sql<number>`sum(case when ${schema.objects.status} = 'active' then 1 else 0 end)`,
-      objectsMonthlyValue: sql<number>`coalesce(sum(coalesce(objects.monthly_value, 0) + coalesce(objects.monthly_rental, 0)), 0)`,
+      objectsMonthlyValue: sql<number>`coalesce(sum(coalesce(objects.monthly_zdw, 0) + coalesce(objects.monthly_ofi, 0) + coalesce(objects.monthly_rental, 0)), 0)`,
       objectsMonthlyCost: sql<number>`coalesce(sum(${schema.objects.monthlyCost}), 0)`,
       objectsSetupCost: sql<number>`coalesce(sum(${schema.objects.setupCost}), 0)`,
     })
@@ -244,7 +245,7 @@ app.get("/", async (c) => {
   const totalsResult = await db
     .select({
       objects: sql<number>`count(${schema.objects.id})`,
-      value: sql<number>`coalesce(sum(coalesce(objects.monthly_value, 0) + coalesce(objects.monthly_rental, 0)), 0)`,
+      value: sql<number>`coalesce(sum(coalesce(objects.monthly_zdw, 0) + coalesce(objects.monthly_ofi, 0) + coalesce(objects.monthly_rental, 0)), 0)`,
       monthlyCost: sql<number>`coalesce(sum(${schema.objects.monthlyCost}), 0)`,
       setupCost: sql<number>`coalesce(sum(${schema.objects.setupCost}), 0)`,
     })
@@ -356,6 +357,9 @@ app.get("/:id/objects", async (c) => {
       
       return {
         ...obj,
+        // Wyliczane z rozbicia — @deprecated `monthly_value` nie jest już
+        // źródłem prawdy (patrz src/lib/abonament-split.ts).
+        monthlyValue: monthlyValueOf(obj.monthlyZdw, obj.monthlyOfi),
         latestAction: history[0] || null,
       };
     })

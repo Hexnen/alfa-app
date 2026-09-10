@@ -1,11 +1,11 @@
 /**
- * Podgląd maili zlecenia — w dwóch wariantach:
+ * Podgląd i wysyłka maili zlecenia — w dwóch wariantach:
  *   • „Do klienta” — potwierdzenie przyjęcia zlecenia (tylko wypełnione pola),
  *   • „Wewnętrzny” — komplet danych dla zespołu (braki jako „—”).
  *
  * Oba szablony składa BACKEND (src/lib/order-mail.ts, GET /api/orders/:id/mail-preview
- * ?variant=client|internal) — front tylko pokazuje gotowy HTML. Dzięki temu późniejsza
- * wysyłka nodemailerem wyśle dokładnie to, co człowiek zobaczył w tym oknie.
+ * ?variant=client|internal) — front tylko pokazuje gotowy HTML. Dzięki temu wysyłka
+ * nodemailerem wysyła dokładnie to, co człowiek zobaczył w tym oknie.
  *
  * HTML renderujemy w `<iframe srcDoc sandbox="allow-same-origin">`: mail ma własne,
  * inline'owe style i nie może przeciec do arkusza aplikacji (ani odwrotnie).
@@ -14,10 +14,19 @@
  * `contentDocument`. Skryptów NIE dopuszczamy (brak `allow-scripts`), więc mail
  * dalej jest tylko obrazkiem — nic z jego wnętrza się nie wykona.
  *
- * Na razie WYŁĄCZNIE podgląd — przycisk „Wyślij” jest zablokowany.
+ * ADRESACI SĄ EDYTOWALNE, temat nie. Adresy to jedyne, co przy wysyłce bywa
+ * inne niż w kartotece (klient poda drugi mail, dyspozytor dorzuci kolegę), a
+ * temat i treść składa szablon — ręczna podmianka rozjechałaby podgląd z tym,
+ * co faktycznie poszło.
+ *
+ * O tym, CZY wolno wysłać, decyduje backend (`preview.sending`), a nie front:
+ * przełącznik wysyłki, konto SMTP i adresat zespołu siedzą w Administracja →
+ * Poczta. Front dokłada tylko warunek uprawnień (`canSend`).
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
   Dialog,
   DialogContent,
@@ -25,10 +34,37 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { ClipboardCopy, Check, ExternalLink, Mail, Send } from "lucide-react";
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  ChevronDown,
+  ChevronRight,
+  ClipboardCopy,
+  Check,
+  ExternalLink,
+  Loader2,
+  Mail,
+  Send,
+} from "lucide-react";
+import { MailLogTable } from "@/components/MailLogTable";
+import { usePerms } from "@/auth/permissions";
+import { cn } from "@/lib/utils";
+import { toPasteHtml } from "@/lib/mail-paste";
+import {
+  getOrderMailLog,
   getOrderMailPreview,
+  isMissingEndpoint,
+  sendOrderMail,
+  type MailLogEntry,
   type Order,
   type OrderMailPreview,
   type OrderMailVariant,
@@ -38,53 +74,42 @@ interface Props {
   order: Order | null;
   open: boolean;
   onClose: () => void;
+  /** Czy użytkownik ma edycję Zleceń. Bez tego „Wyślij” zostaje nieaktywny. */
+  canSend?: boolean;
 }
 
 /** Podpowiedź, gdy wdrożenie nie ma ustawionej skrzynki zespołu. */
-const NO_INTERNAL_RECIPIENT = "(nie skonfigurowano — ORDER_INTERNAL_MAIL_TO)";
+const NO_INTERNAL_RECIPIENT = "(nie skonfigurowano — Administracja → Poczta)";
 
 /** Który przycisk ma przez chwilę pokazywać „Skopiowano”. */
 type CopyTarget = "mail" | "subject" | "recipients";
 
-/**
- * Przygotowuje HTML pod wklejenie do Outlooka/Worda.
- *
- * Outlook wkleja tylko fragment — `<head>` (a więc i `<title>`) ignoruje, więc
- * podanie mu całego dokumentu nic nie daje, a bywa, że psuje. Style szablonu są
- * inline'owe, żaden nie siedzi w `<head>`, więc przy zejściu do `<body>` nic nie
- * ginie. Dodatkowo zdejmujemy ukryty preheader z początku body: w mailu jest
- * niewidoczny (`display:none`), ale Word potrafi go pokazać jako pierwszą linijkę.
- */
-function toPasteHtml(fullHtml: string): string {
-  try {
-    const doc = new DOMParser().parseFromString(fullHtml, "text/html");
-    const body = doc.body;
-    if (!body) return fullHtml;
-    // Zdejmujemy z początku body komentarze i puste teksty (szablon ma tam
-    // komentarz opisujący preheader) oraz sam ukryty preheader.
-    for (let node = body.firstChild; node; node = body.firstChild) {
-      if (node.nodeType === Node.COMMENT_NODE) {
-        node.remove();
-        continue;
-      }
-      if (node.nodeType === Node.TEXT_NODE && !node.textContent?.trim()) {
-        node.remove();
-        continue;
-      }
-      const el = node.nodeType === Node.ELEMENT_NODE ? (node as Element) : null;
-      const style = (el?.getAttribute("style") ?? "").replace(/\s+/g, "");
-      if (!el || !style.includes("display:none")) break;
-      el.remove();
-    }
-    const inner = body.innerHTML.trim();
-    return inner || fullHtml;
-  } catch {
-    // DOMParser nie powinien rzucać, ale wolimy skopiować cokolwiek niż nic.
-    return fullHtml;
-  }
+/** Nagłówek wiadomości w postaci, w jakiej człowiek go edytuje (tekst, nie lista). */
+interface Recipients {
+  to: string;
+  cc: string;
+  bcc: string;
 }
 
-export function OrderMailPreviewDialog({ order, open, onClose }: Props) {
+const VARIANT_LABEL: Record<OrderMailVariant, string> = {
+  client: "do klienta",
+  internal: "wewnętrzny",
+};
+
+/** Ta sama prosta walidacja co w panelu Poczty — łapie literówki, nie RFC 5322. */
+const EMAIL_RE = /^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+$/;
+
+/** „a@x.pl, b@y.pl; " → ["a@x.pl", "b@y.pl"] */
+const parseAddresses = (raw: string): string[] =>
+  raw
+    .split(/[,;]/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+
+const invalidAddresses = (raw: string): string[] =>
+  parseAddresses(raw).filter((a) => !EMAIL_RE.test(a));
+
+export function OrderMailPreviewDialog({ order, open, onClose, canSend = false }: Props) {
   const [variant, setVariant] = useState<OrderMailVariant>("client");
   const [preview, setPreview] = useState<OrderMailPreview | null>(null);
   const [loading, setLoading] = useState(false);
@@ -94,6 +119,21 @@ export function OrderMailPreviewDialog({ order, open, onClose }: Props) {
   // kopiowanie nie jest powodem, żeby zabierać człowiekowi mail z ekranu.
   const [actionError, setActionError] = useState<string | null>(null);
 
+  // Ręczne poprawki adresatów. `null` = „człowiek nie tknął, bierz z podglądu”,
+  // dzięki czemu odświeżony podgląd nie nadpisuje tego, co ktoś dopisał.
+  const [edited, setEdited] = useState<Partial<Record<OrderMailVariant, Recipients>>>({});
+
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [sendOk, setSendOk] = useState<string | null>(null);
+  const [sendError, setSendError] = useState<string | null>(null);
+
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [history, setHistory] = useState<MailLogEntry[]>([]);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+
+  const perms = usePerms();
   const frameRef = useRef<HTMLIFrameElement | null>(null);
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -134,6 +174,11 @@ export function OrderMailPreviewDialog({ order, open, onClose }: Props) {
       // wyczyszczonym cache'em — stąd wcześniejszy `return`.
       if (cacheRef.current.orderId !== orderId) {
         cacheRef.current = { orderId, entries: {} };
+        setEdited({});
+        setHistory([]);
+        setHistoryError(null);
+        setSendOk(null);
+        setSendError(null);
         if (variant !== "client") {
           setVariant("client");
           return;
@@ -175,6 +220,33 @@ export function OrderMailPreviewDialog({ order, open, onClose }: Props) {
       cancelled = true;
     };
   }, [open, orderId, variant]);
+
+  const loadHistory = useCallback(async (id: number) => {
+    setHistoryLoading(true);
+    try {
+      const items = await getOrderMailLog(id);
+      setHistory(items);
+      setHistoryError(null);
+    } catch (e) {
+      setHistory([]);
+      setHistoryError(
+        isMissingEndpoint(e)
+          ? "Historia pojawi się, gdy backend udostępni dziennik wysyłek."
+          : e instanceof Error
+            ? e.message
+            : "Nie udało się wczytać historii wysyłek.",
+      );
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, []);
+
+  // Historia domyślnie zwinięta — dociągamy ją dopiero, gdy ktoś ją rozwinie
+  // (okno przy 1280×800 ma się mieścić bez przewijania).
+  useEffect(() => {
+    if (!open || !historyOpen || orderId === null) return;
+    void loadHistory(orderId);
+  }, [open, historyOpen, orderId, loadHistory]);
 
   // Nowa karta — ten sam sposób co wydruk protokołu (frontend/src/lib/protocolPrint.ts):
   // pusty `window.open` + `document.write`, bo mail żyje tylko w pamięci (nie ma URL-a).
@@ -268,29 +340,96 @@ export function OrderMailPreviewDialog({ order, open, onClose }: Props) {
     [flashCopied],
   );
 
-  // Wariant wewnętrzny bez skonfigurowanej skrzynki nie może podstawić adresu
-  // klienta — pokazujemy wprost, czego brakuje w konfiguracji wdrożenia.
-  const recipient =
-    variant === "internal"
-      ? preview?.to || null
-      : preview?.to || order?.requesterEmail || null;
-  const recipientMissingHint = variant === "internal" && !recipient;
+  // Adresaci z backendu — punkt wyjścia, dopóki nikt ich nie poprawił.
+  // Wariant wewnętrzny bez skonfigurowanej skrzynki nie podstawia adresu klienta:
+  // ma być widać, czego brakuje w konfiguracji, a nie wysłać maila zespołu do klienta.
+  const suggested = useMemo<Recipients>(
+    () => ({
+      to: (variant === "internal" ? preview?.to : preview?.to || order?.requesterEmail) ?? "",
+      cc: preview?.cc ?? "",
+      bcc: preview?.bcc ?? "",
+    }),
+    [preview, order, variant],
+  );
+
+  const recipients = edited[variant] ?? suggested;
+  const patchRecipients = (patch: Partial<Recipients>) =>
+    setEdited((prev) => ({ ...prev, [variant]: { ...recipients, ...patch } }));
+
+  const toBad = invalidAddresses(recipients.to);
+  const ccBad = invalidAddresses(recipients.cc);
+  const bccBad = invalidAddresses(recipients.bcc);
+  const toList = parseAddresses(recipients.to);
+  const recipientMissingHint = variant === "internal" && toList.length === 0;
 
   // Outlook przyjmuje w polu „Do” listę rozdzieloną średnikami — dokładnie w tej
   // postaci wkładamy do schowka adresata razem z DW.
-  const recipientsForOutlook = [recipient, preview?.cc].filter(Boolean).join("; ");
+  const recipientsForOutlook = [...toList, ...parseAddresses(recipients.cc)].join("; ");
+
+  // O gotowości decyduje backend. Starszy backend pola nie zwraca — wtedy
+  // traktujemy wysyłkę jako niedostępną (lepiej zablokować niż wysłać w próżnię).
+  const sendReady = preview?.sending?.ready === true;
+  const sendReason =
+    preview?.sending?.reason ?? "backend nie udostępnia jeszcze wysyłki maili ze zleceń";
+  const addressesOk = toList.length > 0 && toBad.length === 0 && ccBad.length === 0 && bccBad.length === 0;
+  const sendDisabled = !preview || !canSend || !sendReady || !addressesOk || sending;
+  const sendBlockedTitle = !canSend
+    ? "Brak uprawnień do edycji zleceń"
+    : !sendReady
+      ? sendReason
+      : toList.length === 0
+        ? "Podaj co najmniej jednego adresata"
+        : !addressesOk
+          ? "Popraw niepoprawne adresy"
+          : undefined;
+
+  const doSend = async () => {
+    if (orderId === null) return;
+    setSending(true);
+    setSendOk(null);
+    setSendError(null);
+    try {
+      const res = await sendOrderMail(orderId, {
+        variant,
+        to: toList,
+        cc: parseAddresses(recipients.cc),
+        bcc: parseAddresses(recipients.bcc),
+      });
+      if (res.ok) {
+        setSendOk(
+          `Wysłano ✓ ${new Date().toLocaleString("pl-PL", { dateStyle: "short", timeStyle: "short" })}`,
+        );
+      } else {
+        setSendError(res.error ?? "Nie udało się wysłać maila.");
+      }
+      // Nieudana próba też jest wpisem w dzienniku — historia ma to pokazać.
+      setHistoryOpen(true);
+      void loadHistory(orderId);
+    } finally {
+      setSending(false);
+      setConfirmOpen(false);
+    }
+  };
+
+  const confirmText = `Wysłać mail ${VARIANT_LABEL[variant]} do ${toList.join(", ") || "—"}${
+    parseAddresses(recipients.cc).length ? ` (DW: ${parseAddresses(recipients.cc).join(", ")})` : ""
+  }${parseAddresses(recipients.bcc).length ? ` (UDW: ${parseAddresses(recipients.bcc).join(", ")})` : ""}?`;
+
+  /** Wspólny wygląd pól nagłówka — wąskie, żeby okno mieściło się przy 1280×800. */
+  const headerInput = "h-8 text-xs";
 
   return (
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
       {/* Kolumna na pełnej wysokości okna: nagłówek i stopka z przyciskami mają
-          stały rozmiar, a podgląd między nimi kurczy się do tego, co zostanie.
-          Bez `max-h`/`flex` Radix centruje okno o stałej wysokości i przy
-          1280×800 tytuł oraz rząd przycisków wychodziły poza ekran. */}
+          stały rozmiar, a podgląd między nimi ROŚNIE do tego, co zostanie.
+          `h-[92vh]`, nie samo `max-h`: przy max-h okno kurczy się do treści, a
+          że mail siedzi w iframe (element bez własnej wysokości), podgląd
+          dostawał kilkadziesiąt pikseli, a pod stopką zostawała pustka. */}
       <DialogContent
-        className="sm:max-w-3xl max-h-[92vh] flex flex-col p-0 overflow-hidden bg-white"
+        className="sm:max-w-3xl h-[92vh] max-h-[92vh] flex flex-col gap-0 p-0 overflow-hidden bg-white"
         data-testid="zlecenia-mail-preview-dialog"
       >
-        <DialogHeader className="shrink-0 px-6 pt-6 pb-4 border-b border-slate-200">
+        <DialogHeader className="shrink-0 space-y-1 px-6 pt-5 pb-3 border-b border-slate-200">
           <DialogTitle className="flex items-center gap-2 text-slate-900">
             <Mail className="w-5 h-5 text-indigo-600" />
             Podgląd maila — {order?.orderNumber ?? ""}
@@ -299,7 +438,7 @@ export function OrderMailPreviewDialog({ order, open, onClose }: Props) {
           <Tabs
             value={variant}
             onValueChange={(v) => setVariant(v as OrderMailVariant)}
-            className="pt-2"
+            className="pt-1"
           >
             <TabsList className="bg-slate-100">
               <TabsTrigger value="client" data-testid="zlecenia-mail-variant-client">
@@ -312,30 +451,62 @@ export function OrderMailPreviewDialog({ order, open, onClose }: Props) {
           </Tabs>
 
           <DialogDescription asChild>
-            <div className="text-sm text-slate-500 space-y-0.5 pt-1">
-              <div data-testid="zlecenia-mail-preview-to">
-                <span className="text-slate-400">Do:</span>{" "}
-                {recipient ? (
-                  <span className="text-slate-700">{recipient}</span>
-                ) : (
-                  <span className="text-slate-400">
-                    {recipientMissingHint ? NO_INTERNAL_RECIPIENT : "—"}
-                  </span>
-                )}
-                {preview?.cc ? (
-                  <>
-                    {" "}
-                    <span className="text-slate-400">DW:</span>{" "}
-                    <span className="text-slate-700">{preview.cc}</span>
-                  </>
-                ) : null}
+            <div className="text-sm text-slate-500 space-y-1 pt-1.5">
+              {/* Adresaci są edytowalne — temat i treść składa szablon, więc
+                  zostają do odczytu (inaczej podgląd rozjechałby się z wysyłką). */}
+              <div className="grid grid-cols-[3rem_minmax(0,1fr)] items-center gap-x-2 gap-y-1">
+                <label htmlFor="zlecenia-mail-to" className="text-xs text-slate-400">
+                  Do:
+                </label>
+                <Input
+                  id="zlecenia-mail-to"
+                  data-testid="zlecenia-mail-to"
+                  className={cn(headerInput, toBad.length && "border-red-500 focus-visible:ring-red-500")}
+                  value={recipients.to}
+                  placeholder={recipientMissingHint ? NO_INTERNAL_RECIPIENT : "adresy po przecinku"}
+                  aria-invalid={toBad.length > 0}
+                  onChange={(e) => patchRecipients({ to: e.target.value })}
+                />
+
+                <label htmlFor="zlecenia-mail-cc" className="text-xs text-slate-400">
+                  DW:
+                </label>
+                {/* DW i UDW dzielą jeden rząd: pełnowymiarowe wiersze zabierały
+                    podglądowi maila kolejne 36 px, a wypełnia się je rzadko. */}
+                <div className="grid grid-cols-[minmax(0,1fr)_2.6rem_minmax(0,1fr)] items-center gap-2">
+                  <Input
+                    id="zlecenia-mail-cc"
+                    data-testid="zlecenia-mail-cc"
+                    className={cn(headerInput, ccBad.length && "border-red-500 focus-visible:ring-red-500")}
+                    value={recipients.cc}
+                    placeholder="—"
+                    aria-invalid={ccBad.length > 0}
+                    onChange={(e) => patchRecipients({ cc: e.target.value })}
+                  />
+                  <label htmlFor="zlecenia-mail-bcc" className="text-xs text-slate-400">
+                    UDW:
+                  </label>
+                  <Input
+                    id="zlecenia-mail-bcc"
+                    data-testid="zlecenia-mail-bcc"
+                    className={cn(headerInput, bccBad.length && "border-red-500 focus-visible:ring-red-500")}
+                    value={recipients.bcc}
+                    placeholder="—"
+                    aria-invalid={bccBad.length > 0}
+                    onChange={(e) => patchRecipients({ bcc: e.target.value })}
+                  />
+                </div>
               </div>
-              <div data-testid="zlecenia-mail-preview-subject">
+
+              {(toBad.length > 0 || ccBad.length > 0 || bccBad.length > 0) && (
+                <div className="text-xs text-red-600" data-testid="zlecenia-mail-address-error">
+                  Niepoprawne adresy: {[...toBad, ...ccBad, ...bccBad].join(", ")}
+                </div>
+              )}
+
+              <div data-testid="zlecenia-mail-preview-subject" className="pt-0.5">
                 <span className="text-slate-400">Temat:</span>{" "}
                 <span className="text-slate-700">{preview?.subject || "—"}</span>
-              </div>
-              <div className="text-xs text-slate-400 pt-1" data-testid="zlecenia-mail-preview-hint">
-                Wklej w Outlooku: Nowa wiadomość → Ctrl+V w treści (format HTML zostaje zachowany).
               </div>
             </div>
           </DialogDescription>
@@ -344,7 +515,7 @@ export function OrderMailPreviewDialog({ order, open, onClose }: Props) {
         {/* `min-h-0` jest tu obowiązkowe: element flex ma domyślnie
             `min-height:auto`, więc bez tego iframe rozepchnąłby okno zamiast
             oddać wysokość nagłówkowi i stopce. */}
-        <div className="flex-1 min-h-0 bg-slate-100 px-6 py-4">
+        <div className="flex-1 min-h-0 bg-slate-100 px-6 py-3">
           {loading && (
             <div className="h-full flex items-center justify-center text-slate-500 text-sm">
               Buduję podgląd…
@@ -370,12 +541,64 @@ export function OrderMailPreviewDialog({ order, open, onClose }: Props) {
           )}
         </div>
 
-        <div className="shrink-0 border-t border-slate-200 bg-white px-6 py-4 space-y-2">
+        <div className="shrink-0 border-t border-slate-200 bg-white px-6 py-3 space-y-1.5">
+          {sendOk && (
+            <div
+              className="rounded border border-green-300 bg-green-50 px-3 py-2 text-sm text-green-700"
+              role="status"
+              data-testid="zlecenia-mail-send-ok"
+            >
+              {sendOk}
+            </div>
+          )}
+          {sendError && (
+            <div
+              className="rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700"
+              role="alert"
+              data-testid="zlecenia-mail-send-error"
+            >
+              {sendError}
+            </div>
+          )}
           {actionError && (
             <div className="text-xs text-red-600" data-testid="zlecenia-mail-preview-copy-error">
               {actionError}
             </div>
           )}
+
+          {/* Historia zwinięta domyślnie — okno ma się mieścić przy 1280×800. */}
+          <div>
+            <button
+              type="button"
+              className="flex items-center gap-1 text-xs text-slate-500 hover:text-slate-700"
+              aria-expanded={historyOpen}
+              onClick={() => setHistoryOpen((o) => !o)}
+              data-testid="zlecenia-mail-history-toggle"
+            >
+              {historyOpen ? (
+                <ChevronDown className="w-3.5 h-3.5" aria-hidden />
+              ) : (
+                <ChevronRight className="w-3.5 h-3.5" aria-hidden />
+              )}
+              Historia wysyłek tego zlecenia
+              {history.length > 0 && <span className="text-slate-400">({history.length})</span>}
+            </button>
+            {/* Własny limit wysokości: rozwinięta historia ma przewijać się w
+                miejscu, a nie wypychać podglądu maila ze środka okna. */}
+            {historyOpen && (
+              <div className="mt-2 max-h-48 overflow-y-auto" data-testid="zlecenia-mail-history">
+                {historyLoading ? (
+                  <div className="flex items-center gap-2 text-xs text-slate-500">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden /> Wczytywanie…
+                  </div>
+                ) : historyError ? (
+                  <p className="text-xs text-slate-500">{historyError}</p>
+                ) : (
+                  <MailLogTable items={history} compact emptyText="Z tego zlecenia nic jeszcze nie wysłano." />
+                )}
+              </div>
+            )}
+          </div>
 
           {/* Osobno drobiazgi do nagłówka wiadomości — Outlook chce je w polach,
               nie w treści, więc lądują w schowku jako czysty tekst. Trzymamy je
@@ -404,6 +627,22 @@ export function OrderMailPreviewDialog({ order, open, onClose }: Props) {
             </Button>
           </div>
 
+          {!sendReady && preview && (
+            <div className="text-xs text-slate-500" data-testid="zlecenia-mail-send-hint">
+              {/* Sam powód od backendu — brzmi już jak zdanie („Wysyłka maili jest
+                  wyłączona…", „Nie ustawiono hasła SMTP"), więc nie doklejamy
+                  do niego drugiego „Wysyłka wyłączona:". */}
+              {sendReason}. Ustawienia:{" "}
+              {perms.isAdmin ? (
+                <Link to="/admin/poczta" className="text-indigo-600 underline underline-offset-2">
+                  Administracja → Poczta
+                </Link>
+              ) : (
+                "Administracja → Poczta"
+              )}
+            </div>
+          )}
+
           <div className="flex flex-wrap items-center justify-end gap-2">
             <Button
               variant="outline"
@@ -426,9 +665,17 @@ export function OrderMailPreviewDialog({ order, open, onClose }: Props) {
               )}
               {copied === "mail" ? "Skopiowano ✓" : "Kopiuj do Outlooka"}
             </Button>
-            {/* Wysyłka jeszcze nie istnieje — przycisk stoi, żeby było widać, dokąd to zmierza. */}
-            <Button disabled title="Wysyłka wkrótce" data-testid="zlecenia-mail-preview-send">
-              <Send className="w-4 h-4 mr-2" />
+            <Button
+              onClick={() => setConfirmOpen(true)}
+              disabled={sendDisabled}
+              title={sendBlockedTitle}
+              data-testid="zlecenia-mail-send"
+            >
+              {sending ? (
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" aria-hidden />
+              ) : (
+                <Send className="w-4 h-4 mr-2" />
+              )}
               Wyślij
             </Button>
             <Button variant="ghost" onClick={onClose} data-testid="zlecenia-mail-preview-close">
@@ -437,6 +684,29 @@ export function OrderMailPreviewDialog({ order, open, onClose }: Props) {
           </div>
         </div>
       </DialogContent>
+
+      <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Potwierdź wysyłkę</AlertDialogTitle>
+            <AlertDialogDescription>{confirmText}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={sending}>Anuluj</AlertDialogCancel>
+            <AlertDialogAction
+              data-testid="zlecenia-mail-send-confirm"
+              disabled={sending}
+              onClick={(e) => {
+                e.preventDefault();
+                void doSend();
+              }}
+            >
+              {sending && <Loader2 className="w-4 h-4 mr-2 animate-spin" aria-hidden />}
+              Wyślij
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Dialog>
   );
 }

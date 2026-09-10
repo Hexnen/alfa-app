@@ -10,6 +10,9 @@ import {
 import { findUserByEmail, publicUser } from "../lib/auth/users.js";
 import { verifyPassword, burnPasswordCheck } from "../lib/auth/passwords.js";
 import { clientIp, createRateLimiter } from "../lib/rate-limit.js";
+import { db } from "../db/index.js";
+import type { User } from "../db/schema.js";
+import { findSalespersonForUser } from "../lib/calendar-queries.js";
 
 const auth = new Hono();
 
@@ -71,6 +74,21 @@ auth.post("/register", (c) => {
   );
 });
 
+/**
+ * Publiczny user + `salespersonId` (po `salespeople.user_id`). To pole włącza
+ * w module handlowym filtr „Moje”; brak powiązania = null → front pokazuje
+ * „Wszyscy” i chowa przełącznik.
+ *
+ * MUSI iść przez OBA wejścia do sesji — `/login` i `/me`. Gdy `/login` zwracał
+ * samo `publicUser()`, `AuthProvider` sadzał do stanu użytkownika bez
+ * `salespersonId` i przełącznik „Moje/Wszyscy” pojawiał się dopiero po
+ * przeładowaniu strony (czyli po pierwszym `/me`).
+ */
+function withSalespersonId(user: User) {
+  const salesperson = findSalespersonForUser(user, db);
+  return { ...publicUser(user), salespersonId: salesperson?.id ?? null };
+}
+
 // --- POST /login ---
 auth.post("/login", async (c) => {
   const body = await c.req.json().catch(() => ({}));
@@ -102,7 +120,7 @@ auth.post("/login", async (c) => {
   }
   const { token, expiresAt } = createSession(user.id);
   setSessionCookie(c, token, expiresAt);
-  return c.json({ user: publicUser(user) });
+  return c.json({ user: withSalespersonId(user) });
 });
 
 // --- POST /logout ---
@@ -117,7 +135,7 @@ auth.post("/logout", (c) => {
 auth.get("/me", (c) => {
   const user = getSessionUser(getCookie(c, SESSION_COOKIE));
   if (!user) return c.json({ user: null }, 200);
-  return c.json({ user: publicUser(user) });
+  return c.json({ user: withSalespersonId(user) });
 });
 
 export default auth;

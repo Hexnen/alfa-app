@@ -11,7 +11,9 @@ import {
   type Ref,
   type RefObject,
 } from "react";
+import { Link } from "react-router-dom";
 import {
+  Building2,
   CalendarDays,
   Check,
   Download,
@@ -19,6 +21,7 @@ import {
   File as FileIcon,
   FileSpreadsheet,
   FileText,
+  Info,
   Loader2,
   Paperclip,
   Pencil,
@@ -31,7 +34,15 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -42,7 +53,9 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { tip } from "@/components/ui/tooltip";
 import { useAuth } from "@/auth/AuthProvider";
+import { usePerms } from "@/auth/permissions";
 import {
   CALENDAR_ATTACHMENT_ACCEPT,
   CALENDAR_ATTACHMENT_MAX_FILES,
@@ -531,6 +544,14 @@ export interface CalendarEventNotesProps {
    * propa chipy są nieklikalne (nadal pokazują rozstrzygniętą datę).
    */
   onOpenMention?: OpenMention;
+  /**
+   * Obiekt wydarzenia — odblokowuje „Zapisz też w obiekcie” (kopia notatki
+   * w kartotece). Bez niego (wydarzenie bez obiektu) kontrolki się nie pojawiają;
+   * poza `objectId` potrzebne jest jeszcze uprawnienie edit do klucza `objects`.
+   */
+  objectId?: number | null;
+  /** Nazwa obiektu — do treści modalu informacyjnego. */
+  objectName?: string | null;
   /** Uchwyt imperatywny (React 19: `ref` jako zwykły prop). */
   ref?: Ref<CalendarEventNotesHandle>;
 }
@@ -539,6 +560,11 @@ export interface CalendarEventNotesProps {
  * Dziennik notatek wydarzenia. Zapis od razu przez osobne API — niezależnie od „Zapisz” dialogu.
  * Własne notatki (lub admin): edycja inline, usunięcie z potwierdzeniem.
  * Załączniki: wybór z dysku / drop (przez `ref.addFiles`), multipart przy wysyłce.
+ *
+ * Kopia w kartotece obiektu (`objectId` + edit do klucza `objects`): toggle
+ * „Zapisz też w obiekcie” w kompozytorze albo „Do obiektu” na gotowej notatce.
+ * Obie ścieżki prowadzą przez ten sam modal informacyjny — kopia jest trwała,
+ * niezależna od oryginału i widoczna dla wszystkich z dostępem do obiektów.
  */
 export function CalendarEventNotes({
   eventId,
@@ -548,10 +574,17 @@ export function CalendarEventNotes({
   autoFocus,
   onDraftChange,
   onOpenMention,
+  objectId,
+  objectName,
   ref,
 }: CalendarEventNotesProps) {
   const { user } = useAuth();
+  const { canEdit: canEditTab, canView: canViewTab } = usePerms();
   const isAdmin = user?.role === "admin";
+  /** Kopiowanie do kartoteki: wydarzenie ma obiekt i mamy edit do klucza `objects`. */
+  const canCopyToObject = objectId != null && canEditTab("objects");
+  /** Sam chip „w obiekcie” z linkiem wystarczy podejrzeć — do tego starczy view. */
+  const canSeeObject = objectId != null && canViewTab("objects");
   const [notes, setNotes] = useState<CalendarNote[]>(() => initialNotes ?? []);
   const [loading, setLoading] = useState(!initialNotes);
   // Rodzic dociąga notatki po otwarciu (GET /events/:id) — synchronizacja w trakcie renderu, bez efektu.
@@ -576,6 +609,14 @@ export function CalendarEventNotes({
   const [lightbox, setLightbox] = useState<CalendarNoteAttachment | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [savedAt, setSavedAt] = useState<number | null>(null);
+  /** Czy nowa notatka ma trafić także do kartoteki obiektu. Reset po wysyłce. */
+  const [copyToObject, setCopyToObject] = useState(false);
+  /**
+   * Otwarty modal informacyjny: `composer` = pierwsze włączenie toggla,
+   * `{ noteId }` = kopiowanie istniejącej notatki. `null` = zamknięty.
+   */
+  const [copyInfo, setCopyInfo] = useState<"composer" | { noteId: number } | null>(null);
+  const [copyBusy, setCopyBusy] = useState(false);
   const addRef = useRef<HTMLTextAreaElement>(null);
   const editRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -691,15 +732,25 @@ export function CalendarEventNotes({
       if (opts?.rethrow) throw new Error(msg);
       return;
     }
+    // Kartoteka obiektu przechowuje treść, nie pliki — sama paczka załączników
+    // nie miałaby tam czego pokazać (backend odrzuca to samym komunikatem).
+    const copy = canCopyToObject && copyToObject;
+    if (copy && !text) {
+      const msg = "Do obiektu można skopiować tylko notatkę z treścią.";
+      setError(msg);
+      if (opts?.rethrow) throw new Error(msg);
+      return;
+    }
     setAdding(true);
     setError(null);
     try {
       const res = files.length
-        ? await calendarApi.addNoteWithFiles(eventId, text, files)
-        : await calendarApi.addNote(eventId, text);
+        ? await calendarApi.addNoteWithFiles(eventId, text, files, { copyToObject: copy })
+        : await calendarApi.addNote(eventId, text, { copyToObject: copy });
       if (res.data) publish([...notes, res.data]);
       setDraft("");
       clearPending();
+      setCopyToObject(false);
       setSavedAt(Date.now());
       addRef.current?.focus();
     } catch (e) {
@@ -714,6 +765,7 @@ export function CalendarEventNotes({
   const discardDraft = () => {
     setDraft("");
     clearPending();
+    setCopyToObject(false);
     setError(null);
   };
 
@@ -809,6 +861,34 @@ export function CalendarEventNotes({
       setError(errMsg(e, "Nie udało się usunąć załącznika."));
     } finally {
       setDeleteAttBusy(false);
+    }
+  };
+
+  /**
+   * Potwierdzenie modalu „Notatka w kartotece obiektu”. Dla kompozytora tylko
+   * włącza toggle (kopia powstanie przy wysyłce), dla istniejącej notatki od razu
+   * woła backend — operacja jest idempotentna, więc powtórka nic nie psuje.
+   */
+  const confirmCopyInfo = async () => {
+    if (copyInfo === "composer") {
+      setCopyToObject(true);
+      setCopyInfo(null);
+      return;
+    }
+    if (copyInfo == null || copyBusy) return;
+    const noteId = copyInfo.noteId;
+    setCopyBusy(true);
+    setError(null);
+    try {
+      const res = await calendarApi.copyNoteToObject(noteId);
+      const objectNoteId = res.data?.id ?? null;
+      publish(notes.map((n) => (n.id === noteId ? { ...n, objectNoteId } : n)));
+      setCopyInfo(null);
+    } catch (e) {
+      setError(errMsg(e, "Nie udało się skopiować notatki do obiektu."));
+      setCopyInfo(null);
+    } finally {
+      setCopyBusy(false);
     }
   };
 
@@ -1006,33 +1086,69 @@ export function CalendarEventNotes({
                         {hasText && <NoteText note={n} onOpenMention={onOpenMention} />}
                         {renderAttachments(n)}
                         <NoteLinkedEvents note={n} onOpenMention={onOpenMention} />
+                        {canSeeObject && n.objectNoteId != null && (
+                          <Link
+                            to={`/objects/${objectId}`}
+                            className="mt-1 inline-flex items-center gap-1 rounded-full border border-emerald-500/40 px-1.5 py-px text-[10px] font-medium text-emerald-800 hover:bg-emerald-500/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring dark:text-emerald-200"
+                            data-testid="note-in-object"
+                            {...tip(
+                              objectName
+                                ? `Kopia tej notatki jest w kartotece obiektu „${objectName}” — otwórz`
+                                : "Kopia tej notatki jest w kartotece obiektu — otwórz"
+                            )}
+                          >
+                            <Check className="h-3 w-3" aria-hidden />
+                            w obiekcie
+                          </Link>
+                        )}
                       </div>
-                      {canManage(n) && (
+                      {/* Kopiowanie do kartoteki nie wymaga autorstwa notatki (liczy się
+                          edit do klucza `objects`), więc pasek akcji pokazujemy też
+                          wtedy, gdy jedyną dostępną akcją jest „Do obiektu”. */}
+                      {(canManage(n) || (canCopyToObject && n.objectNoteId == null && hasText)) && (
                         <span className="flex shrink-0 items-center gap-0.5 opacity-70 transition-opacity focus-within:opacity-100 group-hover:opacity-100 sm:opacity-0">
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon"
-                            className="h-7 w-7 text-muted-foreground"
-                            aria-label="Edytuj notatkę"
-                            title="Edytuj"
-                            onClick={() => startEdit(n)}
-                            data-testid="note-edit"
-                          >
-                            <Pencil className="h-3.5 w-3.5" />
-                          </Button>
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon"
-                            className="h-7 w-7 text-muted-foreground hover:text-destructive"
-                            aria-label="Usuń notatkę"
-                            title="Usuń"
-                            onClick={() => setDeleteId(n.id)}
-                            data-testid="note-delete"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </Button>
+                          {canCopyToObject && n.objectNoteId == null && hasText && (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="h-7 w-7 text-muted-foreground"
+                              aria-label="Skopiuj notatkę do kartoteki obiektu"
+                              onClick={() => setCopyInfo({ noteId: n.id })}
+                              data-testid="note-copy-to-object"
+                              {...tip("Do obiektu — zapisz kopię w kartotece")}
+                            >
+                              <Building2 className="h-3.5 w-3.5" />
+                            </Button>
+                          )}
+                          {canManage(n) && (
+                            <>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon"
+                                className="h-7 w-7 text-muted-foreground"
+                                aria-label="Edytuj notatkę"
+                                title="Edytuj"
+                                onClick={() => startEdit(n)}
+                                data-testid="note-edit"
+                              >
+                                <Pencil className="h-3.5 w-3.5" />
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon"
+                                className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                                aria-label="Usuń notatkę"
+                                title="Usuń"
+                                onClick={() => setDeleteId(n.id)}
+                                data-testid="note-delete"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </Button>
+                            </>
+                          )}
                         </span>
                       )}
                     </div>
@@ -1100,6 +1216,43 @@ export function CalendarEventNotes({
             </ul>
           )}
 
+          {/* „Zapisz też w obiekcie” — tylko gdy jest do czego kopiować i wolno.
+              Pierwsze włączenie prowadzi przez modal, bo kopia jest trwała
+              i widoczna dla wszystkich z dostępem do obiektów. */}
+          {canCopyToObject && (
+            <div className="mt-1 flex items-center gap-1.5 px-1">
+              <Checkbox
+                id={`note-copy-object-${eventId}`}
+                checked={copyToObject}
+                disabled={adding}
+                onCheckedChange={(v) => {
+                  // Wyłączenie bez pytania; włączenie dopiero po przeczytaniu modalu.
+                  if (v === true) setCopyInfo("composer");
+                  else setCopyToObject(false);
+                }}
+                data-testid="note-copy-to-object-toggle"
+              />
+              <label
+                htmlFor={`note-copy-object-${eventId}`}
+                className="inline-flex cursor-pointer select-none items-center gap-1 text-[11px] text-muted-foreground"
+              >
+                <Building2 className="h-3.5 w-3.5" aria-hidden />
+                Zapisz też w obiekcie
+                {objectName && <span className="max-w-[12rem] truncate font-medium">„{objectName}”</span>}
+              </label>
+              <button
+                type="button"
+                onClick={() => setCopyInfo("composer")}
+                className="inline-flex h-5 w-5 items-center justify-center rounded-full text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                aria-label="Co to znaczy „Zapisz też w obiekcie”?"
+                data-testid="note-copy-to-object-info"
+                {...tip("Co się stanie po zaznaczeniu?")}
+              >
+                <Info className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          )}
+
           <div className="mt-1 flex flex-wrap items-center justify-between gap-2 px-1">
             <input
               ref={fileInputRef}
@@ -1159,6 +1312,50 @@ export function CalendarEventNotes({
           {error}
         </p>
       )}
+
+      {/* Modal informacyjny — jeden dla obu ścieżek: włączenia toggla w kompozytorze
+          i kopiowania istniejącej notatki. Tłumaczy skutki, bo kopia jest trwała. */}
+      <Dialog open={copyInfo != null} onOpenChange={(o) => !o && !copyBusy && setCopyInfo(null)}>
+        <DialogContent className="sm:max-w-md" data-testid="note-copy-to-object-dialog">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Building2 className="h-4 w-4 text-muted-foreground" aria-hidden />
+              Notatka w kartotece obiektu
+            </DialogTitle>
+            <DialogDescription asChild>
+              <div className="space-y-2 text-left">
+                <p>
+                  Notatka zostanie zapisana także w karcie obiektu{" "}
+                  <span className="font-medium text-foreground">„{objectName ?? `#${objectId}`}”</span>, w sekcji
+                  Notatki.
+                </p>
+                <ul className="list-disc space-y-1 pl-5">
+                  <li>zobaczy ją każdy, kto ma dostęp do obiektów;</li>
+                  <li>kopia będzie oznaczona źródłem — tym wydarzeniem;</li>
+                  <li>
+                    późniejsza edycja notatki w kalendarzu <span className="font-medium">nie zmieni</span> kopii
+                    w obiekcie (i odwrotnie).
+                  </li>
+                </ul>
+              </div>
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button type="button" variant="ghost" disabled={copyBusy} onClick={() => setCopyInfo(null)}>
+              Anuluj
+            </Button>
+            <Button
+              type="button"
+              disabled={copyBusy}
+              onClick={() => void confirmCopyInfo()}
+              data-testid="note-copy-to-object-confirm"
+            >
+              {copyBusy ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Check className="mr-1 h-4 w-4" />}
+              Rozumiem, dodaj do obiektu
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <AlertDialog open={deleteId != null} onOpenChange={(o) => !o && !deleteBusy && setDeleteId(null)}>
         <AlertDialogContent className="motion-reduce:animate-none">

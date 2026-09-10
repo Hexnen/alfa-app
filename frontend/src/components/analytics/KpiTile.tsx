@@ -34,6 +34,8 @@ export interface KpiTileProps {
   coverage?: CoverageProps;
   className?: string;
   onClick?: () => void;
+  /** Uchwyt dla testów — etykieta kafelka bywa długa i zmienna (horyzont w dniach). */
+  "data-testid"?: string;
 }
 
 export function KpiTile({
@@ -45,14 +47,32 @@ export function KpiTile({
   coverage,
   className,
   onClick,
+  "data-testid": testId,
 }: KpiTileProps) {
   return (
     <Card
       title={tip}
+      data-testid={testId}
       onClick={onClick}
+      // Kafelek z akcją musi być osiągalny z klawiatury: to `div`, więc rolę
+      // i obsługę Enter/Spacji trzeba dołożyć ręcznie. Bez `onClick` kafelek
+      // zostaje zwykłym tekstem i NIE trafia do kolejki tabulacji.
+      role={onClick ? "button" : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      onKeyDown={
+        onClick
+          ? (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onClick();
+              }
+            }
+          : undefined
+      }
       className={cn(
         tip && "cursor-help",
-        onClick && "cursor-pointer transition-colors hover:bg-slate-50",
+        onClick &&
+          "cursor-pointer transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
         className
       )}
     >

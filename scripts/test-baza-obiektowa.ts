@@ -44,6 +44,14 @@ const objects = db.select().from(schema.objects).all();
 const monitored = db.select().from(schema.monitoredObjects).all();
 const hrObjects = db.select().from(schema.hrObjects).all();
 const companies = db.select().from(schema.companies).all();
+/** Okresy usług — od migracji 0084 to ONE są źródłem prawdy dla flag `has_*`. */
+const services = db.select().from(schema.objectServices).all();
+const servicesByObject = new Map<number, typeof services>();
+for (const s of services) {
+  const list = servicesByObject.get(s.objectId);
+  if (list) list.push(s);
+  else servicesByObject.set(s.objectId, [s]);
+}
 
 const contractorById = new Map(contractors.map((c) => [c.id, c]));
 const contractorByNip = new Map(contractors.map((c) => [normalizeNIP(c.nip), c]));
@@ -125,6 +133,50 @@ console.log(`Kontrahentów ${contractors.length}, obiektów ${objects.length}, p
     ofiOnly.every((o) => o.hasOfi),
     sample(ofiOnly.filter((o) => !o.hasOfi).map((o) => o.name))
   );
+  // Usługa bez OKRESU nie istnieje: od migracji 0084 flagi `has_*` są cache'em
+  // przeliczanym z `object_services`, więc obiekt z zapaloną flagą i bez wiersza
+  // zgasłby przy pierwszej synchronizacji (start backendu).
+  const withoutPeriod = ofiOnly.filter(
+    (o) => !(servicesByObject.get(o.id) ?? []).some((s) => s.service === "ofi")
+  );
+  check(
+    "posterunki OFI mają okres usługi w object_services",
+    withoutPeriod.length === 0,
+    sample(withoutPeriod.map((o) => `${o.id} ${o.name}`))
+  );
+}
+
+// 5b. Flagi usług zgodne z okresami — cache nie może się rozjechać ze źródłem.
+{
+  const missing = objects.filter((o) => {
+    const rows = servicesByObject.get(o.id) ?? [];
+    const has = (s: string) => rows.some((r) => r.service === s);
+    return (
+      (o.hasCameras && !has("kamery")) ||
+      (o.hasSswin && !has("sswin")) ||
+      (o.hasVideoreception && !has("wideorecepcja")) ||
+      (o.hasOfi && !has("ofi"))
+    );
+  });
+  check(
+    "każda zapalona flaga usługi ma okres w object_services",
+    missing.length === 0,
+    sample(missing.map((o) => `${o.id} ${o.name}`))
+  );
+
+  const badDates = services.filter((s) => !/^\d{4}-\d{2}-\d{2}$/.test(s.startDate));
+  check(
+    "daty rozpoczęcia okresów w formacie RRRR-MM-DD",
+    badDates.length === 0,
+    sample(badDates.map((s) => `${s.objectId}: ${s.startDate}`))
+  );
+
+  const badCameraPeriods = services.filter((s) => s.service !== "kamery" && s.cameraCount !== null);
+  check(
+    "liczba kamer wpisana wyłącznie przy usłudze „kamery”",
+    badCameraPeriods.length === 0,
+    sample(badCameraPeriods.map((s) => `${s.objectId}: ${s.service}=${s.cameraCount}`))
+  );
 }
 
 // 6. Do notatek nie przeciekły hasła, loginy ani adresy urządzeń z rejestru CMA.
@@ -178,8 +230,25 @@ console.log(`Kontrahentów ${contractors.length}, obiektów ${objects.length}, p
   const badCompany = objects.filter((o) => o.companyId !== null && !companyIds.has(o.companyId));
   check("company_id wskazuje istniejącą spółkę", badCompany.length === 0, sample(badCompany.map((o) => o.name)));
 
-  const badMoney = objects.filter((o) => o.monthlyValue !== null && !(o.monthlyValue > 0));
-  check("abonament, jeśli jest, jest dodatni", badMoney.length === 0, sample(badMoney.map((o) => `${o.name}: ${o.monthlyValue}`)));
+  // Abonament jest ROZBITY na linie (migracja 0082) — sprawdzamy obie osobno,
+  // bo zero w jednej z nich znaczyłoby „tę usługę świadczymy za darmo".
+  const badMoney = objects.filter(
+    (o) => (o.monthlyZdw !== null && !(o.monthlyZdw > 0)) || (o.monthlyOfi !== null && !(o.monthlyOfi > 0))
+  );
+  check(
+    "abonament (ZDW / OFI), jeśli jest, jest dodatni",
+    badMoney.length === 0,
+    sample(badMoney.map((o) => `: zdw= ofi=`))
+  );
+
+  // Po rozbiciu  `monthly_value` nie może być JEDYNYM nośnikiem kwoty:
+  // obiekt z abonamentem musi mieć wypełnioną którąś z linii.
+  const unsplit = objects.filter((o) => o.monthlyValue !== null && o.monthlyZdw === null && o.monthlyOfi === null);
+  check(
+    "każdy abonament jest rozbity na ZDW / OFI",
+    unsplit.length === 0,
+    sample(unsplit.map((o) => `: `))
+  );
 
   const badCoords = objects.filter(
     (o) =>
@@ -191,6 +260,25 @@ console.log(`Kontrahentów ${contractors.length}, obiektów ${objects.length}, p
 
   const badCameras = objects.filter((o) => o.cameraCount !== null && o.cameraCount <= 0);
   check("liczba kamer nigdy nie jest zerem (NULL = nie policzono)", badCameras.length === 0, sample(badCameras.map((o) => o.name)));
+
+  // Liczba kamer na obiekcie to SUMA po aktywnych okresach kamer (a NULL, gdy
+  // któryś okres jej nie zna) — rozjazd znaczy, że ktoś zapisał kolumnę z pominięciem synca.
+  const today = new Date().toISOString().slice(0, 10);
+  const cameraMismatch = objects.filter((o) => {
+    const active = (servicesByObject.get(o.id) ?? []).filter(
+      (s) => s.service === "kamery" && (s.endDate === null || s.endDate >= today)
+    );
+    if (active.length === 0) return false; // obiekt bez aktywnych kamer — patrz test flag wyżej
+    const expected = active.some((s) => s.cameraCount === null)
+      ? null
+      : active.reduce((sum, s) => sum + (s.cameraCount ?? 0), 0);
+    return o.cameraCount !== expected;
+  });
+  check(
+    "liczba kamer na obiekcie zgodna z sumą z aktywnych okresów",
+    cameraMismatch.length === 0,
+    sample(cameraMismatch.map((o) => `${o.id} ${o.name}: ${o.cameraCount}`))
+  );
 }
 
 // 10. Kartoteka nie jest już demonstracyjna — dane z seeda musiały zniknąć.

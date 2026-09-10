@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import contractorsRoutes from "./contractors.js";
 import objectsRoutes from "./objects.js";
 import contractsRoutes from "./contracts.js";
+import contractDraftsRoutes from "./contract-drafts.js";
 import historyRoutes from "./history.js";
 import ordersRoutes from "./orders.js";
 import realizationsRoutes from "./realizations.js";
@@ -24,16 +25,21 @@ import hrRoutes from "./hr.js";
 import warehouseRoutes from "./warehouse.js";
 import warehousePluginRoutes from "./warehouse-plugin.js";
 import pluginRoutes from "./plugin.js";
+import manualsRoutes from "./manuals.js";
+import interventionGroupsRoutes from "./intervention-groups.js";
 import authRoutes from "./auth.js";
 import publicRoutes from "./public.js";
 import adminRoutes from "./admin.js";
 import adminAssistantRoutes from "./admin-assistant.js";
 import adminCalendarRoutes from "./admin-calendar.js";
 import adminCompanyRoutes from "./admin-company.js";
+import adminMailRoutes from "./admin-mail.js";
 import assistantRoutes from "./assistant.js";
 import calendarRoutes, { calendarPublicRoutes } from "./calendar.js";
 import activityRoutes from "./activity.js";
 import analyticsRoutes from "./analytics.js";
+import leadsRoutes from "./leads.js";
+import contactsRoutes from "./contacts.js";
 import { requireAuth, requireAssistantAccess, tabPermissionGuard, getUser } from "../middleware/auth.js";
 import { canView } from "../lib/auth/permissions.js";
 import { db, schema } from "../db/index.js";
@@ -55,6 +61,8 @@ const BODY_LIMIT_XLS_IMPORT = 20 * MB;
 const BODY_LIMIT_DESIGNER = 30 * MB;
 /** Notatki wydarzeń z załącznikami: 15 plików × 5 MB + narzut multipart (src/lib/calendar-attachments.ts). */
 const BODY_LIMIT_NOTE_ATTACHMENTS = 80 * MB;
+/** Manuale z załącznikami: ten sam limit co notatki (15 plików × 5 MB + narzut multipart). */
+const BODY_LIMIT_MANUAL_ATTACHMENTS = BODY_LIMIT_NOTE_ATTACHMENTS;
 /**
  * Import towaru z zapisanej strony sklepu. „Strona sieci Web, kompletna” z
  * Chrome ma inline'owane CSS-y i base64 obrazków — próbka SAMAL waży ~1,3 MB,
@@ -77,6 +85,22 @@ function bodyLimitFor(path: string, method: string): number {
   }
   if (/^\/monitoring\/snapshots\/\d+$/.test(path) && method === "PUT") return BODY_LIMIT_DESIGNER;
   if (/^\/calendar\/events\/\d+\/notes$/.test(path) && method === "POST") return BODY_LIMIT_NOTE_ATTACHMENTS;
+  // Manuale: multipart przy zakładaniu (POST /manuals) i przy dokładaniu plików.
+  if (path === "/manuals" && method === "POST") return BODY_LIMIT_MANUAL_ATTACHMENTS;
+  if (/^\/manuals\/\d+\/attachments$/.test(path) && method === "POST") return BODY_LIMIT_MANUAL_ATTACHMENTS;
+  // Grupy interwencyjne: umowy ramowe firmy, umowa na obiekt, dokumentacja podjazdu —
+  // ten sam moduł załączników, więc ten sam limit co manuale.
+  if (
+    /^\/cma\/intervention-groups\/(companies|terms|interventions)\/\d+\/attachments$/.test(path) &&
+    method === "POST"
+  ) {
+    return BODY_LIMIT_MANUAL_ATTACHMENTS;
+  }
+  // Drafty umów: skan podpisanej umowy i aneksy — ten sam moduł załączników,
+  // więc ten sam limit co manuale.
+  if (/^\/contracts\/drafts\/\d+\/attachments$/.test(path) && method === "POST") {
+    return BODY_LIMIT_MANUAL_ATTACHMENTS;
+  }
   if (path === "/cma/reports/import" || path === "/monitored-objects/import") {
     return BODY_LIMIT_XLS_IMPORT;
   }
@@ -139,6 +163,7 @@ api.use("*", requireAuth);
 api.route("/admin/assistant", adminAssistantRoutes);
 api.route("/admin/calendar", adminCalendarRoutes);
 api.route("/admin/company", adminCompanyRoutes);
+api.route("/admin/mail", adminMailRoutes);
 api.route("/admin", adminRoutes);
 
 // --- ASYSTENT AI (kalendarz) — dostęp wg ustawienia assistant.access (admin lub edytorzy kalendarza);
@@ -215,7 +240,7 @@ api.get("/stats", async (c) => {
     // Przychód miesięczny = abonament + dzierżawa sprzętu (obie kwoty płatne co miesiąc).
     const [monthlyValueSum] = await db
       .select({
-        sum: sql<number>`COALESCE(sum(COALESCE(monthly_value, 0) + COALESCE(monthly_rental, 0)), 0)`,
+        sum: sql<number>`COALESCE(sum(COALESCE(monthly_zdw, 0) + COALESCE(monthly_ofi, 0) + COALESCE(monthly_rental, 0)), 0)`,
       })
       .from(o)
       .where(eq(o.status, "active"));
@@ -256,6 +281,10 @@ api.get("/stats", async (c) => {
 // Mount routes
 api.route("/contractors", contractorsRoutes);
 api.route("/objects", objectsRoutes);
+// Drafty umów PRZED /contracts — Hono dopasowuje po kolejności rejestracji,
+// więc szerszy prefiks przykryłby ten router i `/contracts/drafts` wpadłoby
+// w `/contracts/:id` rejestru (400 „Nieprawidłowe id”).
+api.route("/contracts/drafts", contractDraftsRoutes);
 api.route("/contracts", contractsRoutes);
 api.route("/history", historyRoutes);
 api.route("/orders", ordersRoutes);
@@ -271,6 +300,10 @@ api.route("/protocols", protocolsRoutes);
 api.route("/quotes", quotesRoutes);
 api.route("/services", servicesRoutes);
 api.route("/offers", offersRoutes);
+// Grupy interwencyjne PRZED /cma i /cma/mail — Hono dopasowuje po kolejności
+// rejestracji, więc szerszy prefiks /cma przykryłby tę zakładkę (403 dla
+// właściciela klucza `cma/grupy-interwencyjne`).
+api.route("/cma/intervention-groups", interventionGroupsRoutes);
 api.route("/cma/mail", cmaMailRoutes);
 api.route("/cma", cmaRoutes);
 api.route("/monitoring", monitoringRoutes);
@@ -281,9 +314,15 @@ api.route("/hr", hrRoutes);
 // dziedziczą z prefiksu /warehouse w API_TAB_MAP).
 api.route("/warehouse", warehousePluginRoutes);
 api.route("/warehouse", warehouseRoutes);
+api.route("/manuals", manualsRoutes);
 // Analityka finansowa — montowana TUTAJ, czyli poniżej api.use("*", tabPermissionGuard).
 // W bloku nad strażnikiem (obok /calendar czy /company-lookup) wystawiłaby przychody,
 // koszty i wynagrodzenia handlowców każdemu zalogowanemu użytkownikowi.
 api.route("/analytics", analyticsRoutes);
+// Lejek handlowy — jak analityka, POD strażnikiem: `/leads` i `/contacts` mają
+// własne wpisy w API_TAB_MAP (src/middleware/auth.ts), a bez strażnika kwoty
+// i kontakty klientów byłyby widoczne dla każdego zalogowanego.
+api.route("/leads", leadsRoutes);
+api.route("/contacts", contactsRoutes);
 
 export default api;

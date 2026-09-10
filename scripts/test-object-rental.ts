@@ -79,7 +79,7 @@ try {
       type: "monitoring",
       installationType: "new",
       status: "active",
-      monthlyValue: 200,
+      monthlyZdw: 200,
       monthlyRental: 400,
       monthlyCost: 100,
     })
@@ -95,7 +95,7 @@ try {
       type: "monitoring",
       installationType: "new",
       status: "active",
-      monthlyValue: 300,
+      monthlyZdw: 300,
       monthlyCost: 100,
     })
     .returning()

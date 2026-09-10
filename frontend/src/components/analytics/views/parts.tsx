@@ -121,9 +121,13 @@ export function PersonnelFootnote({
           {service === "ofi"
             ? " (obiekty z ochroną fizyczną). Koszt osobowy to wyłącznie wypłaty za godziny przepracowane na obiekcie — udział w puli centrum monitorowania należy do ZDV."
             : " (obiekty z kamerami, SSWiN-em albo wideorecepcją). Koszt osobowy to wyłącznie udział w puli centrum monitorowania — wypłaty wartowników należą do OFI."}{" "}
-          Przychód i koszt pozostały zostają w całości: kartoteka trzyma jedną
-          kwotę na obiekt, więc obiekt z obiema usługami liczy się po obu
-          stronach i sumy „ZDV” + „OFI” nie dodają się do całości firmy.
+          {service === "ofi"
+            ? "Przychód to abonament OFI."
+            : "Przychód to abonament ZDW plus dzierżawa sprzętu (dzierżawiony sprzęt to sprzęt monitoringu)."}{" "}
+          Koszt pozostały zostaje w całości po obu stronach: kartoteka trzyma
+          jedną kwotę kosztu na obiekt. Obiekt z obiema usługami liczy się w
+          OBU przekrojach, ale swoją częścią abonamentu — dlatego przychód
+          „ZDV” + „OFI” równa się całości firmy, a liczba obiektów nie.
         </p>
       )}
       {mapped ? (

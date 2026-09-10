@@ -28,6 +28,14 @@ function usageOf(name: string, id: number) {
     .from(schema.hrContracts)
     .where(eq(schema.hrContracts.company, name))
     .get();
+  // Drafty umów: spółka nadała numer z własnego licznika. Skasowanie jej
+  // rozsypałoby numerację (kolejny draft dostałby seq 1 i wpadł w duplikat),
+  // dlatego klucz obcy jest na RESTRICT, a tu mówimy o tym po polsku.
+  const drafts = db
+    .select({ count: sql<number>`count(*)` })
+    .from(schema.contractDrafts)
+    .where(eq(schema.contractDrafts.companyId, id))
+    .get();
   const office = db
     .select({ count: sql<number>`count(*)` })
     .from(schema.hrOfficePayroll)
@@ -37,6 +45,7 @@ function usageOf(name: string, id: number) {
     objects: objects?.count ?? 0,
     contracts: contracts?.count ?? 0,
     officeRows: office?.count ?? 0,
+    contractDrafts: drafts?.count ?? 0,
   };
 }
 
@@ -58,6 +67,15 @@ interface CompanyFields {
   employerMarkupUop: number | null;
   employerMarkupZlecenieZua: number | null;
   employerMarkupZlecenieZza: number | null;
+  /*
+   * Dane do umów (moduł „Drafty umów”). Puste pole = NULL, a nie pusty napis:
+   * brak `contractCode` znaczy „ta spółka nie numeruje umów” i backend draftów
+   * odmawia wtedy nadania numeru — pusty napis udawałby uzupełnioną wartość.
+   */
+  contractCode: string | null;
+  contractName: string | null;
+  representativeLine: string | null;
+  shareCapital: string | null;
 }
 
 /**
@@ -121,6 +139,11 @@ function parseBody(body: Record<string, unknown>): { data?: CompanyFields; error
       employerMarkupUop: uop.value,
       employerMarkupZlecenieZua: zua.value,
       employerMarkupZlecenieZza: zza.value,
+      // Kod idzie WERSALIKAMI — wchodzi wprost do numeru umowy („12/ZDW/2026”).
+      contractCode: str(body.contractCode).toUpperCase() || null,
+      contractName: str(body.contractName) || null,
+      representativeLine: str(body.representativeLine) || null,
+      shareCapital: str(body.shareCapital) || null,
     },
   };
 }
@@ -136,7 +159,7 @@ app.get("/", async (c) => {
         select count(*) from objects where objects.company_id = companies.id
       )`,
       objectsMonthlyValue: sql<number>`(
-        select coalesce(sum(coalesce(monthly_value, 0) + coalesce(monthly_rental, 0)), 0) from objects where objects.company_id = companies.id
+        select coalesce(sum(coalesce(monthly_zdw, 0) + coalesce(monthly_ofi, 0) + coalesce(monthly_rental, 0)), 0) from objects where objects.company_id = companies.id
       )`,
       contractsCount: sql<number>`(
         select count(*) from hr_contracts where hr_contracts.company = companies.name
@@ -273,11 +296,12 @@ app.delete("/:id", async (c) => {
   }
 
   const used = usageOf(existing[0].name, id);
-  if (used.objects > 0 || used.contracts > 0 || used.officeRows > 0) {
+  if (used.objects > 0 || used.contracts > 0 || used.officeRows > 0 || used.contractDrafts > 0) {
     const bits = [
       used.objects > 0 ? `${used.objects} obiekt(ów)` : null,
       used.contracts > 0 ? `${used.contracts} umów w kadrach` : null,
       used.officeRows > 0 ? `${used.officeRows} wierszy wynagrodzeń biura` : null,
+      used.contractDrafts > 0 ? `${used.contractDrafts} draft(ów) umów` : null,
     ].filter(Boolean);
     return c.json<ApiResponse<null>>(
       {

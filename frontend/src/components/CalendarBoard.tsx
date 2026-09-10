@@ -1,11 +1,11 @@
-import { useMemo, useState, type DragEvent, type MouseEvent as ReactMouseEvent } from "react";
+import { useMemo, useState, type DragEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { AlertTriangle, Building2, CalendarX2, Repeat, Users } from "lucide-react";
 import type { CalendarEvent, CalendarEventStatus, CalendarEventType, WeatherBrief } from "@/lib/api";
 import {
   EVENT_STATUS_META,
   EVENT_STATUS_ORDER,
   EVENT_TYPE_META,
-  EVENT_TYPE_ORDER,
+  DEPARTMENT_TYPE_ORDER,
   eventTipAria,
   eventTipData,
   eventsCount,
@@ -23,6 +23,13 @@ import { cn } from "@/lib/utils";
 /** Grupowanie kolumn tablicy: wg statusu (domyślnie) albo wg typu. */
 export type BoardGroupBy = "status" | "type";
 
+/** Osoba przypisana do wydarzenia — technik albo handlowiec (inicjały na karcie). */
+interface BoardAssignee {
+  id: number;
+  firstName: string;
+  lastName: string;
+}
+
 interface CalendarBoardProps {
   events: CalendarEvent[];
   /** Skróty pogody po id wydarzenia (dolatują osobnym batchem — mogą być puste). */
@@ -37,9 +44,25 @@ interface CalendarBoardProps {
   onMove: (ev: CalendarEvent, target: CalendarEventStatus | CalendarEventType) => Promise<void> | void;
   /** CTA pustego stanu (np. „Nowe wydarzenie”) — pokazywane tylko, gdy cała tablica jest pusta. */
   onCreate?: () => void;
+  /**
+   * Kolumny tablicy; brak = domyślne (statusy albo typy działu technicznego).
+   * Kalendarz handlowy podaje własne z `buildBoardColumns(groupBy, cfg.typeOrder, cfg.statusOrder)`.
+   */
+  columns?: BoardColumn[];
+  /**
+   * Znaczniki techniczne na kartach (rozliczenie, protokół, wycena, realizacja).
+   * Domyślnie `true` — dział handlowy tych bytów nie ma.
+   */
+  showTechBadges?: boolean;
+  /** Przypisani do wydarzenia; domyślnie technicy (`ev.technicians`). */
+  getAssignees?: (ev: CalendarEvent) => BoardAssignee[];
+  /** Teksty dymka przy inicjałach: „Technicy” / „Handlowcy”. */
+  assigneeLabels?: { one: string; many: string };
+  /** Dodatkowy wiersz na karcie (dział handlowy: tytuł szansy). */
+  renderCardMeta?: (ev: CalendarEvent) => ReactNode;
 }
 
-interface BoardColumn {
+export interface BoardColumn {
   key: string;
   label: string;
   /** Klasy nagłówka (kolor statusu / chip typu). */
@@ -73,6 +96,35 @@ export function isOverdue(ev: CalendarEvent, now: Date): boolean {
 const initials = (t: { firstName: string; lastName: string }) =>
   `${t.firstName[0] ?? ""}${t.lastName[0] ?? ""}`.toUpperCase();
 
+/**
+ * Kolumny tablicy dla działu: statusy albo typy w kolejności z `CalendarConfig`.
+ * Bez argumentów daje dokładnie to, co tablica techniczna miała przed refaktorem.
+ */
+export function buildBoardColumns(
+  groupBy: BoardGroupBy,
+  typeOrder: CalendarEventType[] = DEPARTMENT_TYPE_ORDER.technical,
+  statusOrder: CalendarEventStatus[] = EVENT_STATUS_ORDER
+): BoardColumn[] {
+  if (groupBy === "status") {
+    return statusOrder.map((s) => ({
+      key: s,
+      label: EVENT_STATUS_META[s].label,
+      headClass: EVENT_STATUS_META[s].badge,
+      accent: STATUS_ACCENT[s],
+      hint: EVENT_STATUS_META[s].hint,
+    }));
+  }
+  return typeOrder.map((t) => ({
+    key: t,
+    label: EVENT_TYPE_META[t].label,
+    headClass: cn("border bg-background", EVENT_TYPE_META[t].chip),
+    accent: typeColor(t),
+    icon: EVENT_TYPE_META[t].icon,
+  }));
+}
+
+const defaultAssignees = (ev: CalendarEvent): BoardAssignee[] => ev.technicians ?? [];
+
 export function CalendarBoard({
   events,
   weather,
@@ -83,29 +135,20 @@ export function CalendarBoard({
   onContextMenu,
   onMove,
   onCreate,
+  columns: columnsProp,
+  showTechBadges = true,
+  getAssignees = defaultAssignees,
+  assigneeLabels,
+  renderCardMeta,
 }: CalendarBoardProps) {
   const [dragId, setDragId] = useState<number | null>(null);
   const [overKey, setOverKey] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
 
-  const columns = useMemo<BoardColumn[]>(() => {
-    if (groupBy === "status") {
-      return EVENT_STATUS_ORDER.map((s) => ({
-        key: s,
-        label: EVENT_STATUS_META[s].label,
-        headClass: EVENT_STATUS_META[s].badge,
-        accent: STATUS_ACCENT[s],
-        hint: EVENT_STATUS_META[s].hint,
-      }));
-    }
-    return EVENT_TYPE_ORDER.map((t) => ({
-      key: t,
-      label: EVENT_TYPE_META[t].label,
-      headClass: cn("border bg-background", EVENT_TYPE_META[t].chip),
-      accent: typeColor(t),
-      icon: EVENT_TYPE_META[t].icon,
-    }));
-  }, [groupBy]);
+  const columns = useMemo<BoardColumn[]>(
+    () => columnsProp ?? buildBoardColumns(groupBy),
+    [columnsProp, groupBy]
+  );
 
   const grouped = useMemo(() => {
     const now = new Date();
@@ -295,6 +338,10 @@ export function CalendarBoard({
                     onDragEnd={handleDragEnd}
                     onOpen={() => onOpen(ev)}
                     onContextMenu={(e) => onContextMenu(ev, e)}
+                    assignees={getAssignees(ev)}
+                    assigneeLabels={assigneeLabels}
+                    showTechBadges={showTechBadges}
+                    meta={renderCardMeta?.(ev)}
                   />
                 ))}
                 {items.length > 0 && isOver && (
@@ -323,6 +370,12 @@ interface BoardCardProps {
   onDragEnd: () => void;
   onOpen: () => void;
   onContextMenu: (e: ReactMouseEvent) => void;
+  /** Przypisani (technicy albo handlowcy) — inicjały w stopce karty. */
+  assignees: BoardAssignee[];
+  assigneeLabels?: { one: string; many: string };
+  showTechBadges: boolean;
+  /** Dodatkowy wiersz pod tytułem (np. tytuł szansy w dziale handlowym). */
+  meta?: ReactNode;
 }
 
 function BoardCard({
@@ -336,10 +389,14 @@ function BoardCard({
   onDragEnd,
   onOpen,
   onContextMenu,
+  assignees,
+  assigneeLabels,
+  showTechBadges,
+  meta: cardMeta,
 }: BoardCardProps) {
   const meta = EVENT_TYPE_META[ev.type];
   const Icon = meta?.icon ?? Building2;
-  const techs = ev.technicians ?? [];
+  const techs = assignees;
   const color = typeColor(ev.type);
 
   return (
@@ -392,10 +449,16 @@ function BoardCard({
           <div className="mt-0.5 text-xs tabular-nums text-muted-foreground">
             {fmtRange(ev.startAt, ev.endAt, ev.allDay)}
           </div>
+          {cardMeta}
         </div>
       </div>
 
-      {(ev.objectName || techs.length > 0 || ev.seriesId || overdue || ev.billing || protocolBadgeKind(ev) || wx) && (
+      {(ev.objectName ||
+        techs.length > 0 ||
+        ev.seriesId ||
+        overdue ||
+        (showTechBadges && (ev.billing || protocolBadgeKind(ev))) ||
+        wx) && (
         <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
           {ev.objectName && (
             <span className="inline-flex min-w-0 max-w-full items-center gap-1">
@@ -407,7 +470,10 @@ function BoardCard({
             <span
               className="inline-flex items-center gap-1"
               {...tipAttrs({
-                title: techs.length > 1 ? "Technicy" : "Technik",
+                title:
+                  techs.length > 1
+                    ? (assigneeLabels?.many ?? "Technicy")
+                    : (assigneeLabels?.one ?? "Technik"),
                 text: techs.map((t) => `${t.firstName} ${t.lastName}`).join("\n"),
               })}
             >
@@ -454,10 +520,14 @@ function BoardCard({
             </span>
           )}
           <WeatherMark brief={wx} compact />
-          <BillingBadge billing={ev.billing} compact />
-          <ProtocolBadge event={ev} compact />
-          <QuoteBadge event={ev} compact />
-          <RealizationBadge event={ev} compact />
+          {showTechBadges && (
+            <>
+              <BillingBadge billing={ev.billing} compact />
+              <ProtocolBadge event={ev} compact />
+              <QuoteBadge event={ev} compact />
+              <RealizationBadge event={ev} compact />
+            </>
+          )}
         </div>
       )}
     </div>

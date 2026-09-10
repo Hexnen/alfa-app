@@ -10,7 +10,7 @@ import {
   DialogTitle,
   DialogFooter,
 } from "./ui/dialog";
-import type { HrEmployeeRef, Salesperson, SalespersonInput } from "@/lib/api";
+import type { AdminUser, HrEmployeeRef, Salesperson, SalespersonInput } from "@/lib/api";
 
 interface SalespersonFormProps {
   open: boolean;
@@ -19,6 +19,12 @@ interface SalespersonFormProps {
   salesperson?: Salesperson | null;
   /** Pracownicy z kadr do powiązania; pusta lista = pole pokazuje tylko „bez powiązania". */
   employees?: HrEmployeeRef[];
+  /**
+   * Konta użytkowników do wyboru. `undefined` = pole „Konto w systemie" w ogóle
+   * się nie pokazuje — listę kont widzi wyłącznie administrator, a przypisanie
+   * konta decyduje o tym, czyje szanse ktoś zobaczy pod filtrem „Moje".
+   */
+  users?: AdminUser[];
 }
 
 /** Formularz handlowca — ten sam układ, co formularz technika. */
@@ -28,6 +34,7 @@ export function SalespersonForm({
   onSubmit,
   salesperson,
   employees = [],
+  users,
 }: SalespersonFormProps) {
   const [loading, setLoading] = useState(false);
   const [formData, setFormData] = useState<SalespersonInput>({
@@ -39,9 +46,12 @@ export function SalespersonForm({
     monthlyCost: salesperson?.monthlyCost ?? null,
     commissionRate: salesperson?.commissionRate ?? null,
     employeeId: salesperson?.employeeId ?? null,
+    userId: salesperson?.userId ?? null,
     notes: salesperson?.notes || "",
     active: salesperson?.active ?? true,
   });
+  /** Komunikat 409 z backendu: to konto prowadzi już innego handlowca. */
+  const [userError, setUserError] = useState<string | null>(null);
 
   const setField = (name: keyof SalespersonInput, value: unknown) =>
     setFormData((p) => ({ ...p, [name]: value }));
@@ -56,11 +66,21 @@ export function SalespersonForm({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
+    setUserError(null);
     try {
-      await onSubmit(formData);
+      // Pole „Konto" wysyłamy TYLKO wtedy, gdy formularz je pokazał. Bez tego
+      // zapis zwykłego użytkownika (który konta nie widzi) odpinałby je,
+      // wysyłając `userId: null` z domyślnego stanu.
+      const payload: SalespersonInput = { ...formData };
+      if (!users) delete payload.userId;
+      await onSubmit(payload);
       onClose();
     } catch (error) {
-      alert(error instanceof Error ? error.message : "Błąd zapisu handlowca");
+      const message = error instanceof Error ? error.message : "Błąd zapisu handlowca";
+      // Jedno konto = jeden portfel: backend odpowiada 409 z nazwiskiem osoby,
+      // która to konto już ma. Pokazujemy to PRZY POLU, a nie w alercie.
+      if ((error as { status?: number }).status === 409) setUserError(message);
+      else alert(message);
     } finally {
       setLoading(false);
     }
@@ -122,6 +142,38 @@ export function SalespersonForm({
               onChange={(e) => setField("region", e.target.value)}
             />
           </div>
+
+          {/* KONTO W SYSTEMIE — tylko dla administratora (patrz prop `users`). */}
+          {users && (
+            <div className="space-y-2">
+              <Label htmlFor="salesperson-user">Konto w systemie</Label>
+              <select
+                id="salesperson-user"
+                data-testid="salesperson-user"
+                className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                value={formData.userId ?? ""}
+                onChange={(e) => {
+                  setUserError(null);
+                  setField("userId", e.target.value ? Number(e.target.value) : null);
+                }}
+              >
+                <option value="">— bez konta —</option>
+                {users.map((u) => (
+                  <option key={u.id} value={u.id}>
+                    {u.displayName || u.email} ({u.email})
+                  </option>
+                ))}
+              </select>
+              {userError ? (
+                <p className="text-xs text-destructive">{userError}</p>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  Po tym powiązaniu działa filtr „Moje” w module Handlowym i kalendarz
+                  handlowca. Jedno konto może prowadzić tylko jedną kartotekę.
+                </p>
+              )}
+            </div>
+          )}
 
           <div className="space-y-2">
             <Label htmlFor="salesperson-employee">Pracownik w kadrach</Label>

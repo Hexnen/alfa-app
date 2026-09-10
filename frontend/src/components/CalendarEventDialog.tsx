@@ -14,6 +14,7 @@ import {
   ArrowRight,
   Building2,
   Calculator,
+  CalendarPlus,
   Check,
   ChevronDown,
   ChevronLeft,
@@ -24,11 +25,14 @@ import {
   ExternalLink,
   FileCheck2,
   FileText,
+  Handshake,
   History,
   Loader2,
+  Mail,
   MapPin,
   Paperclip,
   Pencil,
+  Phone,
   Receipt,
   Repeat,
   RotateCcw,
@@ -64,12 +68,14 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import {
+  availabilityAssigneeId,
   calendarApi,
+  contactsApi,
   getObjects,
+  leadsApi,
   getProtocols,
   getQuotes,
   getRealizations,
-  getTechnicians,
   type ActivityEntry,
   type CalendarBilling,
   type CalendarConflict,
@@ -89,8 +95,9 @@ import {
   type Protocol,
   type Quote,
   type Realization,
-  type Technician,
-  type TechnicianAvailability,
+  type CalendarAvailability,
+  type Contact,
+  type Lead,
   type WeatherBrief,
 } from "@/lib/api";
 import {
@@ -107,7 +114,6 @@ import {
   statusBadgeClass,
   EVENT_STATUS_ORDER,
   EVENT_TYPE_META,
-  EVENT_TYPE_ORDER,
   PROTOCOL_BADGE_META,
   QUOTE_BADGE_META,
   SERIES_FREQ_META,
@@ -144,9 +150,20 @@ import {
   toDateStr,
   toDateTimeStr,
 } from "@/lib/calendar-labels";
+import {
+  TECHNICAL_CALENDAR,
+  assigneeConflictQuery,
+  assigneeIdsInput,
+  assigneesOf,
+  type AssigneeRef,
+  type CalendarConfig,
+} from "@/lib/calendar-config";
+import { LEAD_STAGE_META } from "@/lib/sales-labels";
 import { travelLine, travelSourceLabel, useTravel } from "@/lib/travel";
 import { cn } from "@/lib/utils";
 import { CalendarEventNotes, type CalendarEventNotesHandle } from "@/components/CalendarEventNotes";
+import { ContactPicker } from "@/components/sales/ContactPicker";
+import { LeadPicker, type LeadRef } from "@/components/sales/LeadPicker";
 import { WeatherSection } from "@/components/CalendarWeather";
 import { tip } from "@/components/ui/tooltip";
 
@@ -162,8 +179,17 @@ export interface CalendarEventPrefill {
   title?: string;
   location?: string | null;
   description?: string | null;
+  /**
+   * Przypisani w dziale tego kalendarza (technicy albo handlowcy) — nazwa pola
+   * jest wspólna, bo prefill nie wie, w której konfiguracji wyląduje.
+   */
+  assigneeIds?: number[];
+  /** @deprecated Stara nazwa `assigneeIds`; czytana dla zgodności z wywołaniami sprzed refaktoru. */
   technicianIds?: number[];
   status?: CalendarEventStatus;
+  /** Dział handlowy: szansa i osoba kontaktowa („Zaplanuj następną”). */
+  leadId?: number | null;
+  contactId?: number | null;
 }
 
 interface CalendarEventDialogProps {
@@ -190,7 +216,7 @@ interface CalendarEventDialogProps {
   onOpenEvent?: (id: number) => void;
   /**
    * Przejście kalendarza do dnia (klik we wzmiankę daty w notatce, gdy nie ma jeszcze
-   * kafelka). Bez propa dialog nawiguje na `/technical/kalendarz?date=…`.
+   * kafelka). Bez propa dialog nawiguje na `<cfg.baseHref>?date=…`.
    */
   onGoToDate?: (date: string) => void;
   /** Zmiana liczby notatek (zapis natychmiastowy, poza „Zapisz”) — rodzic aktualizuje licznik w kalendarzu. */
@@ -206,6 +232,19 @@ interface CalendarEventDialogProps {
    * szuflada ma sens (dość szeroki ekran) i osadza komponent we właściwej kolumnie.
    */
   variant?: "modal" | "drawer";
+  /**
+   * Konfiguracja działu. Domyślnie techniczna — drugi konsument dialogu
+   * (`pages/ObjectDetails.tsx`) propa nie podaje i ma działać jak przed refaktorem.
+   * Wartość domyślna MUSI stać w destrukturyzacji propsów, a nie w `useMemo`,
+   * inaczej referencja zmieniałaby się przy każdym renderze.
+   */
+  config?: CalendarConfig;
+  /**
+   * „Zaplanuj następną” (dział handlowy, wydarzenie wykonane): rodzic zamyka ten
+   * dialog i otwiera nowy w trybie `create` z podanym prefillem. Bez propa
+   * przycisk się nie pokazuje — dialog nie ma jak sam otworzyć drugiego siebie.
+   */
+  onPlanNext?: (prefill: CalendarEventPrefill) => void;
 }
 
 const plural = (n: number, one: string, few: string, many: string) => {
@@ -231,7 +270,12 @@ interface FormState {
   objectId: string;
   location: string;
   description: string;
-  technicianIds: number[];
+  /** Przypisani: technicy albo handlowcy — o tym, które pole API, decyduje `config`. */
+  assigneeIds: number[];
+  /** Dział handlowy: szansa, do której wydarzenie należy (null = wolna aktywność). */
+  leadId: number | null;
+  /** Dział handlowy: osoba kontaktowa (musi należeć do szansy albo jej kontrahenta). */
+  contactId: number | null;
   /** Rozliczenie (null = nie dotyczy); ukryte dla urlop/biuro/przygotowanie. */
   billing: CalendarBilling | null;
   /** Jawnie przypięty protokół (null = brak / protokół realizacji wyliczany przez backend). */
@@ -252,7 +296,7 @@ interface FormState {
   recCount: string;
 }
 
-type FieldKey = "title" | "start" | "end" | "technicians" | "recUntil" | "recCount" | "note";
+type FieldKey = "title" | "start" | "end" | "assignees" | "recUntil" | "recCount" | "note";
 type FieldErrors = Partial<Record<FieldKey, string>>;
 
 /**
@@ -296,7 +340,8 @@ function addYears(dateStr: string, years: number): string {
 
 function buildInitial(
   event: CalendarEvent | null | undefined,
-  prefill: CalendarEventPrefill | null | undefined
+  prefill: CalendarEventPrefill | null | undefined,
+  cfg: CalendarConfig
 ): FormState {
   if (event) {
     const allDay = event.allDay;
@@ -310,7 +355,9 @@ function buildInitial(
       objectId: event.objectId ? String(event.objectId) : "",
       location: event.location ?? "",
       description: event.description ?? "",
-      technicianIds: event.technicians.map((t) => t.id),
+      assigneeIds: assigneesOf(event, cfg).map((a) => a.id),
+      leadId: event.leadId ?? null,
+      contactId: event.contactId ?? null,
       billing: event.billing ?? null,
       protocolId: event.protocolId ?? null,
       quoteId: event.quoteId ?? null,
@@ -324,7 +371,8 @@ function buildInitial(
       recCount: "",
     };
   }
-  const prefillType = prefill?.type ?? "serwis";
+  // Pierwszy typ z listy działu: „serwis” w technicznym, „spotkanie” w handlowym.
+  const prefillType = prefill?.type ?? cfg.typeOrder[0] ?? "serwis";
   const isNote = prefillType === "notatka";
   const allDay = prefillType === "urlop" || isNote ? true : (prefill?.allDay ?? false);
   const def = defaultRange();
@@ -349,7 +397,9 @@ function buildInitial(
     objectId: prefill?.objectId ? String(prefill.objectId) : "",
     location: prefill?.location ?? "",
     description: prefill?.description ?? "",
-    technicianIds: prefill?.technicianIds ? [...prefill.technicianIds] : [],
+    assigneeIds: [...(prefill?.assigneeIds ?? prefill?.technicianIds ?? [])],
+    leadId: prefill?.leadId ?? null,
+    contactId: prefill?.contactId ?? null,
     billing: null,
     protocolId: null,
     quoteId: null,
@@ -364,9 +414,15 @@ function buildInitial(
   };
 }
 
-/** Konwersja stanu formularza → payload API (all-day: koniec exclusive). */
-function toInput(f: FormState): CalendarEventInput {
-  // Kafelek notatki: zawsze jeden dzień, bez techników, obiektu i dokumentów.
+/**
+ * Konwersja stanu formularza → payload API (all-day: koniec exclusive).
+ *
+ * `department` idzie w KAŻDYM zapisie, także technicznym: backend domyśla się
+ * `technical`, więc `PUT` bez tego pola na wydarzeniu handlowym wyglądałby jak
+ * próba zmiany działu i skończyłby się błędem 400.
+ */
+function toInput(f: FormState, cfg: CalendarConfig): CalendarEventInput {
+  // Kafelek notatki: zawsze jeden dzień, bez przypisanych, obiektu i dokumentów.
   if (isNoteEvent(f.type)) {
     const day = f.start.slice(0, 10);
     return {
@@ -379,13 +435,18 @@ function toInput(f: FormState): CalendarEventInput {
       allDay: true,
       status: f.status,
       objectId: null,
+      department: cfg.department,
+      // `technicianIds` jest w kontrakcie API wymagane; dla działu handlowego
+      // zostaje puste, a most dokłada właściwe pole z identyfikatorami.
       technicianIds: [],
+      ...assigneeIdsInput([], cfg),
       billing: null,
       protocolId: null,
       quoteId: null,
       realizationId: null,
       realizationOptout: false,
       noteId: f.noteId,
+      ...(cfg.features.leadPicker ? { leadId: f.leadId, contactId: f.contactId } : {}),
     };
   }
   const startAt = f.allDay ? f.start.slice(0, 10) : f.start;
@@ -401,12 +462,17 @@ function toInput(f: FormState): CalendarEventInput {
     allDay: f.allDay,
     status: f.status,
     objectId: !isUrlop && f.objectId ? Number(f.objectId) : null,
-    technicianIds: f.technicianIds,
-    billing: billingApplies(f.type) ? f.billing : null,
-    protocolId: billingApplies(f.type) ? f.protocolId : null,
-    quoteId: billingApplies(f.type) ? f.quoteId : null,
-    realizationId: realizationApplies(f.type) ? f.realizationId : null,
-    realizationOptout: realizationApplies(f.type) ? f.realizationOptout : false,
+    department: cfg.department,
+    technicianIds: [],
+    ...assigneeIdsInput(f.assigneeIds, cfg),
+    // Dokumenty techniczne (rozliczenie, protokół, wycena, realizacja) nie istnieją
+    // w dziale handlowym — flagi decydują, czy pola w ogóle wyjeżdżają na serwer.
+    billing: cfg.features.billing && billingApplies(f.type) ? f.billing : null,
+    protocolId: cfg.features.protocol && billingApplies(f.type) ? f.protocolId : null,
+    quoteId: cfg.features.quote && billingApplies(f.type) ? f.quoteId : null,
+    realizationId: cfg.features.realization && realizationApplies(f.type) ? f.realizationId : null,
+    realizationOptout: cfg.features.realization && realizationApplies(f.type) ? f.realizationOptout : false,
+    ...(cfg.features.leadPicker ? { leadId: f.leadId, contactId: f.contactId } : {}),
   };
   if (f.recFreq && !isUrlop) {
     input.recurrence = {
@@ -1928,6 +1994,8 @@ export function CalendarEventDialog({
   onEdit,
   onNotesChanged,
   variant = "modal",
+  config: cfg = TECHNICAL_CALENDAR,
+  onPlanNext,
 }: CalendarEventDialogProps) {
   const docked = variant === "drawer";
   const readOnly = mode === "view";
@@ -1954,7 +2022,7 @@ export function CalendarEventDialog({
     [event, onNotesChanged]
   );
 
-  const initialRef = useRef<FormState>(buildInitial(event, prefill));
+  const initialRef = useRef<FormState>(buildInitial(event, prefill, cfg));
   const [form, setForm] = useState<FormState>(initialRef.current);
   /** Protokół wybrany z listy w tej sesji edycji (podgląd przed zapisem). */
   const [pickedProtocol, setPickedProtocol] = useState<CalendarEventProtocol | null>(null);
@@ -1964,11 +2032,16 @@ export function CalendarEventDialog({
   const [pickedQuote, setPickedQuote] = useState<CalendarEventQuote | null>(null);
   /** Notatka wybrana z wyszukiwarki (typ `notatka`) — podgląd przed zapisem. */
   const [pickedNote, setPickedNote] = useState<CalendarNoteRef | null>(event?.sourceNote ?? null);
-  const [technicians, setTechnicians] = useState<Technician[]>([]);
+  /** Technicy albo handlowcy — kto, decyduje `cfg.assignees.load()`. */
+  const [assignees, setAssignees] = useState<AssigneeRef[]>([]);
+  /** Dział handlowy: szansa wybrana w tej sesji (podgląd zanim zapis wróci). */
+  const [pickedLead, setPickedLead] = useState<Lead | null>(null);
+  /** Osoby kontaktowe szansy i jej kontrahenta (zawężone przez `LeadPicker`). */
+  const [leadContacts, setLeadContacts] = useState<Contact[]>([]);
   const [objects, setObjects] = useState<ObjectWithContractor[]>([]);
   const [history, setHistory] = useState<ActivityEntry[]>([]);
   const [conflicts, setConflicts] = useState<CalendarConflict[]>([]);
-  const [availability, setAvailability] = useState<TechnicianAvailability[]>([]);
+  const [availability, setAvailability] = useState<CalendarAvailability[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
@@ -2081,11 +2154,13 @@ export function CalendarEventDialog({
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
-    Promise.all([getTechnicians(true), getObjects({ pageSize: 1000 })])
-      .then(([tRes, oRes]) => {
+    // Kartotekę obiektów ciągniemy tylko tam, gdzie jest picker — w dziale bez
+    // niego to byłoby tysiąc wierszy pobranych po nic.
+    Promise.all([cfg.assignees.load(), cfg.features.objectPicker ? getObjects({ pageSize: 1000 }) : null])
+      .then(([aRows, oRes]) => {
         if (cancelled) return;
-        setTechnicians(tRes.data || []);
-        setObjects(oRes.data || []);
+        setAssignees(aRows || []);
+        setObjects(oRes?.data || []);
       })
       .catch(() => {
         /* słowniki opcjonalne — formularz działa bez nich */
@@ -2093,7 +2168,7 @@ export function CalendarEventDialog({
     return () => {
       cancelled = true;
     };
-  }, [open]);
+  }, [open, cfg]);
 
   // Historia
   useEffect(() => {
@@ -2124,10 +2199,12 @@ export function CalendarEventDialog({
   // Konflikty (debounce)
   const draftInput = useMemo(() => {
     if (!open || readOnly) return null;
-    if (!form.technicianIds.length || !form.start || !form.end) return null;
-    const i = toInput(form);
-    return { technicianIds: i.technicianIds, startAt: i.startAt, endAt: i.endAt };
-  }, [open, readOnly, form]);
+    if (!form.assigneeIds.length || !form.start || !form.end) return null;
+    const i = toInput(form, cfg);
+    // Kolizje pytamy o TYCH SAMYCH ludzi, których zapisujemy — nazwę parametru
+    // (`technicianIds` / `salespersonIds`) podmienia most z calendar-config.
+    return { ...assigneeConflictQuery(form.assigneeIds, cfg), startAt: i.startAt, endAt: i.endAt };
+  }, [open, readOnly, form, cfg]);
 
   useEffect(() => {
     if (!draftInput) {
@@ -2154,9 +2231,9 @@ export function CalendarEventDialog({
   // Dostępność (urlopy) w wybranym terminie
   const draftRange = useMemo(() => {
     if (!open || readOnly || !form.start || !form.end) return null;
-    const i = toInput(form);
+    const i = toInput(form, cfg);
     return { from: i.startAt, to: i.endAt };
-  }, [open, readOnly, form]);
+  }, [open, readOnly, form, cfg]);
 
   useEffect(() => {
     if (!draftRange || draftRange.to <= draftRange.from) {
@@ -2166,7 +2243,7 @@ export function CalendarEventDialog({
     let cancelled = false;
     const t = window.setTimeout(() => {
       calendarApi
-        .availability(draftRange.from, draftRange.to)
+        .availability(draftRange.from, draftRange.to, cfg.department)
         .then((res) => {
           if (!cancelled) setAvailability(res.data || []);
         })
@@ -2178,17 +2255,100 @@ export function CalendarEventDialog({
       cancelled = true;
       window.clearTimeout(t);
     };
-  }, [draftRange]);
+  }, [draftRange, cfg.department]);
+
+  // --- Szansa i osoby kontaktowe (dział handlowy) ---------------------------
+
+  /**
+   * Szansa do pokazania w pickerze. Przy edycji zapisanego wydarzenia znamy z
+   * początku tylko `leadId` + `leadTitle` z wiersza — pełny obiekt (kontrahent,
+   * właściciel) dociąga efekt niżej, a do tego czasu pokazujemy, co mamy.
+   */
+  const selectedLead: LeadRef | null = useMemo(() => {
+    if (form.leadId == null) return null;
+    if (pickedLead && pickedLead.id === form.leadId) return pickedLead;
+    if (event?.leadId === form.leadId) {
+      return { id: form.leadId, title: event.leadTitle ?? `Szansa #${form.leadId}`, stage: event.leadStage ?? null };
+    }
+    return { id: form.leadId, title: `Szansa #${form.leadId}` };
+  }, [form.leadId, pickedLead, event]);
+
+  // Pełna szansa po id — potrzebna dla kontrahenta (zawężenie kontaktów) i właściciela.
+  useEffect(() => {
+    if (!open || !cfg.features.leadPicker || form.leadId == null) return;
+    if (pickedLead?.id === form.leadId) return;
+    let cancelled = false;
+    leadsApi
+      .get(form.leadId)
+      .then((res) => {
+        if (!cancelled && res.data) setPickedLead(res.data);
+      })
+      .catch(() => {
+        /* brak dostępu do karty szansy nie blokuje edycji wydarzenia */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, cfg.features.leadPicker, form.leadId, pickedLead?.id]);
+
+  /**
+   * Kontakty szansy ORAZ jej kontrahenta — dokładnie ten zbiór, który backend
+   * przyjmuje w `contactId` (src/lib/calendar-mutations.ts). Dwa zapytania zamiast
+   * jednego, bo kontakt bywa podpięty pod klienta, a nie pod samą szansę.
+   */
+  useEffect(() => {
+    if (!open || !cfg.features.contactPicker || form.leadId == null) {
+      setLeadContacts([]);
+      return;
+    }
+    let cancelled = false;
+    const leadId = form.leadId;
+    const contractorId = pickedLead?.id === leadId ? pickedLead.contractorId : null;
+    Promise.all([
+      contactsApi.list({ leadId, pageSize: 200 }),
+      contractorId != null ? contactsApi.list({ contractorId, pageSize: 200 }) : null,
+    ])
+      .then(([byLead, byContractor]) => {
+        if (cancelled) return;
+        const merged = new Map<number, Contact>();
+        for (const c of [...(byLead.data ?? []), ...(byContractor?.data ?? [])]) merged.set(c.id, c);
+        setLeadContacts([...merged.values()]);
+      })
+      .catch(() => {
+        if (!cancelled) setLeadContacts([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, cfg.features.contactPicker, form.leadId, pickedLead]);
+
+  const selectedContact = useMemo(
+    () => (form.contactId == null ? null : (leadContacts.find((c) => c.id === form.contactId) ?? null)),
+    [leadContacts, form.contactId]
+  );
+
+  /**
+   * Dopełniacz przypisanego („technika” / „handlowca”). Polskiej odmiany nie da
+   * się złożyć z mianownika, a osobnego pola w `CalendarConfig` nie ma — wycinamy
+   * go więc z gotowego zdania walidacji urlopu, które już go zawiera.
+   */
+  const assigneeGenitive =
+    cfg.assignees.labels.leave.replace(/^.*wskazania\s+/i, "").replace(/\.\s*$/, "") ||
+    cfg.assignees.labels.one.toLowerCase();
 
   const isUrlop = form.type === "urlop";
   /** Kafelek notatki — formularz redukuje się do daty, statusu i wyboru notatki. */
   const isNote = isNoteEvent(form.type);
-  const showBilling = billingApplies(form.type);
+  // Rozliczenia, protokoły, wyceny i realizacje należą do świata techniki —
+  // w kalendarzu handlowym tych sekcji po prostu nie ma.
+  const showBilling = cfg.features.billing && billingApplies(form.type);
+  const showProtocol = cfg.features.protocol && billingApplies(form.type);
+  const showQuote = cfg.features.quote && billingApplies(form.type);
   /** Notatka źródłowa: wybrana w tej sesji albo przysłana przez backend z wydarzeniem. */
   const sourceNote = pickedNote ?? event?.sourceNote ?? null;
 
   /** Dojazd — pole informacyjne, poza FormState: nie zapisuje się z wydarzeniem. */
-  const { travel, loading: travelLoading } = useTravel(form.objectId, open && !isUrlop && !isNote);
+  const { travel, loading: travelLoading } = useTravel(form.objectId, open && cfg.features.routePlanner && !isUrlop && !isNote);
   /** Protokół widoczny w formularzu: wybrany z listy / przypięty / z realizacji (gdy nic nie przypięto). */
   const formProtocol: CalendarEventProtocol | null =
     form.protocolId != null
@@ -2235,10 +2395,11 @@ export function CalendarEventDialog({
   const realizationOptedOut = form.realizationOptout && form.realizationId == null;
 
   const onLeave = useMemo(() => {
-    const m = new Map<number, TechnicianAvailability>();
+    // Wiersz dostępności ma `technicianId` albo `salespersonId` — id czyta most.
+    const m = new Map<number, CalendarAvailability>();
     for (const a of availability) {
       const leaves = a.leaves.filter((l) => l.eventId !== event?.id);
-      if (leaves.length) m.set(a.technicianId, { ...a, leaves });
+      if (leaves.length) m.set(availabilityAssigneeId(a), { ...a, leaves });
     }
     return m;
   }, [availability, event?.id]);
@@ -2254,8 +2415,8 @@ export function CalendarEventDialog({
   const leaveMessages = useMemo(() => {
     const out: { key: string; eventId: number; text: string }[] = [];
     for (const c of leaveConflicts) {
-      for (const t of c.technicians) {
-        if (!form.technicianIds.includes(t.id)) continue;
+      for (const t of assigneesOf(c, cfg)) {
+        if (!form.assigneeIds.includes(t.id)) continue;
         out.push({
           key: `${c.id}-${t.id}`,
           eventId: c.id,
@@ -2264,12 +2425,12 @@ export function CalendarEventDialog({
       }
     }
     return out;
-  }, [leaveConflicts, form.technicianIds]);
+  }, [leaveConflicts, form.assigneeIds, cfg]);
 
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => {
     setForm((f) => ({ ...f, [k]: v }));
     setFieldErrors((e) => {
-      const key = (k === "technicianIds" ? "technicians" : k) as FieldKey;
+      const key = (k === "assigneeIds" ? "assignees" : k) as FieldKey;
       if (!(key in e)) return e;
       const n = { ...e };
       delete n[key];
@@ -2309,6 +2470,9 @@ export function CalendarEventDialog({
         next.objectId = "";
         next.location = "";
         next.recFreq = "";
+        // Urlop nie należy do żadnej szansy — to nieobecność, nie aktywność handlowa.
+        next.leadId = null;
+        next.contactId = null;
         setMultiDayPref(true);
       }
       if (!isNoteEvent(type) && isNoteEvent(f.type)) {
@@ -2325,7 +2489,9 @@ export function CalendarEventDialog({
         next.objectId = "";
         next.location = "";
         next.description = "";
-        next.technicianIds = [];
+        next.assigneeIds = [];
+        next.leadId = null;
+        next.contactId = null;
         next.recFreq = "";
         next.realizationOptout = false;
         setMultiDayPref(false);
@@ -2341,12 +2507,12 @@ export function CalendarEventDialog({
     });
   };
 
-  const toggleTechnician = (id: number) =>
+  const toggleAssignee = (id: number) =>
     set(
-      "technicianIds",
-      form.technicianIds.includes(id)
-        ? form.technicianIds.filter((x) => x !== id)
-        : [...form.technicianIds, id]
+      "assigneeIds",
+      form.assigneeIds.includes(id)
+        ? form.assigneeIds.filter((x) => x !== id)
+        : [...form.assigneeIds, id]
     );
 
   // --- Sekcja „Kiedy”: jeden wiersz Data / od → do, czas trwania zachowywany ---
@@ -2437,12 +2603,11 @@ export function CalendarEventDialog({
       return e;
     }
     if (!form.title.trim() && !isUrlop) e.title = "Podaj tytuł wydarzenia.";
-    if (isUrlop && form.technicianIds.length === 0)
-      e.technicians = "Urlop wymaga wskazania co najmniej jednego technika.";
+    if (isUrlop && form.assigneeIds.length === 0) e.assignees = cfg.assignees.labels.leave;
     if (!form.start) e.start = "Podaj początek.";
     if (!form.end) e.end = "Podaj koniec.";
     if (form.start && form.end) {
-      const i = toInput(form);
+      const i = toInput(form, cfg);
       if (parseLocal(i.endAt).getTime() <= parseLocal(i.startAt).getTime()) {
         e.end = form.allDay
           ? "Koniec nie może być wcześniejszy niż początek."
@@ -2463,7 +2628,7 @@ export function CalendarEventDialog({
       title: "cal-title",
       start: "cal-start",
       end: "cal-end",
-      technicians: "cal-tech-first",
+      assignees: "cal-assignee-first",
       recUntil: "cal-rec-until",
       recCount: "cal-rec-count",
       note: "cal-note-search",
@@ -2476,7 +2641,7 @@ export function CalendarEventDialog({
       setSaving(true);
       setError(null);
       try {
-        const input = toInput(form);
+        const input = toInput(form, cfg);
         const res = isEdit
           ? await calendarApi.update(event!.id, input, scope)
           : await calendarApi.create(input);
@@ -2583,7 +2748,7 @@ export function CalendarEventDialog({
     try {
       const res = await calendarApi.update(
         event.id,
-        { ...toInput(buildInitial(event, null)), status },
+        { ...toInput(buildInitial(event, null, cfg), cfg), status },
         "this"
       );
       if (res.data) onSaved?.(res.data);
@@ -2709,13 +2874,13 @@ export function CalendarEventDialog({
         return;
       }
       onClose();
-      navigate(`/technical/kalendarz?event=${eventId}`);
+      navigate(`${cfg.baseHref}?event=${eventId}`);
       return;
     }
     if (!date) return;
     onClose();
     if (onGoToDate) onGoToDate(date);
-    else navigate(`/technical/kalendarz?date=${date}`);
+    else navigate(`${cfg.baseHref}?date=${date}`);
   };
 
   /** „Otwórz wydarzenie źródłowe” — wydarzenie, do którego należy notatka kafelka. */
@@ -2727,7 +2892,7 @@ export function CalendarEventDialog({
       return;
     }
     onClose();
-    navigate(`/technical/kalendarz?event=${id}`);
+    navigate(`${cfg.baseHref}?event=${id}`);
   };
 
   // --- Wyliczenia do nagłówka / podsumowań ---
@@ -2743,12 +2908,12 @@ export function CalendarEventDialog({
   const travelSource = travelSourceLabel(travel, travelLoading);
   const rangeText = (() => {
     if (!form.start || !form.end) return "";
-    const i = toInput(form);
+    const i = toInput(form, cfg);
     return fmtRange(i.startAt, i.endAt, i.allDay);
   })();
   const durationText = (() => {
     if (!form.start || !form.end) return "";
-    const i = toInput(form);
+    const i = toInput(form, cfg);
     return fmtDuration(i.startAt, i.endAt, i.allDay);
   })();
 
@@ -2792,17 +2957,36 @@ export function CalendarEventDialog({
         ? "Edycja wydarzenia"
         : event?.title || "Wydarzenie";
 
-  const techList = technicians.length
-    ? technicians
-    : (event?.technicians ?? []).map(
-        (t) =>
-          ({
-            id: t.id,
-            firstName: t.firstName,
-            lastName: t.lastName,
-            active: true,
-          }) as Technician
-      );
+  /**
+   * Prefill dla „Zaplanuj następną”: ta sama szansa, ten sam handlowiec, termin
+   * przesunięty o tydzień. `null` = przycisku nie ma (nie ten dział, nie wykonane
+   * wydarzenie albo rodzic nie umie otworzyć nowego dialogu).
+   */
+  const planNextPrefill: CalendarEventPrefill | null = useMemo(() => {
+    if (!cfg.features.leadPicker || !onPlanNext) return null;
+    if (!readOnly || !event || event.status !== "done" || event.deletedAt) return null;
+    if (isNoteEvent(event.type) || event.type === "urlop") return null;
+    const shift = (v: string) =>
+      v.length > 10 ? `${addDays(v.slice(0, 10), 7)}${v.slice(10, 16)}` : addDays(v.slice(0, 10), 7);
+    return {
+      type: event.type,
+      startAt: shift(event.startAt),
+      endAt: shift(event.endAt),
+      allDay: event.allDay,
+      assigneeIds: assigneesOf(event, cfg).map((a) => a.id),
+      leadId: event.leadId ?? null,
+      contactId: event.contactId ?? null,
+      objectId: event.objectId,
+      location: event.location,
+    };
+  }, [cfg, onPlanNext, readOnly, event]);
+
+  /** Lista do wyboru: słownik działu, a zanim dojedzie — osoby już przypisane. */
+  const assigneeList: AssigneeRef[] = assignees.length
+    ? assignees
+    : event
+      ? assigneesOf(event, cfg).map((a) => ({ ...a, active: true }))
+      : [];
 
   // ---------------------------------------------------------------------------
 
@@ -2849,8 +3033,8 @@ export function CalendarEventDialog({
                 : isNote
                   ? "Wybierz notatkę i dzień — kafelek tylko do niej prowadzi."
                   : isUrlop
-                    ? "Wskaż technika i termin urlopu. Tytuł jest opcjonalny."
-                    : "Typ, tytuł, termin i technicy. Reszta pod rozwijanymi sekcjami."}
+                    ? `Wskaż ${assigneeGenitive} i termin urlopu. Tytuł jest opcjonalny.`
+                    : `Typ, tytuł, termin i ${cfg.assignees.labels.many.toLowerCase()}. Reszta pod rozwijanymi sekcjami.`}
           </Description>
         </div>
       </div>
@@ -2911,6 +3095,25 @@ export function CalendarEventDialog({
           )}
         </div>
       )}
+      {/*
+        Reguła modułu handlowego: po wykonanej aktywności od razu planuje się
+        następną, żeby szansa nie została bez kolejnego kroku (i nie zaczęła gnić).
+        Dialog nie umie otworzyć drugiego siebie — robi to rodzic przez `onPlanNext`.
+      */}
+      {planNextPrefill && (
+        <div className="flex flex-wrap gap-2">
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            data-testid="plan-next-activity"
+            onClick={() => onPlanNext?.(planNextPrefill)}
+            {...tip("Zaplanuj kolejny krok na tej szansie (za tydzień)")}
+          >
+            <CalendarPlus className="mr-1 h-4 w-4" /> Zaplanuj następną
+          </Button>
+        </div>
+      )}
       <dl className="grid gap-3 text-sm sm:grid-cols-[120px_1fr]">
         <dt className="flex items-center gap-1.5 text-muted-foreground">
           <Clock className="h-3.5 w-3.5" /> Kiedy
@@ -2961,22 +3164,57 @@ export function CalendarEventDialog({
               <MapPin className="h-3.5 w-3.5" /> Lokalizacja
             </dt>
             <dd>{event.location || <span className="text-muted-foreground">—</span>}</dd>
-            {/* Pogoda dla dnia i miejsca wydarzenia (nie dotyczy urlopu). */}
+            {/* Pogoda dla dnia i miejsca wydarzenia (nie dotyczy urlopu ani działu handlowego). */}
+            {cfg.features.weather && (
+              <>
+                <dt className="flex items-center gap-1.5 text-muted-foreground">
+                  <CloudSun className="h-3.5 w-3.5" /> Pogoda
+                </dt>
+                <dd>
+                  <WeatherSection
+                    eventId={event.id}
+                    brief={weather}
+                    startAt={event.startAt}
+                    endAt={event.endAt}
+                    allDay={event.allDay}
+                  />
+                </dd>
+              </>
+            )}
+          </>
+        )}
+        {/* Szansa i osoba kontaktowa — karta wydarzenia handlowego. */}
+        {cfg.features.leadPicker && event.leadId != null && (
+          <>
             <dt className="flex items-center gap-1.5 text-muted-foreground">
-              <CloudSun className="h-3.5 w-3.5" /> Pogoda
+              <Handshake className="h-3.5 w-3.5" /> Szansa
             </dt>
             <dd>
-              <WeatherSection
-                eventId={event.id}
-                brief={weather}
-                startAt={event.startAt}
-                endAt={event.endAt}
-                allDay={event.allDay}
-              />
+              <Link
+                to={`/handlowy/leady/${event.leadId}`}
+                onClick={onClose}
+                className="inline-flex items-center gap-1 font-medium text-primary hover:underline"
+              >
+                {event.leadTitle ?? `Szansa #${event.leadId}`}
+                <ExternalLink className="h-3.5 w-3.5" />
+              </Link>
+              {event.leadStage && (
+                <span className="ml-2 text-xs text-muted-foreground">
+                  {LEAD_STAGE_META[event.leadStage]?.label ?? event.leadStage}
+                </span>
+              )}
             </dd>
           </>
         )}
-        {billingApplies(event.type) && (
+        {cfg.features.contactPicker && event.contactId != null && (
+          <>
+            <dt className="flex items-center gap-1.5 text-muted-foreground">
+              <Users className="h-3.5 w-3.5" /> Kontakt
+            </dt>
+            <dd>{event.contactName || <span className="text-muted-foreground">—</span>}</dd>
+          </>
+        )}
+        {cfg.features.billing && billingApplies(event.type) && (
           <>
             <dt className="flex items-center gap-1.5 text-muted-foreground">
               <Wallet className="h-3.5 w-3.5" /> Rozliczenie
@@ -3058,7 +3296,7 @@ export function CalendarEventDialog({
           </>
         )}
 
-        {realizationApplies(event.type) && (
+        {cfg.features.realization && realizationApplies(event.type) && (
           <>
             <dt className="flex items-center gap-1.5 text-muted-foreground">
               <Receipt className="h-3.5 w-3.5" /> Realizacja
@@ -3087,12 +3325,12 @@ export function CalendarEventDialog({
         {!isNoteEvent(event.type) && (
           <>
             <dt className="flex items-center gap-1.5 text-muted-foreground">
-              <Users className="h-3.5 w-3.5" /> Technicy
+              <Users className="h-3.5 w-3.5" /> {cfg.assignees.labels.many}
             </dt>
             <dd>
-              {event.technicians.length ? (
+              {assigneesOf(event, cfg).length ? (
                 <div className="flex flex-wrap gap-1.5">
-                  {event.technicians.map((t) => (
+                  {assigneesOf(event, cfg).map((t) => (
                     <span
                       key={t.id}
                       className="inline-flex items-center gap-1.5 rounded-full border py-0.5 pl-0.5 pr-2.5 text-sm"
@@ -3124,7 +3362,9 @@ export function CalendarEventDialog({
             initialNotes={notes}
             canEdit={!!onEdit && !event.deletedAt}
             onCountChange={handleNotesCount}
-            onOpenMention={openMention}
+            onOpenMention={cfg.features.noteMentions ? openMention : undefined}
+            objectId={event.objectId}
+            objectName={event.objectName}
           />
         </Section>
       )}
@@ -3147,7 +3387,7 @@ export function CalendarEventDialog({
           aria-label="Typ wydarzenia"
           className={cn("grid gap-1.5", docked ? "grid-cols-2" : "grid-cols-2 sm:grid-cols-4")}
         >
-          {EVENT_TYPE_ORDER.filter((t) => !isEdit || !isNoteEvent(t)).map((t) => {
+          {cfg.typeOrder.filter((t) => !isEdit || !isNoteEvent(t)).map((t) => {
             const m = EVENT_TYPE_META[t];
             const I = m.icon;
             const active = form.type === t;
@@ -3326,7 +3566,7 @@ export function CalendarEventDialog({
               </button>
             )}
           </div>
-          {form.objectId && (
+          {cfg.features.routePlanner && form.objectId && (
             <div className="space-y-0.5" aria-live="polite">
               <span className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
                 <Route className="h-3.5 w-3.5" /> Dojazd (szacowany)
@@ -3336,7 +3576,7 @@ export function CalendarEventDialog({
             </div>
           )}
           {/* Pogoda — tylko dla zapisanego wydarzenia (punkt liczy backend z zapisanych danych). */}
-          {event && (
+          {cfg.features.weather && event && (
             <div className="space-y-0.5">
               <span className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
                 <CloudSun className="h-3.5 w-3.5" /> Pogoda
@@ -3348,6 +3588,76 @@ export function CalendarEventDialog({
                 endAt={event.endAt}
                 allDay={event.allDay}
               />
+            </div>
+          )}
+        </Section>
+      )}
+
+      {/*
+        Szansa i osoba kontaktowa — sekcja działu handlowego. Wybór szansy
+        podpowiada tytuł i właściciela, a przede wszystkim ZAWĘŻA listę kontaktów:
+        backend przyjmuje tylko osoby należące do szansy albo do jej kontrahenta.
+      */}
+      {cfg.features.leadPicker && !isNote && !isUrlop && (
+        <Section id="sec-lead" icon={Handshake} title="Szansa i kontakt">
+          <div className="space-y-1">
+            <Label htmlFor="cal-lead">Szansa</Label>
+            <LeadPicker
+              inputId="cal-lead"
+              value={selectedLead}
+              onPick={(lead) => {
+                setPickedLead(lead);
+                setForm((f) => ({
+                  ...f,
+                  leadId: lead.id,
+                  // Podpowiedzi wchodzą tylko w PUSTE pola — nadpisywanie tego,
+                  // co planujący już wpisał, byłoby zabraniem mu decyzji.
+                  title: f.title.trim() ? f.title : `${eventTypeLabel(f.type)} — ${lead.title}`,
+                  assigneeIds:
+                    f.assigneeIds.length === 0 && lead.salespersonId != null
+                      ? [lead.salespersonId]
+                      : f.assigneeIds,
+                  // Kontakt spoza nowej szansy przestaje być dozwolony.
+                  contactId: null,
+                }));
+              }}
+              onClear={() => {
+                setPickedLead(null);
+                setForm((f) => ({ ...f, leadId: null, contactId: null }));
+              }}
+            />
+          </div>
+          {cfg.features.contactPicker && (
+            <div className="space-y-1">
+              <Label htmlFor="cal-contact">Osoba kontaktowa</Label>
+              <ContactPicker
+                inputId="cal-contact"
+                contacts={leadContacts}
+                value={form.contactId}
+                disabled={form.leadId == null}
+                onChange={(id) => set("contactId", id)}
+              />
+              {form.leadId == null ? (
+                <p className="text-[11px] text-muted-foreground">
+                  Najpierw wskaż szansę — kontakt musi do niej należeć.
+                </p>
+              ) : (
+                selectedContact && (
+                  <div className="flex flex-wrap items-center gap-3 text-xs">
+                    {selectedContact.phone && (
+                      <a href={`tel:${selectedContact.phone}`} className="inline-flex items-center gap-1 text-primary hover:underline">
+                        <Phone className="h-3.5 w-3.5" /> {selectedContact.phone}
+                      </a>
+                    )}
+                    {selectedContact.email && (
+                      <a href={`mailto:${selectedContact.email}`} className="inline-flex items-center gap-1 text-primary hover:underline">
+                        <Mail className="h-3.5 w-3.5" /> {selectedContact.email}
+                      </a>
+                    )}
+                    {selectedContact.role && <span className="text-muted-foreground">{selectedContact.role}</span>}
+                  </div>
+                )
+              )}
             </div>
           )}
         </Section>
@@ -3531,33 +3841,33 @@ export function CalendarEventDialog({
       </Section>
       )}
 
-      {/* Kto (kafelek notatki nie ma techników) */}
+      {/* Kto (kafelek notatki nie ma przypisanych) */}
       {!isNote && (
       <Section id="sec-who" icon={Users} title={isUrlop ? "Kto *" : "Kto"}>
-        {techList.length === 0 ? (
-          <p className="text-xs text-muted-foreground">Brak aktywnych techników.</p>
+        {assigneeList.length === 0 ? (
+          <p className="text-xs text-muted-foreground">{cfg.assignees.labels.empty}.</p>
         ) : (
           <div
             role="group"
-            aria-label="Technicy"
-            aria-describedby={fieldErrors.technicians ? "cal-tech-err" : undefined}
+            aria-label={cfg.assignees.labels.many}
+            aria-describedby={fieldErrors.assignees ? "cal-assignee-err" : undefined}
             className={cn(
               "flex flex-wrap gap-1.5 rounded-md border p-2",
-              fieldErrors.technicians && "border-destructive"
+              fieldErrors.assignees && "border-destructive"
             )}
           >
-            {techList.map((t, idx) => {
-              const checked = form.technicianIds.includes(t.id);
+            {assigneeList.map((t, idx) => {
+              const checked = form.assigneeIds.includes(t.id);
               const leave = onLeave.get(t.id);
               const name = `${t.firstName} ${t.lastName}`;
               return (
                 <button
                   key={t.id}
-                  id={idx === 0 ? "cal-tech-first" : undefined}
+                  id={idx === 0 ? "cal-assignee-first" : undefined}
                   type="button"
                   role="checkbox"
                   aria-checked={checked}
-                  onClick={() => toggleTechnician(t.id)}
+                  onClick={() => toggleAssignee(t.id)}
                   className={cn(
                     "inline-flex items-center gap-1.5 rounded-full border py-0.5 pl-0.5 pr-2.5 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none",
                     checked
@@ -3591,7 +3901,7 @@ export function CalendarEventDialog({
             })}
           </div>
         )}
-        <FieldError id="cal-tech-err" msg={fieldErrors.technicians} />
+        <FieldError id="cal-assignee-err" msg={fieldErrors.assignees} />
 
         {leaveMessages.length > 0 && (
           <div
@@ -3601,7 +3911,7 @@ export function CalendarEventDialog({
           >
             <div className="flex items-center gap-2 font-medium">
               <TreePalm className="h-4 w-4 shrink-0" />
-              Technik na urlopie w tym terminie
+              {cfg.assignees.labels.one} na urlopie w tym terminie
             </div>
             <ul className="mt-1 space-y-0.5 text-xs">
               {leaveMessages.map((m) => (
@@ -3643,7 +3953,7 @@ export function CalendarEventDialog({
                     <span className="font-medium">{c.title}</span>
                     <span className="opacity-80">
                       · {fmtRange(c.startAt, c.endAt, c.allDay)} ·{" "}
-                      {c.technicians.map((t) => `${t.firstName} ${t.lastName}`).join(", ")}
+                      {assigneesOf(c, cfg).map((t) => `${t.firstName} ${t.lastName}`).join(", ")}
                     </span>
                   </>
                 );
@@ -3673,7 +3983,7 @@ export function CalendarEventDialog({
       )}
 
       {/* Protokół — przypięty jawnie albo wyliczony z realizacji */}
-      {showBilling && (
+      {showProtocol && (
         <Section
           id="sec-protocol"
           icon={FileCheck2}
@@ -3759,7 +4069,7 @@ export function CalendarEventDialog({
       )}
 
       {/* Wycena — dokument „za ile”; powstaje automatycznie dla prac płatnych */}
-      {showBilling && (
+      {showQuote && (
         <Section
           id="sec-quote"
           icon={Calculator}
@@ -3859,7 +4169,7 @@ export function CalendarEventDialog({
       )}
 
       {/* Realizacja — powiązanie z rejestrem Realizacji (auto lub ręcznie) */}
-      {showRealization && (
+      {cfg.features.realization && showRealization && (
         <Section
           id="sec-realization"
           icon={Receipt}
@@ -4135,7 +4445,9 @@ export function CalendarEventDialog({
             canEdit={!event.deletedAt}
             onCountChange={handleNotesCount}
             onDraftChange={setHasNoteDraft}
-            onOpenMention={openMention}
+            onOpenMention={cfg.features.noteMentions ? openMention : undefined}
+            objectId={event.objectId}
+            objectName={event.objectName}
           />
         </Section>
       ) : mode === "create" ? (

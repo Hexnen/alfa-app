@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { useNavigate, useLocation } from "react-router-dom";
+import { Link, useNavigate, useLocation } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
@@ -64,10 +64,12 @@ import type {
   Order,
   OrderInput,
   OrderSortKey,
+  Salesperson,
 } from "@/lib/api";
 import {
   getOrders,
   getContractorCatalog,
+  getSalespeople,
   createOrder,
   updateOrder,
   deleteOrder,
@@ -94,8 +96,12 @@ const DEFAULT_DIR: Record<OrderSortKey, "asc" | "desc"> = {
   requester: "asc",
   object: "asc",
   payer: "asc",
+  salesperson: "asc",
   created: "desc",
 };
+
+/** Wartość w selekcie handlowca oznaczająca „zlecenia bez opiekuna”. */
+const NO_SALESPERSON = "none";
 
 export function Orders() {
   const navigate = useNavigate();
@@ -120,6 +126,9 @@ export function Orders() {
   const [payerFilter, setPayerFilter] = useState<number | "none" | undefined>(undefined);
   const [cameraMode, setCameraMode] = useState<CameraMode>("all");
   const [contractors, setContractors] = useState<ContractorCatalogEntry[]>([]);
+  /** Filtr „Handlowiec” — słownik jest mały, więc ciągniemy go raz przy wejściu. */
+  const [salespersonFilter, setSalespersonFilter] = useState<number | "none" | undefined>(undefined);
+  const [salespeople, setSalespeople] = useState<Salesperson[]>([]);
 
   const [sort, setSort] = useState<OrderSortKey>("created");
   const [dir, setDir] = useState<"asc" | "desc">("desc");
@@ -166,6 +175,11 @@ export function Orders() {
     getContractorCatalog()
       .then((res) => setContractors(res.data ?? []))
       .catch(() => setContractors([]));
+    // Brak uprawnienia do kartoteki handlowców nie może wywalić listy zleceń —
+    // wtedy filtr po prostu nie ma czego pokazać (jak w module Ofert).
+    getSalespeople()
+      .then((res) => setSalespeople(res.data ?? []))
+      .catch(() => setSalespeople([]));
   }, []);
 
   /**
@@ -178,6 +192,7 @@ export function Orders() {
     search,
     statusFilter,
     payerFilter ?? "",
+    salespersonFilter ?? "",
     cameraMode,
     created.from ?? "",
     created.to ?? "",
@@ -197,6 +212,7 @@ export function Orders() {
         search: search || undefined,
         status: statusFilter !== "all" ? statusFilter : undefined,
         payerContractorId: payerFilter,
+        salespersonId: salespersonFilter,
         camera: cameraMode === "with" ? "1" : cameraMode === "without" ? "0" : undefined,
         createdFrom: created.from,
         createdTo: created.to,
@@ -223,6 +239,7 @@ export function Orders() {
     search,
     statusFilter,
     payerFilter,
+    salespersonFilter,
     cameraMode,
     created.from,
     created.to,
@@ -250,6 +267,7 @@ export function Orders() {
     search !== "" ||
     statusFilter !== "all" ||
     payerFilter !== undefined ||
+    salespersonFilter !== undefined ||
     cameraMode !== "all" ||
     fromInput !== "" ||
     toInput !== "";
@@ -258,6 +276,7 @@ export function Orders() {
     setSearchInput("");
     setStatusFilter("all");
     setPayerFilter(undefined);
+    setSalespersonFilter(undefined);
     setCameraMode("all");
     setFromInput("");
     setToInput("");
@@ -471,6 +490,31 @@ export function Orders() {
           </SelectContent>
         </Select>
 
+        {/* Handlowiec prowadzący — kolumna „Handlowiec" niżej pokazuje to samo.
+            „Bez handlowca" to zlecenia spoza lejka (np. z formularza publicznego). */}
+        <Select
+          value={salespersonFilter === undefined ? "all" : String(salespersonFilter)}
+          onValueChange={(v) =>
+            setSalespersonFilter(
+              v === "all" ? undefined : v === NO_SALESPERSON ? "none" : parseInt(v)
+            )
+          }
+        >
+          <SelectTrigger className="w-[200px]" data-testid="zlecenia-filter-salesperson">
+            <SelectValue placeholder="Handlowiec" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">Wszyscy handlowcy</SelectItem>
+            <SelectItem value={NO_SALESPERSON}>Bez handlowca</SelectItem>
+            {salespeople.map((sp) => (
+              <SelectItem key={sp.id} value={String(sp.id)}>
+                {sp.firstName} {sp.lastName}
+                {sp.active ? "" : " (archiwalny)"}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+
         <Select value={cameraMode} onValueChange={(v) => setCameraMode(v as CameraMode)}>
           <SelectTrigger className="w-[200px]" data-testid="zlecenia-filter-camera">
             <SelectValue placeholder="Zakres" />
@@ -539,6 +583,7 @@ export function Orders() {
               <SortHeader label="Zlecający" sortKey="requester" />
               <SortHeader label="Obiekt" sortKey="object" />
               <SortHeader label="Płatnik" sortKey="payer" />
+              <SortHeader label="Handlowiec" sortKey="salesperson" />
               {/* „Techniczne" to zbiór znaczników (kamery, megafony), a nie jedna
                   wartość — nie ma po czym sortować, więc nagłówek zostaje zwykły. */}
               <TableHead className="font-semibold">Techniczne</TableHead>
@@ -555,13 +600,13 @@ export function Orders() {
           <TableBody>
             {loading ? (
               <TableRow>
-                <TableCell colSpan={8} className="text-center py-8 text-slate-500">
+                <TableCell colSpan={9} className="text-center py-8 text-slate-500">
                   Ładowanie...
                 </TableCell>
               </TableRow>
             ) : orders.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={8} className="text-center py-8 text-slate-500">
+                <TableCell colSpan={9} className="text-center py-8 text-slate-500">
                   {filtersActive
                     ? "Brak zleceń dla wybranych filtrów"
                     : "Brak zleceń. Utwórz pierwsze zlecenie używając przycisku wyżej."}
@@ -622,6 +667,26 @@ export function Orders() {
                         NIP: {order.payerNip}
                       </div>
                     </div>
+                  </TableCell>
+                  {/* Handlowiec prowadzący, a pod nim szansa, z której zlecenie
+                      wyszło — jedna kolumna, bo to jedna informacja: skąd to
+                      zlecenie się wzięło i kto za nie odpowiada. */}
+                  <TableCell className="text-sm">
+                    {order.salespersonName || (
+                      <span className="text-slate-400">—</span>
+                    )}
+                    {order.leadId ? (
+                      <div className="text-xs">
+                        <Link
+                          to={`/handlowy/leady/${order.leadId}`}
+                          onClick={(e) => e.stopPropagation()}
+                          className="text-indigo-600 hover:underline"
+                          data-testid="zlecenia-lead-link"
+                        >
+                          {order.leadTitle || "z szansy"}
+                        </Link>
+                      </div>
+                    ) : null}
                   </TableCell>
                   <TableCell>
                     <div className="flex items-center gap-2">
@@ -744,6 +809,7 @@ export function Orders() {
         order={mailPreviewOrder}
         open={mailPreviewOrder !== null}
         onClose={() => setMailPreviewOrder(null)}
+        canSend={editable}
       />
 
       {/* Delete Confirmation Dialog */}

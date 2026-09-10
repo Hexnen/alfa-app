@@ -1,8 +1,23 @@
 import { Hono } from "hono";
 import { db, schema } from "../db/index.js";
-import { asc, eq, ne, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { alias } from "drizzle-orm/sqlite-core";
+import type { ObjectService, ObjectServiceKind } from "../types/index.js";
+import {
+  LEAD_OPEN_STAGES,
+  LEAD_STAGES,
+  type LeadLostReason,
+  type LeadStage,
+} from "../db/schema.js";
+import { nextActivityByLead, rottingOf } from "../lib/sales-leads.js";
+import {
+  ENDING_SOON_DEFAULT_DAYS,
+  flagsFromServicesInRange,
+  isEndingSoon,
+  monthBounds,
+  todayIso,
+} from "../lib/object-services.js";
 import {
   computeEmployeeMonthlyCost,
   computeObjectPersonnelCost,
@@ -20,8 +35,8 @@ import {
  * kontrahenci, obiekty i handlowcy w ujęciu przychód / koszt / zysk.
  *
  * Cały moduł stoi na jednym słowniku pojęć liczonym per obiekt:
- *   revenue       = coalesce(monthly_value,0) + coalesce(monthly_rental,0)
- *                                                       — abonament + dzierżawa sprzętu
+ *   revenue       = coalesce(monthly_zdw,0) + coalesce(monthly_ofi,0) + coalesce(monthly_rental,0)
+ *                                                       — abonament ZDW + abonament OFI + dzierżawa sprzętu
  *   personnelCost = personnelDirectCost + personnelCmaCost — koszt osobowy z Kadr
  *   personnelDirectCost = wypłaty × godziny NA TYM obiekcie (ochrona fizyczna)
  *   personnelCmaCost    = udział w koszcie centrum monitorowania, dzielonym po
@@ -114,13 +129,18 @@ const SCOPE_SQL: Record<AnalyticsScope, SQL> = {
  *   ofi = ochrona fizyczna: ludzie stojący na obiekcie
  *   all = obie linie razem, czyli to samo, co przed wprowadzeniem parametru
  *
- * PODZIAŁ NIE JEST ROZŁĄCZNY — dokładnie tak samo, jak przekrój po usługach
- * (`bucketizeServices`): obiekt z OFI I kamerami wchodzi do OBU przekrojów w
- * całości, więc przychód z „zdv" plus przychód z „ofi" jest WIĘKSZY niż „all".
- * To celowe: pytanie brzmi „ile ważą u nas obiekty dozorowane", a nie „jak
- * podzielić firmę na dwie rozłączne połowy" — do tego drugiego trzeba by
- * wymyślić regułę dzielenia jednej faktury abonamentowej między dwie linie,
- * której w danych nie ma.
+ * ZBIÓR OBIEKTÓW NIE JEST ROZŁĄCZNY, ALE PRZYCHÓD JUŻ TAK. Obiekt z OFI I
+ * kamerami POLICZY SIĘ w obu przekrojach (suma `objects` przekracza liczbę
+ * obiektów — tak samo jak w przekroju po usługach, `bucketizeServices`), ale
+ * wchodzi tam TYLKO SWOJĄ CZĘŚCIĄ PRZYCHODU: abonamentem ZDW (plus dzierżawą)
+ * do „zdv" i abonamentem OFI do „ofi". Dzięki temu przychód „zdv" plus „ofi"
+ * jest DOKŁADNIE równy „all".
+ *
+ * Do września 2026 kartoteka trzymała jeden abonament na obiekt i nie było czego
+ * dzielić — mieszany obiekt wchodził całą kwotą do obu przekrojów, przez co
+ * „zdv" + „ofi" wychodziło więcej niż „all". Rozbicie (migracja 0082,
+ * src/lib/abonament-split.ts) daje ten klucz podziału wprost z danych, zamiast
+ * zmyślać proporcję po jednostkach czy godzinach.
  */
 export type AnalyticsService = "zdv" | "ofi" | "all";
 
@@ -256,6 +276,15 @@ interface ObjectRow {
   type: string;
   status: string;
   services: ObjectServicesInfo;
+  /**
+   * OKRESY usług obiektu — pełna lista, także zakończone. Z nich liczy się seria
+   * czasowa (`timeline`) i predykat „kończy się wkrótce"; `services` wyżej to
+   * dalej stan NA DZIŚ. Pusta tablica = obiekt bez ani jednego wiersza (D3:
+   * skrypty, seedy, dane sprzed migracji 0084) — o takim nie wiemy nic poza dziś.
+   */
+  servicePeriods: ObjectService[];
+  /** Przewidywane zakończenie obsługi całego obiektu (YYYY-MM-DD); null = bezterminowo. */
+  expectedEndDate: string | null;
   /** Waga obiektu w podziale kosztu CMA (SSWiN 1 + wideorecepcja 1 + kamery po 1). */
   serviceUnits: number;
   contractorId: number | null;
@@ -273,6 +302,14 @@ interface ObjectRow {
   effectiveSalespersonId: number | null;
   contractorSalespersonId: number | null;
   revenue: number;
+  /**
+   * Składniki przychodu — pole wewnętrzne, poza JSON-em. Potrzebne, bo przekrój
+   * usługowy przypisuje przychód do LINII: ZDW + dzierżawa idą do „zdv",
+   * abonament OFI do „ofi". Bez rozbicia mieszany obiekt wchodził całą kwotą do
+   * obu przekrojów i „zdv" + „ofi" dawało więcej niż „all".
+   */
+  revenueZdw: number;
+  revenueOfi: number;
   personnelCost: number;
   personnelDirectCost: number;
   personnelCmaCost: number;
@@ -312,13 +349,15 @@ async function loadObjectRows(
       cameraCount: schema.objects.cameraCount,
       hasOfi: schema.objects.hasOfi,
       hasVideoreception: schema.objects.hasVideoreception,
+      expectedEndDate: schema.objects.expectedEndDate,
       contractorId: schema.objects.contractorId,
       contractorName: schema.contractors.name,
       contractorCity: schema.contractors.city,
       contractorActive: schema.contractors.active,
       contractorSalespersonId: schema.contractors.salespersonId,
       companyName: schema.companies.name,
-      monthlyValue: schema.objects.monthlyValue,
+      monthlyZdw: schema.objects.monthlyZdw,
+      monthlyOfi: schema.objects.monthlyOfi,
       monthlyRental: schema.objects.monthlyRental,
       monthlyCost: schema.objects.monthlyCost,
       objectSetupCost: schema.objects.setupCost,
@@ -336,11 +375,37 @@ async function loadObjectRows(
     .leftJoin(contractorSalesperson, eq(contractorSalesperson.id, schema.contractors.salespersonId))
     .where(SCOPE_WHERE[scope]);
 
+  /*
+   * Okresy usług — JEDNO dodatkowe zapytanie na cały zakres (`inArray` po id
+   * wierszy wyżej), tak samo jak robi to lista obiektów. Bez nich seria czasowa
+   * i „kończące się" nie mają z czego powstać, a doczytywanie ich per wiersz
+   * dałoby kilkaset zapytań na jedno wejście w zakładkę.
+   */
+  const periodsByObject = new Map<number, ObjectService[]>();
+  if (rows.length > 0) {
+    const periodRows = await db
+      .select()
+      .from(schema.objectServices)
+      .where(inArray(schema.objectServices.objectId, rows.map((r) => r.id)))
+      .orderBy(asc(schema.objectServices.service), asc(schema.objectServices.startDate));
+    for (const p of periodRows) {
+      const list = periodsByObject.get(p.objectId);
+      if (list) list.push(p);
+      else periodsByObject.set(p.objectId, [p]);
+    }
+  }
+
   return rows.map((r) => {
-    // Przychód miesięczny to abonament ORAZ dzierżawa sprzętu — klient płaci
-    // obie pozycje co miesiąc. Do sierpnia 2026 liczył się sam abonament, przez
-    // co obiekty ze sprzętem w najmie wyglądały na dużo mniej rentowne.
-    const revenue = (r.monthlyValue ?? 0) + (r.monthlyRental ?? 0);
+    // Przychód miesięczny to OBA abonamenty ORAZ dzierżawa sprzętu — klient
+    // płaci wszystkie pozycje co miesiąc. Do sierpnia 2026 liczył się sam
+    // abonament, przez co obiekty ze sprzętem w najmie wyglądały na dużo mniej
+    // rentowne; od września 2026 abonament jest jeszcze rozbity na linie.
+    //
+    // Dzierżawa doliczana jest do linii ZDW, bo dzierżawiony sprzęt to sprzęt
+    // monitoringu (rejestratory, kamery), a nie wyposażenie wartownika.
+    const revenueZdw = (r.monthlyZdw ?? 0) + (r.monthlyRental ?? 0);
+    const revenueOfi = r.monthlyOfi ?? 0;
+    const revenue = revenueZdw + revenueOfi;
     // Koszt osobowy z Kadr i koszt pozostały z kartoteki SUMUJĄ SIĘ.
     const personnelCost = personnel.byObjectId.get(r.id) ?? 0;
     // ...a sam koszt osobowy składa się z dwóch ścieżek, które też się SUMUJĄ:
@@ -383,6 +448,8 @@ async function loadObjectRows(
         ofi: r.hasOfi,
         videoreception: r.hasVideoreception,
       },
+      servicePeriods: periodsByObject.get(r.id) ?? [],
+      expectedEndDate: r.expectedEndDate,
       // Jedna definicja wagi na całą aplikację — ta sama funkcja, którą podział
       // puli liczy w src/lib/object-personnel-cost.ts. Front pokazuje tę liczbę
       // obok udziału CMA, żeby było widać, DLACZEGO obiekt dostał tyle, ile dostał.
@@ -417,6 +484,8 @@ async function loadObjectRows(
       effectiveSalespersonId: effectiveSalespersonId(r),
       contractorSalespersonId: r.contractorSalespersonId,
       revenue,
+      revenueZdw,
+      revenueOfi,
       personnelCost,
       personnelDirectCost,
       personnelCmaCost,
@@ -450,10 +519,15 @@ function matchesService(s: ObjectServicesInfo, service: AnalyticsService): boole
  *         samego obiektu nie mają z dozorem nic wspólnego,
  *   all → obie ścieżki razem, czyli dzisiejsza definicja bez zmian.
  *
- * Przychód i koszt pozostały (`monthly_cost`) zostają w CAŁOŚCI po obu stronach —
- * kartoteka trzyma jedną kwotę abonamentu i jedną kwotę kosztu na obiekt, bez
- * rozbicia na linie. Zmyślony klucz podziału (po jednostkach? po godzinach?)
- * byłby liczbą, której nikt nie umie obronić przed zarządem.
+ * PRZYCHÓD idzie za linią: „ofi" bierze `revenueOfi` (abonament za ochronę
+ * fizyczną), „zdv" bierze `revenueZdw` (abonament za dozór PLUS dzierżawa
+ * sprzętu monitoringu). Dzięki temu suma przychodu obu przekrojów równa się
+ * przekrojowi „all" i nikt nie liczy mieszanego obiektu dwa razy.
+ *
+ * KOSZT POZOSTAŁY (`monthly_cost`) zostaje w CAŁOŚCI po obu stronach — kartoteka
+ * trzyma jedną kwotę kosztu na obiekt, bez rozbicia na linie. Zmyślony klucz
+ * podziału (po jednostkach? po godzinach?) byłby liczbą, której nikt nie umie
+ * obronić przed zarządem.
  *
  * `hasCost` liczy się na nowo z tych samych składników co zawsze (wpisany koszt
  * albo godziny na obiekcie), więc w przekroju „zdv" mieszany obiekt bez wpisanego
@@ -468,16 +542,18 @@ function applyServiceView(rows: ObjectRow[], service: AnalyticsService): ObjectR
     const personnelCmaCost = service === "zdv" ? r.personnelCmaCost : 0;
     const personnelCost = personnelDirectCost + personnelCmaCost;
     const cost = personnelCost + r.otherCost;
-    const profit = r.revenue - cost;
+    const revenue = service === "ofi" ? r.revenueOfi : r.revenueZdw;
+    const profit = revenue - cost;
     const hasCost = r.otherCostKnown || personnelDirectCost > 0;
     out.push({
       ...r,
+      revenue,
       personnelCost,
       personnelDirectCost,
       personnelCmaCost,
       cost,
       profit,
-      margin: marginOf(r.revenue, profit, hasCost ? 1 : 0),
+      margin: marginOf(revenue, profit, hasCost ? 1 : 0),
       payback: paybackOf(r.setupCost, profit),
       hasCost,
     });
@@ -828,8 +904,157 @@ function marginBucketKey(margin: number | null, hasCost: boolean): string {
   return "60%+";
 }
 
+/* --- „Kończące się" i seria czasowa usług -------------------------------- */
+
+/**
+ * Horyzont zestawienia „kończy się wkrótce" (`?horizonDays=`). Domyślnie te same
+ * 90 dni, co filtr listy obiektów — kafelek linkuje do `/objects?endingIn=90`
+ * i obie liczby muszą znaczyć to samo. Zakres 1–730 dni: zero dni nie jest
+ * pytaniem, a dwa lata to górna granica, przy której „wkrótce" jeszcze cokolwiek
+ * znaczy (i zabezpieczenie przed `?horizonDays=999999`).
+ */
+function parseHorizonDays(raw: string | undefined): number {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return ENDING_SOON_DEFAULT_DAYS;
+  return Math.min(Math.max(Math.floor(n), 1), 730);
+}
+
+/** Ile miesięcy wstecz pokazuje seria czasowa — rok włącznie z bieżącym. */
+const TIMELINE_MONTHS = 12;
+
+export interface AnalyticsTimelinePoint {
+  /** YYYY-MM */
+  month: string;
+  activeObjects: number;
+  /** Jednostki usług aktywnych w miesiącu; kamery = suma sztuk, reszta po obiekcie. */
+  activeUnits: Record<ObjectServiceKind, number>;
+  /**
+   * Okresy usług ROZPOCZĘTE w tym miesiącu — wyłącznie te z datą, którą znamy.
+   * Okresy z `startEstimated` są policzone osobno, w `startedEstimated`.
+   */
+  started: number;
+  /**
+   * Ile okresów o dacie startu ZGADNIĘTEJ (backfill 0084, fallback importu)
+   * wypadło w tym miesiącu i zostało POMINIĘTYCH w `started`.
+   *
+   * Bez tego pola wykres milczałby o dziurze: użytkownik widzi „0 rozpoczętych"
+   * w miesiącu, w którym kartoteka urosła o 147 usług, i nie ma jak się
+   * dowiedzieć, że to nie zapaść sprzedaży, tylko dzień wgrania danych.
+   * Front dopisuje tę liczbę w opisie punktu („+147 z datą szacowaną").
+   */
+  startedEstimated: number;
+  ended: number;
+  revenue: number;
+}
+
+/**
+ * SERIA CZASOWA USŁUG — 12 ostatnich miesięcy WŁĄCZNIE z bieżącym.
+ *
+ * Liczona z OKRESÓW (`object_services`), ale kwotami BIEŻĄCYMI: kartoteka trzyma
+ * jeden komplet stawek na obiekt, bez historii cen. `revenue` odpowiada więc na
+ * pytanie „ile dzisiejszymi stawkami warte były obiekty wtedy dozorowane", a NIE
+ * „ile wtedy zafakturowano" — front ma to napisać przy wykresie, bo to dwie
+ * różne liczby i tylko jedną z nich umiemy podać.
+ *
+ * Obiekty BEZ ani jednego wiersza okresów (D3) wchodzą jako aktywne w KAŻDYM
+ * miesiącu, z dzisiejszymi flagami. Alternatywa — pominąć je — narysowałaby
+ * wykres, na którym firma nagle traci połowę kartoteki, bo skrypty i dane sprzed
+ * migracji 0084 nie mają dat. Ich okresów nie ma, więc do `started`/`ended` nie
+ * wnoszą nic.
+ *
+ * Wiersze przychodzą PO filtrze przekroju usługowego (`applyServiceView`), więc
+ * seria opisuje ten sam zbiór, co kafelki nad nią.
+ */
+function buildTimeline(rows: ObjectRow[], today: string): AnalyticsTimelinePoint[] {
+  // Indeks miesiąca ciągłego (rok*12 + miesiąc) — arytmetyka bez pułapek przełomu
+  // roku, tak samo jak w `fullMonths()` modułu kosztu osobowego.
+  const lastIdx = Number(today.slice(0, 4)) * 12 + Number(today.slice(5, 7)) - 1;
+  const out: AnalyticsTimelinePoint[] = [];
+  for (let i = TIMELINE_MONTHS - 1; i >= 0; i--) {
+    const idx = lastIdx - i;
+    const year = Math.floor(idx / 12);
+    const month = (idx % 12) + 1;
+    const { from, to } = monthBounds(year, month);
+    const activeUnits: Record<ObjectServiceKind, number> = {
+      kamery: 0,
+      sswin: 0,
+      wideorecepcja: 0,
+      ofi: 0,
+    };
+    let activeObjects = 0;
+    let started = 0;
+    let startedEstimated = 0;
+    let ended = 0;
+    let revenue = 0;
+
+    for (const r of rows) {
+      if (r.servicePeriods.length === 0) {
+        activeObjects += 1;
+        revenue += r.revenue;
+        // Kamery bez policzonej liczby nie wnoszą sztuk (NULL ≠ 0), ale obiekt
+        // nadal jest aktywny — tak samo, jak w mianowniku kosztu CMA.
+        if (r.services.cameras) activeUnits.kamery += r.services.cameraCount ?? 0;
+        if (r.services.sswin) activeUnits.sswin += 1;
+        if (r.services.videoreception) activeUnits.wideorecepcja += 1;
+        if (r.services.ofi) activeUnits.ofi += 1;
+        continue;
+      }
+      for (const p of r.servicePeriods) {
+        if (p.startDate >= from && p.startDate <= to) {
+          // Data startu wzięta z daty założenia kartoteki (backfill 0084) albo
+          // z dnia importu NIE JEST rozpoczęciem usługi — usługa istniała
+          // wcześniej, tylko nikt nie zapisał od kiedy. Liczymy ją osobno,
+          // żeby wykres nie pokazywał dnia wgrania danych jako rekordu sprzedaży.
+          if (p.startEstimated) startedEstimated += 1;
+          else started += 1;
+        }
+        if (p.endDate && p.endDate >= from && p.endDate <= to) ended += 1;
+      }
+      const flags = flagsFromServicesInRange(r.servicePeriods, from, to);
+      if (!flags.hasCameras && !flags.hasSswin && !flags.hasVideoreception && !flags.hasOfi) {
+        continue;
+      }
+      activeObjects += 1;
+      revenue += r.revenue;
+      if (flags.hasCameras) activeUnits.kamery += flags.cameraCount ?? 0;
+      if (flags.hasSswin) activeUnits.sswin += 1;
+      if (flags.hasVideoreception) activeUnits.wideorecepcja += 1;
+      if (flags.hasOfi) activeUnits.ofi += 1;
+    }
+
+    out.push({
+      month: `${year}-${String(month).padStart(2, "0")}`,
+      activeObjects,
+      activeUnits,
+      started,
+      startedEstimated,
+      ended,
+      revenue,
+    });
+  }
+  return out;
+}
+
 app.get("/obiekty", async (c) => {
   const { scope, service, limit, costWindow, personnel, rows, totals } = await baseline(c);
+  const today = todayIso();
+  const horizonDays = parseHorizonDays(c.req.query("horizonDays"));
+
+  /*
+   * „Kończące się" liczymy po WSZYSTKICH wierszach zakresu, nie po przyciętym
+   * limitem rankingu — tak samo, jak `totals` (patrz `loadTotals`). Predykat
+   * to ten sam helper, którego w SQL-u używa filtr listy obiektów
+   * (`?endingIn=`), więc kafelek i lista, do której linkuje, pokazują tę samą
+   * liczbę. `revenue` jest przychodem BIEŻĄCEGO PRZEKROJU (`service`/`scope`):
+   * w widoku „ofi" zagrożony jest tylko abonament za ochronę fizyczną.
+   */
+  let endingSoonCount = 0;
+  let endingSoonRevenue = 0;
+  for (const r of rows) {
+    if (!isEndingSoon(r, r.servicePeriods, today, horizonDays)) continue;
+    endingSoonCount += 1;
+    endingSoonRevenue += r.revenue;
+  }
 
   // Sortowanie po zysku dzieje się w JS, a nie w SQL: zysk zawiera teraz koszt
   // osobowy, którego baza nie zna, więc ORDER BY po `monthly_cost` układałby
@@ -844,6 +1069,10 @@ app.get("/obiekty", async (c) => {
       type: r.type,
       status: r.status,
       services: r.services,
+      // Okresy jadą do UI w całości (także zakończone): druga linia w kolumnie
+      // „Usługi" pokazuje daty, a karta obiektu — historię świadczenia.
+      servicePeriods: r.servicePeriods,
+      expectedEndDate: r.expectedEndDate,
       serviceUnits: r.serviceUnits,
       contractorId: r.contractorId,
       contractorName: r.contractorName,
@@ -903,6 +1132,11 @@ app.get("/obiekty", async (c) => {
       byStatus,
       byCompany,
       marginBuckets,
+      // Horyzont wraca w odpowiedzi, bo front pisze go w opisie kafelka („≤ 90 dni")
+      // i przy braku parametru nie zna wartości domyślnej.
+      endingSoon: { count: endingSoonCount, revenue: endingSoonRevenue, horizonDays },
+      // Seria czasowa liczy się z PEŁNEGO zbioru wierszy, nie z przyciętego rankingu.
+      timeline: buildTimeline(rows, today),
       personnel: personnelInfo(costWindow, personnel),
     },
   });
@@ -1081,6 +1315,400 @@ app.get("/handlowcy", async (c) => {
       personnel: personnelInfo(costWindow, personnel),
     },
   });
+});
+
+
+/* ------------------------------------------------------------------ */
+/* GET /lejek — lejek sprzedaży (konwersja etapów, win rate, powody)    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Lejek handlowy — DRUGI słownik pojęć w tym pliku, całkowicie niezależny od
+ * rentowności portfela wyżej. Tamten liczy pieniądze z obiektów, ten opisuje
+ * DROGĘ szansy przez etapy: ile ich wpadło, ile doszło do oferty, gdzie się
+ * zatrzymały i dlaczego przepadły.
+ *
+ * KOHORTA. Wszystkie liczby (poza dwiema wyraźnie oznaczonymi) dotyczą jednego
+ * zbioru: szans UTWORZONYCH w zakresie `from`–`to` i nieusuniętych
+ * (`deleted_at IS NULL`). Nie mieszamy „utworzonych w tym roku" z „wygranymi
+ * w tym roku": lejek, konwersja, wygrane i przegrane muszą opisywać ten sam
+ * zbiór, inaczej konwersja etapów potrafi przekroczyć 100%. Wyjątki to
+ * `rotting` i `openNow` — one z definicji są stanem NA TERAZ, nie historią
+ * kohorty, i są tak opisane w odpowiedzi.
+ *
+ * ŹRÓDŁO HISTORII. Etap, w którym szansa jest DZIŚ, siedzi w `leads.stage`,
+ * ale droga do niego wyłącznie w `activity_log` (`entity_type='lead'`,
+ * `action='stage_changed'`, `field='stage'`, `old_value`→`new_value`). Stąd:
+ *  • „dotarła do etapu" = etap początkowy albo któreś `new_value` w historii,
+ *    więc cofnięcie szansy o etap NIE odbiera jej dotarcia (lejek liczy
+ *    zasięg, nie stan),
+ *  • czas w etapie = różnica znaczników kolejnych zmian; pierwszy etap liczy
+ *    się od `leads.created_at`. Trwający pobyt (etap jeszcze nieopuszczony)
+ *    NIE wchodzi do średniej — inaczej świeża szansa zaniżałaby każdy wynik.
+ * Szansa bez ANI JEDNEGO wpisu w dzienniku (import, zapis sprzed modułu) ma
+ * tylko etap bieżący; ile takich jest, mówi `coverage` — bez tego „średnio
+ * 0 dni w etapie" wyglądałoby jak wynik, a znaczy „nie wiemy".
+ *
+ * Kształt JSON-a jest kontraktem z frontem (frontend/src/lib/api.ts:
+ * `AnalyticsFunnel`) — front NIE liczy tu niczego poza formatowaniem:
+ * ```
+ * {
+ *   from, to,                       // YYYY-MM-DD, zakres kohorty (to włącznie)
+ *   salespersonId,                  // filtr: id | null (wszyscy) | "none" (bez opiekuna)
+ *   generatedAt,
+ *   leads,                          // liczność kohorty
+ *   funnel: [{ stage, reached, current, conversion, avgDays, avgDaysSamples,
+ *              monthly, setup }],   // etapy otwarte + „wygrany" na końcu
+ *   won:  { count, monthly, setup, medianDaysToWin },
+ *   lost: { count, byReason: [{ reason, count }] },   // reason: null = nie podano
+ *   winRate,                        // 0..100 | null, won / (won + lost)
+ *   bySalesperson: [{ salespersonId, name, leads, won, lost, open, winRate,
+ *                     wonMonthly, wonSetup, avgDaysToWin }],
+ *   rotting, openNow,               // STAN NA TERAZ, nie kohorta
+ *   coverage: { leadsWithHistory, leads }
+ * }
+ * ```
+ * Parametr `scope` (pasek Analityki) jest przyjmowany i IGNOROWANY: lejek nie ma
+ * wymiaru „archiwum obiektów", a ciche filtrowanie po nim dawałoby liczby, których
+ * nie da się wytłumaczyć.
+ */
+
+/** Etapy lejka: otwarte + „wygrany" jako domknięcie (przegrany ma własny blok). */
+const FUNNEL_STAGES: LeadStage[] = [...LEAD_OPEN_STAGES, "wygrany"];
+
+/** Domyślny zakres kohorty — rok wstecz, jak seria czasowa obiektów. */
+const FUNNEL_MONTHS = 12;
+
+export interface AnalyticsFunnelStage {
+  stage: LeadStage;
+  /** Ile szans kohorty KIEDYKOLWIEK dotarło do tego etapu. */
+  reached: number;
+  /** Ile stoi na nim DZIŚ. */
+  current: number;
+  /**
+   * Dotarcia do NASTĘPNEGO etapu / dotarcia do tego, w % (null: ostatni etap
+   * albo `reached = 0`). To proporcja lejka, nie ścieżka pojedynczej szansy:
+   * etapy wolno przeskakiwać, więc wartość potrafi przekroczyć 100% i NIE
+   * przycinamy jej — przycięta wyglądałaby na wynik, którego nie ma.
+   */
+  conversion: number | null;
+  /** Średni czas ZAKOŃCZONEGO pobytu w etapie (dni); null = brak próbek. */
+  avgDays: number | null;
+  /** Ile pobytów weszło do średniej — bez tego „0 dni" nie da się odczytać. */
+  avgDaysSamples: number;
+  /** Wartość szans, które dotarły do etapu (MRR netto / wdrożenie netto). */
+  monthly: number;
+  setup: number;
+}
+
+export interface AnalyticsFunnelSalesperson {
+  /** null = szanse bez opiekuna. */
+  salespersonId: number | null;
+  name: string;
+  leads: number;
+  won: number;
+  lost: number;
+  open: number;
+  winRate: number | null;
+  wonMonthly: number;
+  wonSetup: number;
+  avgDaysToWin: number | null;
+}
+
+/** "YYYY-MM-DD HH:MM:SS" (SQLite) albo ISO → ms; null gdy nie da się odczytać. */
+function stampMs(iso: string | null | undefined): number | null {
+  if (!iso) return null;
+  const t = Date.parse(iso.includes("T") ? iso : `${iso.replace(" ", "T")}Z`);
+  return Number.isFinite(t) ? t : null;
+}
+
+const DAY_MS = 86_400_000;
+
+/** Data YYYY-MM-DD z parametru; cokolwiek innego → `fallback`. */
+function parseDateParam(raw: string | undefined, fallback: string): string {
+  const t = (raw || "").trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(t) ? t : fallback;
+}
+
+/** Dzień po `date` — górna granica porównania `created_at < …` (żeby `to` weszło w całości). */
+function nextDay(date: string): string {
+  const t = Date.parse(`${date}T00:00:00Z`);
+  return Number.isFinite(t) ? new Date(t + DAY_MS).toISOString().slice(0, 10) : date;
+}
+
+/** Mediana z próbki (pusta → null). */
+function median(values: number[]): number | null {
+  if (values.length === 0) return null;
+  const s = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+}
+
+app.get("/lejek", (c) => {
+  try {
+    const today = todayIso();
+    const to = parseDateParam(c.req.query("to"), today);
+    const defaultFrom = (() => {
+      const d = new Date(`${to}T00:00:00Z`);
+      d.setUTCMonth(d.getUTCMonth() - FUNNEL_MONTHS);
+      return d.toISOString().slice(0, 10);
+    })();
+    const from = parseDateParam(c.req.query("from"), defaultFrom);
+    const toExclusive = nextDay(to);
+
+    // Filtr opiekuna: konkretny handlowiec, „none" (szanse niczyje) albo brak filtra.
+    const rawSp = (c.req.query("salespersonId") || "").trim();
+    const spId = Number(rawSp);
+    const salespersonFilter: number | "none" | null =
+      rawSp === "none" ? "none" : Number.isInteger(spId) && spId > 0 ? spId : null;
+    const spWhere: SQL[] =
+      salespersonFilter === "none"
+        ? [sql`leads.salesperson_id is null`]
+        : salespersonFilter !== null
+          ? [sql`leads.salesperson_id = ${salespersonFilter}`]
+          : [];
+
+    // ---- Kohorta -------------------------------------------------------
+    const cohort = db
+      .select({
+        id: schema.leads.id,
+        stage: schema.leads.stage,
+        salespersonId: schema.leads.salespersonId,
+        monthly: sql<number>`coalesce(leads.estimated_monthly, 0)`,
+        setup: sql<number>`coalesce(leads.estimated_setup, 0)`,
+        createdAt: schema.leads.createdAt,
+        wonAt: schema.leads.wonAt,
+        lostReason: schema.leads.lostReason,
+      })
+      .from(schema.leads)
+      .where(
+        and(
+          isNull(schema.leads.deletedAt),
+          sql`leads.created_at >= ${from}`,
+          sql`leads.created_at < ${toExclusive}`,
+          ...spWhere
+        )
+      )
+      .all();
+
+    // ---- Historia etapów ----------------------------------------------
+    // Złączenie z `leads` zamiast `inArray(ids)`: kohorta bywa większa niż limit
+    // parametrów SQLite, a warunek i tak jest ten sam.
+    const changes = db
+      .select({
+        leadId: schema.activityLog.entityId,
+        oldValue: schema.activityLog.oldValue,
+        newValue: schema.activityLog.newValue,
+        at: schema.activityLog.createdAt,
+      })
+      .from(schema.activityLog)
+      .innerJoin(schema.leads, eq(schema.leads.id, schema.activityLog.entityId))
+      .where(
+        and(
+          eq(schema.activityLog.entityType, "lead"),
+          eq(schema.activityLog.action, "stage_changed"),
+          eq(schema.activityLog.field, "stage"),
+          isNull(schema.leads.deletedAt),
+          sql`leads.created_at >= ${from}`,
+          sql`leads.created_at < ${toExclusive}`,
+          ...spWhere
+        )
+      )
+      .orderBy(asc(schema.activityLog.entityId), asc(schema.activityLog.createdAt), asc(schema.activityLog.id))
+      .all();
+
+    const isStage = (v: string | null): v is LeadStage =>
+      v != null && (LEAD_STAGES as readonly string[]).includes(v);
+
+    const historyOf = new Map<number, { at: number; to: LeadStage; from: LeadStage | null }[]>();
+    for (const r of changes) {
+      if (!isStage(r.newValue)) continue;
+      const at = stampMs(r.at);
+      if (at === null) continue;
+      const list = historyOf.get(r.leadId) ?? [];
+      list.push({ at, to: r.newValue, from: isStage(r.oldValue) ? r.oldValue : null });
+      historyOf.set(r.leadId, list);
+    }
+
+    // ---- Przebieg kohorty ---------------------------------------------
+    const reachedCount = new Map<LeadStage, number>();
+    const reachedMonthly = new Map<LeadStage, number>();
+    const reachedSetup = new Map<LeadStage, number>();
+    const currentCount = new Map<LeadStage, number>();
+    const stageDays = new Map<LeadStage, { sum: number; n: number }>();
+    const bump = (m: Map<LeadStage, number>, s: LeadStage, v = 1) => m.set(s, (m.get(s) ?? 0) + v);
+
+    const daysToWin: number[] = [];
+    const perSales = new Map<number | null, AnalyticsFunnelSalesperson & { _winDays: number[] }>();
+    const lostByReason = new Map<LeadLostReason | null, number>();
+    let leadsWithHistory = 0;
+    let wonCount = 0;
+    let wonMonthly = 0;
+    let wonSetup = 0;
+    let lostCount = 0;
+
+    for (const lead of cohort) {
+      const hist = historyOf.get(lead.id) ?? [];
+      if (hist.length) leadsWithHistory++;
+      // Etap początkowy: `old_value` pierwszej zmiany (a gdy go brak — wartość
+      // domyślna kolumny), przy pustej historii po prostu etap bieżący.
+      const initial: LeadStage = hist.length ? (hist[0].from ?? "nowy") : lead.stage;
+
+      const reached = new Set<LeadStage>([initial, lead.stage]);
+      for (const h of hist) reached.add(h.to);
+      for (const s of reached) {
+        bump(reachedCount, s);
+        bump(reachedMonthly, s, lead.monthly);
+        bump(reachedSetup, s, lead.setup);
+      }
+      bump(currentCount, lead.stage);
+
+      // Zakończone pobyty w etapach — od `created_at` przez kolejne zmiany.
+      let prevStage = initial;
+      let prevAt = stampMs(lead.createdAt);
+      for (const h of hist) {
+        if (prevAt !== null && h.at >= prevAt) {
+          const acc = stageDays.get(prevStage) ?? { sum: 0, n: 0 };
+          acc.sum += (h.at - prevAt) / DAY_MS;
+          acc.n += 1;
+          stageDays.set(prevStage, acc);
+        }
+        prevStage = h.to;
+        prevAt = h.at;
+      }
+
+      // Zamknięcia — liczone z etapu BIEŻĄCEGO, bo tylko on mówi, jak szansa stoi dziś.
+      const createdMs = stampMs(lead.createdAt);
+      const wonMs = stampMs(lead.wonAt) ?? [...hist].reverse().find((h) => h.to === "wygrany")?.at ?? null;
+      const winDays =
+        lead.stage === "wygrany" && createdMs !== null && wonMs !== null && wonMs >= createdMs
+          ? (wonMs - createdMs) / DAY_MS
+          : null;
+      if (lead.stage === "wygrany") {
+        wonCount++;
+        wonMonthly += lead.monthly;
+        wonSetup += lead.setup;
+        if (winDays !== null) daysToWin.push(winDays);
+      }
+      if (lead.stage === "przegrany") {
+        lostCount++;
+        lostByReason.set(lead.lostReason ?? null, (lostByReason.get(lead.lostReason ?? null) ?? 0) + 1);
+      }
+
+      const key = lead.salespersonId;
+      let sp = perSales.get(key);
+      if (!sp) {
+        sp = {
+          salespersonId: key,
+          name: "",
+          leads: 0,
+          won: 0,
+          lost: 0,
+          open: 0,
+          winRate: null,
+          wonMonthly: 0,
+          wonSetup: 0,
+          avgDaysToWin: null,
+          _winDays: [],
+        };
+        perSales.set(key, sp);
+      }
+      sp.leads++;
+      if (lead.stage === "wygrany") {
+        sp.won++;
+        sp.wonMonthly += lead.monthly;
+        sp.wonSetup += lead.setup;
+        if (winDays !== null) sp._winDays.push(winDays);
+      } else if (lead.stage === "przegrany") {
+        sp.lost++;
+      } else {
+        sp.open++;
+      }
+    }
+
+    // ---- Lejek ---------------------------------------------------------
+    const funnel: AnalyticsFunnelStage[] = FUNNEL_STAGES.map((stage, i) => {
+      const reached = reachedCount.get(stage) ?? 0;
+      const nextReached = i + 1 < FUNNEL_STAGES.length ? (reachedCount.get(FUNNEL_STAGES[i + 1]) ?? 0) : null;
+      const days = stageDays.get(stage);
+      return {
+        stage,
+        reached,
+        current: currentCount.get(stage) ?? 0,
+        conversion: nextReached === null || reached === 0 ? null : (nextReached / reached) * 100,
+        avgDays: days && days.n > 0 ? days.sum / days.n : null,
+        avgDaysSamples: days?.n ?? 0,
+        monthly: reachedMonthly.get(stage) ?? 0,
+        setup: reachedSetup.get(stage) ?? 0,
+      };
+    });
+
+    // ---- Handlowcy -----------------------------------------------------
+    const names = new Map<number, string>();
+    for (const s of db
+      .select({ id: schema.salespeople.id, firstName: schema.salespeople.firstName, lastName: schema.salespeople.lastName })
+      .from(schema.salespeople)
+      .all()) {
+      names.set(s.id, `${s.firstName} ${s.lastName}`.trim());
+    }
+    const bySalesperson: AnalyticsFunnelSalesperson[] = [...perSales.values()]
+      .map(({ _winDays, ...row }) => ({
+        ...row,
+        name: row.salespersonId === null ? "Bez handlowca" : (names.get(row.salespersonId) ?? `#${row.salespersonId}`),
+        winRate: row.won + row.lost > 0 ? (row.won / (row.won + row.lost)) * 100 : null,
+        avgDaysToWin: _winDays.length ? _winDays.reduce((a, b) => a + b, 0) / _winDays.length : null,
+      }))
+      .sort((a, b) => b.won - a.won || b.leads - a.leads || a.name.localeCompare(b.name, "pl"));
+
+    // ---- Stan NA TERAZ: gnijące szanse ---------------------------------
+    // Definicja „gnicia" ma jedno źródło (src/lib/sales-leads.ts) — ta sama
+    // funkcja, którą liczy lista i kanban, żeby trzy ekrany nie mówiły trzech rzeczy.
+    const openNowRows = db
+      .select({
+        id: schema.leads.id,
+        stage: schema.leads.stage,
+        lastActivityAt: schema.leads.lastActivityAt,
+        createdAt: schema.leads.createdAt,
+      })
+      .from(schema.leads)
+      .where(and(isNull(schema.leads.deletedAt), inArray(schema.leads.stage, [...LEAD_OPEN_STAGES]), ...spWhere))
+      .limit(2000)
+      .all();
+    const nextByLead = nextActivityByLead(db, openNowRows.map((r) => r.id));
+    const rotting = openNowRows.filter((r) => rottingOf(r, nextByLead.get(r.id)).rotting).length;
+
+    return c.json({
+      success: true,
+      data: {
+        from,
+        to,
+        salespersonId: salespersonFilter,
+        generatedAt: new Date().toISOString(),
+        leads: cohort.length,
+        funnel,
+        won: {
+          count: wonCount,
+          monthly: wonMonthly,
+          setup: wonSetup,
+          medianDaysToWin: median(daysToWin),
+        },
+        lost: {
+          count: lostCount,
+          byReason: [...lostByReason.entries()]
+            .map(([reason, count]) => ({ reason, count }))
+            .sort((a, b) => b.count - a.count),
+        },
+        winRate: wonCount + lostCount > 0 ? (wonCount / (wonCount + lostCount)) * 100 : null,
+        bySalesperson,
+        rotting,
+        openNow: openNowRows.length,
+        coverage: { leadsWithHistory, leads: cohort.length },
+      },
+    });
+  } catch (error) {
+    console.error("Błąd lejka sprzedaży:", error);
+    return c.json({ success: false, error: "Błąd pobierania lejka sprzedaży" }, 500);
+  }
 });
 
 export default app;
