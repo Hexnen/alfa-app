@@ -31,6 +31,7 @@ import { Button } from "./ui/button";
 import { tip } from "./ui/tooltip";
 import { useAuth } from "@/auth/AuthProvider";
 import { usePerms, TABS } from "@/auth/permissions";
+import { APP_VERSION } from "@/lib/version";
 
 type NavChild = {
   name: string;
@@ -861,6 +862,22 @@ export function Layout({ children }: LayoutProps) {
 
         {/* Page content */}
         <main className="px-3 pb-3 pt-2 lg:px-4 lg:pb-3 lg:pt-2">{children}</main>
+      </div>
+
+      {/* Numer wersji w prawym dolnym rogu aplikacji → „Co nowego”. Renderuje
+          się tylko w zalogowanej powłoce (strony publiczne nie mają Layoutu).
+          Niska warstwa (z-30) i wąski obszar klikalny — dialogi, dymki i
+          podglądy (z-50 i wyżej) przykrywają go, a reszta ekranu zostaje
+          klikalna dzięki `pointer-events-none` na kontenerze. */}
+      <div className="pointer-events-none fixed bottom-2 right-3 z-30 print:hidden">
+        <Link
+          to="/co-nowego"
+          title="Co nowego"
+          className="pointer-events-auto rounded bg-background/80 px-1.5 py-0.5 text-[0.7rem] leading-none text-muted-foreground/70 backdrop-blur-sm transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          data-testid="app-version-link"
+        >
+          v{APP_VERSION}
+        </Link>
       </div>
     </div>
   );

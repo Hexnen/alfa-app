@@ -22,6 +22,7 @@ import { Monitoring } from "./pages/Monitoring";
 import { Templates } from "./pages/Templates";
 import { Warehouse } from "./pages/Warehouse";
 import { Manuals } from "./pages/Manuals";
+import { CoNowego } from "./pages/CoNowego";
 import { Uslugi } from "./pages/Uslugi";
 import { Oferty } from "./pages/Oferty";
 import { Calendar } from "./pages/Calendar";
@@ -88,6 +89,8 @@ function AuthedApp() {
       <PluginImportBridge />
       <Routes>
         <Route path="/" element={<Dashboard />} />
+        {/* Historia zmian — dostępna dla każdego zalogowanego, bez uprawnień. */}
+        <Route path="/co-nowego" element={<CoNowego />} />
         <Route path="/contractors" element={<Contractors />} />
         <Route path="/objects" element={<Objects />} />
         <Route path="/objects/:id" element={<ObjectDetails />} />
