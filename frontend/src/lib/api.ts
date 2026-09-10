@@ -9774,6 +9774,14 @@ export type ContractDraftAttachmentJson = ContractDraftAttachment;
  * wypełnione są wtedy tylko `url`, `host` i zastępczy `favicon`, a front i tak
  * pokazuje klikalny link z domeną.
  */
+/** Punkt mini-mapy — wypełniony wyłącznie dla linków Google Maps. */
+export interface LinkPreviewMap {
+  lat: number;
+  lng: number;
+  zoom: number;
+  label: string | null;
+}
+
 export interface LinkPreview {
   url: string;
   finalUrl: string;
@@ -9783,14 +9791,38 @@ export interface LinkPreview {
   image: string | null;
   favicon: string | null;
   siteName: string | null;
+  /** Link do Map Google → karta z mini-mapą zamiast zwykłego podglądu strony. */
+  map: LinkPreviewMap | null;
   status: "ok" | "error";
   error: string | null;
   fetchedAt: string;
+}
+
+/** Dystans do punktu z karty mapy (w jedną stronę). */
+export interface LinkDistance {
+  km: number;
+  minutes: number;
+  method: "route" | "straight";
+  /** Tylko dla `object` — nazwa obiektu z kartoteki. */
+  objectName?: string;
+}
+
+export interface LinkDistances {
+  office: LinkDistance | null;
+  object: LinkDistance | null;
+  /** Ile pinezkę dzieli od drogi, do której liczona jest trasa (km; 0 = na drodze). */
+  snapKm?: number;
 }
 
 export const linksApi = {
   /** GET /links/preview?url=… — wynik jest cache'owany po stronie serwera (7 dni). */
   async preview(url: string) {
     return request<ApiResponse<LinkPreview>>(`/links/preview?url=${encodeURIComponent(url)}`);
+  },
+  /** GET /links/distances — „od biura" i „od obiektu" dla pinezki wklejonej w notatce. */
+  async distances(lat: number, lng: number, objectId?: number | null) {
+    const params = new URLSearchParams({ lat: String(lat), lng: String(lng) });
+    if (objectId) params.set("objectId", String(objectId));
+    return request<ApiResponse<LinkDistances>>(`/links/distances?${params.toString()}`);
   },
 };

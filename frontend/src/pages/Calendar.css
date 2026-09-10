@@ -742,6 +742,17 @@
   from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: none; }
 }
+/* Panel wydarzenia jako nakładka (poniżej lg) — wsuwa się od prawej krawędzi. Od lg panel
+   jest częścią siatki strony i wjeżdżanie razem ze zwężaniem kalendarza tylko by migało. */
+@media (max-width: 1023.98px) {
+  .alfa-drawer-in {
+    animation: cal-drawer-in 160ms ease-out;
+  }
+}
+@keyframes cal-drawer-in {
+  from { opacity: 0; transform: translateX(12px); }
+  to { opacity: 1; transform: none; }
+}
 
 /* ---- Skrót klawiszowy (kbd) ---- */
 .alfa-kbd {
@@ -885,6 +896,7 @@
   .alfa-calendar .fc .fc-event,
   .alfa-pop,
   .alfa-toast,
+  .alfa-drawer-in,
   .alfa-calendar .cal-skeleton-bar {
     animation: none !important;
     transition: none !important;

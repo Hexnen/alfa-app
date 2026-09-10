@@ -113,6 +113,7 @@ import { usePerms } from "@/auth/permissions";
 import { fmtKm, travelSourceLabel, useTravel } from "@/lib/travel";
 import { toMapsUrl } from "@/lib/maps-url";
 import { RichText } from "@/components/RichText";
+import { MapPreviewCard } from "@/components/MapPreviewCard";
 import {
   activityApi,
   calendarApi,
@@ -730,6 +731,25 @@ export function ObjectDetails() {
                   >
                     <ExternalLink className="h-3 w-3" /> Google Maps
                   </a>
+                )}
+                {/* Mini-mapa pinezki — ta sama karta, co pod linkiem w notatce.
+                    Mając współrzędne w kartotece rysujemy ją BEZ pytania backendu;
+                    sam link do Map (bez współrzędnych) idzie przez podgląd linku. */}
+                {mapsHref && (
+                  <MapPreviewCard
+                    href={mapsHref}
+                    point={
+                      hasCoords
+                        ? {
+                            lat: object.latitude as number,
+                            lng: object.longitude as number,
+                            label: object.name,
+                          }
+                        : null
+                    }
+                    url={hasCoords ? undefined : (object.mapsUrl ?? undefined)}
+                    className="mt-1.5 max-w-sm"
+                  />
                 )}
                 {/* Dojazd z biura — ta sama linia, co w dialogu wydarzenia. */}
                 <div className="text-xs text-muted-foreground">

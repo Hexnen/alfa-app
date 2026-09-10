@@ -28,6 +28,8 @@ export const NOMINATIM_SEARCH_URL = "https://nominatim.openstreetmap.org/search"
 /** Reverse (współrzędne → jednostka administracyjna) — ta sama kolejka i User-Agent. */
 export const NOMINATIM_REVERSE_URL = "https://nominatim.openstreetmap.org/reverse";
 export const OSRM_ROUTE_URL = "https://router.project-osrm.org/route/v1/driving";
+/** Nearest API — najbliższe punkty SIECI DRÓG dla współrzędnych spoza niej. */
+export const OSRM_NEAREST_URL = "https://router.project-osrm.org/nearest/v1/driving";
 /** Table API — macierz n×n jednym zapytaniem (planer trasy). */
 export const OSRM_TABLE_URL = "https://router.project-osrm.org/table/v1/driving";
 /** Twardy limit punktów w jednym `/table` (demo OSRM: `--max-table-size` 100). */
@@ -338,6 +340,71 @@ export async function geocode(query: string, opts: GeocodeOptions = {}): Promise
 }
 
 // ---------------------------------------------------------------------------
+// Geokodowanie odwrotne (współrzędne → adres)
+// ---------------------------------------------------------------------------
+
+/** Klucz cache'u adresu spod pinezki: `rev:<lat,lng>` (5 miejsc = ok. 1 m). */
+export function reverseCacheKey(point: { lat: number; lng: number }): string {
+  return `rev:${point.lat.toFixed(5)},${point.lng.toFixed(5)}`;
+}
+
+/**
+ * Współrzędne → krótka linia adresu („ul. Prosta 51, Warszawa”).
+ *
+ * Po co: link do Map w postaci samych współrzędnych (`/maps/search/52.29,+21.06`
+ * — tak wygląda pinezka udostępniona z telefonu) nie niesie ŻADNEJ nazwy, więc
+ * karta z mini-mapą miałaby tylko liczby. Reverse daje jej podpis.
+ *
+ * Jak reszta modułu: przez cache `geo_cache`, przez wspólną kolejkę 1 req/s
+ * (ToS Nominatim) i BEZ rzucania — brak sieci albo pusty wynik to `null`.
+ */
+export async function reverseAddress(
+  point: { lat: number; lng: number },
+  opts: GeocodeOptions = {}
+): Promise<string | null> {
+  const dbx = opts.dbx ?? db;
+  if (!Number.isFinite(point.lat) || !Number.isFinite(point.lng)) return null;
+
+  const key = reverseCacheKey(point);
+  const hit = geoCacheGet<{ display: string | null }>(key, dbx);
+  // `{ display: null }` w cache'u to zapamiętane „tam nic nie ma" — też trafienie.
+  if (hit && typeof hit === "object" && "display" in hit) return hit.display ?? null;
+  if (opts.cacheOnly) return null;
+
+  const params = new URLSearchParams({
+    format: "json",
+    lat: point.lat.toFixed(6),
+    lon: point.lng.toFixed(6),
+    zoom: "18",
+    addressdetails: "1",
+    "accept-language": "pl",
+  });
+  const res = await getJson(`${NOMINATIM_REVERSE_URL}?${params.toString()}`, "Geokoder (reverse)");
+  if (isGeoError(res)) return null; // błędów nie cache'ujemy (zasada modułu)
+
+  const body = res.json as { display_name?: unknown; address?: Record<string, unknown> } | null;
+  const addr = (body?.address ?? {}) as Record<string, unknown>;
+  const pick = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : null);
+
+  const road = pick(addr.road) ?? pick(addr.pedestrian) ?? pick(addr.footway) ?? pick(addr.path);
+  const house = pick(addr.house_number);
+  const city =
+    pick(addr.city) ?? pick(addr.town) ?? pick(addr.village) ?? pick(addr.municipality) ?? pick(addr.county);
+  const street = road ? (house ? `${road} ${house}` : road) : null;
+
+  const display =
+    [street, city].filter(Boolean).join(", ") ||
+    // Bez ulicy i miasta (las, pole) zostaje początek pełnej nazwy z Nominatim.
+    (typeof body?.display_name === "string"
+      ? body.display_name.split(",").map((p) => p.trim()).filter(Boolean).slice(0, 2).join(", ")
+      : "") ||
+    null;
+
+  geoCacheSet(key, { display }, dbx);
+  return display;
+}
+
+// ---------------------------------------------------------------------------
 // Dystans
 // ---------------------------------------------------------------------------
 
@@ -427,6 +494,163 @@ export async function routeDistanceKm(
   // a zacierałby informację o pochodzeniu wartości.
   geoCacheSet(key, fromOsrm ? { km, minutes, method: "route" } : { km, method: "route" }, dbx);
   return { km, minutes, method: "route", minutesEstimated: !fromOsrm, cached: false };
+}
+
+// ---------------------------------------------------------------------------
+// Przyklejanie punktu do drogi (OSRM Nearest) — trasy do pinezek spoza dróg
+// ---------------------------------------------------------------------------
+//
+// PROBLEM, KTÓRY TO ROZWIĄZUJE. Pinezka z Map Google bywa postawiona w lesie,
+// na środku osiedla albo na trawniku. OSRM przykleja taki punkt do NAJBLIŻSZEGO
+// odcinka sieci drogowej — a najbliższy nie znaczy sensowny: dwie pinezki
+// oddalone o 150 m w Lesie Bródnowskim dawały „2,3 km" i „6,3 km" od biura, bo
+// druga przykleiła się do bezimiennej leśnej ścieżki, do której samochód musi
+// nadrabiać naokoło.
+//
+// Dlatego pytamy `nearest` o kilku kandydatów, odrzucamy drogi BEZ NAZWY (ścieżki,
+// dukty, wewnętrzne dojazdy), gdy jest jakakolwiek nazwana, i sprawdzamy wynik
+// zdrowym rozsądkiem: trasa dłuższa niż 3× linia prosta + 1 km to prawie na pewno
+// objazd wymuszony złym przyklejeniem — wtedy próbujemy kolejnego kandydata,
+// a na końcu wracamy do uczciwego przybliżenia linią prostą.
+
+/** Kandydat z `nearest`: punkt na drodze, jej nazwa i odległość pinezki od niej (metry). */
+export interface RoadCandidate {
+  lat: number;
+  lng: number;
+  name: string;
+  /** Metry od pinezki do drogi (z OSRM). */
+  distance: number;
+}
+
+/** Klucz cache'u kandydatów: `near:<lat,lng>` (5 miejsc = ok. 1 m). */
+export function nearestCacheKey(point: { lat: number; lng: number }): string {
+  return `near:${point.lat.toFixed(5)},${point.lng.toFixed(5)}`;
+}
+
+/**
+ * Ilu kandydatów pytamy. Pięciu NIE WYSTARCZA: dla pinezki w Lesie Bródnowskim
+ * pierwszych pięć trafień to same bezimienne ścieżki (274–289 m) i dopiero
+ * dziesiąte jest ulicą (Kondratowicza, 314 m) — czyli dokładnie ten przypadek,
+ * przez który dwie sąsiednie pinezki dawały 2,3 km i 6,3 km od biura.
+ */
+const NEAREST_COUNT = 10;
+/**
+ * Jak daleko wolno „iść" po nazwaną drogę. Bez tego limitu pinezka na wsi
+ * przykleiłaby się do drogi wojewódzkiej o pięć kilometrów dalej tylko dlatego,
+ * że ma nazwę.
+ */
+const NAMED_MAX_DISTANCE_M = 1500;
+const MAX_SNAP_ATTEMPTS = 3;
+/** Trasa dłuższa niż `straight × 3 + 1 km` = podejrzenie objazdu przez złe przyklejenie. */
+const SUSPICIOUS_FACTOR = 3;
+const SUSPICIOUS_MARGIN_KM = 1;
+/** Od tylu kilometrów od drogi mówimy o tym użytkownikowi („kawałek pieszo"). */
+export const SNAP_VISIBLE_KM = 0.1;
+
+const round2 = (n: number) => Math.round(n * 100) / 100;
+
+/**
+ * Najbliższe punkty sieci drogowej dla pinezki — posortowane rosnąco po
+ * odległości, z odfiltrowanymi bezimiennymi drogami (o ile została choć jedna
+ * nazwana). Pusta tablica = `nearest` nie odpowiedział; wołający ma wtedy
+ * trasować surowy punkt, czyli zachować się jak przed tą zmianą.
+ */
+export async function nearestRoadCandidates(
+  point: { lat: number; lng: number },
+  opts: GeocodeOptions = {}
+): Promise<RoadCandidate[]> {
+  const dbx = opts.dbx ?? db;
+  const key = nearestCacheKey(point);
+  const hit = geoCacheGet<RoadCandidate[]>(key, dbx);
+  if (Array.isArray(hit)) return hit;
+  if (opts.cacheOnly) return [];
+
+  const url = `${OSRM_NEAREST_URL}/${point.lng},${point.lat}?number=${NEAREST_COUNT}`;
+  const res = await getJson(url, "OSRM nearest");
+  if (isGeoError(res)) return [];
+
+  const body = res.json as
+    | { code?: string; waypoints?: { location?: [number, number]; name?: string; distance?: number }[] }
+    | null;
+  if (body?.code !== "Ok" || !Array.isArray(body.waypoints)) return [];
+
+  const all: RoadCandidate[] = [];
+  for (const w of body.waypoints) {
+    const loc = w.location;
+    if (!Array.isArray(loc) || loc.length < 2) continue;
+    const lng = Number(loc[0]);
+    const lat = Number(loc[1]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+    const distance = Number(w.distance);
+    all.push({
+      lat: round6(lat),
+      lng: round6(lng),
+      name: typeof w.name === "string" ? w.name : "",
+      distance: Number.isFinite(distance) ? distance : Number.POSITIVE_INFINITY,
+    });
+  }
+
+  // Bezimienne odcinki (leśne ścieżki, dojazdy wewnętrzne) tylko wtedy, gdy w
+  // rozsądnym zasięgu nie ma NIC nazwanego — to one produkowały absurdalne objazdy.
+  const named = all.filter((c) => c.name.trim() !== "" && c.distance <= NAMED_MAX_DISTANCE_M);
+  const chosen = (named.length > 0 ? named : all).sort((a, b) => a.distance - b.distance);
+
+  geoCacheSet(key, chosen, dbx);
+  return chosen;
+}
+
+export interface SnappedDistance extends RouteDistance {
+  /**
+   * Ile kilometrów dzieli pinezkę od drogi, do której doliczyliśmy trasę
+   * (2 miejsca). 0 = trasowaliśmy surowy punkt albo różnica jest pomijalna.
+   */
+  snapKm: number;
+}
+
+/**
+ * Trasa do pinezki, która NIE MUSI leżeć na drodze — z przyklejeniem do sensownej
+ * drogi i kontrolą zdrowego rozsądku (patrz komentarz nad `nearestRoadCandidates`).
+ *
+ * Świadomie osobna od `routeDistanceKm`: ta druga liczy dojazdy do obiektów
+ * z kartoteki (`/company/travel`, realizacje, planer trasy), gdzie współrzędne
+ * pochodzą z geokodera adresu i leżą przy drodze — zmiana tamtego zachowania
+ * ruszyłaby kilometry, z których liczą się pieniądze. Cache tras jest wspólny.
+ */
+export async function routeDistanceSnapped(
+  from: { lat: number; lng: number },
+  to: { lat: number; lng: number },
+  opts: RouteOptions = {}
+): Promise<SnappedDistance> {
+  const straightKm = straightLineKm(from, to);
+  const straight: SnappedDistance = {
+    km: straightKm,
+    minutes: estimateMinutes(straightKm),
+    method: "straight",
+    minutesEstimated: true,
+    cached: false,
+    snapKm: 0,
+  };
+  if (opts.useRouting === false) return straight;
+
+  const candidates = await nearestRoadCandidates(to, opts);
+  if (candidates.length === 0) {
+    // `nearest` padł — zachowujemy się dokładnie jak dotąd.
+    return { ...(await routeDistanceKm(from, to, opts)), snapKm: 0 };
+  }
+
+  const limit = Math.max(straightKm * SUSPICIOUS_FACTOR + SUSPICIOUS_MARGIN_KM, SUSPICIOUS_MARGIN_KM);
+  for (const candidate of candidates.slice(0, MAX_SNAP_ATTEMPTS)) {
+    const route = await routeDistanceKm(from, candidate, opts);
+    // OSRM niedostępny (fallback na linię prostą) — kolejne próby nic nie dadzą.
+    if (route.method !== "route") return straight;
+    if (route.km <= limit) {
+      return { ...route, snapKm: round2(haversineKm(to, candidate)) };
+    }
+  }
+
+  // Każdy kandydat dawał absurdalny objazd — uczciwsza jest linia prosta ×1,3
+  // (front pokaże ją z tyldą) niż kilometry przez pół miasta.
+  return straight;
 }
 
 // ---------------------------------------------------------------------------

@@ -121,6 +121,27 @@ export function isGoogleMapsUrl(value: string): boolean {
   return ALLOWED_HOST_SUFFIXES.some((s) => host === s || host.endsWith(`.${s}`));
 }
 
+/**
+ * Czy adres WYGLĄDA na link do Map (a nie na zwykłe wyszukiwanie w Google).
+ * Zgrubne, bo służy tylko do KOLEJNOŚCI kart podglądu pod notatką — o tym, czy
+ * karta faktycznie dostanie mini-mapę, decyduje `preview.map` z backendu
+ * (`parseGoogleMapsUrl` w src/lib/maps-url.ts, wraz z rozwijaniem krótkich linków).
+ */
+export function looksLikeMapsLink(value: string): boolean {
+  const raw = value.trim();
+  if (!isGoogleMapsUrl(raw)) return false;
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return false;
+  }
+  const host = u.hostname.toLowerCase();
+  // Krótkie linki (goo.gl / g.co) nie mówią nic o ścieżce — traktujemy je jak mapy.
+  if (host.endsWith("goo.gl") || host.endsWith("g.co")) return true;
+  return /^\/maps(\/|$)/.test(u.pathname) || host.startsWith("maps.");
+}
+
 /** Skąd wzięły się współrzędne — UI mówi „odczytano z linku” vs „rozwinięto krótki link”. */
 export type MapsLinkSource = "parsed" | "resolved";
 

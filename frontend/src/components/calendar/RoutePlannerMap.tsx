@@ -22,13 +22,9 @@ import { cn } from "@/lib/utils";
 import { POLAND_RING } from "@/assets/poland-outline";
 import type { DayRoutePoint } from "@/lib/api";
 import { vehicleLetter, type Vehicle, type VehiclePlan } from "@/lib/route-plan";
+import { loadLeaflet } from "@/lib/leaflet-loader";
 
 declare const L: any;
-
-const LEAFLET_CSS = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
-const LEAFLET_JS = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
-const LEAFLET_CSS_ID = "leaflet-cdn-css";
-const LEAFLET_JS_ID = "leaflet-cdn-js";
 
 const DEFAULT_CENTER: [number, number] = [52.07, 19.48];
 const DEFAULT_ZOOM = 6;
@@ -67,38 +63,6 @@ function vehicleColor(colorIndex: number): string {
 /** Kolor typu wydarzenia z palety `--cal-<typ>` (Calendar.css). */
 function typeColor(type: string): string {
   return themeColor(`--cal-${type}`, "#64748b");
-}
-
-function loadLeaflet(): Promise<void> {
-  return new Promise((resolve) => {
-    if (typeof window !== "undefined" && (window as any).L) {
-      resolve();
-      return;
-    }
-    if (!document.getElementById(LEAFLET_CSS_ID)) {
-      const link = document.createElement("link");
-      link.id = LEAFLET_CSS_ID;
-      link.rel = "stylesheet";
-      link.href = LEAFLET_CSS;
-      document.head.appendChild(link);
-    }
-    const existing = document.getElementById(LEAFLET_JS_ID) as HTMLScriptElement | null;
-    if (existing) {
-      if ((window as any).L) resolve();
-      else {
-        existing.addEventListener("load", () => resolve());
-        existing.addEventListener("error", () => resolve());
-      }
-      return;
-    }
-    const script = document.createElement("script");
-    script.id = LEAFLET_JS_ID;
-    script.src = LEAFLET_JS;
-    script.async = true;
-    script.addEventListener("load", () => resolve());
-    script.addEventListener("error", () => resolve());
-    document.head.appendChild(script);
-  });
 }
 
 /** Mała kłódka SVG — Lucide nie działa wewnątrz `divIcon`, więc rysujemy ją wprost. */

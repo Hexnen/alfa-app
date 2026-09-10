@@ -6,54 +6,17 @@ import {
   reverseGeocode,
   toMapsUrl,
 } from "@/lib/maps-url";
+import { loadLeaflet } from "@/lib/leaflet-loader";
 
 // Leaflet is loaded from the unpkg CDN at runtime (no npm dependency — keeps the
 // standalone public form working), so the global `L` has no bundled types.
 declare const L: any;
-
-const LEAFLET_CSS = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
-const LEAFLET_JS = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
-const LEAFLET_CSS_ID = "leaflet-cdn-css";
-const LEAFLET_JS_ID = "leaflet-cdn-js";
 
 const DEFAULT_CENTER: [number, number] = [52.07, 19.48]; // środek Polski
 const DEFAULT_ZOOM = 6;
 
 /** Remembers the user's base-layer choice (streets ⇄ satellite) across sessions. */
 const MAP_LAYER_KEY = "mapLayerPref";
-
-/** Injects Leaflet CSS + JS from the CDN once, resolving when `window.L` exists. */
-function loadLeaflet(): Promise<void> {
-  return new Promise((resolve) => {
-    if (typeof window !== "undefined" && (window as any).L) {
-      resolve();
-      return;
-    }
-    // CSS (idempotent via guard id)
-    if (!document.getElementById(LEAFLET_CSS_ID)) {
-      const link = document.createElement("link");
-      link.id = LEAFLET_CSS_ID;
-      link.rel = "stylesheet";
-      link.href = LEAFLET_CSS;
-      document.head.appendChild(link);
-    }
-    // JS (idempotent via guard id)
-    const existing = document.getElementById(LEAFLET_JS_ID) as
-      | HTMLScriptElement
-      | null;
-    if (existing) {
-      if ((window as any).L) resolve();
-      else existing.addEventListener("load", () => resolve());
-      return;
-    }
-    const script = document.createElement("script");
-    script.id = LEAFLET_JS_ID;
-    script.src = LEAFLET_JS;
-    script.async = true;
-    script.addEventListener("load", () => resolve());
-    document.head.appendChild(script);
-  });
-}
 
 // `parseCoords` / `isDirectInput` / `toMapsUrl` mieszkają w @/lib/maps-url —
 // tego samego rozpoznawania używa kartoteka obiektu i formularz zlecenia.

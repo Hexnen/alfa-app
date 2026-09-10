@@ -60,17 +60,13 @@ import {
   ListChecks,
   Loader2,
   Mail,
-  MapPin,
   MousePointerClick,
-  Paperclip,
   Pencil,
   Plus,
   RefreshCw,
   Repeat,
-  Route,
   Rss,
   Sparkles,
-  StickyNote,
   Tags,
   Trash2,
   Undo2,
@@ -80,6 +76,16 @@ import {
 import { Button } from "@/components/ui/button";
 import { ContextMenu, type ContextMenuItem } from "@/components/ui/context-menu";
 import { Card, CardContent } from "@/components/ui/card";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import {
   Dialog,
   DialogContent,
@@ -105,7 +111,6 @@ import {
   type CalendarAvailability,
   type CalendarBilling,
   type CalendarEvent,
-  type CalendarNote,
   type CalendarEventInput,
   type CalendarEventStatus,
   type CalendarEventType,
@@ -140,22 +145,18 @@ import {
   eventTipData,
   eventsCount,
   isNoteEvent,
-  overdueTip,
   protocolBadgeKind,
   protocolHref,
-  REALIZATION_KIND_LABEL,
   realizationApplies,
   realizationBadgeKind,
   realizationHref,
   realizationMoney,
   fmtDayHeading,
   fmtRange,
-  fmtRangeCompact,
   fmtRelative,
   fmtShort,
   fmtTimestamp,
   parseLocal,
-  pluralPl,
   techShort,
   timestampDayKey,
   toDateStr,
@@ -180,13 +181,12 @@ import {
   RealizationBadge,
   RealizationMark,
 } from "@/components/CalendarEventBadges";
-import { NotesBadge } from "@/components/CalendarEventNotes";
-import { WeatherMark, WeatherPreviewRow } from "@/components/CalendarWeather";
+import { WeatherMark } from "@/components/CalendarWeather";
 import { FilterSets } from "@/components/calendar/FilterSets";
 import { RoutePlanner } from "@/components/calendar/RoutePlanner";
 import { Tooltip, applyTip, blockTooltips, hideTooltip, tip } from "@/components/ui/tooltip";
 import { AssistantDrawer, type AssistantEventChangeKind, type AssistantPreview } from "@/components/assistant/AssistantDrawer";
-import { departureAt, departureLine, travelSourceLabel, travelSummary, useTravel } from "@/lib/travel";
+import { departureAt, departureLine } from "@/lib/travel";
 import { cn } from "@/lib/utils";
 import "@/pages/Calendar.css";
 
@@ -496,11 +496,6 @@ interface TravelBand {
   /** Wyjazd przed początkiem widocznego zakresu — pas urwany u góry, etykieta pod linią. */
   clipped: boolean;
   label: string;
-}
-
-interface PreviewState {
-  ev: CalendarEvent;
-  rect: { left: number; top: number; width: number; height: number };
 }
 
 // ---------------------------------------------------------------------------
@@ -1171,33 +1166,49 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
   const [dialogPrefill, setDialogPrefill] = useState<CalendarEventPrefill | null>(null);
   const [dialogNonce, setDialogNonce] = useState(0);
   /**
-   * Formularz jako szuflada zwężająca kalendarz zamiast okna na środku. Włącza go tylko
-   * przycisk „Edytuj” w podglądzie i tylko na dość szerokim ekranie — niżej kalendarz obok
-   * panelu 480 px przestaje być czytelny, więc zostaje okno modalne.
+   * Panel z prawej jest jedyną powłoką formularza w kalendarzu, więc jego stan trzymamy też
+   * w refach: `openEvent` siedzi w zależnościach menu kontekstowego i `openEventById`, a
+   * przebudowa tych callbacków przy każdym otwarciu panelu nic by nie dała.
    */
-  const [docked, setDocked] = useState(false);
-  const [wide, setWide] = useState(() =>
-    typeof window === "undefined" ? true : window.matchMedia("(min-width: 1024px)").matches
-  );
-  useEffect(() => {
-    const mq = window.matchMedia("(min-width: 1024px)");
-    const on = () => setWide(mq.matches);
-    mq.addEventListener("change", on);
-    return () => mq.removeEventListener("change", on);
+  const dialogOpenRef = useRef(false);
+  dialogOpenRef.current = dialogOpen;
+  const dialogModeRef = useRef<CalendarDialogMode>(dialogMode);
+  dialogModeRef.current = dialogMode;
+  const dialogEventRef = useRef<CalendarEvent | null>(dialogEvent);
+  dialogEventRef.current = dialogEvent;
+  /** Zgłaszane przez panel: brudny formularz albo niewysłany szkic notatki. */
+  const dialogDirtyRef = useRef(false);
+  /** Otwarcie odłożone do decyzji w pytaniu o porzucenie zmian. */
+  const [pendingOpen, setPendingOpen] = useState<null | (() => void)>(null);
+  /** Panel w edycji/tworzeniu przejmuje uwagę; w podglądzie kalendarz zostaje „na chodzie”. */
+  const panelBusy = dialogOpen && dialogMode !== "view";
+
+  /**
+   * Podmiana zawartości panelu z niezapisanymi zmianami — pytamy, zamiast gubić po cichu.
+   * Zwraca `true`, gdy otwarcie zostało odłożone; `next` otwiera już bez guarda, więc
+   * potwierdzenie nie wraca do tego samego pytania.
+   */
+  const guardSwap = useCallback((next: () => void) => {
+    if (!dialogOpenRef.current || !dialogDirtyRef.current) return false;
+    setPendingOpen(() => next);
+    return true;
   }, []);
 
-
+  /** Otwarcie bez pytania o porzucenie zmian — dla ścieżek już sprawdzonych i po potwierdzeniu. */
+  const doOpenCreate = useCallback((prefill?: CalendarEventPrefill) => {
+    setDialogMode("create");
+    setDialogEvent(null);
+    setDialogPrefill(prefill ?? null);
+    setDialogNonce((n) => n + 1);
+    setDialogOpen(true);
+  }, []);
   const openCreate = useCallback(
     (prefill?: CalendarEventPrefill) => {
       if (!editable) return;
-      setDialogMode("create");
-      setDialogEvent(null);
-      setDialogPrefill(prefill ?? null);
-      setDialogNonce((n) => n + 1);
-      setDocked(false);
-      setDialogOpen(true);
+      if (guardSwap(() => doOpenCreate(prefill))) return;
+      doOpenCreate(prefill);
     },
-    [editable]
+    [editable, guardSwap, doOpenCreate]
   );
 
   // --- Drag&drop maila .msg z Outlooka na KONKRETNĄ komórkę kalendarza ---
@@ -1402,16 +1413,36 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
     ? { onDragEnter: onMsgDragEnter, onDragOver: onMsgDragOver, onDragLeave: onMsgDragLeave, onDrop: onMsgDrop }
     : {};
 
+  /** Jak `doOpenCreate`, tylko dla istniejącego wydarzenia — tryb przychodzi już rozstrzygnięty. */
+  const doOpenEvent = useCallback((ev: CalendarEvent, mode: CalendarDialogMode) => {
+    setDialogMode(mode);
+    setDialogEvent(ev);
+    setDialogPrefill(null);
+    setDialogNonce((n) => n + 1);
+    setDialogOpen(true);
+  }, []);
+  /**
+   * Wejście w wydarzenie: domyślnie podgląd, edycja tylko gdy naprawdę wolno ją tknąć.
+   * Powtórny klik w wydarzenie już otwarte w podglądzie zamyka panel (w edycji nie rusza nic).
+   */
   const openEvent = useCallback(
-    (ev: CalendarEvent, asDrawer = false) => {
-      setDialogMode(editable && !ev.deletedAt ? "edit" : "view");
-      setDialogEvent(ev);
-      setDialogPrefill(null);
-      setDialogNonce((n) => n + 1);
-      setDocked(asDrawer);
-      setDialogOpen(true);
+    (ev: CalendarEvent, mode: CalendarDialogMode = "view") => {
+      const m = mode === "edit" && editable && !ev.deletedAt ? "edit" : "view";
+      if (
+        dialogOpenRef.current &&
+        dialogModeRef.current === "view" &&
+        dialogEventRef.current?.id === ev.id &&
+        m === "view"
+      ) {
+        // Szkic notatki w podglądzie też jest „niezapisany” — pytamy tak samo jak przy podmianie.
+        if (guardSwap(() => setDialogOpen(false))) return;
+        setDialogOpen(false);
+        return;
+      }
+      if (guardSwap(() => doOpenEvent(ev, m))) return;
+      doOpenEvent(ev, m);
     },
-    [editable]
+    [editable, guardSwap, doOpenEvent]
   );
 
   /** Przejście do daty: w siatce przez API FullCalendar, w Tablicy przez kotwicę miesiąca. */
@@ -1458,16 +1489,25 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
     return () => window.clearTimeout(t);
   }, [searchParams, setSearchParams, openEventById]);
 
-  // --- Podgląd (jeden klik) ---
-  const [preview, setPreview] = useState<PreviewState | null>(null);
-  const closePreview = useCallback(() => setPreview(null), []);
+  /**
+   * Świeżość panelu w podglądzie: po przeładowaniu listy (status z menu, SSE, zapis gdzie
+   * indziej) panel pokazuje aktualny obiekt. Czytamy z `allEvents`, bo lista po filtrach
+   * zgubiłaby wydarzenie przy zawężeniu widoku. Znikniętego wydarzenia nie zamykamy:
+   * równie dobrze mogło wyjść poza zakres dat, a po usunięciu panel zamyka i tak sam
+   * dialog. W edycji nie dotykamy nic — podmiana propa `event` przeładowałaby formularz
+   * razem z wpisywanymi zmianami.
+   *
+   * Porównanie po WARTOŚCI, nie po referencji: `onNotesChanged` przepisuje wydarzenie na
+   * liście przy każdym odczycie notatek, a nowa referencja wracająca do panelu wywołałaby
+   * kolejny odczyt — i tak w kółko.
+   */
   useEffect(() => {
-    // Po przeładowaniu danych odśwież obiekt w podglądzie (np. po zmianie statusu).
-    if (!preview) return;
-    const fresh = events.find((e) => e.id === preview.ev.id);
-    if (!fresh) setPreview(null);
-    else if (fresh !== preview.ev) setPreview({ ...preview, ev: fresh });
-  }, [events]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (!dialogOpen || dialogMode !== "view" || !dialogEvent) return;
+    const fresh = allEvents.find((e) => e.id === dialogEvent.id);
+    if (!fresh || fresh === dialogEvent) return;
+    if (JSON.stringify(fresh) === JSON.stringify(dialogEvent)) return;
+    setDialogEvent(fresh);
+  }, [allEvents, dialogOpen, dialogMode, dialogEvent]);
 
   // --- Menu kontekstowe (prawy przycisk) ---
   const [ctxMenu, setCtxMenu] = useState<CtxMenuState | null>(null);
@@ -1491,14 +1531,10 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
   eventCtxRef.current = (ev, e) => {
     e.preventDefault();
     e.stopPropagation();
-    setPreview(null);
     setCtxMenu({ kind: "event", x: e.clientX, y: e.clientY, ev });
   };
   const eventDblRef = useRef<(ev: CalendarEvent) => void>(() => {});
-  eventDblRef.current = (ev) => {
-    setPreview(null);
-    openEvent(ev);
-  };
+  eventDblRef.current = (ev) => openEvent(ev, "edit");
   type ElWithHandlers = HTMLElement & {
     _alfaCtx?: (e: MouseEvent) => void;
     _alfaDbl?: (e: MouseEvent) => void;
@@ -1614,11 +1650,11 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
 
   /**
    * Podświetlenie „ten sam obiekt” w widoku Lista: hover na wierszu podbija wszystkie
-   * wydarzenia tego samego obiektu, a otwarty podgląd/formularz trzyma je podświetlone
+   * wydarzenia tego samego obiektu, a otwarty panel wydarzenia trzyma je podświetlone
    * na stałe. Klasy przełączamy po DOM — hover nie może przerysowywać kalendarza.
    */
   const hoverObjectRef = useRef<number | null>(null);
-  const pinnedObjectId = preview?.ev.objectId ?? (dialogOpen ? (dialogEvent?.objectId ?? null) : null);
+  const pinnedObjectId = dialogOpen ? (dialogEvent?.objectId ?? null) : null;
   const pinnedObjectRef = useRef<number | null>(null);
   pinnedObjectRef.current = pinnedObjectId;
   const syncObjectHighlight = useCallback(() => {
@@ -1713,8 +1749,8 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
     }
   }, [allEvents, departureFor]);
 
-  // Otwarcie podglądu/formularza albo zmiana widoku zabiera mysz z wiersza bez
-  // `mouseleave` — hover czyścimy sami.
+  // Otwarcie panelu albo zmiana widoku zabiera mysz z wiersza bez `mouseleave`
+  // — hover czyścimy sami.
   useEffect(() => {
     hoverObjectRef.current = null;
   }, [pinnedObjectId, view]);
@@ -1724,14 +1760,15 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
   }, [pinnedObjectId, allEvents, view, syncObjectHighlight]);
 
   /**
-   * Dymki milkną, gdy na wierzchu jest coś ważniejszego: podgląd wydarzenia,
-   * menu kontekstowe, formularz albo potwierdzenie usunięcia.
+   * Dymki milkną, gdy na wierzchu jest coś ważniejszego: menu kontekstowe, formularz
+   * w panelu albo potwierdzenie usunięcia. Panel w podglądzie ich nie blokuje — kalendarz
+   * obok zostaje w pełni używalny.
    */
   useEffect(() => {
-    const busy = !!preview || !!ctxMenu || dialogOpen || !!deleteTarget;
+    const busy = !!ctxMenu || panelBusy || !!deleteTarget;
     blockTooltips("calendar-overlay", busy);
     return () => blockTooltips("calendar-overlay", false);
-  }, [preview, ctxMenu, dialogOpen, deleteTarget]);
+  }, [ctxMenu, panelBusy, deleteTarget]);
   const handleEventWillUnmount = useCallback((arg: EventMountArg) => {
     const el = arg.el as ElWithHandlers;
     if (el._alfaCtx) el.removeEventListener("contextmenu", el._alfaCtx);
@@ -1758,7 +1795,6 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
     ) as HTMLElement | undefined;
     const time = slotEl?.dataset.time; // "HH:MM:SS"
     e.preventDefault();
-    setPreview(null);
     if (time && !dayEl?.closest(".fc-daygrid-body")) {
       const start = new Date(`${date}T${time.slice(0, 5)}`);
       const end = new Date(start);
@@ -1867,7 +1903,7 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
         label: canMutate ? "Edytuj" : "Otwórz",
         icon: canMutate ? Pencil : Eye,
         hint: "dwuklik",
-        onSelect: () => openEvent(ev),
+        onSelect: () => openEvent(ev, canMutate ? "edit" : "view"),
       },
     ];
     if (ev.objectId) {
@@ -1942,7 +1978,6 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
 
   // --- Toast "Usunięto · Przywróć" ---
   const handleDeleted = (ev: CalendarEvent, scope: CalendarSeriesScope) => {
-    setPreview(null);
     announce(`Usunięto „${ev.title}”`);
     notify({
       kind: "info",
@@ -1989,7 +2024,6 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
     const from = toDateStr(arg.start);
     const to = toDateStr(arg.end);
     setRange((r) => (r && r.from === from && r.to === to ? r : { from, to }));
-    setPreview(null);
   };
 
   const handleSelect = (arg: DateSelectArg) => {
@@ -2003,22 +2037,32 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
     calendarRef.current?.getApi().unselect();
   };
 
+  /**
+   * Pojedynczy klik czeka chwilę na ewentualny drugi: otwarcie panelu przesuwa siatkę
+   * (od lg zwęża kalendarz, poniżej zasłania go nakładką), więc drugi klik dwukliku
+   * trafiałby już w inny element i `dblclick` na kafelku nigdy by nie doszedł.
+   */
+  const clickTimerRef = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (clickTimerRef.current != null) window.clearTimeout(clickTimerRef.current);
+  }, []);
   const handleEventClick = (arg: EventClickArg) => {
     arg.jsEvent.preventDefault();
     const ev = freshEvent(arg.event);
     if (!ev) return;
-    // Na mobile od razu dialog (arkusz); na desktopie lekki podgląd przy evencie.
-    if (mobile) {
-      openEvent(ev);
-      return;
+    if (clickTimerRef.current != null) {
+      window.clearTimeout(clickTimerRef.current);
+      clickTimerRef.current = null;
     }
-    const r = arg.el.getBoundingClientRect();
+    // Drugi klik dwukliku — edycję otwiera listener `dblclick` z `handleEventDidMount`.
+    if (arg.jsEvent.detail >= 2) return;
+    // Jedna ścieżka na każdej szerokości: panel w podglądzie (poniżej lg sam wchodzi
+    // nakładką z prawej). Powtórny klik w to samo wydarzenie zamyka go z powrotem.
     setCtxMenu(null);
-    setPreview((p) =>
-      p && p.ev.id === ev.id
-        ? null
-        : { ev, rect: { left: r.left, top: r.top, width: r.width, height: r.height } }
-    );
+    clickTimerRef.current = window.setTimeout(() => {
+      clickTimerRef.current = null;
+      openEvent(ev);
+    }, 220);
   };
 
   /**
@@ -2043,7 +2087,6 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
       if (allDay) end.setDate(end.getDate() + 1);
       else end.setHours(end.getHours() + 1);
     }
-    setPreview(null);
     const startAt = allDay ? toDateStr(start) : toDateTimeStr(start);
     const endAt = allDay ? toDateStr(end) : toDateTimeStr(end);
     // Optymistycznie przepisujemy termin od razu: siatka już pokazuje wydarzenie w nowym
@@ -2065,7 +2108,6 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
   const changeView = useCallback(
     (v: ViewName) => {
       storeView(cfg, v);
-      setPreview(null);
       // Siatka znika pod tooltipem — chowamy go, żeby nie wisiał nad nowym widokiem.
       hideTooltip();
       if (v === "board" || v === "route") {
@@ -2084,19 +2126,16 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
 
   /** Nawigacja ‹ Dziś ›: FullCalendar, miesiąc Tablicy albo dzień Trasy. */
   const navPrev = useCallback(() => {
-    setPreview(null);
     if (isBoard) setAnchorDate((d) => new Date(d.getFullYear(), d.getMonth() - 1, 1));
     else if (isRoute) setAnchorDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() - 1));
     else api()?.prev();
   }, [isBoard, isRoute]);
   const navNext = useCallback(() => {
-    setPreview(null);
     if (isBoard) setAnchorDate((d) => new Date(d.getFullYear(), d.getMonth() + 1, 1));
     else if (isRoute) setAnchorDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1));
     else api()?.next();
   }, [isBoard, isRoute]);
   const navToday = useCallback(() => {
-    setPreview(null);
     if (isBoard) setAnchorDate(startOfMonth(new Date()));
     else if (isRoute) setAnchorDate(new Date());
     else api()?.today();
@@ -2176,7 +2215,7 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
       if (raf) cancelAnimationFrame(raf);
       window.removeEventListener("resize", schedule);
     };
-  }, [fit, view, weekends, activityOpen, assistantOpen, activeFilterCount, editable, loadedOnce, docked, dialogOpen]);
+  }, [fit, view, weekends, activityOpen, assistantOpen, activeFilterCount, editable, loadedOnce, dialogOpen]);
 
   // FullCalendar przelicza kolumny tylko przy resize okna — a szerokość
   // kontenera zmienia też zwinięcie menu bocznego. Obserwujemy więc kontener.
@@ -2263,11 +2302,11 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
     },
     [openCreate]
   );
-  /** Karta zmian „Edytuj” → dialog edycji istniejącego wydarzenia (scalonego z patchem asystenta). */
+  /** Karta zmian „Edytuj” → panel edycji istniejącego wydarzenia (scalonego z patchem asystenta). */
   const onAssistantEditEvent = useCallback(
     (ev: CalendarEvent, onSaved: (saved: CalendarEvent) => void) => {
       assistantSavedRef.current = onSaved;
-      openEvent(ev);
+      openEvent(ev, "edit");
     },
     [openEvent]
   );
@@ -2300,14 +2339,23 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
       if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return;
       if (isTypingTarget(e.target)) return;
       // Dialogi Radix blokują tło — nie reaguj, gdy otwarty jest dialog/prompt.
-      if (dialogOpen || deleteTarget || icsOpen || document.querySelector('[role="dialog"]')) {
+      if (deleteTarget || icsOpen || document.querySelector('[role="dialog"],[role="alertdialog"]')) {
+        return;
+      }
+      // Panel w podglądzie zostawia skróty kalendarza w grze; blokuje je tylko formularz
+      // (edycja/tworzenie) albo fokus na kontrolce wewnątrz panelu, gdzie klawisze należą
+      // do niej. Sam `<aside>` dostaje fokus zaraz po otwarciu — to nie blokuje skrótów.
+      const target = e.target as HTMLElement | null;
+      const inDrawer = target?.closest?.('[data-testid="event-drawer"]');
+      if (dialogOpen && (dialogMode !== "view" || (inDrawer && inDrawer !== target))) {
         return;
       }
       const k = e.key;
       if (k === "Escape") {
-        if (helpOpen || preview || ctxMenu || filtersOpen) {
+        // `preventDefault` chroni panel przed window-handlerem dialogu: najpierw znika
+        // to, co jest na wierzchu (pomoc, menu, filtry).
+        if (helpOpen || ctxMenu || filtersOpen) {
           setHelpOpen(false);
-          setPreview(null);
           setCtxMenu(null);
           setFiltersOpen(false);
           e.preventDefault();
@@ -2354,10 +2402,10 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
     return () => document.removeEventListener("keydown", onKey);
   }, [
     dialogOpen,
+    dialogMode,
     deleteTarget,
     icsOpen,
     helpOpen,
-    preview,
     ctxMenu,
     filtersOpen,
     editable,
@@ -2557,23 +2605,30 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
   );
 
   /**
-   * Formularz wydarzenia. Ta sama instancja w dwóch powłokach: jako okno modalne poza siatką
-   * albo jako szuflada w kolumnie obok kalendarza (wtedy kalendarz zwęża się zamiast znikać
-   * pod overlayem). Wariant ustala się przy otwarciu i już się nie zmienia — przeniesienie
-   * formularza między kontenerami to remount, czyli utrata niezapisanych zmian.
+   * Karta wydarzenia: podgląd i formularz w jednej szufladzie w kolumnie obok kalendarza
+   * (poniżej lg powłoka sama wchodzi nakładką z prawej). Wariant jest stały, a remount
+   * robi wyłącznie `dialogNonce` — przełączenie podgląd → edycja zostaje w tej samej
+   * instancji, żeby nie zgubić szkicu notatki wpisanego w podglądzie.
    */
-  const eventEditor = (variant: "modal" | "drawer") => (
+  const eventEditor = () => (
     <CalendarEventDialog
       key={dialogNonce}
       config={cfg}
-      variant={variant}
+      variant="drawer"
       open={dialogOpen}
       mode={dialogMode}
       event={dialogEvent}
       weather={dialogEvent ? weather[dialogEvent.id] : null}
       prefill={dialogPrefill}
+      onEdit={
+        editable && dialogEvent && !dialogEvent.deletedAt ? () => setDialogMode("edit") : undefined
+      }
+      onDirtyChange={(d) => {
+        dialogDirtyRef.current = d;
+      }}
       onClose={() => {
         assistantSavedRef.current = null;
+        dialogDirtyRef.current = false;
         setDialogOpen(false);
       }}
       onSaved={(ev) => {
@@ -2621,9 +2676,15 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
           // Jeden wiersz o wysokości kontenera — bez tego treść kolumny bocznej
           // (asystent) rozpycha wiersz ponad wyliczoną wysokość.
           fit && "min-h-0 [grid-template-rows:minmax(0,1fr)]",
-          activityOpen && "lg:grid-cols-[1fr_360px]",
-          assistantOpen && "lg:grid-cols-[1fr_420px]",
-          docked && dialogOpen && "lg:grid-cols-[1fr_480px]"
+          // Jedna kolumna boczna naraz — panel wydarzenia ma pierwszeństwo, bo to on
+          // właśnie dostał uwagę (asystenta ani aktywności nie zamykamy w tle).
+          dialogOpen
+            ? "lg:grid-cols-[1fr_480px]"
+            : assistantOpen
+              ? "lg:grid-cols-[1fr_420px]"
+              : activityOpen
+                ? "lg:grid-cols-[1fr_360px]"
+                : undefined
         )}
       >
         <div
@@ -2926,7 +2987,7 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
                 groupBy={boardGroup}
                 editable={editable}
                 loading={loading}
-                onOpen={openEvent}
+                onOpen={(ev) => openEvent(ev)}
                 onContextMenu={handleBoardContextMenu}
                 onMove={handleBoardMove}
                 onCreate={editable ? () => openCreate() : undefined}
@@ -3099,8 +3160,8 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
           />
         )}
 
-        {/* Formularz wydarzenia jako szuflada — zwęża kalendarz zamiast go zasłaniać */}
-        {docked && dialogOpen && eventEditor("drawer")}
+        {/* Panel wydarzenia — zwęża kalendarz zamiast go zasłaniać */}
+        {dialogOpen && eventEditor()}
 
         {/* Panel Asystent (wg status.allowed) */}
         {assistantOpen && assistantAllowed && (
@@ -3116,7 +3177,7 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
       </div>
 
       {/* Pas dojazdu — widoczny tylko pod kursorem, nie łapie zdarzeń myszy */}
-      {band && !preview && !ctxMenu && !dialogOpen && (
+      {band && !ctxMenu && !panelBusy && (
         <div
           className="cal-travel-band"
           data-testid="travel-band"
@@ -3127,28 +3188,6 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
           <span className="cal-travel-band-label">{band.label}</span>
         </div>
       )}
-
-      {/* Podgląd wydarzenia (jeden klik) */}
-      {preview && (
-        <EventPreview
-          state={preview}
-          cfg={cfg}
-          editable={editable}
-          onClose={closePreview}
-          onEdit={() => {
-            closePreview();
-            openEvent(preview.ev, wide);
-          }}
-          onGoToObject={
-            preview.ev.objectId ? () => navigate(`/objects/${preview.ev.objectId}`) : undefined
-          }
-          onStatus={(s) => void setStatus(preview.ev, s)}
-          weather={weather[preview.ev.id]}
-        />
-      )}
-
-      {/* Formularz wydarzenia — okno modalne (szuflada renderuje się w siatce wyżej) */}
-      {!docked && eventEditor("modal")}
 
       {/* Menu kontekstowe (prawy przycisk na wydarzeniu / pustym dniu) */}
       <ContextMenu
@@ -3187,6 +3226,31 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
         onCancel={() => setDeleteTarget(null)}
         onDeleted={handleDeleted}
       />
+
+      {/* Podmiana wydarzenia w panelu, który ma niezapisane zmiany */}
+      <AlertDialog open={pendingOpen !== null} onOpenChange={(o) => !o && setPendingOpen(null)}>
+        <AlertDialogContent className="motion-reduce:animate-none" data-testid="swap-event-prompt">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Panel ma niezapisane zmiany</AlertDialogTitle>
+            <AlertDialogDescription>Zamknięcie panelu lub otwarcie innego wydarzenia je porzuci.</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Zostań w panelu</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={(e) => {
+                e.preventDefault();
+                const next = pendingOpen;
+                setPendingOpen(null);
+                dialogDirtyRef.current = false;
+                next?.();
+              }}
+            >
+              Porzuć zmiany
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Arkusz filtrów (mobile) */}
       {filtersOpen && (
@@ -3400,7 +3464,7 @@ function HelpPopover({
       ? ([[["F"], "Zestawy filtrów (zapisane kombinacje)"]] as [string[], string][])
       : []),
     ...(editable ? ([[["N", "C"], "Nowe wydarzenie"]] as [string[], string][]) : []),
-    [["Esc"], "Zamknij podgląd / menu / pomoc"],
+    [["Esc"], "Zamknij panel / menu / pomoc"],
     [["?"], "Ta ściąga"],
   ];
   return (
@@ -3455,7 +3519,7 @@ function HelpPopover({
           <div>
             <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Mysz</p>
             <ul className="space-y-1 text-xs text-muted-foreground">
-              <li className="flex gap-2"><MousePointerClick className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden /><span>Klik — podgląd; dwuklik — edycja</span></li>
+              <li className="flex gap-2"><MousePointerClick className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden /><span>Klik — panel wydarzenia; dwuklik — od razu edycja</span></li>
               <li className="flex gap-2"><MousePointerClick className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden /><span>Prawy przycisk — menu (status, duplikat, usuń)</span></li>
               {editable && (
                 <>
@@ -3487,261 +3551,6 @@ function HelpPopover({
         Wydarzenia powiązane z obiektem są też widoczne w zakładce „Kalendarz” na{" "}
         <Link to="/objects" className="underline">karcie obiektu</Link>.
       </p>
-    </div>
-  );
-}
-
-/** Szybki podgląd wydarzenia zakotwiczony przy elemencie w siatce. */
-function EventPreview({
-  state,
-  cfg,
-  editable,
-  onClose,
-  onEdit,
-  onGoToObject,
-  onStatus,
-  weather,
-}: {
-  state: PreviewState;
-  cfg: CalendarConfig;
-  editable: boolean;
-  onClose: () => void;
-  onEdit: () => void;
-  onGoToObject?: () => void;
-  onStatus: (s: CalendarEventStatus) => void;
-  /** Skrót pogody z batcha kalendarza (ten sam, co znacznik na kafelku); brak → bez wiersza. */
-  weather?: WeatherBrief | null;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  const [pos, setPos] = useState<{ left: number; top: number }>({ left: state.rect.left, top: state.rect.top });
-  const ev = state.ev;
-  const meta = EVENT_TYPE_META[ev.type];
-  const Icon = meta?.icon ?? Building2;
-  const status = EVENT_STATUS_META[ev.status];
-  // Dojazd biuro → obiekt; przy urlopie i wydarzeniach bez obiektu nie ma czego liczyć.
-  const { travel, loading: travelLoading } = useTravel(
-    ev.objectId,
-    cfg.features.weather && ev.type !== "urlop" && !isNoteEvent(ev.type)
-  );
-  // Dzień widać z siatki kalendarza, więc jednodniowe wydarzenia pokazują sam zakres godzin.
-  const term = fmtRangeCompact(ev.startAt, ev.endAt, ev.allDay);
-  const travelText = travelSummary(travel, { startAt: ev.startAt, allDay: ev.allDay });
-  const canMutate = editable && !ev.deletedAt;
-  const overdue = isOverdue(ev, new Date());
-  const notesCount = ev.notesCount ?? ev.notes?.length ?? 0;
-  // Ostatnia notatka jedną linią: z listy nie mamy treści — dociągamy tylko gdy licznik > 0.
-  const inlineLast = ev.notes?.length ? ev.notes[ev.notes.length - 1] : null;
-  const [fetchedLast, setFetchedLast] = useState<{ id: number; note: CalendarNote | null } | null>(null);
-  useEffect(() => {
-    if (inlineLast || !notesCount) return;
-    let cancelled = false;
-    calendarApi
-      .notes(ev.id)
-      .then((res) => {
-        if (cancelled) return;
-        const list = res.data ?? [];
-        setFetchedLast({ id: ev.id, note: list.length ? list[list.length - 1] : null });
-      })
-      .catch(() => {
-        /* starszy backend — bez linii notatki */
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [ev.id, inlineLast, notesCount]);
-  const lastNote = inlineLast ?? (fetchedLast?.id === ev.id && notesCount ? fetchedLast.note : null);
-  // Notatka może być SAMYMI załącznikami (pusty tekst) — wtedy zamiast pustej
-  // linii „autor:" pokazujemy, ile plików doszło.
-  const lastNoteText = (lastNote?.text ?? "").replace(/\s+/g, " ").trim();
-  const lastNoteFiles = lastNote?.attachments?.length ?? 0;
-  const lastNoteLine = lastNoteText || (lastNoteFiles ? pluralPl(lastNoteFiles, "załącznik", "załączniki", "załączników") : "");
-
-  useLayoutEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const pad = 8;
-    const { width, height } = el.getBoundingClientRect();
-    const r = state.rect;
-    // Preferuj prawo od eventu, potem lewo, potem pod spodem.
-    let left = r.left + r.width + 8;
-    let top = r.top;
-    if (left + width > window.innerWidth - pad) left = r.left - width - 8;
-    if (left < pad) {
-      left = Math.max(pad, Math.min(r.left, window.innerWidth - width - pad));
-      top = r.top + r.height + 6;
-    }
-    if (top + height > window.innerHeight - pad) top = Math.max(pad, window.innerHeight - height - pad);
-    setPos({ left, top });
-  }, [state]);
-
-  useEffect(() => {
-    const onDown = (e: MouseEvent) => {
-      if (ref.current?.contains(e.target as Node)) return;
-      onClose();
-    };
-    const onScroll = () => onClose();
-    document.addEventListener("mousedown", onDown, true);
-    window.addEventListener("scroll", onScroll, true);
-    window.addEventListener("resize", onScroll);
-    return () => {
-      document.removeEventListener("mousedown", onDown, true);
-      window.removeEventListener("scroll", onScroll, true);
-      window.removeEventListener("resize", onScroll);
-    };
-  }, [onClose]);
-
-  useEffect(() => {
-    ref.current?.querySelector<HTMLButtonElement>("button[data-primary]")?.focus({ preventScroll: true });
-  }, []);
-
-  return (
-    <div
-      ref={ref}
-      role="dialog"
-      aria-label={`Podgląd: ${ev.title}`}
-      data-testid="event-preview"
-      style={{ left: pos.left, top: pos.top }}
-      className="alfa-pop alfa-calendar fixed z-50 w-80 rounded-lg border bg-popover p-0 text-sm text-popover-foreground shadow-xl"
-    >
-      <div className="flex items-start gap-2 border-b px-3 py-2.5" style={{ boxShadow: `inset 3px 0 0 ${typeColor(ev.type)}` }}>
-        <Icon className="mt-0.5 h-4 w-4 shrink-0" style={{ color: typeColor(ev.type) }} aria-hidden />
-        <div className="min-w-0 flex-1">
-          <div className={cn("font-semibold leading-snug", ev.status === "cancelled" && "line-through")}>{ev.title}</div>
-          <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
-            <span>{meta?.label ?? ev.type}</span>
-            <span className={cn("rounded-full px-1.5 py-px text-[10px] font-semibold", status?.badge)}>{status?.label}</span>
-            {overdue && (
-              <span
-                className="inline-flex items-center gap-0.5 text-[10px] font-semibold text-red-600 dark:text-red-300"
-                {...tip(overdueTip(ev))}
-              >
-                <AlertTriangle className="h-3 w-3" aria-hidden /> po terminie
-              </span>
-            )}
-            {ev.deletedAt && <span className="text-[10px] font-semibold text-red-600">usunięte</span>}
-            <NotesBadge count={notesCount} />
-          </div>
-          <div className="mt-1 flex flex-wrap items-center gap-1.5 empty:mt-0">
-            {cfg.features.billing && <BillingBadge billing={ev.billing} />}
-            {cfg.features.protocol && <ProtocolBadge event={ev} link />}
-            {cfg.features.quote && <QuoteBadge event={ev} link />}
-            {cfg.features.realization && <RealizationBadge event={ev} link />}
-          </div>
-        </div>
-        <Button variant="ghost" size="icon" className="-mr-1 -mt-1 h-7 w-7" onClick={onClose} aria-label="Zamknij podgląd">
-          <X className="h-4 w-4" />
-        </Button>
-      </div>
-      <dl className="space-y-1.5 px-3 py-2.5 text-xs">
-        <div className="flex gap-2">
-          <dt className="w-4 shrink-0 text-muted-foreground"><CalendarDays className="h-3.5 w-3.5" aria-label="Termin" /></dt>
-          <dd className="tabular-nums">{term || "cały dzień"}{term && ev.allDay && " · cały dzień"}</dd>
-        </div>
-        {ev.objectName && (
-          <div className="flex gap-2">
-            <dt className="w-4 shrink-0 text-muted-foreground"><Building2 className="h-3.5 w-3.5" aria-label="Obiekt" /></dt>
-            <dd className="truncate">{ev.objectName}</dd>
-          </div>
-        )}
-        {ev.location && (
-          <div className="flex gap-2">
-            <dt className="w-4 shrink-0 text-muted-foreground"><MapPin className="h-3.5 w-3.5" aria-label="Lokalizacja" /></dt>
-            <dd className="truncate">{ev.location}</dd>
-          </div>
-        )}
-        {(travelText || travelLoading) && (
-          <div className="flex gap-2" data-testid="preview-travel">
-            <dt className="w-4 shrink-0 text-muted-foreground"><Route className="h-3.5 w-3.5" aria-label="Dojazd" /></dt>
-            <dd className="min-w-0" {...tip(travelSourceLabel(travel, travelLoading) || undefined)}>
-              {travelText ?? "liczę…"}
-            </dd>
-          </div>
-        )}
-        {/* Pogoda: ten sam brief, co znacznik na kafelku — bez prognozy wiersza nie ma. */}
-        <WeatherPreviewRow brief={weather} />
-        {cfg.features.realization && ev.realization && (
-          <div className="flex gap-2" data-testid="preview-realization">
-            <dt className="w-4 shrink-0 text-muted-foreground"><Receipt className="h-3.5 w-3.5" aria-label="Realizacja" /></dt>
-            <dd className="min-w-0 truncate">
-              {/* Obiekt jest już w wierszu wyżej — tu tylko rodzaj i kwota. */}
-              {REALIZATION_KIND_LABEL[ev.realization.kind] ?? ev.realization.kind}
-              {" · "}
-              <span className="tabular-nums">{realizationMoney(ev.realization.total)}</span>
-            </dd>
-          </div>
-        )}
-        {assigneesOf(ev, cfg).length > 0 && (
-          <div className="flex gap-2">
-            <dt className="w-4 shrink-0 text-muted-foreground">
-              <Users className="h-3.5 w-3.5" aria-label={cfg.assignees.labels.many} />
-            </dt>
-            <dd>{assigneesOf(ev, cfg).map((t) => `${t.firstName} ${t.lastName}`).join(", ")}</dd>
-          </div>
-        )}
-        {ev.seriesId && (
-          <div className="flex gap-2">
-            <dt className="w-4 shrink-0 text-muted-foreground"><Repeat className="h-3.5 w-3.5" aria-label="Seria" /></dt>
-            <dd>
-              seria
-              {ev.seriesIndex != null && ev.seriesTotal != null && ` ${ev.seriesIndex}/${ev.seriesTotal}`}
-            </dd>
-          </div>
-        )}
-        {ev.description && (
-          <div className="flex gap-2">
-            <dt className="w-4 shrink-0 text-muted-foreground"><AlertCircle className="h-3.5 w-3.5" aria-label="Opis" /></dt>
-            <dd className="line-clamp-2 text-muted-foreground">{ev.description}</dd>
-          </div>
-        )}
-        {/* Kafelek notatki: treść notatki źródłowej wprost w podglądzie. */}
-        {ev.sourceNote && (
-          <div className="flex gap-2" data-testid="preview-source-note">
-            <dt className="w-4 shrink-0 text-amber-600 dark:text-amber-400">
-              <StickyNote className="h-3.5 w-3.5" aria-label="Notatka" />
-            </dt>
-            <dd className="min-w-0">
-              <span className="line-clamp-3 whitespace-pre-wrap break-words">
-                {ev.sourceNote.text?.trim() || "notatka bez treści (sam załącznik)"}
-              </span>
-              <span className="mt-0.5 block truncate text-muted-foreground">
-                {ev.sourceNote.eventTitle}
-                {ev.sourceNote.userLabel ? ` · ${ev.sourceNote.userLabel}` : ""}
-              </span>
-            </dd>
-          </div>
-        )}
-        {lastNote && lastNoteLine && (
-          <div className="flex gap-2" data-testid="preview-last-note">
-            <dt className="w-4 shrink-0 text-amber-600 dark:text-amber-400"><StickyNote className="h-3.5 w-3.5" aria-label="Ostatnia notatka" /></dt>
-            <dd className="min-w-0 truncate" {...tip(lastNoteLine)}>
-              <span className="text-muted-foreground">{lastNote.userLabel || (lastNote.source === "assistant" ? "Asystent" : "—")}:</span>{" "}
-              {!lastNoteText && <Paperclip className="mr-0.5 inline h-3 w-3 align-[-1px] text-muted-foreground" aria-hidden />}
-              {lastNoteLine}
-            </dd>
-          </div>
-        )}
-      </dl>
-      <div className="flex flex-wrap items-center gap-1.5 border-t px-3 py-2">
-        <Button size="sm" className="h-8" onClick={onEdit} data-primary>
-          {canMutate ? <Pencil className="mr-1 h-3.5 w-3.5" /> : <Eye className="mr-1 h-3.5 w-3.5" />}
-          {canMutate ? "Edytuj" : "Otwórz"}
-        </Button>
-        {onGoToObject && (
-          <Button size="sm" variant="outline" className="h-8" onClick={onGoToObject}>
-            <ExternalLink className="mr-1 h-3.5 w-3.5" /> Obiekt
-          </Button>
-        )}
-        {canMutate && ev.status === "planned" && (
-          <Button size="sm" variant="outline" className="h-8" onClick={() => onStatus("confirmed")}>
-            <Check className="mr-1 h-3.5 w-3.5" /> Potwierdź
-          </Button>
-        )}
-        {canMutate && ev.status !== "done" && ev.type !== "urlop" && (
-          <Button size="sm" variant="outline" className="h-8" onClick={() => onStatus("done")}>
-            <CheckCheck className="mr-1 h-3.5 w-3.5" /> Wykonane
-          </Button>
-        )}
-      </div>
     </div>
   );
 }

@@ -263,8 +263,10 @@ interface CalendarEventDialogProps {
   onEdit?: () => void;
   /**
    * Powłoka formularza. `modal` (domyślnie) to okno na środku, `drawer` — panel dokowany
-   * w siatce strony, który zwęża kalendarz zamiast go zasłaniać. Rodzic decyduje, kiedy
-   * szuflada ma sens (dość szeroki ekran) i osadza komponent we właściwej kolumnie.
+   * w siatce strony, który od lg zwęża kalendarz zamiast go zasłaniać. Poniżej lg ta sama
+   * szuflada sama przechodzi w nakładkę `fixed` z prawej (przyciemnienie, pułapka fokusu),
+   * więc rodzic nie musi mierzyć szerokości ekranu — wystarczy, że osadzi komponent
+   * we właściwej kolumnie siatki.
    */
   variant?: "modal" | "drawer";
   /**
@@ -285,6 +287,11 @@ interface CalendarEventDialogProps {
    * (zamyka się) — np. „Pominięto załączniki: …”. Rodzic robi z tego toast.
    */
   onNotice?: (message: string) => void;
+  /**
+   * Zmiana stanu „niezapisane” — formularz brudny albo niewysłany szkic notatki.
+   * Rodzic używa do ostrzeżenia przed podmianą wydarzenia w panelu.
+   */
+  onDirtyChange?: (dirty: boolean) => void;
 }
 
 const plural = (n: number, one: string, few: string, many: string) => {
@@ -1770,6 +1777,23 @@ function useIsMobile(): boolean {
 }
 
 /**
+ * Czy ekran węższy niż lg (1024px) — szuflada nie ma wtedy gdzie się zadokować
+ * obok kalendarza i staje się nasuwaną z prawej nakładką (fixed + przyciemnienie).
+ */
+function useBelowLg(): boolean {
+  const [below, setBelow] = useState(() =>
+    typeof window !== "undefined" ? window.matchMedia("(max-width: 1023.98px)").matches : false
+  );
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 1023.98px)");
+    const on = () => setBelow(mq.matches);
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, []);
+  return below;
+}
+
+/**
  * Pole godziny: na desktopie combobox (wpisz ręcznie albo wybierz z listy co 15 min),
  * na mobile natywny <input type="time">. `durationFrom` = godzina początku — lista
  * pokazuje wtedy czas trwania przy każdej pozycji („10:00 (2 godz.)”).
@@ -2050,10 +2074,14 @@ export function CalendarEventDialog({
   config: cfg = TECHNICAL_CALENDAR,
   onPlanNext,
   onNotice,
+  onDirtyChange,
 }: CalendarEventDialogProps) {
   const docked = variant === "drawer";
   const readOnly = mode === "view";
   const isEdit = mode === "edit" && !!event;
+  /** Poniżej lg szuflada jest nakładką: przyciemnienie, scroll-lock, pułapka fokusu. */
+  const belowLg = useBelowLg();
+  const asideRef = useRef<HTMLElement>(null);
   const navigate = useNavigate();
   /** Notatki z GET /calendar/events/:id; null = jeszcze nie wczytane (komponent notatek sam dociągnie). */
   const [notes, setNotes] = useState<CalendarNote[] | null>(null);
@@ -2237,6 +2265,19 @@ export function CalendarEventDialog({
         !!firstNoteMail),
     [form, readOnly, firstNote, firstNoteFiles, firstNoteMail]
   );
+
+  // Rodzic (panel w kalendarzu) musi wiedzieć o niezapisanych zmianach, żeby nie
+  // podmienić wydarzenia w panelu po cichu. Niewysłany szkic notatki liczy się tak
+  // samo jak brudny formularz — jedno i drugie ginie przy podmianie.
+  const dirtyNotifyRef = useRef(onDirtyChange);
+  useEffect(() => {
+    dirtyNotifyRef.current = onDirtyChange;
+  }, [onDirtyChange]);
+  useEffect(() => {
+    onDirtyChange?.(dirty || hasNoteDraft);
+  }, [dirty, hasNoteDraft, onDirtyChange]);
+  // Odmontowanie panelu zeruje flagę — inaczej rodzic pytałby o zmiany, których już nie ma.
+  useEffect(() => () => dirtyNotifyRef.current?.(false), []);
 
   // Słowniki
   useEffect(() => {
@@ -2874,6 +2915,75 @@ export function CalendarEventDialog({
     if (guardDraft("close")) return;
     onClose();
   };
+  // Handler w refie: efekty poniżej wiszą na `window` i nie mogą się przepisywać
+  // przy każdym renderze (a `requestClose` jest zwykłą funkcją z ciała komponentu).
+  const requestCloseRef = useRef(requestClose);
+  useEffect(() => {
+    requestCloseRef.current = requestClose;
+  });
+
+  // --- Szuflada: Esc, blokada przewijania i fokus ---
+
+  // Poniżej lg panel zasłania stronę, więc tło nie może się przewijać. Poprzednia
+  // wartość wraca w cleanupie — inne nakładki (arkusz filtrów) też ją ustawiają.
+  useEffect(() => {
+    if (!docked || !open || !belowLg) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, [docked, open, belowLg]);
+
+  // Esc na `window`: panel nie jest modalem Radixa, więc musi łapać klawisz także
+  // wtedy, gdy fokus siedzi w siatce kalendarza. Gdy na wierzchu stoi pytanie o szkic,
+  // pomoc albo filtry (`[role="dialog"]`/`[role="alertdialog"]`), Esc należy do nich.
+  useEffect(() => {
+    if (!docked || !open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      if (document.querySelector('[role="alertdialog"],[role="dialog"]')) return;
+      e.preventDefault();
+      requestCloseRef.current();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [docked, open]);
+
+  // Fokus na panelu po otwarciu — czytnik ekranu czyta nagłówek, a Esc i Tab działają od razu.
+  useEffect(() => {
+    if (!docked || !open) return;
+    asideRef.current?.focus({ preventScroll: true });
+  }, [docked, open]);
+
+  // Pułapka Tab tylko w nakładce; od lg panel jest częścią strony i fokus ma z niego wychodzić.
+  useEffect(() => {
+    if (!docked || !open || !belowLg) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Tab" || !asideRef.current) return;
+      // Radix ma własną pułapkę w oknach nad panelem (pytanie o szkic, prognoza, pickery) —
+      // nie wolno mu wtedy wyrywać fokusu z powrotem do panelu.
+      if (document.querySelector('[role="alertdialog"],[role="dialog"]')) return;
+      const focusables = Array.from(
+        asideRef.current.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        )
+      ).filter((el) => el.offsetParent !== null);
+      if (!focusables.length) return;
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      const active = document.activeElement as HTMLElement | null;
+      if (e.shiftKey && (active === first || !asideRef.current.contains(active))) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [docked, open, belowLg]);
 
   /**
    * Rozstrzygnięcie pytania: „send” wysyła szkic notatki i dopiero potem wykonuje pierwotną
@@ -3093,6 +3203,14 @@ export function CalendarEventDialog({
 
   const Title = docked ? "h2" : DialogTitle;
   const Description = docked ? "p" : DialogDescription;
+  /**
+   * Podpis panelu i jego krzyżyka zależy od trybu — czytnik ekranu ma powiedzieć,
+   * co dokładnie jest otwarte i co się zamknie (panel obsługuje wszystkie trzy tryby).
+   */
+  const drawerLabel =
+    mode === "create" ? "Nowe wydarzenie" : mode === "edit" ? "Edycja wydarzenia" : "Wydarzenie";
+  const drawerCloseLabel =
+    mode === "create" ? "Zamknij nowe wydarzenie" : mode === "edit" ? "Zamknij edycję" : "Zamknij panel";
   const header = (
     <div className="relative shrink-0 border-b px-5 pb-3 pt-4 pr-12">
       <div className={cn("absolute inset-x-0 top-0 h-1", typeUi?.bar)} aria-hidden />
@@ -3146,7 +3264,7 @@ export function CalendarEventDialog({
           size="icon"
           className="absolute right-2 top-3 h-7 w-7"
           onClick={requestClose}
-          aria-label="Zamknij edycję"
+          aria-label={drawerCloseLabel}
         >
           <X className="h-4 w-4" />
         </Button>
@@ -3265,6 +3383,18 @@ export function CalendarEventDialog({
               <MapPin className="h-3.5 w-3.5" /> Lokalizacja
             </dt>
             <dd>{event.location || <span className="text-muted-foreground">—</span>}</dd>
+            {/* Dojazd (szacowany) — te same dane co w formularzu, `useTravel` działa też w podglądzie. */}
+            {cfg.features.routePlanner && event.objectId != null && !!travelText && (
+              <>
+                <dt className="flex items-center gap-1.5 text-muted-foreground">
+                  <Route className="h-3.5 w-3.5" /> Dojazd
+                </dt>
+                <dd aria-live="polite">
+                  <div>{travelText}</div>
+                  {travelSource && <div className="text-[11px] text-muted-foreground">{travelSource}</div>}
+                </dd>
+              </>
+            )}
             {/* Pogoda dla dnia i miejsca wydarzenia (nie dotyczy urlopu ani działu handlowego). */}
             {cfg.features.weather && (
               <>
@@ -4689,7 +4819,7 @@ export function CalendarEventDialog({
   );
 
   const metaLine = event && (
-    <span className="truncate text-[11px] text-muted-foreground">
+    <span className="block truncate text-[11px] text-muted-foreground">
       Utworzył {event.createdByLabel ?? "—"},{" "}
       <time dateTime={event.createdAt} {...tip(`Utworzono: ${fmtTimestamp(event.createdAt)}`)}>
         {fmtRelative(event.createdAt)}
@@ -4775,27 +4905,51 @@ export function CalendarEventDialog({
   return (
     <>
       {docked ? (
-        // Szuflada: zwykły panel w siatce strony (kalendarz zwęża się obok), więc bez
-        // overlaya i pułapki fokusu. Esc zamyka tak samo jak w oknie modalnym.
-        <aside
-          role="region"
-          aria-label={isEdit ? "Edycja wydarzenia" : "Wydarzenie"}
-          data-testid="event-drawer"
-          onKeyDown={(e) => {
-            onKeyDown(e);
-            if (e.key === "Escape") {
-              e.stopPropagation();
-              requestClose();
-            }
-          }}
-          className="relative flex h-fit min-w-0 flex-col overflow-hidden rounded-lg border bg-background shadow-sm lg:h-full lg:min-h-0"
-          {...dropProps}
-        >
-          {header}
-          {scrollBody}
-          {footer}
-          {dropOverlay}
-        </aside>
+        // Szuflada: od lg zwykły panel w siatce strony (kalendarz zwęża się obok), poniżej lg
+        // nakładka nasunięta z prawej — kalendarz nie ma tam gdzie się zwęzić. Esc zamyka
+        // w obu przypadkach, tak samo jak w oknie modalnym.
+        <>
+          {/* Przyciemnienie tylko pod nakładką; zamyka przez `requestClose`, więc szkic i zmiany są chronione. */}
+          {belowLg && (
+            <button
+              type="button"
+              aria-label="Zamknij panel"
+              className="fixed inset-0 z-40 bg-black/40 lg:hidden"
+              onClick={requestClose}
+            />
+          )}
+          <aside
+            ref={asideRef}
+            tabIndex={-1}
+            role="region"
+            aria-label={drawerLabel}
+            // `role` zostaje regionem (nie dialogiem) — inaczej panel wpadałby we własne
+            // wykluczenie `[role="dialog"]` przy obsłudze Esc i skrótów kalendarza.
+            aria-modal={belowLg ? "true" : undefined}
+            data-testid="event-drawer"
+            onKeyDown={(e) => {
+              onKeyDown(e);
+              if (e.key === "Escape") {
+                // `preventDefault` + `stopPropagation`, żeby handler na `window` (niżej)
+                // nie zamknął panelu po raz drugi.
+                e.preventDefault();
+                e.stopPropagation();
+                requestClose();
+              }
+            }}
+            className={cn(
+              "flex min-w-0 flex-col overflow-hidden bg-background",
+              "fixed inset-y-0 right-0 z-50 h-full w-[min(100vw,480px)] rounded-none border-l shadow-2xl alfa-drawer-in",
+              "lg:relative lg:inset-auto lg:z-auto lg:h-full lg:min-h-0 lg:w-auto lg:rounded-lg lg:border lg:shadow-sm"
+            )}
+            {...dropProps}
+          >
+            {header}
+            {scrollBody}
+            {footer}
+            {dropOverlay}
+          </aside>
+        </>
       ) : (
         <Dialog open={open} onOpenChange={(o) => !o && requestClose()}>
           <DialogContent

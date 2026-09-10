@@ -680,6 +680,13 @@
       "when": 1789300004000,
       "tag": "0096_note_attachment_origin",
       "breakpoints": true
+    },
+    {
+      "idx": 97,
+      "version": "6",
+      "when": 1789300005000,
+      "tag": "0097_link_previews_map",
+      "breakpoints": true
     }
   ]
 }

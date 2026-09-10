@@ -10,6 +10,7 @@
  * skrypt nigdy nie wychodzi do internetu; testy SSRF sprawdzają dodatkowo, że
  * podmieniony `fetch` NIE ZOSTAŁ wywołany.
  */
+import { lookup } from "node:dns/promises";
 import { Hono } from "hono";
 import {
   assertFetchableUrl,
@@ -398,6 +399,60 @@ console.log("\n=== C2. Pobranie z podmienionym fetch ===");
 }
 
 // ---------------------------------------------------------------------------
+// C3. Mini-mapa dla linków Google Maps
+// ---------------------------------------------------------------------------
+console.log("\n=== C3. Mini-mapa (map) dla linków Google Maps ===");
+
+// UWAGA: te dwa przypadki potrzebują DNS-u (walidacja SSRF rozwiązuje nazwę
+// hosta `maps.app.goo.gl` / `www.google.com`) — samo POBRANIE jest zamockowane
+// i nic nie wychodzi do internetu. Bez DNS-u przypadki są pomijane, żeby test
+// nie fałszował porażki na maszynie bez sieci.
+const dnsWorks = await lookup("www.google.com")
+  .then(() => true)
+  .catch(() => false);
+
+if (!dnsWorks) {
+  console.log("POMINIĘTE — brak DNS-u (walidacja SSRF nie rozwiąże nazw Google)");
+} else {
+  {
+    // Krótki link niesie punkt DOPIERO po przekierowaniu — mapa musi wyjść z `finalUrl`.
+    const m = mockFetch((url) =>
+      url.startsWith("https://maps.app.goo.gl/")
+        ? new Response(null, {
+            status: 302,
+            headers: { location: "https://www.google.com/maps/place/Pa%C5%82ac+Kultury/@52.2317,21.0062,17z" },
+          })
+        : new Response(
+            `<head><meta property="og:title" content="Pałac Kultury - Google Maps">` +
+              `<meta property="og:image" content="https://maps.google.com/big.png"></head>`,
+            { status: 200, headers: { "content-type": "text/html; charset=utf-8" } }
+          )
+    );
+    const p = await fetchPreview("https://maps.app.goo.gl/x");
+    m.restore();
+    ok("krótki link → punkt z adresu po przekierowaniu", p.map?.lat === 52.2317 && p.map?.lng === 21.0062, p.map);
+    ok("…zoom z adresu", p.map?.zoom === 17, p.map);
+    ok("…etykieta z /place/ (zdekodowana)", p.map?.label === "Pałac Kultury", p.map);
+    ok("…og:image pominięty dla map", p.image === null, p.image);
+    ok("…dwa przeskoki, zero dodatkowych wyjść", m.seen.length === 2, m.seen);
+  }
+
+  {
+    // Adres bez współrzędnych i bez frazy do geokodowania — karta zwykła, `map: null`.
+    const m = mockFetch(
+      () =>
+        new Response("<head><title>Google Maps</title></head>", {
+          status: 200,
+          headers: { "content-type": "text/html" },
+        })
+    );
+    const p = await fetchPreview("https://www.google.com/maps");
+    m.restore();
+    ok("adres bez punktu i bez frazy → map: null", p.map === null, p.map);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // D. Trasa + cache w bazie (tylko na kopii)
 // ---------------------------------------------------------------------------
 if (!process.env.ALFA_DB_PATH) {
@@ -511,6 +566,170 @@ if (!process.env.ALFA_DB_PATH) {
 
     const row = db.select().from(schema.linkPreviews).where(eq(schema.linkPreviews.url, STALE)).get();
     ok("odświeżony podgląd zapisany w cache'u", row?.title === "Świeże" && row?.status === "ok", row);
+
+    // --- Mini-mapa: geokodowanie frazy, zapis `map_json`, odczyt z cache'u ----
+    console.log("\n=== D2. Mini-mapa w trasie i w cache'u ===");
+    const { setGeoFetch } = await import("../src/lib/geo.js");
+
+    if (!dnsWorks) {
+      console.log("POMINIĘTE — brak DNS-u (walidacja SSRF nie rozwiąże `www.google.com`)");
+    } else {
+      // Fraza celowo fikcyjna — inaczej wpis mógłby siedzieć w `geo_cache` skopiowanej
+      // bazy i test mierzyłby cache, a nie zamockowany geokoder.
+      const QUERY_URL = "https://www.google.com/maps?q=Testowa+Fikcyjna+Pinezka+Alfa+QA";
+      db.delete(schema.linkPreviews).where(eq(schema.linkPreviews.url, QUERY_URL)).run();
+
+      // Geokoder zamockowany osobno (`setGeoFetch`) — `fetch` obsługuje samą stronę.
+      setGeoFetch(
+        (async () =>
+          new Response(JSON.stringify([{ lat: "50.0616", lon: "19.9373", display_name: "Rynek Główny, Kraków" }]), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          })) as typeof fetch
+      );
+      const page = mockFetch(
+        () =>
+          new Response("<head><title>Testowa Fikcyjna Pinezka – Mapy Google</title></head>", {
+            status: 200,
+            headers: { "content-type": "text/html" },
+          })
+      );
+      const geo = await call(QUERY_URL);
+      page.restore();
+      setGeoFetch(null);
+
+      const map = geo.data?.map as { lat?: number; lng?: number; label?: string } | null | undefined;
+      ok("?q=<tekst> → punkt z geokodera", map?.lat === 50.0616 && map?.lng === 19.9373, map);
+      ok("…etykieta z tytułu strony bez sufiksu „Mapy Google”", map?.label === "Testowa Fikcyjna Pinezka", map);
+
+      const mapRow = db.select().from(schema.linkPreviews).where(eq(schema.linkPreviews.url, QUERY_URL)).get();
+      ok("…punkt zapisany w `map_json`", (mapRow?.mapJson ?? "").includes("50.0616"), mapRow?.mapJson);
+
+      // Drugie pytanie o ten sam adres: ani strony, ani geokodera — wszystko z cache'u.
+      const guard2 = mockFetch(() => {
+        throw new Error("fetch NIE POWINIEN być wywołany");
+      });
+      setGeoFetch((async () => {
+        throw new Error("geokoder NIE POWINIEN być wywołany");
+      }) as typeof fetch);
+      const again = await call(QUERY_URL);
+      setGeoFetch(null);
+      guard2.restore();
+      const map2 = again.data?.map as { lat?: number; label?: string } | null | undefined;
+      ok("…odczyt z cache'u bez sieci zwraca ten sam punkt", map2?.lat === 50.0616 && map2?.label === "Testowa Fikcyjna Pinezka", map2);
+      ok("…i nic nie poszło w sieć", guard2.seen.length === 0, guard2.seen);
+
+      // Geokoder padł → karta bez mapy, ale BEZ wyjątku i bez błędu podglądu.
+      const FAIL_URL = "https://www.google.com/maps?q=Nieistniej%C4%85cy+adres+testowy";
+      db.delete(schema.linkPreviews).where(eq(schema.linkPreviews.url, FAIL_URL)).run();
+      setGeoFetch((async () => {
+        throw new Error("brak sieci");
+      }) as typeof fetch);
+      const failPage = mockFetch(
+        () => new Response("<head><title>Google Maps</title></head>", { status: 200, headers: { "content-type": "text/html" } })
+      );
+      const failed = await call(FAIL_URL);
+      failPage.restore();
+      setGeoFetch(null);
+      ok(
+        "awaria geokodera → map: null, podgląd nadal ok",
+        failed.status === 200 && failed.data?.status === "ok" && failed.data?.map === null,
+        failed
+      );
+
+      db.delete(schema.linkPreviews).where(eq(schema.linkPreviews.url, QUERY_URL)).run();
+      db.delete(schema.linkPreviews).where(eq(schema.linkPreviews.url, FAIL_URL)).run();
+    }
+
+    // Wiersz z czasów sprzed mini-mapy: `status: "ok"`, ale `map_json` NULL. Dla
+    // linku do Map liczy się jak błąd (TTL 1 h), więc po godzinie jest odświeżany
+    // — inaczej przez tydzień pokazywałby kartę bez mapy mimo działającego parsera.
+    if (!dnsWorks) {
+      console.log("POMINIĘTE (TTL wpisu bez mapy) — brak DNS-u");
+    } else {
+      // Współrzędne celowo „nietknięte” — realny punkt mógłby już siedzieć w `geo_cache`
+      // skopiowanej bazy i test mierzyłby cache zamiast zamockowanego reverse.
+      const OLD_MISS = "https://www.google.com/maps/search/51.111111,+22.222222";
+      db.delete(schema.linkPreviews).where(eq(schema.linkPreviews.url, OLD_MISS)).run();
+      db.insert(schema.linkPreviews)
+        .values({
+          url: OLD_MISS,
+          finalUrl: OLD_MISS,
+          host: "www.google.com",
+          title: "Google Maps",
+          description: null,
+          image: null,
+          favicon: null,
+          siteName: "Google Maps",
+          mapJson: null,
+          status: "ok",
+          error: null,
+          fetchedAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+        })
+        .run();
+
+      const refetch = mockFetch(
+        () =>
+          new Response("<head><title>Google Maps</title></head>", {
+            status: 200,
+            headers: { "content-type": "text/html" },
+          })
+      );
+      // Reverse zamockowany — etykietą samych współrzędnych jest adres spod pinezki.
+      setGeoFetch(
+        (async () =>
+          new Response(
+            JSON.stringify({ display_name: "5, Testowa, Zielonka", address: { road: "Testowa", house_number: "5", city: "Zielonka" } }),
+            { status: 200, headers: { "content-type": "application/json" } }
+          )) as typeof fetch
+      );
+      const revived = await call(OLD_MISS);
+      setGeoFetch(null);
+      refetch.restore();
+      const revivedMap = revived.data?.map as { lat?: number; lng?: number; label?: string } | null | undefined;
+      ok(
+        "stary wpis `ok` bez mapy → odświeżony po godzinie i punkt jest",
+        revivedMap?.lat === 51.111111 && revivedMap?.lng === 22.222222,
+        revived
+      );
+      ok("…etykieta z geokodera odwrotnego", revivedMap?.label === "Testowa 5, Zielonka", revivedMap);
+      ok("…odświeżenie faktycznie pobrało stronę", refetch.seen.length === 1, refetch.seen);
+      db.delete(schema.linkPreviews).where(eq(schema.linkPreviews.url, OLD_MISS)).run();
+    }
+
+    // Punkt z `map_json` wraca z cache'u bez żadnego wyjścia w sieć i bez DNS-u.
+    const MAP_CACHED = "https://www.google.pl/maps/place/Testowa+Pinezka/@52.1,21.2,16z";
+    db.delete(schema.linkPreviews).where(eq(schema.linkPreviews.url, MAP_CACHED)).run();
+    db.insert(schema.linkPreviews)
+      .values({
+        url: MAP_CACHED,
+        finalUrl: MAP_CACHED,
+        host: "www.google.pl",
+        title: "Testowa Pinezka",
+        description: null,
+        image: null,
+        favicon: null,
+        siteName: "Google Maps",
+        mapJson: JSON.stringify({ lat: 52.1, lng: 21.2, zoom: 16, label: "Testowa Pinezka" }),
+        status: "ok",
+        error: null,
+        fetchedAt: new Date().toISOString(),
+      })
+      .run();
+
+    const mapGuard = mockFetch(() => {
+      throw new Error("fetch NIE POWINIEN być wywołany");
+    });
+    const fromCache = await call(MAP_CACHED);
+    mapGuard.restore();
+    const cachedMap = fromCache.data?.map as { lat?: number; zoom?: number; label?: string } | null | undefined;
+    ok(
+      "`map_json` z cache'u → gotowy punkt bez sieci",
+      cachedMap?.lat === 52.1 && cachedMap?.zoom === 16 && cachedMap?.label === "Testowa Pinezka",
+      fromCache
+    );
+    ok("…i faktycznie zero wyjść w sieć", mapGuard.seen.length === 0, mapGuard.seen);
+    db.delete(schema.linkPreviews).where(eq(schema.linkPreviews.url, MAP_CACHED)).run();
 
     // Sprzątanie — wiersze testowe znikają z kopii (i z bazy, gdyby ktoś puścił wprost).
     db.delete(schema.linkPreviews).where(eq(schema.linkPreviews.url, CACHED)).run();

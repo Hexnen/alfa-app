@@ -16,11 +16,15 @@
  * na nie wzrokiem — a wynik siedzi w cache'u modułu i w `sessionStorage`, więc
  * przerysowanie notatki nie generuje ruchu.
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { ChevronDown, ChevronRight, Globe } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { linksApi, type LinkPreview } from "@/lib/api";
+import { type LinkPreview } from "@/lib/api";
 import { uniqueUrls } from "@/lib/linkify";
+import { googleFavicon, hostOf, loadPreview, readSessionPreview } from "@/lib/link-preview-client";
+import { useInView } from "@/lib/use-in-view";
+import { looksLikeMapsLink } from "@/lib/maps-url";
+import { MapPreviewCard } from "@/components/MapPreviewCard";
 import {
   parseInline,
   parseRichText,
@@ -34,89 +38,8 @@ import {
 // ma eksportować wyłącznie komponenty (react-refresh), a czyste funkcje żyją
 // w `@/lib/linkify` i `@/lib/richtext`, skąd biorą je też testy.
 
-// ---------------------------------------------------------------------------
-// Domena i ikona
-// ---------------------------------------------------------------------------
-
-/** Domena adresu, bez „www." — to ona jest podpisem karty. */
-function hostOf(url: string): string {
-  try {
-    return new URL(url).hostname.replace(/^www\./i, "");
-  } catch {
-    return url;
-  }
-}
-
-/** Ikona z serwisu Google — używana, gdy strona nie ma własnej albo ta się nie wczytała. */
-function googleFavicon(host: string): string {
-  return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=64`;
-}
-
-// ---------------------------------------------------------------------------
-// Cache podglądów po stronie przeglądarki
-// ---------------------------------------------------------------------------
-
-const SESSION_PREFIX = "alfa.linkPreview.";
-/** Krócej niż serwerowy TTL — `sessionStorage` ma tylko oszczędzić okrążenie do API. */
-const SESSION_TTL_MS = 6 * 60 * 60 * 1000;
-
-/** Trwające i zakończone pobrania w obrębie karty przeglądarki. */
-const memoryCache = new Map<string, Promise<LinkPreview>>();
-
-function readSession(url: string): LinkPreview | null {
-  try {
-    const raw = sessionStorage.getItem(SESSION_PREFIX + url);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as { at: number; data: LinkPreview };
-    if (!parsed?.data || Date.now() - parsed.at > SESSION_TTL_MS) return null;
-    return parsed.data;
-  } catch {
-    return null;
-  }
-}
-
-function writeSession(url: string, data: LinkPreview) {
-  try {
-    sessionStorage.setItem(SESSION_PREFIX + url, JSON.stringify({ at: Date.now(), data }));
-  } catch {
-    // Pełny albo wyłączony storage — podgląd i tak zadziała, tylko bez cache'u.
-  }
-}
-
-function loadPreview(url: string): Promise<LinkPreview> {
-  const pending = memoryCache.get(url);
-  if (pending) return pending;
-  const promise = linksApi
-    .preview(url)
-    .then((res) => {
-      const data = res.data as LinkPreview;
-      writeSession(url, data);
-      return data;
-    })
-    .catch((err) => {
-      // Błąd zapytania (400, brak sieci) też jest wynikiem — pokazujemy gołą domenę.
-      memoryCache.delete(url);
-      const host = hostOf(url);
-      const fallback: LinkPreview = {
-        url,
-        finalUrl: url,
-        host,
-        title: null,
-        description: null,
-        image: null,
-        // Ikona z serwisu Google działa nawet wtedy, gdy nasz backend nie
-        // odpowiedział — karta bez ikony wygląda jak zepsuta.
-        favicon: googleFavicon(host),
-        siteName: null,
-        status: "error",
-        error: err instanceof Error ? err.message : "Nie udało się pobrać podglądu",
-        fetchedAt: new Date().toISOString(),
-      };
-      return fallback;
-    });
-  memoryCache.set(url, promise);
-  return promise;
-}
+// Pobieranie i cache podglądów siedzą w `@/lib/link-preview-client` — korzysta
+// z nich także `MapPreviewCard`, a ten plik ma eksportować komponenty.
 
 // ---------------------------------------------------------------------------
 // Karta podglądu
@@ -133,45 +56,25 @@ export interface LinkPreviewCardProps {
 }
 
 export function LinkPreviewCard({ url, compact = false, className }: LinkPreviewCardProps) {
-  const [preview, setPreview] = useState<LinkPreview | null>(() => readSession(url));
+  const [preview, setPreview] = useState<LinkPreview | null>(() => readSessionPreview(url));
   /** 0 = ikona ze strony, 1 = zastępcza z Google, 2 = ikona Lucide. */
   const [iconStage, setIconStage] = useState(0);
   const [imageFailed, setImageFailed] = useState(false);
-  // Bez IntersectionObserver (starsza przeglądarka, test w jsdom) nie ma na co
-  // czekać — pobieramy od razu.
-  const [visible, setVisible] = useState(() => typeof IntersectionObserver === "undefined");
-  const ref = useRef<HTMLAnchorElement | null>(null);
+  // Podgląd pobieramy dopiero, gdy karta wejdzie w widok.
+  const { ref, inView } = useInView<HTMLAnchorElement>();
   // Zmiana adresu w tym samym miejscu drzewa = zerowanie stanu W TRAKCIE renderu
   // (wzorzec z dokumentacji Reacta), a nie efektem — efekt dawałby jedno
   // przerysowanie z cudzym podglądem.
   const [lastUrl, setLastUrl] = useState(url);
   if (lastUrl !== url) {
     setLastUrl(url);
-    setPreview(readSession(url));
+    setPreview(readSessionPreview(url));
     setIconStage(0);
     setImageFailed(false);
   }
 
-  // Podgląd pobieramy dopiero, gdy karta wejdzie w widok.
   useEffect(() => {
-    if (preview || visible) return;
-    const el = ref.current;
-    if (!el || typeof IntersectionObserver === "undefined") return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((e) => e.isIntersecting)) {
-          setVisible(true);
-          observer.disconnect();
-        }
-      },
-      { rootMargin: "200px" }
-    );
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, [preview, visible]);
-
-  useEffect(() => {
-    if (!visible || preview) return;
+    if (!inView || preview) return;
     let alive = true;
     loadPreview(url).then((data) => {
       if (alive) setPreview(data);
@@ -179,7 +82,13 @@ export function LinkPreviewCard({ url, compact = false, className }: LinkPreview
     return () => {
       alive = false;
     };
-  }, [visible, preview, url]);
+  }, [inView, preview, url]);
+
+  // Link do Map Google z punktem → zamiast metadanych strony („Google Maps" +
+  // logo) pokazujemy sam punkt na mini-mapie.
+  if (preview?.map) {
+    return <MapPreviewCard href={url} point={preview.map} compact={compact} className={className} />;
+  }
 
   const host = hostOf(url);
   const failed = preview?.status === "error";
@@ -460,7 +369,14 @@ export function RichText({
   if (!value.trim()) return null;
 
   const blocks = parseRichText(value, mode);
-  const urls = previews ? uniqueUrls(value, previewLimit) : [];
+  // Limit liczy się PRZED przestawieniem kolejności, żeby mapa nie wypychała
+  // zwykłego linku z puli trzech kart. Sortowanie jest stabilne, więc reszta
+  // zostaje w kolejności wystąpienia.
+  const urls = previews
+    ? [...uniqueUrls(value, previewLimit)].sort(
+        (a, b) => Number(looksLikeMapsLink(b)) - Number(looksLikeMapsLink(a))
+      )
+    : [];
 
   return (
     <div className={cn("whitespace-pre-wrap break-words", className)} data-testid={testId}>

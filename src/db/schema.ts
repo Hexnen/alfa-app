@@ -3764,6 +3764,12 @@ export const linkPreviews = sqliteTable("link_previews", {
   status: text("status", { enum: ["ok", "error"] }).notNull(),
   /** Powód niepowodzenia (po polsku, pokazywany tylko pomocniczo). */
   error: text("error"),
+  /**
+   * Punkt do mini-mapy dla linków Google Maps: `{lat,lng,zoom,label}` jako JSON
+   * albo NULL, gdy to nie jest link do map. Trzymany razem z podglądem, bo ma
+   * to samo źródło (jedno wyjście w sieć) i to samo TTL.
+   */
+  mapJson: text("map_json"),
   fetchedAt: text("fetched_at")
     .default(sql`(datetime('now'))`)
     .notNull(),

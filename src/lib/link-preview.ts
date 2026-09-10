@@ -20,15 +20,36 @@
  * naraz w całym procesie i jedno naraz per URL.
  *
  * Wynik ląduje w tabeli `link_previews` (TTL: 7 dni dla `ok`, 1 h dla `error`).
+ *
+ * OSOBNY WĄTEK: linki do Google Maps. Dla nich doklejamy `map` — punkt, zoom i
+ * podpis odczytane z samego adresu (`src/lib/maps-url.ts`), z adresu po
+ * przekierowaniach (krótkie `maps.app.goo.gl`) albo z geokodera. Front rysuje z
+ * tego mini-mapę na kafelkach OSM, więc nie potrzebujemy klucza Google, a punkt
+ * — jak reszta podglądu — siedzi w cache'u (`link_previews.map_json`).
  */
 import { lookup as dnsLookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { db, schema } from "../db/index.js";
 import { eq } from "drizzle-orm";
+import { parseGoogleMapsUrl } from "./maps-url.js";
+import { geocode, isGeoError, reverseAddress } from "./geo.js";
 
 // ---------------------------------------------------------------------------
 // Kształt danych
 // ---------------------------------------------------------------------------
+
+/**
+ * Punkt do mini-mapy — wypełniony TYLKO dla linków Google Maps.
+ * Front rysuje go Leafletem na kafelkach OSM (bez klucza Google).
+ */
+export interface LinkPreviewMap {
+  lat: number;
+  lng: number;
+  /** Zoom z adresu albo `DEFAULT_MAP_ZOOM`; front i tak ogranicza go do 12–17. */
+  zoom: number;
+  /** Podpis karty: nazwa z `/place/…` → tytuł strony → adres z geokodera. */
+  label: string | null;
+}
 
 export interface LinkPreview {
   /** Adres znormalizowany — klucz cache'u i to, o co pytał front. */
@@ -41,6 +62,8 @@ export interface LinkPreview {
   image: string | null;
   favicon: string | null;
   siteName: string | null;
+  /** Punkt mini-mapy dla linków Google Maps; `null` dla wszystkiego innego. */
+  map: LinkPreviewMap | null;
   status: "ok" | "error";
   error: string | null;
   fetchedAt: string;
@@ -56,6 +79,8 @@ const MAX_BYTES = 512 * 1024;
 const MAX_REDIRECTS = 3;
 const MAX_PARALLEL = 4;
 const DESCRIPTION_MAX = 200;
+/** Zoom mini-mapy, gdy adres go nie niesie (kwartał ulic, a nie cała aglomeracja). */
+export const DEFAULT_MAP_ZOOM = 15;
 
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) " +
@@ -412,11 +437,11 @@ async function readLimited(res: Response): Promise<Uint8Array> {
 }
 
 /**
- * Pobiera i parsuje stronę. Bez cache'u i bez kolejki — to robi
- * `getLinkPreview`. `fetch` bierzemy z `globalThis` przy każdym wywołaniu,
- * żeby test mógł go podmienić.
+ * Pobiera i parsuje stronę. Bez cache'u, bez kolejki i bez mini-mapy — to robią
+ * `getLinkPreview` i `fetchPreview`. `fetch` bierzemy z `globalThis` przy każdym
+ * wywołaniu, żeby test mógł go podmienić.
  */
-export async function fetchPreview(normalized: string): Promise<LinkPreview> {
+async function fetchPreviewRaw(normalized: string): Promise<LinkPreview> {
   const startHost = bareHostname(new URL(normalized).hostname);
   const base: LinkPreview = {
     url: normalized,
@@ -427,6 +452,7 @@ export async function fetchPreview(normalized: string): Promise<LinkPreview> {
     image: null,
     favicon: fallbackFavicon(startHost),
     siteName: null,
+    map: null,
     status: "error",
     error: null,
     fetchedAt: new Date().toISOString(),
@@ -526,6 +552,126 @@ export async function fetchPreview(normalized: string): Promise<LinkPreview> {
 }
 
 // ---------------------------------------------------------------------------
+// Mini-mapa dla linków Google Maps
+// ---------------------------------------------------------------------------
+
+/** Ogon tytułu strony Google („Pałac Kultury - Google Maps") — w karcie nic nie wnosi. */
+const GOOGLE_TITLE_SUFFIX_RE = /\s*[-–—|]\s*(?:Google\s+Maps|Mapy\s+Google|Google\s+Mapy)\s*$/i;
+
+/** Tytuł generycznej strony Map — jako podpis punktu nie mówi nic. */
+const GOOGLE_TITLE_GENERIC_RE = /^(?:google(?:\s+maps|\s+mapy)?|mapy\s+google|maps)$/i;
+
+function stripGoogleTitle(title: string | null): string | null {
+  if (!title) return null;
+  const v = title.replace(GOOGLE_TITLE_SUFFIX_RE, "").replace(/\s+/g, " ").trim();
+  if (!v.length || GOOGLE_TITLE_GENERIC_RE.test(v)) return null;
+  return v;
+}
+
+/**
+ * Adres z Nominatim bywa litanią („Rynek Główny, Stare Miasto, Kraków,
+ * województwo małopolskie, 31-042, Polska") — w podpisie karty zostawiamy
+ * początek, bo dalej idą jednostki administracyjne.
+ */
+function shortAddress(display: string | null): string | null {
+  if (!display) return null;
+  const parts = display.split(",").map((p) => p.trim()).filter(Boolean);
+  const head = parts.slice(0, 2).join(", ");
+  return head.length ? head : null;
+}
+
+/** Czy adres (wejściowy albo końcowy) to w ogóle link do Map Google. */
+export function isMapsLink(url: string): boolean {
+  return parseGoogleMapsUrl(url) !== null;
+}
+
+/**
+ * Punkt mini-mapy dla linku do Map. Kolejność jest celowa i idzie od
+ * najtańszego źródła do najdroższego:
+ *   1. sam adres wejściowy (zero ruchu),
+ *   2. adres PO PRZEKIEROWANIACH — `maps.app.goo.gl/x` niesie punkt dopiero po
+ *      rozwinięciu, a rozwinięcie i tak już się wydarzyło w `fetchPreviewRaw`
+ *      (`redirect: "manual"` + `assertFetchableUrl` na każdym przeskoku), więc
+ *      tutaj tylko czytamy `finalUrl`,
+ *   3. geokoder (Nominatim przez `src/lib/geo.ts` — z cache'em `geo_cache` i
+ *      kolejką 1 req/s), gdy w adresie jest tylko fraza albo nazwa miejsca.
+ *
+ * Nigdy nie rzuca: brak sieci, pusty wynik geokodera albo adres spoza Polski
+ * (geokoder ma `countrycodes=pl`) kończą się `null`, czyli zwykłą kartą linku.
+ */
+async function resolveMap(
+  inputUrl: string,
+  finalUrl: string,
+  title: string | null
+): Promise<LinkPreviewMap | null> {
+  const fromInput = parseGoogleMapsUrl(inputUrl);
+  const fromFinal = finalUrl !== inputUrl ? parseGoogleMapsUrl(finalUrl) : null;
+  if (!fromInput && !fromFinal) return null;
+
+  // Adres końcowy jest bogatszy (krótki link → pełny `/place/…/@lat,lng`), ale
+  // etykieta i fraza z adresu wklejonego przez człowieka mają pierwszeństwo.
+  const link = { ...(fromFinal ?? {}), ...(fromInput ?? {}) };
+  if (fromFinal?.lat !== undefined && fromInput?.lat === undefined) {
+    link.lat = fromFinal.lat;
+    link.lng = fromFinal.lng;
+    link.zoom = fromInput?.zoom ?? fromFinal.zoom;
+  }
+  link.label ??= fromFinal?.label;
+  link.query ??= fromFinal?.query;
+
+  let lat = link.lat;
+  let lng = link.lng;
+  let geocoded: string | null = null;
+
+  if (lat === undefined || lng === undefined) {
+    const query = link.query ?? link.label;
+    if (!query) return null;
+    try {
+      const hit = await geocode(query);
+      if (isGeoError(hit)) return null;
+      lat = hit.lat;
+      lng = hit.lng;
+      geocoded = hit.display;
+    } catch (err) {
+      // Geokoder to dodatek — jego awaria nie ma prawa zabrać podglądu linku.
+      console.warn("[link-preview] geokodowanie mapy:", err);
+      return null;
+    }
+  }
+
+  // Fraza wpisana przez człowieka („Rynek Główny Kraków") jest lepszym podpisem
+  // niż pełny adres z geokodera, dlatego stoi przed nim.
+  let label = link.label ?? stripGoogleTitle(title) ?? link.query ?? shortAddress(geocoded);
+
+  if (!label) {
+    // Pinezka udostępniona z telefonu to same współrzędne (`/maps/search/52.29,+21.06`)
+    // i generyczny tytuł „Google Maps" — bez reverse karta miałaby tylko liczby.
+    try {
+      label = await reverseAddress({ lat, lng });
+    } catch (err) {
+      console.warn("[link-preview] reverse adresu mapy:", err);
+      label = null;
+    }
+  }
+
+  return { lat, lng, zoom: link.zoom ?? DEFAULT_MAP_ZOOM, label: label ?? null };
+}
+
+/**
+ * Podgląd strony + (dla linków Google Maps) punkt mini-mapy.
+ *
+ * Dla Map świadomie kasujemy `og:image`: Google podaje tam wielki obrazek
+ * podglądu mapy, który w karcie dublowałby to, co i tak rysujemy Leafletem.
+ * Tytuł i favicon zostają — są podpisem karty i jej ikoną.
+ */
+export async function fetchPreview(normalized: string): Promise<LinkPreview> {
+  const preview = await fetchPreviewRaw(normalized);
+  if (!isMapsLink(preview.url) && !isMapsLink(preview.finalUrl)) return preview;
+  const map = await resolveMap(preview.url, preview.finalUrl, preview.title);
+  return { ...preview, image: null, map };
+}
+
+// ---------------------------------------------------------------------------
 // Kolejka: 4 pobrania naraz w procesie, jedno naraz per URL
 // ---------------------------------------------------------------------------
 
@@ -552,6 +698,24 @@ const inFlight = new Map<string, Promise<LinkPreview>>();
 // Cache w bazie
 // ---------------------------------------------------------------------------
 
+/** `map_json` z bazy → punkt. Uszkodzony albo niepełny JSON = brak mapy, nie wyjątek. */
+function parseMapJson(raw: string | null): LinkPreviewMap | null {
+  if (!raw) return null;
+  try {
+    const v = JSON.parse(raw) as Partial<LinkPreviewMap> | null;
+    if (!v || typeof v.lat !== "number" || typeof v.lng !== "number") return null;
+    if (!Number.isFinite(v.lat) || !Number.isFinite(v.lng)) return null;
+    return {
+      lat: v.lat,
+      lng: v.lng,
+      zoom: typeof v.zoom === "number" && Number.isFinite(v.zoom) ? v.zoom : DEFAULT_MAP_ZOOM,
+      label: typeof v.label === "string" && v.label.trim() ? v.label : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 function rowToPreview(row: typeof schema.linkPreviews.$inferSelect): LinkPreview {
   return {
     url: row.url,
@@ -562,6 +726,7 @@ function rowToPreview(row: typeof schema.linkPreviews.$inferSelect): LinkPreview
     image: row.image,
     favicon: row.favicon,
     siteName: row.siteName,
+    map: parseMapJson(row.mapJson),
     status: row.status === "error" ? "error" : "ok",
     error: row.error,
     fetchedAt: row.fetchedAt,
@@ -573,7 +738,15 @@ function readCache(url: string): LinkPreview | null {
   if (!row) return null;
   const preview = rowToPreview(row);
   const age = Date.now() - Date.parse(preview.fetchedAt.includes("T") ? preview.fetchedAt : `${preview.fetchedAt}Z`);
-  const ttl = preview.status === "ok" ? TTL_OK_MS : TTL_ERROR_MS;
+  // Link do Map BEZ punktu trzymamy tak krótko jak błąd (1 h), mimo `status: "ok"`.
+  // Dwa powody, oba praktyczne: (1) wiersze zapisane, zanim mini-mapa powstała,
+  // mają `map_json` NULL i przez 7 dni blokowałyby kartę mimo działającego już
+  // parsera; (2) brak punktu dla mapy zwykle znaczy „nie udało się TERAZ"
+  // (geokoder nie odpowiedział, przekierowanie zwróciło stronę zgody), a nie
+  // „tego miejsca nie ma". Ponowne pytanie kosztuje jedno pobranie, a nie tydzień
+  // pustej karty.
+  const mapMiss = preview.status === "ok" && !preview.map && isMapsLink(preview.url);
+  const ttl = preview.status === "ok" && !mapMiss ? TTL_OK_MS : TTL_ERROR_MS;
   if (!Number.isFinite(age) || age < 0 || age > ttl) return null;
   return preview;
 }
@@ -588,6 +761,7 @@ function writeCache(preview: LinkPreview): void {
     image: preview.image,
     favicon: preview.favicon,
     siteName: preview.siteName,
+    mapJson: preview.map ? JSON.stringify(preview.map) : null,
     status: preview.status,
     error: preview.error,
     fetchedAt: preview.fetchedAt,

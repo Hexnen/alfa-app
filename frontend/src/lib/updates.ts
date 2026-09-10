@@ -58,10 +58,35 @@ export interface VersionUpdate {
  */
 export const UPDATES_CURRENT: VersionUpdate[] = [
   {
-    version: "1.2.0–1.3.0",
+    version: "1.2.0–1.4.0",
     date: "2026-09-10",
     title: "Co nowego w aplikacji",
     entries: [
+      {
+        text: "Link do Google Maps w notatce pokazuje małą mapkę z pinezką i nazwą miejsca, z przyciskami do otwarcia w Mapach i nawigacji",
+        type: "feat",
+        module: "ogolne",
+      },
+      {
+        text: "Pod mapką od razu widać kilometry i czas dojazdu od biura i od obiektu, bez sprawdzania trasy osobno",
+        type: "feat",
+        module: "ogolne",
+      },
+      {
+        text: "Notatki zajmują całą szerokość karty, a przyciski akcji mają lekkie tło",
+        type: "tweak",
+        module: "ogolne",
+      },
+      {
+        text: "Karta obiektu pokazuje mapkę pod linkiem do Google Maps",
+        type: "tweak",
+        module: "kadry",
+      },
+      {
+        text: "Na węższych ekranach panel wydarzenia w kalendarzu wsuwa się z boku, a przy niezapisanych zmianach aplikacja pyta przed podmianą wydarzenia",
+        type: "tweak",
+        module: "ogolne",
+      },
       {
         text: "Mail z Outlooka można upuścić prosto na dzień albo godzinę w kalendarzu, a wydarzenie powstaje z tematem w tytule i treścią maila jako notatką, zamiast przeklejania tego ręcznie",
         type: "feat",

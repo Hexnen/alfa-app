@@ -73,6 +73,7 @@ import { NOTE_MAX, fmtRelative, fmtShort, fmtTimestamp, initials, notesLabel } f
 import { mentionSuggestions, parseMentions, toDateStr } from "@/lib/note-mentions";
 import { cn } from "@/lib/utils";
 import { RichText, RichTextInline } from "@/components/RichText";
+import { RichTextProvider } from "@/components/RichTextProvider";
 import { looksLikeMailNote } from "@/lib/richtext";
 
 /** Badge „n notatek” — podgląd wydarzenia, karty asystenta. Nic nie renderuje przy 0. */
@@ -1333,6 +1334,10 @@ export function CalendarEventNotes({
   };
 
   return (
+    // Obiekt wydarzenia trafia do kontekstu, żeby karta mapy pod wklejoną
+    // pinezką mogła pokazać „ile stąd do obiektu" (w dialogu tworzenia jeszcze
+    // go nie ma — wtedy `null` i zostaje sam dystans od biura).
+    <RichTextProvider objectId={objectId ?? null}>
     <div className="space-y-3" data-testid="event-notes" data-count={notes.length}>
       {loading ? (
         <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
@@ -1360,20 +1365,19 @@ export function CalendarEventNotes({
               <li
                 key={n.id}
                 className={cn(
-                  "group flex gap-2.5 rounded-md py-1.5 pr-1 transition-colors",
+                  // Treść notatki idzie pełną szerokością karty — awatar siedzi
+                  // w nagłówku inline, żeby nie robić kolumny wcinającej tekst.
+                  "group rounded-md px-1 pb-2.5 pt-1.5 transition-colors",
                   editing ? "bg-muted/50" : "hover:bg-muted/40"
                 )}
                 data-testid="event-note"
                 data-note-id={n.id}
                 data-source={n.source}
               >
-                <div className="flex flex-col items-center">
-                  <NoteAvatar note={n} />
-                  <div className="mt-1 w-px flex-1 bg-border" />
-                </div>
-                <div className="min-w-0 flex-1 pb-1">
+                <div className="min-w-0">
                   <div className="flex items-baseline justify-between gap-2">
                     <span className="flex min-w-0 items-center gap-1.5 text-sm">
+                      <NoteAvatar note={n} />
                       <span className="truncate font-medium">{who}</span>
                       {n.source === "assistant" && (
                         <span className="rounded bg-amber-500/15 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-300">
@@ -1424,8 +1428,10 @@ export function CalendarEventNotes({
                       {renderAttachments(n)}
                     </div>
                   ) : (
-                    <div className="flex items-start gap-2">
-                      <div className="min-w-0 flex-1">
+                    // Treść pełną szerokością; pasek akcji unosi się nad nią w tym
+                    // samym miejscu co dawniej (prawy górny róg pod linią z godziną).
+                    <div className="relative">
+                      <div className="min-w-0">
                         {/* Mail z Outlooka: nagłówek z pól, pod nim sama treść i załączniki. */}
                         {n.kind === "email" && n.mail && (
                           <MailNoteHeader
@@ -1458,7 +1464,7 @@ export function CalendarEventNotes({
                           edit do klucza `objects`), więc pasek akcji pokazujemy też
                           wtedy, gdy jedyną dostępną akcją jest „Do obiektu”. */}
                       {(canManage(n) || (canCopyToObject && n.objectNoteId == null && hasCopyContent)) && (
-                        <span className="flex shrink-0 items-center gap-0.5 opacity-70 transition-opacity focus-within:opacity-100 group-hover:opacity-100 sm:opacity-0">
+                        <span className="absolute right-0 top-0 z-10 flex shrink-0 items-center gap-0.5 rounded-md border border-border/60 bg-background/90 px-0.5 opacity-70 shadow-sm backdrop-blur-sm transition-opacity focus-within:opacity-100 group-hover:opacity-100 sm:opacity-0">
                           {canCopyToObject && n.objectNoteId == null && hasCopyContent && (
                             <Button
                               type="button"
@@ -1794,5 +1800,6 @@ export function CalendarEventNotes({
         </DialogContent>
       </Dialog>
     </div>
+    </RichTextProvider>
   );
 }

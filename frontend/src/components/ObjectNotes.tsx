@@ -36,6 +36,7 @@ import { objectsApi, type ObjectNote, type ObjectNoteSource } from "@/lib/api";
 import { NOTE_MAX, fmtRelative, fmtShort, fmtTimestamp, initials, notesLabel } from "@/lib/calendar-labels";
 import { cn } from "@/lib/utils";
 import { RichText } from "@/components/RichText";
+import { RichTextProvider } from "@/components/RichTextProvider";
 import { looksLikeMailNote } from "@/lib/richtext";
 
 const errMsg = (e: unknown, fallback: string) => (e instanceof Error && e.message ? e.message : fallback);
@@ -238,24 +239,23 @@ export function ObjectNotes({ objectId, canEdit, reloadKey = 0 }: ObjectNotesPro
                 <li
                   key={n.id}
                   className={cn(
-                    "group flex gap-2.5 rounded-md py-1.5 pr-1 transition-colors",
+                    // Jak w notatkach wydarzenia: treść pełną szerokością karty,
+                    // awatar inline w nagłówku (bez kolumny wcinającej tekst).
+                    "group rounded-md px-1 pb-2.5 pt-1.5 transition-colors",
                     editing ? "bg-muted/50" : "hover:bg-muted/40"
                   )}
                   data-testid="object-note-item"
                   data-note-id={n.id}
                 >
-                  <div className="flex flex-col items-center">
-                    <span
-                      aria-hidden
-                      className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-muted text-[10px] font-semibold uppercase text-muted-foreground"
-                    >
-                      {initials(n.userLabel)}
-                    </span>
-                    <div className="mt-1 w-px flex-1 bg-border" />
-                  </div>
-                  <div className="min-w-0 flex-1 pb-1">
+                  <div className="min-w-0">
                     <div className="flex items-baseline justify-between gap-2">
                       <span className="flex min-w-0 items-center gap-1.5 text-sm">
+                        <span
+                          aria-hidden
+                          className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-muted text-[10px] font-semibold uppercase text-muted-foreground"
+                        >
+                          {initials(n.userLabel)}
+                        </span>
                         <span className="truncate font-medium">{who}</span>
                       </span>
                       <span className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
@@ -311,13 +311,19 @@ export function ObjectNotes({ objectId, canEdit, reloadKey = 0 }: ObjectNotesPro
                         </div>
                       </div>
                     ) : (
-                      <div className="flex items-start gap-2">
-                        <div className="min-w-0 flex-1">
-                          <RichText
-                            text={n.text}
-                            mode={looksLikeMailNote(n.text) ? "mail" : "note"}
-                            className="text-sm leading-relaxed"
-                          />
+                      // Treść pełną szerokością; pasek akcji unosi się nad nią
+                      // w tym samym miejscu co dawniej (prawy górny róg).
+                      <div className="relative">
+                        <div className="min-w-0">
+                          {/* Kontekst dla karty mapy: pinezka wklejona w notatce
+                              pokaże też „ile stąd do tego obiektu". */}
+                          <RichTextProvider objectId={objectId}>
+                            <RichText
+                              text={n.text}
+                              mode={looksLikeMailNote(n.text) ? "mail" : "note"}
+                              className="text-sm leading-relaxed"
+                            />
+                          </RichTextProvider>
                           {n.source && (
                             <Link
                               to={sourceHref(n.source)}
@@ -334,7 +340,7 @@ export function ObjectNotes({ objectId, canEdit, reloadKey = 0 }: ObjectNotesPro
                           )}
                         </div>
                         {canManage(n) && (
-                          <span className="flex shrink-0 items-center gap-0.5 opacity-70 transition-opacity focus-within:opacity-100 group-hover:opacity-100 sm:opacity-0">
+                          <span className="absolute right-0 top-0 z-10 flex shrink-0 items-center gap-0.5 rounded-md border border-border/60 bg-background/90 px-0.5 opacity-70 shadow-sm backdrop-blur-sm transition-opacity focus-within:opacity-100 group-hover:opacity-100 sm:opacity-0">
                             <Button
                               type="button"
                               variant="ghost"
