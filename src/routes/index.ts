@@ -40,6 +40,7 @@ import activityRoutes from "./activity.js";
 import analyticsRoutes from "./analytics.js";
 import leadsRoutes from "./leads.js";
 import contactsRoutes from "./contacts.js";
+import linksRoutes from "./links.js";
 import { requireAuth, requireAssistantAccess, tabPermissionGuard, getUser } from "../middleware/auth.js";
 import { canView } from "../lib/auth/permissions.js";
 import { db, schema } from "../db/index.js";
@@ -71,6 +72,12 @@ const BODY_LIMIT_MANUAL_ATTACHMENTS = BODY_LIMIT_NOTE_ATTACHMENTS;
  * komunikatem, zamiast dostać 413 bez wyjaśnienia.
  */
 const BODY_LIMIT_SHOP_IMPORT = 12 * MB;
+/**
+ * Mail `.msg` upuszczony na kalendarz (POST /calendar/msg/parse). Sam plik ma
+ * sufit 10 MB w trasie — tutaj zostawiamy zapas na narzut multipartu, żeby
+ * użytkownik dostał polski komunikat z trasy, a nie gołe 413.
+ */
+const BODY_LIMIT_OUTLOOK_MSG = 12 * MB;
 
 /**
  * Sufit zależny od trasy: trasy dużych ciał są wyliczone jawnie, reszta dostaje
@@ -85,6 +92,8 @@ function bodyLimitFor(path: string, method: string): number {
   }
   if (/^\/monitoring\/snapshots\/\d+$/.test(path) && method === "PUT") return BODY_LIMIT_DESIGNER;
   if (/^\/calendar\/events\/\d+\/notes$/.test(path) && method === "POST") return BODY_LIMIT_NOTE_ATTACHMENTS;
+  // Mail .msg przeciągnięty z Outlooka na siatkę kalendarza.
+  if (path === "/calendar/msg/parse" && method === "POST") return BODY_LIMIT_OUTLOOK_MSG;
   // Manuale: multipart przy zakładaniu (POST /manuals) i przy dokładaniu plików.
   if (path === "/manuals" && method === "POST") return BODY_LIMIT_MANUAL_ATTACHMENTS;
   if (/^\/manuals\/\d+\/attachments$/.test(path) && method === "POST") return BODY_LIMIT_MANUAL_ATTACHMENTS;
@@ -188,6 +197,12 @@ api.route("/activity", activityRoutes);
 // formularze kontrahentów, techników i zleceń, a dane pochodzą z publicznego
 // rejestru, więc wystarczy zalogowana sesja (limit zapytań w samej trasie).
 api.route("/company-lookup", companyLookupRoutes);
+
+// --- PODGLĄD LINKÓW (unfurl) — poza API_TAB_MAP: adresy pochodzą z wolnych
+// tekstów w każdym module (notatki wydarzeń, notatki obiektu, opisy), a trasa
+// nie ujawnia niczego z naszej bazy. Bezpieczeństwo (SSRF, limity) siedzi
+// w src/lib/link-preview.ts i w samej trasie.
+api.route("/links", linksRoutes);
 
 /*
  * Dashboard statistics. Dashboard ma każdy zalogowany, ale liczby pochodzą

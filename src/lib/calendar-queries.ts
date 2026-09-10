@@ -12,7 +12,7 @@ import { attachmentsByNote, type NoteAttachmentJson } from "./calendar-attachmen
 import { parseMentions } from "./note-mentions.js";
 import { zonedToday } from "./tz.js";
 import { asDepartment } from "./calendar-scope.js";
-import type { CalendarBilling, CalendarDepartment, CalendarEventNote, CalendarEventStatus, CalendarEventType, CalendarNoteSource, CalendarSeriesFreq, LeadStage } from "../db/schema.js";
+import type { CalendarBilling, CalendarDepartment, CalendarEventNote, CalendarEventStatus, CalendarEventType, CalendarNoteKind, CalendarNoteSource, CalendarSeriesFreq, LeadStage } from "../db/schema.js";
 
 /**
  * Id wydarzeń kolidujących z zakresem [startAt, endAt) dla podanych techników
@@ -293,6 +293,8 @@ export interface NoteBrief {
   eventTitle: string;
   eventStartAt: string;
   eventType: CalendarEventType;
+  /** Rodzaj wpisu — mail ma w `text` prefiks tematu (briefTextOf). */
+  kind: CalendarNoteKind;
   text: string;
   userLabel: string | null;
   createdAt: string;
@@ -318,6 +320,18 @@ export interface NoteMentionJson {
   eventId: number | null;
 }
 
+/** Nagłówek maila w notatce `kind === "email"` (kolumny `mail_*`, migracja 0094). */
+export interface NoteMailJson {
+  subject: string;
+  from: string;
+  to: string[];
+  cc: string[];
+  /** ISO 8601 albo null. */
+  sentAt: string | null;
+  /** NAZWY załączników maila (kolumna `mail_attachments`, migracja 0096) — także tych niewypakowanych. */
+  attachments: string[];
+}
+
 /** Notatka wydarzenia (kontrakt z frontem: CalendarNote). */
 export interface Note {
   id: number;
@@ -325,7 +339,15 @@ export interface Note {
   userId: number | null;
   userLabel: string | null;
   source: CalendarNoteSource;
+  /** "text" = zwykły wpis; "email" = mail z Outlooka (nagłówek w `mail`). */
+  kind: CalendarNoteKind;
+  /**
+   * Dla maila: SAMA treść (body). Nagłówek renderuje UI z pola `mail` — nie
+   * doklejamy go tutaj, żeby edycja i wyszukiwanie działały na treści.
+   */
   text: string;
+  /** Nagłówek maila albo null dla zwykłej notatki. */
+  mail: NoteMailJson | null;
   createdAt: string;
   updatedAt: string;
   /** Załączniki (pliki na dysku; url = GET /api/calendar/attachments/:id). */
@@ -401,6 +423,8 @@ export function loadSourceNotes(dbx: DbOrTx, noteIds: number[]): Map<number, Sou
       id: schema.calendarEventNotes.id,
       eventId: schema.calendarEventNotes.eventId,
       text: schema.calendarEventNotes.text,
+      kind: schema.calendarEventNotes.kind,
+      mailSubject: schema.calendarEventNotes.mailSubject,
       userLabel: schema.calendarEventNotes.userLabel,
       source: schema.calendarEventNotes.source,
       createdAt: schema.calendarEventNotes.createdAt,
@@ -413,7 +437,11 @@ export function loadSourceNotes(dbx: DbOrTx, noteIds: number[]): Map<number, Sou
     .where(inArray(schema.calendarEventNotes.id, noteIds))
     .all();
   const counts = attachmentsCountByNote(dbx, rows.map((r) => r.id));
-  for (const r of rows) out.set(r.id, { ...r, attachmentsCount: counts.get(r.id) ?? 0 });
+  // Kafelek „notatka" pokazuje SAM tekst — mail dostaje więc prefiks tematu.
+  for (const r of rows) {
+    const { kind, mailSubject, ...rest } = r;
+    out.set(r.id, { ...rest, text: briefTextOf(r), kind, attachmentsCount: counts.get(r.id) ?? 0 });
+  }
   return out;
 }
 
@@ -444,6 +472,42 @@ function quoteTotals(raw: string): { total: number; filledItems: number } {
   return { total: Math.round(total * 100) / 100, filledItems };
 }
 
+/** Tablica JSON stringów z kolumny `mail_to`/`mail_cc`; śmieci → pusta lista. */
+function jsonStrings(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Kolumny `mail_*` → nagłówek maila (null dla notatki tekstowej). */
+export function mailOfRow(r: CalendarEventNote): NoteMailJson | null {
+  if (r.kind !== "email") return null;
+  return {
+    subject: r.mailSubject ?? "",
+    from: r.mailFrom ?? "",
+    to: jsonStrings(r.mailTo),
+    cc: jsonStrings(r.mailCc),
+    sentAt: r.mailSentAt ?? null,
+    attachments: jsonStrings(r.mailAttachments),
+  };
+}
+
+/**
+ * Notatka mailowa spłaszczona do jednej linijki — dla miejsc, które pokazują
+ * SAM tekst (wyszukiwarka notatek, notatka źródłowa kafelka „notatka”).
+ * Bez tego mail wyglądałby tam jak wpis bez kontekstu.
+ */
+export function briefTextOf(r: Pick<CalendarEventNote, "kind" | "text" | "mailSubject">): string {
+  if (r.kind !== "email") return r.text;
+  const subject = (r.mailSubject ?? "").trim() || "(bez tematu)";
+  const body = r.text.trim();
+  return body ? `📧 ${subject} — ${body}` : `📧 ${subject}`;
+}
+
 export function noteOfRow(
   r: CalendarEventNote,
   attachments: NoteAttachmentJson[] = [],
@@ -456,7 +520,9 @@ export function noteOfRow(
     userId: r.userId,
     userLabel: r.userLabel,
     source: r.source,
+    kind: r.kind,
     text: r.text,
+    mail: mailOfRow(r),
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
     attachments,
@@ -518,7 +584,7 @@ export function searchNotes(dbx: DbOrTx, q: string, limit = 20, departments?: re
   if (needle) {
     const pattern = `%${needle.replace(/[%_]/g, (ch) => `\\${ch}`)}%`;
     conds.push(
-      sql`(lower(${schema.calendarEventNotes.text}) LIKE ${pattern} ESCAPE '\\' OR lower(${schema.calendarEvents.title}) LIKE ${pattern} ESCAPE '\\')`
+      sql`(lower(${schema.calendarEventNotes.text}) LIKE ${pattern} ESCAPE '\\' OR lower(coalesce(${schema.calendarEventNotes.mailSubject}, '')) LIKE ${pattern} ESCAPE '\\' OR lower(${schema.calendarEvents.title}) LIKE ${pattern} ESCAPE '\\')`
     );
   }
   const rows = dbx
@@ -526,6 +592,8 @@ export function searchNotes(dbx: DbOrTx, q: string, limit = 20, departments?: re
       id: schema.calendarEventNotes.id,
       eventId: schema.calendarEventNotes.eventId,
       text: schema.calendarEventNotes.text,
+      kind: schema.calendarEventNotes.kind,
+      mailSubject: schema.calendarEventNotes.mailSubject,
       userLabel: schema.calendarEventNotes.userLabel,
       createdAt: schema.calendarEventNotes.createdAt,
       eventTitle: schema.calendarEvents.title,
@@ -539,7 +607,13 @@ export function searchNotes(dbx: DbOrTx, q: string, limit = 20, departments?: re
     .limit(limit)
     .all();
   const counts = attachmentsCountByNote(dbx, rows.map((r) => r.id));
-  return rows.map((r) => ({ ...r, attachmentsCount: counts.get(r.id) ?? 0 }));
+  // Lista wyników pokazuje SAM tekst — mail dostaje prefiks tematu (briefTextOf).
+  return rows.map(({ kind, mailSubject, ...r }) => ({
+    ...r,
+    kind,
+    text: briefTextOf({ kind, mailSubject, text: r.text }),
+    attachmentsCount: counts.get(r.id) ?? 0,
+  }));
 }
 
 /** Liczba nieusuniętych notatek per wydarzenie — jedno zapytanie zbiorcze. */

@@ -51,6 +51,8 @@ export const mimeOf = (a: AttachmentLike): string => a.mime ?? a.mimeType ?? "";
 /** Rozszerzenia dopuszczane przez backend (poza image/*). */
 const ALLOWED_EXT = new Set([
   "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "csv", "txt", "rtf",
+  // Maile: .msg z Outlooka (upuszczony na kalendarz zostaje przy notatce) i .eml.
+  "msg", "eml",
 ]);
 const IMAGE_EXT = new Set(["jpg", "jpeg", "png", "gif", "webp", "bmp", "svg", "avif", "heic", "heif", "tif", "tiff"]);
 
@@ -137,7 +139,7 @@ export function partitionAttachmentFiles(
   }
   if (badType.length) {
     messages.push(
-      `Niedozwolony typ pliku: ${badType.join(", ")}. Dozwolone: obrazy, PDF, dokumenty Office/OpenDocument, CSV, TXT, RTF.`
+      `Niedozwolony typ pliku: ${badType.join(", ")}. Dozwolone: obrazy, PDF, dokumenty Office/OpenDocument, CSV, TXT, RTF, maile MSG/EML.`
     );
   }
   if (tooBig.length) {

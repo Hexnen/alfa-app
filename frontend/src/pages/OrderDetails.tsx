@@ -31,6 +31,7 @@ import {
 import { MailLogTable } from "@/components/MailLogTable";
 import { usePerms } from "@/auth/permissions";
 import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
+import { RichText } from "@/components/RichText";
 
 const orderStatusLabels: Record<string, string> = {
   new: "Nowe",
@@ -358,7 +359,7 @@ export function OrderDetails() {
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                <p className="whitespace-pre-wrap">{order.notes}</p>
+                <RichText text={order.notes} />
               </CardContent>
             </Card>
           )}

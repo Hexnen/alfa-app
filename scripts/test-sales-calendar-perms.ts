@@ -105,6 +105,29 @@ function clientFor(user: User) {
 }
 
 /**
+ * Klient trasy „przeczytaj mail .msg” — osobny, bo `clientFor` umie tylko JSON,
+ * a ta trasa przyjmuje multipart. Mail upuszczony na kalendarz zamienia się
+ * w wydarzenie, więc bramka jest ta sama co przy tworzeniu: EDYCJA działu.
+ */
+function msgParseFor(user: User) {
+  const app = new Hono();
+  app.use("*", async (c, next) => {
+    c.set("user", user);
+    return next();
+  });
+  app.use("*", tabPermissionGuard);
+  app.route("/api/calendar", calendarRoutes);
+  return async (department: string, fileName: string, bytes: number[]) => {
+    const fd = new FormData();
+    fd.set("department", department);
+    fd.append("file", new File([new Uint8Array(bytes)], fileName, { type: "application/octet-stream" }));
+    const res = await app.request("/api/calendar/msg/parse", { method: "POST", body: fd });
+    const json = (await res.json().catch(() => null)) as { success?: boolean; error?: string } | null;
+    return { status: res.status, ...(json ?? {}) };
+  };
+}
+
+/**
  * Klient kartoteki kontrahentów dla usera — ten sam strażnik, inny router.
  * Handlowiec z samymi kluczami `handlowy/*` MUSI móc przeczytać słownik do
  * selecta (`/contractors/catalog`), ale NIE całą kartotekę.
@@ -285,6 +308,17 @@ try {
     department: "technical", type: "serwis", title: `${PREFIX} nieautoryzowane`, startAt: `${DAY}T16:00`, endAt: `${DAY}T16:30`,
   });
   ok("handlowiec: POST wydarzenia technicznego → 403", salesCreatesTech.status === 403, salesCreatesTech);
+
+  // Mail .msg upuszczony na kalendarz — czytanie pliku wymaga prawa EDYCJI działu.
+  const Tmsg = msgParseFor(techUser);
+  const Smsg = msgParseFor(salesUser);
+  const CFBF = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
+  ok("technik: msg/parse dla działu handlowego → 403", (await Tmsg("handlowy", "mail.msg", CFBF)).status === 403);
+  ok("handlowiec: msg/parse dla działu technicznego → 403", (await Smsg("technical", "mail.msg", CFBF)).status === 403);
+  const notMsg = await Tmsg("technical", "faktura.pdf", CFBF);
+  ok("technik: msg/parse z plikiem nie-.msg → 400", notMsg.status === 400 && notMsg.error === "Obsługiwane są tylko pliki .msg z Outlooka", notMsg);
+  const brokenMsg = await Tmsg("technical", "mail.msg", [1, 2, 3, 4]);
+  ok("technik: msg/parse z uszkodzonym .msg → 400", brokenMsg.status === 400 && brokenMsg.error === "Nie udało się odczytać pliku .msg", brokenMsg);
 
   const created = await S("POST", "/events", {
     department: "handlowy", type: "spotkanie", title: `${PREFIX} spotkanie własne`, startAt: `${DAY}T17:00`, endAt: `${DAY}T18:00`,

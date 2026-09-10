@@ -569,9 +569,9 @@
 .alfa-calendar .fc .fc-list {
   border-radius: calc(var(--radius) - 2px);
 }
-.alfa-calendar .fc .fc-list-event {
-  --ev: var(--cal-biuro);
-}
+/* Domyślne `--ev` daje już `.fc-event` (wiersz listy też je ma) — osobna reguła tutaj
+   stała za regułami `.cal-type-*` i przy równej specyficzności wygrywała, przez co
+   wszystkie kropki w liście były szare. */
 .alfa-calendar .fc .fc-list-event td {
   padding: 8px 10px;
   border-color: hsl(var(--border) / 0.7);
@@ -591,6 +591,35 @@
 }
 .alfa-calendar .fc .fc-list-event:hover td {
   background: hsl(var(--ev) / 0.07);
+}
+/* „Ten sam obiekt”: hover na wierszu (albo otwarty podgląd/formularz) podświetla
+   pozostałe wydarzenia tego obiektu — powtórki w tygodniu widać od razu. */
+   Ramka: wiersz to <tr>, na którym obramowanie nie działa w tabeli — składamy ją
+   z wewnętrznych cieni na komórkach (góra/dół na każdej, boki na skrajnych). */
+.alfa-calendar .fc .fc-list-event.cal-same-object td,
+.alfa-calendar .fc .fc-list-event.cal-same-object-pinned td {
+  background: hsl(var(--ev) / 0.18);
+  box-shadow:
+    inset 0 2px 0 hsl(var(--ev)),
+    inset 0 -2px 0 hsl(var(--ev));
+}
+.alfa-calendar .fc .fc-list-event.cal-same-object td:first-child,
+.alfa-calendar .fc .fc-list-event.cal-same-object-pinned td:first-child {
+  box-shadow:
+    inset 0 2px 0 hsl(var(--ev)),
+    inset 0 -2px 0 hsl(var(--ev)),
+    inset 2px 0 0 hsl(var(--ev));
+}
+.alfa-calendar .fc .fc-list-event.cal-same-object td:last-child,
+.alfa-calendar .fc .fc-list-event.cal-same-object-pinned td:last-child {
+  box-shadow:
+    inset 0 2px 0 hsl(var(--ev)),
+    inset 0 -2px 0 hsl(var(--ev)),
+    inset -2px 0 0 hsl(var(--ev));
+}
+.alfa-calendar .fc .fc-list-event.cal-same-object .cal-ev-title,
+.alfa-calendar .fc .fc-list-event.cal-same-object-pinned .cal-ev-title {
+  font-weight: 600;
 }
 .alfa-calendar .fc .fc-list-day > th {
   border-top: 0;
@@ -1287,4 +1316,42 @@
   font-size: 0.78rem;
   color: hsl(var(--muted-foreground));
   font-style: italic;
+}
+
+/* ---------------------------------------------------------------------------
+   Upuszczenie maila .msg z Outlooka — podświetlenie KOMÓRKI pod kursorem.
+   Klasy i `data-msg-drop-label` dokłada CalendarPage podczas przeciągania pliku
+   (elementy rysuje FullCalendar, więc nie da się tego zrobić w JSX). Celem jest
+   dzień (miesiąc, nagłówek dnia listy, pas „całodniowe”) albo kolumna dnia
+   × wiersz godziny w siatce godzinowej — stąd dwie klasy zamiast jednej.
+   --------------------------------------------------------------------------- */
+.alfa-calendar .fc .alfa-msg-drop-target,
+.alfa-calendar .fc .alfa-msg-drop-lane {
+  position: relative;
+  background: hsl(var(--primary) / 0.1);
+  box-shadow: inset 0 0 0 2px hsl(var(--primary));
+}
+/* Dymek „Utwórz wydarzenie z maila · 14:00” — treść w atrybucie, żeby nie
+   powielać tekstu w dwóch miejscach. */
+.alfa-calendar .fc .alfa-msg-drop-target::after,
+.alfa-calendar .fc .alfa-msg-drop-lane::after {
+  content: "✉ " attr(data-msg-drop-label);
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  z-index: 6;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: hsl(var(--primary));
+  color: hsl(var(--primary-foreground));
+  font-size: 0.68rem;
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+  pointer-events: none;
+}
+/* W siatce godzinowej dymek pokazuje wiersz godziny (kolumna dnia jest na całą
+   wysokość widoku — etykieta wylądowałaby poza polem widzenia). */
+.alfa-calendar .fc .fc-timegrid-col.alfa-msg-drop-target::after {
+  content: none;
 }

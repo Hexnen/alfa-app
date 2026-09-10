@@ -11,6 +11,7 @@ import {
   type Ref,
   type RefObject,
 } from "react";
+import { createPortal } from "react-dom";
 import { Link } from "react-router-dom";
 import {
   Building2,
@@ -21,8 +22,10 @@ import {
   File as FileIcon,
   FileSpreadsheet,
   FileText,
+  Image as ImageIcon,
   Info,
   Loader2,
+  Mail,
   Paperclip,
   Pencil,
   Presentation,
@@ -63,10 +66,14 @@ import {
   calendarApi,
   type CalendarNote,
   type CalendarNoteAttachment,
+  type CalendarNoteMailHeader,
+  type ParsedMsgAttachmentMeta,
 } from "@/lib/api";
 import { NOTE_MAX, fmtRelative, fmtShort, fmtTimestamp, initials, notesLabel } from "@/lib/calendar-labels";
 import { mentionSuggestions, parseMentions, toDateStr } from "@/lib/note-mentions";
 import { cn } from "@/lib/utils";
+import { RichText, RichTextInline } from "@/components/RichText";
+import { looksLikeMailNote } from "@/lib/richtext";
 
 /** Badge „n notatek” — podgląd wydarzenia, karty asystenta. Nic nie renderuje przy 0. */
 export function NotesBadge({ count, className }: { count?: number | null; className?: string }) {
@@ -110,6 +117,326 @@ function NoteAvatar({ note }: { note: CalendarNote }) {
 }
 
 const errMsg = (e: unknown, fallback: string) => (e instanceof Error && e.message ? e.message : fallback);
+
+// ---------------------------------------------------------------------------
+// Notatka mailowa (kind === "email") — nagłówek maila z kolumn mail_*
+// ---------------------------------------------------------------------------
+
+const MAIL_DATE_FMT = new Intl.DateTimeFormat("pl-PL", {
+  day: "2-digit",
+  month: "2-digit",
+  year: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
+
+/** „10.09.2026 14:32”; nieparsowalną datę pokazujemy tak, jak przyszła. */
+function fmtMailSentAt(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return MAIL_DATE_FMT.format(d).replace(", ", " ");
+}
+
+/** Ile adresów pokazujemy bez rozwijania — dłuższe listy chowamy pod „+N”. */
+const MAIL_RECIPIENTS_SHOWN = 3;
+
+function MailAddresses({ label, list }: { label: string; list: string[] }) {
+  const [open, setOpen] = useState(false);
+  if (list.length === 0) return null;
+  const hidden = list.length - MAIL_RECIPIENTS_SHOWN;
+  const shown = open || hidden <= 0 ? list : list.slice(0, MAIL_RECIPIENTS_SHOWN);
+  return (
+    <div className="flex gap-1.5">
+      <span className="shrink-0 text-muted-foreground">{label}</span>
+      <span className="min-w-0 break-words">
+        {shown.join(", ")}
+        {hidden > 0 && (
+          <button
+            type="button"
+            onClick={() => setOpen((v) => !v)}
+            className="ml-1 whitespace-nowrap font-medium underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            data-testid="mail-recipients-toggle"
+          >
+            {open ? "zwiń" : `+${hidden}`}
+          </button>
+        )}
+      </span>
+    </div>
+  );
+}
+
+// --- Wiersz „Załączniki:” w karcie maila -----------------------------------
+
+/**
+ * Chip załącznika maila: NAZWA z maila plus — jeśli backend zdążył go wypakować —
+ * dopasowany załącznik notatki (`origin === "msg"`).
+ */
+interface MailAttachmentChipData {
+  name: string;
+  /** Zapisany załącznik notatki albo null (pominięty przy wypakowywaniu). */
+  att: CalendarNoteAttachment | null;
+  /** Metadane ze szkicu (przed zapisem nic jeszcze nie ma na dysku). */
+  meta: ParsedMsgAttachmentMeta | null;
+}
+
+const lower = (s: string) => s.trim().toLowerCase();
+/** Nazwa bez ostatniego rozszerzenia — obrazki zapisujemy jako `.webp`, więc „image001.png” ≠ „image001.webp”. */
+const stemOf = (s: string) => lower(s).replace(/\.[^.]+$/, "");
+
+/**
+ * Dopina nazwy z maila do wypakowanych załączników notatki. Nazwa musi zgadzać
+ * się dokładnie albo — dla obrazków, którym konwersja zmieniła rozszerzenie —
+ * po samym rdzeniu nazwy. Każdy załącznik dopasowujemy najwyżej raz.
+ */
+function mailAttachmentChips(
+  mail: CalendarNoteMailHeader,
+  attachments: CalendarNoteAttachment[] = [],
+  meta: ParsedMsgAttachmentMeta[] = []
+): MailAttachmentChipData[] {
+  const fromMsg = attachments.filter((a) => a.origin === "msg");
+  // Bez listy nazw z maila (starsza notatka) zostają same wypakowane pliki.
+  const names = mail.attachments?.length ? mail.attachments : fromMsg.map((a) => a.fileName);
+  const used = new Set<number>();
+  return names.map((name) => {
+    const att =
+      fromMsg.find((a) => !used.has(a.id) && lower(a.fileName) === lower(name)) ??
+      fromMsg.find((a) => !used.has(a.id) && a.kind === "image" && stemOf(a.fileName) === stemOf(name)) ??
+      null;
+    if (att) used.add(att.id);
+    return { name, att, meta: meta.find((m) => lower(m.name) === lower(name)) ?? null };
+  });
+}
+
+/** Rozszerzenia, po których chip dostaje ikonę dokumentu zamiast spinacza. */
+const DOC_CHIP_RE = /\.(pdf|docx?|odt|rtf|txt|csv|xlsx?|ods|pptx?|odp|eml|msg)$/i;
+
+/**
+ * Ikona chipa jako GOTOWY JSX — funkcja zwracająca typ komponentu (jak
+ * `attachmentIcon`) w ciele komponentu jest dla kompilatora Reacta tworzeniem
+ * komponentu w renderze.
+ */
+function chipIcon(isImage: boolean, name: string, mime: string) {
+  const cls = "h-3 w-3 shrink-0 text-muted-foreground";
+  if (isImage) return <ImageIcon className={cls} aria-hidden />;
+  if (mime === "application/pdf" || mime.startsWith("text/") || DOC_CHIP_RE.test(name)) {
+    return <FileText className={cls} aria-hidden />;
+  }
+  return <Paperclip className={cls} aria-hidden />;
+}
+
+/** Szerokość/wysokość podglądu na hover (px) i opóźnienie, żeby nie migał przy przejeżdżaniu myszą. */
+const PREVIEW_W = 320;
+const PREVIEW_H = 240;
+const PREVIEW_DELAY = 150;
+
+function MailAttachmentChip({
+  chip,
+  onOpenImage,
+}: {
+  chip: MailAttachmentChipData;
+  onOpenImage?: (att: CalendarNoteAttachment) => void;
+}) {
+  const { name, att, meta } = chip;
+  const anchorRef = useRef<HTMLElement | null>(null);
+  const timer = useRef<number | null>(null);
+  const [preview, setPreview] = useState<{ left: number; top: number; below: boolean } | null>(null);
+  const isImage = att ? att.kind === "image" : !!meta?.isImage;
+  const size = att?.size ?? meta?.size ?? null;
+
+  const place = useCallback(() => {
+    const el = anchorRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    // Prosta logika góra/dół: pod chipem, chyba że tam się nie mieści, a nad — tak.
+    const below = window.innerHeight - r.bottom > PREVIEW_H + 16 || r.top < PREVIEW_H + 16;
+    setPreview({
+      left: Math.min(Math.max(8, r.left), Math.max(8, window.innerWidth - PREVIEW_W - 8)),
+      top: below ? r.bottom + 6 : r.top - 6,
+      below,
+    });
+  }, []);
+  const openPreview = useCallback(
+    (immediate: boolean) => {
+      if (!att || att.kind !== "image") return;
+      if (timer.current) window.clearTimeout(timer.current);
+      if (immediate) {
+        place();
+        return;
+      }
+      timer.current = window.setTimeout(place, PREVIEW_DELAY);
+    },
+    [att, place]
+  );
+  const closePreview = useCallback(() => {
+    if (timer.current) window.clearTimeout(timer.current);
+    timer.current = null;
+    setPreview(null);
+  }, []);
+  useEffect(() => {
+    return () => {
+      if (timer.current) window.clearTimeout(timer.current);
+    };
+  }, []);
+
+  const label = (
+    <>
+      {chipIcon(isImage, att?.fileName ?? name, att?.mime ?? meta?.mime ?? "")}
+      <span className="truncate">{name}</span>
+      {size != null && <span className="shrink-0 tabular-nums text-muted-foreground">{fmtFileSize(size)}</span>}
+    </>
+  );
+  const chipClass =
+    "inline-flex max-w-[16rem] items-center gap-1 rounded-full border bg-background/60 px-2 py-px text-[11px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
+
+  // Nic nie zapisano (szkic) albo załącznik pominięto przy wypakowywaniu — chip bez akcji.
+  if (!att) {
+    return (
+      <span
+        className={cn(chipClass, "border-dashed text-muted-foreground")}
+        title={
+          meta
+            ? "Zostanie wypakowany z maila po zapisaniu notatki"
+            : "Załącznik pominięty (nieobsługiwany typ lub za duży) — zostaje w oryginalnym pliku .msg"
+        }
+        data-testid="mail-attachment-chip"
+        data-state={meta ? "draft" : "skipped"}
+      >
+        {label}
+      </span>
+    );
+  }
+
+  const setAnchor = (el: HTMLElement | null) => {
+    anchorRef.current = el;
+  };
+  const hoverProps = {
+    onMouseEnter: () => openPreview(false),
+    onMouseLeave: closePreview,
+    onFocus: () => openPreview(true),
+    onBlur: closePreview,
+  };
+
+  const body = isImage ? (
+    <button
+      type="button"
+      {...hoverProps}
+      ref={setAnchor}
+      onClick={() => (onOpenImage ? onOpenImage(att) : window.open(att.url, "_blank", "noopener,noreferrer"))}
+      className={cn(chipClass, "hover:bg-muted")}
+      title={`${name} — kliknij, żeby powiększyć`}
+      data-testid="mail-attachment-chip"
+      data-state="image"
+    >
+      {label}
+    </button>
+  ) : (
+    <a
+      {...hoverProps}
+      ref={setAnchor}
+      href={opensInline(att) ? att.url : downloadUrl(att)}
+      target={opensInline(att) ? "_blank" : undefined}
+      rel={opensInline(att) ? "noopener noreferrer" : undefined}
+      download={opensInline(att) ? undefined : att.fileName}
+      className={cn(chipClass, "hover:bg-muted")}
+      title={opensInline(att) ? "Otwórz w nowej karcie" : "Pobierz"}
+      data-testid="mail-attachment-chip"
+      data-state="file"
+    >
+      {label}
+    </a>
+  );
+
+  return (
+    <>
+      {body}
+      {preview &&
+        createPortal(
+          <div
+            className="pointer-events-none fixed z-[120] rounded-md border bg-popover p-1 shadow-lg"
+            style={{
+              left: preview.left,
+              top: preview.top,
+              transform: preview.below ? undefined : "translateY(-100%)",
+            }}
+            data-testid="mail-attachment-preview"
+          >
+            <img
+              src={att.url}
+              alt={name}
+              className="block max-h-[240px] max-w-[320px] object-contain"
+              style={{ maxWidth: PREVIEW_W, maxHeight: PREVIEW_H }}
+            />
+          </div>,
+          document.body
+        )}
+    </>
+  );
+}
+
+/**
+ * Karta „Mail z Outlooka”: temat, nadawca, odbiorcy, data wysłania i załączniki.
+ * Używana dwa razy — nad zapisaną notatką `kind === "email"` (chipy pokazują
+ * wypakowane pliki, obrazek na hover) i w kompozytorze szkicu (chipy z `meta`,
+ * bez podglądu — bajty siedzą jeszcze tylko w pliku .msg).
+ */
+export function MailNoteHeader({
+  mail,
+  className,
+  attachments,
+  meta,
+  onOpenImage,
+}: {
+  mail: CalendarNoteMailHeader;
+  className?: string;
+  /** Załączniki zapisanej notatki — chipy dopinają się do tych z `origin === "msg"`. */
+  attachments?: CalendarNoteAttachment[];
+  /** Metadane załączników ze szkicu (POST /calendar/msg/parse). */
+  meta?: ParsedMsgAttachmentMeta[];
+  /** Klik w chip obrazka — podgląd w lightboxie notatek. Bez tego otwiera nową kartę. */
+  onOpenImage?: (att: CalendarNoteAttachment) => void;
+}) {
+  const sentAt = fmtMailSentAt(mail.sentAt);
+  const chips = mailAttachmentChips(mail, attachments, meta);
+  return (
+    <div
+      className={cn("rounded-md border border-sky-500/40 bg-sky-500/5 px-2.5 py-2 text-xs", className)}
+      data-testid="mail-note-header"
+    >
+      <div className="flex items-start gap-1.5 font-semibold">
+        <Mail className="mt-px h-3.5 w-3.5 shrink-0 text-sky-700 dark:text-sky-300" aria-hidden />
+        <span className="min-w-0 break-words" data-testid="mail-note-subject">
+          {mail.subject || "(bez tematu)"}
+        </span>
+      </div>
+      <div className="mt-1 space-y-0.5 text-muted-foreground">
+        {mail.from && (
+          <div className="flex gap-1.5">
+            <span className="shrink-0 text-muted-foreground">Od:</span>
+            <span className="min-w-0 break-words text-foreground">{mail.from}</span>
+          </div>
+        )}
+        <MailAddresses label="Do:" list={mail.to} />
+        <MailAddresses label="DW:" list={mail.cc} />
+        {sentAt && (
+          <div className="flex gap-1.5">
+            <span className="shrink-0">Wysłano:</span>
+            <span className="text-foreground">{sentAt}</span>
+          </div>
+        )}
+        {chips.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1 pt-0.5" data-testid="mail-note-attachments" data-count={chips.length}>
+            <span className="shrink-0 text-muted-foreground">Załączniki:</span>
+            {chips.map((chip, i) => (
+              <MailAttachmentChip key={`${chip.name}-${chip.att?.id ?? i}`} chip={chip} onOpenImage={onOpenImage} />
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Wzmianki dat („@piątek”, „@15.09”) — chipy w treści, autouzupełnianie, podgląd
@@ -185,22 +512,24 @@ function MentionChip({ mention, onOpen }: { mention: ResolvedMention; onOpen?: O
 /** Treść notatki z klikalnymi chipami wzmianek dat. */
 function NoteText({ note, onOpenMention }: { note: CalendarNote; onOpenMention?: OpenMention }) {
   const text = note.text ?? "";
+  // Mail z Outlooka dostaje tryb "mail" (cytowana historia zwinięta, sygnatura
+  // przygaszona); zwykła notatka — tylko ogólne formatowanie i linki.
+  const mode = note.kind === "email" || looksLikeMailNote(text) ? "mail" : "note";
   const mentions = resolveMentions(note, mentionToday());
   if (mentions.length === 0) {
-    return (
-      <p className="whitespace-pre-wrap break-words text-sm leading-relaxed" data-testid="note-text">
-        {text}
-      </p>
-    );
+    return <RichText text={text} mode={mode} className="text-sm leading-relaxed" testId="note-text" />;
   }
   const parts: ReactNode[] = [];
   let cursor = 0;
   mentions.forEach((m, i) => {
-    if (m.start > cursor) parts.push(text.slice(cursor, m.start));
+    // Wzmianki to pozycje w SUROWYM tekście, więc kawałki między nimi lecą przez
+    // wariant „w linii" — składanie bloków przesunęłoby offsety chipów.
+    if (m.start > cursor)
+      parts.push(<RichTextInline key={`t-${i}`} text={text.slice(cursor, m.start)} />);
     parts.push(<MentionChip key={`m-${i}-${m.key}`} mention={m} onOpen={onOpenMention} />);
     cursor = m.end;
   });
-  if (cursor < text.length) parts.push(text.slice(cursor));
+  if (cursor < text.length) parts.push(<RichTextInline key="t-end" text={text.slice(cursor)} />);
   return (
     <p className="whitespace-pre-wrap break-words text-sm leading-relaxed" data-testid="note-text">
       {parts}
@@ -420,6 +749,8 @@ function MentionTextarea({
 /** Rozszerzenia dopuszczane przez backend (poza image/*). */
 const ALLOWED_EXT = new Set([
   "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "csv", "txt", "rtf",
+  // Maile: .msg z Outlooka (upuszczony na kalendarz zostaje przy notatce) i .eml.
+  "msg", "eml",
 ]);
 const IMAGE_EXT = new Set(["jpg", "jpeg", "png", "gif", "webp", "bmp", "svg", "avif", "heic", "heif", "tif", "tiff"]);
 
@@ -498,7 +829,7 @@ function partitionAttachmentFiles(
   }
   if (badType.length) {
     messages.push(
-      `Niedozwolony typ pliku: ${badType.join(", ")}. Dozwolone: obrazy, PDF, dokumenty Office/OpenDocument, CSV, TXT, RTF.`
+      `Niedozwolony typ pliku: ${badType.join(", ")}. Dozwolone: obrazy, PDF, dokumenty Office/OpenDocument, CSV, TXT, RTF, maile MSG/EML.`
     );
   }
   if (tooBig.length) {
@@ -908,8 +1239,13 @@ export function CalendarEventNotes({
   const draftLen = draft.trim().length;
   const canSubmit = !adding && (draftLen > 0 || pending.length > 0);
 
-  const renderAttachments = (n: CalendarNote) => {
-    const atts = n.attachments ?? [];
+  /**
+   * Galeria załączników notatki. `hideIds` to pliki wypakowane z maila, które
+   * pokazuje już wiersz „Załączniki:” w nagłówku — nagłówek ma pierwszeństwo,
+   * żeby ten sam plik nie stał w dwóch miejscach.
+   */
+  const renderAttachments = (n: CalendarNote, hideIds?: Set<number>) => {
+    const atts = (n.attachments ?? []).filter((a) => !hideIds?.has(a.id));
     if (atts.length === 0) return null;
     const images = atts.filter((a) => a.kind === "image");
     const files = atts.filter((a) => a.kind !== "image");
@@ -1013,6 +1349,13 @@ export function CalendarEventNotes({
             const edited = n.updatedAt && n.updatedAt !== n.createdAt;
             const who = n.source === "assistant" ? n.userLabel || "Asystent" : n.userLabel || (n.source === "system" ? "System" : "—");
             const hasText = !!n.text?.trim();
+            // Mail bez treści też ma co skopiować do kartoteki — nagłówek (temat,
+            // nadawca, data) backend spłaszcza do tekstu przy kopiowaniu.
+            const hasCopyContent = hasText || (n.kind === "email" && !!n.mail);
+            // Załączniki maila pokazuje nagłówek — z galerii znikają tylko te DOPASOWANE
+            // (gdyby dopasowanie nie wyszło, plik ma się gdzieś pokazać).
+            const mailChips = n.kind === "email" && n.mail ? mailAttachmentChips(n.mail, n.attachments ?? []) : [];
+            const inMailHeader = new Set(mailChips.map((c) => c.att?.id).filter((id): id is number => id != null));
             return (
               <li
                 key={n.id}
@@ -1083,8 +1426,17 @@ export function CalendarEventNotes({
                   ) : (
                     <div className="flex items-start gap-2">
                       <div className="min-w-0 flex-1">
+                        {/* Mail z Outlooka: nagłówek z pól, pod nim sama treść i załączniki. */}
+                        {n.kind === "email" && n.mail && (
+                          <MailNoteHeader
+                            mail={n.mail}
+                            className="mb-1.5"
+                            attachments={n.attachments ?? []}
+                            onOpenImage={setLightbox}
+                          />
+                        )}
                         {hasText && <NoteText note={n} onOpenMention={onOpenMention} />}
-                        {renderAttachments(n)}
+                        {renderAttachments(n, inMailHeader)}
                         <NoteLinkedEvents note={n} onOpenMention={onOpenMention} />
                         {canSeeObject && n.objectNoteId != null && (
                           <Link
@@ -1105,9 +1457,9 @@ export function CalendarEventNotes({
                       {/* Kopiowanie do kartoteki nie wymaga autorstwa notatki (liczy się
                           edit do klucza `objects`), więc pasek akcji pokazujemy też
                           wtedy, gdy jedyną dostępną akcją jest „Do obiektu”. */}
-                      {(canManage(n) || (canCopyToObject && n.objectNoteId == null && hasText)) && (
+                      {(canManage(n) || (canCopyToObject && n.objectNoteId == null && hasCopyContent)) && (
                         <span className="flex shrink-0 items-center gap-0.5 opacity-70 transition-opacity focus-within:opacity-100 group-hover:opacity-100 sm:opacity-0">
-                          {canCopyToObject && n.objectNoteId == null && hasText && (
+                          {canCopyToObject && n.objectNoteId == null && hasCopyContent && (
                             <Button
                               type="button"
                               variant="ghost"

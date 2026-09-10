@@ -64,6 +64,7 @@ import {
 import { leadHref } from "@/lib/sales-labels";
 import { tip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { RichText } from "@/components/RichText";
 
 const PAGE_SIZE = 50;
 
@@ -605,9 +606,11 @@ export function HandlowyKontakty() {
                 </dl>
 
                 {selected.notes && (
-                  <p className="whitespace-pre-wrap rounded-md bg-muted/50 p-2 text-xs text-muted-foreground">
-                    {selected.notes}
-                  </p>
+                  <RichText
+                    text={selected.notes}
+                    compactPreviews
+                    className="rounded-md bg-muted/50 p-2 text-xs text-muted-foreground"
+                  />
                 )}
 
                 {editable && (

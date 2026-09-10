@@ -58,10 +58,35 @@ export interface VersionUpdate {
  */
 export const UPDATES_CURRENT: VersionUpdate[] = [
   {
-    version: "1.2.0",
+    version: "1.2.0–1.3.0",
     date: "2026-09-10",
     title: "Co nowego w aplikacji",
     entries: [
+      {
+        text: "Mail z Outlooka można upuścić prosto na dzień albo godzinę w kalendarzu, a wydarzenie powstaje z tematem w tytule i treścią maila jako notatką, zamiast przeklejania tego ręcznie",
+        type: "feat",
+        module: "ogolne",
+      },
+      {
+        text: "Notatka z maila pokazuje nadawcę, odbiorców, datę i załączniki, obrazki z maila widać po najechaniu, a obiekt podpowiada się sam po adresach kontaktów",
+        type: "feat",
+        module: "ogolne",
+      },
+      {
+        text: "Linki w notatkach i opisach są klikalne i mają podgląd strony z ikoną i tytułem",
+        type: "feat",
+        module: "ogolne",
+      },
+      {
+        text: "Notatki lepiej się czytają: listy, pogrubienia i cytaty, a w mailach cytowana historia jest zwinięta",
+        type: "tweak",
+        module: "ogolne",
+      },
+      {
+        text: "W zwiniętym menu bocznym miniaturka konta otwiera menu użytkownika",
+        type: "tweak",
+        module: "ogolne",
+      },
       {
         text: "Nowa strona „Co nowego” z historią zmian od początku aplikacji, z filtrem po module i typie zmiany",
         type: "feat",

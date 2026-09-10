@@ -5,6 +5,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type DragEvent as ReactDragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
@@ -58,6 +59,7 @@ import {
   HelpCircle,
   ListChecks,
   Loader2,
+  Mail,
   MapPin,
   MousePointerClick,
   Paperclip,
@@ -92,6 +94,7 @@ import {
   activityApi,
   assistantApi,
   availabilityAssigneeId,
+  CALENDAR_ATTACHMENT_MAX_SIZE,
   calendarApi,
   CLIENT_ID,
   getCompanyTravelBatch,
@@ -162,6 +165,7 @@ import {
 import {
   CalendarDeletePrompt,
   CalendarEventDialog,
+  DEFAULT_DURATION_MIN,
   type CalendarDialogMode,
   type CalendarEventPrefill,
 } from "@/components/CalendarEventDialog";
@@ -1196,6 +1200,208 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
     [editable]
   );
 
+  // --- Drag&drop maila .msg z Outlooka na KONKRETNĄ komórkę kalendarza ---
+  // Upuszczony mail nie zapisuje NICZEGO: backend tylko go czyta (POST /calendar/msg/parse),
+  // a my otwieramy zwykły formularz tworzenia z gotowym tytułem i szkicem pierwszej notatki
+  // (oryginalny plik jedzie jako jej załącznik). Reagujemy WYŁĄCZNIE na natywne przeciąganie
+  // plików — wewnętrzny drag&drop kafelków FullCalendara (i `eventReceive`) ma zostać nietknięty.
+  //
+  // Celem jest KOMÓRKA pod kursorem, nie „gdzieś na kalendarzu”: dzień w miesiącu i w liście,
+  // a w tygodniu/dniu kolumna dnia × slot godziny. Nasłuchy wiszą na wrapperze (przeżywają
+  // przerysowania FullCalendara), ale cel liczymy przy każdym `dragover` z pozycji kursora.
+  /** Trafiona komórka + wynikający z niej moment wydarzenia. */
+  interface MsgDropTarget {
+    /** Element, który podświetlamy (dzień, nagłówek dnia listy albo kolumna dnia). */
+    cell: HTMLElement;
+    /** Wiersz godziny w siatce godzinowej — podświetlany razem z kolumną (bez niego „komórki” nie widać). */
+    lane: HTMLElement | null;
+    date: string;
+    /** „HH:MM” albo null dla całodniowego. */
+    time: string | null;
+  }
+  const msgZoneRef = useRef<HTMLDivElement>(null);
+  const msgCellRef = useRef<HTMLElement | null>(null);
+  const msgLaneRef = useRef<HTMLElement | null>(null);
+  /** Licznik enter/leave: bez niego podświetlenie gaśnie przy każdym dziecku pod kursorem. */
+  const msgDragDepth = useRef(0);
+  const [msgBusy, setMsgBusy] = useState(false);
+  const hasFiles = (e: ReactDragEvent) => Array.from(e.dataTransfer?.types ?? []).includes("Files");
+  /** Po rozszerzeniu, bo przy drag&drop z Outlooka przeglądarka daje pusty MIME albo octet-stream. */
+  const isMsgFile = (f: File) => /\.msg$/i.test(f.name) || f.type === "application/vnd.ms-outlook";
+  const isDayStr = (v: string | null | undefined): v is string => !!v && /^\d{4}-\d{2}-\d{2}$/.test(v);
+
+  /** Kolumna dnia pod kursorem — po X, gdy kursor jest nad tabelą slotów wspólną dla wszystkich dni. */
+  const timedColAt = (x: number): HTMLElement | null => {
+    const cols = msgZoneRef.current?.querySelectorAll<HTMLElement>(".fc-timegrid-col[data-date]") ?? [];
+    for (const col of cols) {
+      const r = col.getBoundingClientRect();
+      if (r.width > 0 && x >= r.left && x < r.right) return col;
+    }
+    return null;
+  };
+  /** Wiersz godziny pod kursorem (`.fc-timegrid-slot-lane[data-time]`, czyli slot siatki). */
+  const slotLaneAt = (y: number): HTMLElement | null => {
+    const lanes = msgZoneRef.current?.querySelectorAll<HTMLElement>(".fc-timegrid-slot-lane[data-time]") ?? [];
+    for (const lane of lanes) {
+      const r = lane.getBoundingClientRect();
+      if (r.height > 0 && y >= r.top && y < r.bottom) return lane;
+    }
+    return null;
+  };
+
+  /**
+   * Komórka pod kursorem. Kolejność ma znaczenie: najpierw lista (wiersz wydarzenia należy
+   * do nagłówka dnia wyżej), potem ciało siatki godzinowej (kolumna × slot), a na końcu
+   * zwykła komórka dnia — tą samą ścieżką łapiemy pas „całodniowe” nad siatką godzinową.
+   * Poza komórkami (nagłówki bez daty, Tablica, Trasa, marginesy) zwracamy null.
+   */
+  const msgDropTargetAt = (e: ReactDragEvent): MsgDropTarget | null => {
+    const el = e.target instanceof Element ? e.target : null;
+    if (!el || !msgZoneRef.current?.contains(el)) return null;
+
+    if (el.closest(".fc-list-table")) {
+      const row = el.closest("tr");
+      let day: Element | null = row?.classList.contains("fc-list-day") ? row : null;
+      for (let prev = row?.previousElementSibling ?? null; !day && prev; prev = prev.previousElementSibling) {
+        if (prev.classList.contains("fc-list-day")) day = prev;
+      }
+      const date = day?.getAttribute("data-date");
+      return day && isDayStr(date) ? { cell: day as HTMLElement, lane: null, date, time: null } : null;
+    }
+
+    if (el.closest(".fc-timegrid-body")) {
+      const col = el.closest<HTMLElement>(".fc-timegrid-col[data-date]") ?? timedColAt(e.clientX);
+      const lane = slotLaneAt(e.clientY);
+      const date = col?.getAttribute("data-date");
+      const time = (lane?.getAttribute("data-time") ?? "").slice(0, 5);
+      if (!col || !lane || !isDayStr(date) || !/^\d{2}:\d{2}$/.test(time)) return null;
+      return { cell: col, lane, date, time };
+    }
+
+    const dayCell = el.closest<HTMLElement>(".fc-daygrid-day[data-date]");
+    const date = dayCell?.getAttribute("data-date");
+    return dayCell && isDayStr(date) ? { cell: dayCell, lane: null, date, time: null } : null;
+  };
+
+  /** Komórka → wartości do formularza (całodniowe: bez `endAt`, dialog zrobi z tego jeden dzień). */
+  const msgMomentOf = (t: MsgDropTarget): { startAt: string; endAt?: string; allDay: boolean } => {
+    if (!t.time) return { startAt: t.date, allDay: true };
+    const start = parseLocal(`${t.date}T${t.time}`);
+    const end = new Date(start.getTime() + DEFAULT_DURATION_MIN * 60_000);
+    return { startAt: toDateTimeStr(start), endAt: toDateTimeStr(end), allDay: false };
+  };
+
+  const clearMsgTarget = useCallback(() => {
+    const cell = msgCellRef.current;
+    if (cell) {
+      cell.classList.remove("alfa-msg-drop-target");
+      cell.removeAttribute("data-msg-drop-target");
+      cell.removeAttribute("data-msg-drop-label");
+    }
+    msgCellRef.current = null;
+    const lane = msgLaneRef.current;
+    if (lane) {
+      lane.classList.remove("alfa-msg-drop-lane");
+      lane.removeAttribute("data-msg-drop-label");
+    }
+    msgLaneRef.current = null;
+  }, []);
+  // Podświetlenie żyje poza Reactem (elementy rysuje FullCalendar) — sprzątamy przy odmontowaniu.
+  useEffect(() => clearMsgTarget, [clearMsgTarget]);
+
+  const markMsgTarget = (t: MsgDropTarget) => {
+    if (msgCellRef.current !== t.cell || msgLaneRef.current !== t.lane) clearMsgTarget();
+    const label = t.time ? `Utwórz wydarzenie z maila · ${t.time}` : "Utwórz wydarzenie z maila · cały dzień";
+    t.cell.classList.add("alfa-msg-drop-target");
+    t.cell.setAttribute("data-msg-drop-target", "1");
+    t.cell.setAttribute("data-msg-drop-label", label);
+    msgCellRef.current = t.cell;
+    if (t.lane) {
+      t.lane.classList.add("alfa-msg-drop-lane");
+      t.lane.setAttribute("data-msg-drop-label", label);
+      msgLaneRef.current = t.lane;
+    }
+  };
+
+  const onMsgDragEnter = (e: ReactDragEvent) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    msgDragDepth.current += 1;
+  };
+  const onMsgDragOver = (e: ReactDragEvent) => {
+    if (!hasFiles(e)) return;
+    // preventDefault jest konieczne, żeby przeglądarka w ogóle dopuściła upuszczenie;
+    // brak celu sygnalizujemy kursorem „nie tutaj”, a sam drop wtedy nic nie zrobi.
+    e.preventDefault();
+    const t = msgDropTargetAt(e);
+    if (!t) {
+      clearMsgTarget();
+      e.dataTransfer.dropEffect = "none";
+      return;
+    }
+    e.dataTransfer.dropEffect = "copy";
+    markMsgTarget(t);
+  };
+  const onMsgDragLeave = (e: ReactDragEvent) => {
+    if (!hasFiles(e)) return;
+    msgDragDepth.current = Math.max(0, msgDragDepth.current - 1);
+    if (msgDragDepth.current === 0) clearMsgTarget();
+  };
+  const onMsgDrop = async (e: ReactDragEvent) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    msgDragDepth.current = 0;
+    // Cel czytamy PRZED sprzątaniem i PRZED await — potem nie ma już ani kursora, ani klas.
+    const target = msgDropTargetAt(e);
+    clearMsgTarget();
+    if (!target) return;
+    const files = Array.from(e.dataTransfer.files ?? []);
+    if (files.length === 0) return;
+    const msg = files.find(isMsgFile);
+    if (!msg) {
+      notify({ kind: "error", message: "Obsługiwane są tylko pliki .msg z Outlooka" });
+      return;
+    }
+    const when = msgMomentOf(target);
+    setMsgBusy(true);
+    try {
+      const res = await calendarApi.parseMsg(msg, cfg.department);
+      const parsed = res.data;
+      if (!parsed) throw new Error("Pusta odpowiedź serwera");
+      // Załączniki notatki mają twardszy limit niż sama trasa czytająca mail —
+      // wtedy zostaje treść (najważniejsza), a o braku oryginału mówimy wprost.
+      const tooBigForNote = msg.size > CALENDAR_ATTACHMENT_MAX_SIZE;
+      if (tooBigForNote) {
+        notify({
+          kind: "info",
+          message: "Mail przekracza 5 MB — treść trafi do notatki, ale oryginalny plik nie zostanie dołączony.",
+        });
+      }
+      openCreate({
+        ...when,
+        title: parsed.suggestedTitle,
+        // `noteText` to samo body — nagłówek jedzie w `mail` i zapisze się w polach notatki.
+        noteDraft: {
+          text: parsed.noteText,
+          files: tooBigForNote ? [] : [msg],
+          mail: parsed.mail,
+          // Bez oryginalnego .msg nie ma z czego wypakowywać — chipy też odpadają.
+          attachmentsMeta: tooBigForNote ? [] : (parsed.parsed.attachmentsMeta ?? []),
+        },
+        objectSuggestions: parsed.objectSuggestions,
+      });
+    } catch (err) {
+      notifyError(err, "Nie udało się odczytać pliku .msg");
+    } finally {
+      setMsgBusy(false);
+    }
+  };
+  /** Strefa aktywna tylko przy prawie edycji — bez niego nie ma czego tworzyć. */
+  const msgDropProps = editable
+    ? { onDragEnter: onMsgDragEnter, onDragOver: onMsgDragOver, onDragLeave: onMsgDragLeave, onDrop: onMsgDrop }
+    : {};
+
   const openEvent = useCallback(
     (ev: CalendarEvent, asDrawer = false) => {
       setDialogMode(editable && !ev.deletedAt ? "edit" : "view");
@@ -1406,6 +1612,27 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
     };
   }, [band, hideBand]);
 
+  /**
+   * Podświetlenie „ten sam obiekt” w widoku Lista: hover na wierszu podbija wszystkie
+   * wydarzenia tego samego obiektu, a otwarty podgląd/formularz trzyma je podświetlone
+   * na stałe. Klasy przełączamy po DOM — hover nie może przerysowywać kalendarza.
+   */
+  const hoverObjectRef = useRef<number | null>(null);
+  const pinnedObjectId = preview?.ev.objectId ?? (dialogOpen ? (dialogEvent?.objectId ?? null) : null);
+  const pinnedObjectRef = useRef<number | null>(null);
+  pinnedObjectRef.current = pinnedObjectId;
+  const syncObjectHighlight = useCallback(() => {
+    const root = gridRef.current;
+    if (!root) return;
+    const hover = hoverObjectRef.current;
+    const pinned = pinnedObjectRef.current;
+    for (const el of Array.from(root.querySelectorAll<HTMLElement>("[data-alfa-object]"))) {
+      const id = Number(el.dataset.alfaObject);
+      el.classList.toggle("cal-same-object", hover != null && id === hover);
+      el.classList.toggle("cal-same-object-pinned", pinned != null && id === pinned);
+    }
+  }, []);
+
   const handleEventDidMount = useCallback((arg: EventMountArg) => {
     const el = arg.el as ElWithHandlers;
     const ev = arg.event.extendedProps.ev as CalendarEvent | undefined;
@@ -1421,8 +1648,19 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
     const over = () => {
       const cur = freshEvent(arg.event);
       if (cur) bandRef.current(cur, el);
+      // Tylko lista — w siatce wiersze tego samego obiektu nie stoją obok siebie.
+      if (el.classList.contains("fc-list-event")) {
+        hoverObjectRef.current = cur?.objectId ?? null;
+        syncObjectHighlight();
+      }
     };
-    const out = () => setBand(null);
+    const out = () => {
+      setBand(null);
+      if (hoverObjectRef.current != null) {
+        hoverObjectRef.current = null;
+        syncObjectHighlight();
+      }
+    };
     el._alfaCtx = ctx;
     el._alfaDbl = dbl;
     el._alfaOver = over;
@@ -1441,7 +1679,18 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
       applyTip(el, eventTipData(ev, { compactDate: true, departure: departureFor(ev) }));
       el.setAttribute("aria-label", eventTipAria(ev));
     }
-  }, [freshEvent, departureFor]);
+    // Klasy od razu przy montowaniu — inaczej przewijanie tygodni przy otwartym
+    // podglądzie dokładałoby wiersze bez podświetlenia.
+    const objectId = ev?.objectId ?? null;
+    if (objectId != null) {
+      el.dataset.alfaObject = String(objectId);
+      el.classList.toggle("cal-same-object", hoverObjectRef.current === objectId);
+      el.classList.toggle("cal-same-object-pinned", pinnedObjectRef.current === objectId);
+    } else if (el.dataset.alfaObject != null) {
+      delete el.dataset.alfaObject;
+      el.classList.remove("cal-same-object", "cal-same-object-pinned");
+    }
+  }, [freshEvent, departureFor, syncObjectHighlight]);
 
   /**
    * FullCalendar recyklinguje kafelki (eventDidMount nie powtarza się po zapisie),
@@ -1455,8 +1704,24 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
       if (!ev) continue;
       applyTip(el, eventTipData(ev, { compactDate: true, departure: departureFor(ev) }));
       el.setAttribute("aria-label", eventTipAria(ev));
+      // Obiekt wydarzenia mógł się zmienić przy edycji — atrybut musi za tym nadążyć.
+      if (ev.objectId != null) el.dataset.alfaObject = String(ev.objectId);
+      else if (el.dataset.alfaObject != null) {
+        delete el.dataset.alfaObject;
+        el.classList.remove("cal-same-object", "cal-same-object-pinned");
+      }
     }
   }, [allEvents, departureFor]);
+
+  // Otwarcie podglądu/formularza albo zmiana widoku zabiera mysz z wiersza bez
+  // `mouseleave` — hover czyścimy sami.
+  useEffect(() => {
+    hoverObjectRef.current = null;
+  }, [pinnedObjectId, view]);
+
+  useEffect(() => {
+    syncObjectHighlight();
+  }, [pinnedObjectId, allEvents, view, syncObjectHighlight]);
 
   /**
    * Dymki milkną, gdy na wierzchu jest coś ważniejszego: podgląd wydarzenia,
@@ -2332,6 +2597,8 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
       // otworzyć drugiego siebie, więc robi to kalendarz — ten sam `openCreate`,
       // co menu kontekstowe, tylko z prefillem szansy i handlowca.
       onPlanNext={openCreate}
+      // Komunikat z zapisu, po którym dialog już się zamknął (np. pominięte załączniki maila).
+      onNotice={(message) => notify({ kind: "info", message })}
     />
   );
 
@@ -2623,6 +2890,13 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
             </div>
           )}
 
+          {/* Strefa upuszczenia maila .msg — nasłuch na wrapperze, cel liczony per komórka */}
+          <div
+            ref={msgZoneRef}
+            className={cn("relative min-w-0", fit && "flex min-h-0 flex-1 flex-col")}
+            data-testid="calendar-msg-dropzone"
+            {...msgDropProps}
+          >
           {/* Tablica (kanban) — zamiast siatki FullCalendar */}
           {isBoard && (
             <div
@@ -2795,6 +3069,23 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
               )}
             </div>
           )}
+
+
+          {/* „Czytam mail…" — pasek u dołu strefy zamiast nakładki na kalendarz */}
+          {msgBusy && (
+            <div
+              className="pointer-events-none absolute inset-x-0 bottom-2 z-30 flex justify-center"
+              data-testid="calendar-msg-busy"
+              aria-live="polite"
+            >
+              <span className="inline-flex items-center gap-2 rounded-full border bg-background px-3 py-1.5 text-xs shadow-md">
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" aria-hidden />
+                <Mail className="h-3.5 w-3.5 text-muted-foreground" aria-hidden />
+                Czytam mail…
+              </span>
+            </div>
+          )}
+          </div>
         </div>
 
         {/* Panel Aktywność */}

@@ -112,6 +112,7 @@ import { ObjectNotes } from "@/components/ObjectNotes";
 import { usePerms } from "@/auth/permissions";
 import { fmtKm, travelSourceLabel, useTravel } from "@/lib/travel";
 import { toMapsUrl } from "@/lib/maps-url";
+import { RichText } from "@/components/RichText";
 import {
   activityApi,
   calendarApi,
@@ -807,7 +808,7 @@ export function ObjectDetails() {
 
               {object.notes && (
                 <Row icon={StickyNote} label="Uwagi">
-                  <p className="whitespace-pre-wrap">{object.notes}</p>
+                  <RichText text={object.notes} />
                 </Row>
               )}
             </dl>

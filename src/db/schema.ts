@@ -2866,6 +2866,14 @@ export type NewCalendarEventSalesperson = typeof calendarEventSalespeople.$infer
 // Notatki do wydarzenia — dziennik (wiele wpisów, z autorem i czasem). `description`
 // wydarzenia pozostaje stałym opisem; notatki dopisują użytkownicy i asystent (source).
 export const CALENDAR_NOTE_SOURCES = ["user", "assistant", "system"] as const;
+/**
+ * Rodzaj notatki: zwykły wpis dziennika albo MAIL z Outlooka (upuszczony na
+ * kalendarz — src/lib/outlook-msg.ts). Mail ma własny nagłówek w polach `mail*`,
+ * a w `text` SAMĄ treść — dzięki temu UI składa kartę maila, zamiast pokazywać
+ * sklejony tekst. Migracja 0094.
+ */
+export const CALENDAR_NOTE_KINDS = ["text", "email"] as const;
+export type CalendarNoteKind = (typeof CALENDAR_NOTE_KINDS)[number];
 export type CalendarNoteSource = (typeof CALENDAR_NOTE_SOURCES)[number];
 export const CALENDAR_NOTE_MAX = 4000;
 
@@ -2880,7 +2888,25 @@ export const calendarEventNotes = sqliteTable(
     // Snapshot autora (displayName || email); dla asystenta „Asystent (kto zatwierdził)”.
     userLabel: text("user_label"),
     source: text("source", { enum: CALENDAR_NOTE_SOURCES }).default("user").notNull(),
+    /** "text" = zwykły wpis; "email" = mail z Outlooka (pola mail* niżej). */
+    kind: text("kind", { enum: CALENDAR_NOTE_KINDS }).default("text").notNull(),
+    /** Treść wpisu; dla maila SAMO body, bez nagłówka. */
     text: text("text").notNull(),
+    mailSubject: text("mail_subject"),
+    /** Nadawca w formie „Jan Kowalski <jan@x.pl>". */
+    mailFrom: text("mail_from"),
+    /** Odbiorcy jako tablica JSON stringów (snapshot z maila, nie kartoteka). */
+    mailTo: text("mail_to"),
+    /** Kopia (DW) jako tablica JSON stringów. */
+    mailCc: text("mail_cc"),
+    /** Data wysłania w ISO 8601 (albo NULL, gdy mail jej nie niósł). */
+    mailSentAt: text("mail_sent_at"),
+    /**
+     * NAZWY załączników maila jako tablica JSON stringów (migracja 0096). Snapshot
+     * wiersza „Załączniki:” z Outlooka — także tych, których nie dało się wypakować
+     * (za duże, nieobsługiwany typ); UI pokazuje je wtedy jako szare chipy.
+     */
+    mailAttachments: text("mail_attachments"),
     createdAt: text("created_at")
       .default(sql`(datetime('now'))`)
       .notNull(),
@@ -2955,6 +2981,10 @@ export type NewObjectNote = typeof objectNotes.$inferInsert;
 export const CALENDAR_ATTACHMENT_KINDS = ["image", "file"] as const;
 export type CalendarAttachmentKind = (typeof CALENDAR_ATTACHMENT_KINDS)[number];
 
+/** Skąd wziął się załącznik notatki: „upload” = wybrany/upuszczony ręcznie, „msg” = wypakowany z maila .msg. */
+export const NOTE_ATTACHMENT_ORIGINS = ["upload", "msg"] as const;
+export type NoteAttachmentOrigin = (typeof NOTE_ATTACHMENT_ORIGINS)[number];
+
 export const calendarNoteAttachments = sqliteTable(
   "calendar_note_attachments",
   {
@@ -2970,6 +3000,8 @@ export const calendarNoteAttachments = sqliteTable(
     /** Ścieżka relatywna wewnątrz katalogu załączników, np. `12/3f0a….webp`. */
     storedPath: text("stored_path").notNull(),
     kind: text("kind", { enum: CALENDAR_ATTACHMENT_KINDS }).notNull(),
+    /** „upload” = plik dodany ręcznie, „msg” = wypakowany z maila .msg (migracja 0096). */
+    origin: text("origin", { enum: NOTE_ATTACHMENT_ORIGINS }).default("upload").notNull(),
     width: integer("width"),
     height: integer("height"),
     createdAt: text("created_at")
@@ -3707,3 +3739,35 @@ export const contractDraftAttachments = sqliteTable(
 
 export type ContractDraftAttachment = typeof contractDraftAttachments.$inferSelect;
 export type NewContractDraftAttachment = typeof contractDraftAttachments.$inferInsert;
+
+/**
+ * Cache podglądów linków (unfurl) — patrz `src/lib/link-preview.ts`.
+ *
+ * Klucz to adres ZNORMALIZOWANY (bez fragmentu, przycięty), a nie ten, który
+ * użytkownik wpisał w notatce: ten sam link w dwóch notatkach ma dawać jedno
+ * pobranie. Wiersze z `status = 'error'` też trzymamy — martwy adres nie ma
+ * być odpytywany przy każdym renderze; TTL błędu jest po prostu krótszy
+ * (1 h wobec 7 dni dla `ok`), a liczy się go przy odczycie, nie zadaniem
+ * czyszczącym.
+ */
+export const linkPreviews = sqliteTable("link_previews", {
+  /** Znormalizowany adres — klucz główny. */
+  url: text("url").primaryKey(),
+  /** Adres po przekierowaniach (może być równy `url`). */
+  finalUrl: text("final_url"),
+  host: text("host").notNull(),
+  title: text("title"),
+  description: text("description"),
+  image: text("image"),
+  favicon: text("favicon"),
+  siteName: text("site_name"),
+  status: text("status", { enum: ["ok", "error"] }).notNull(),
+  /** Powód niepowodzenia (po polsku, pokazywany tylko pomocniczo). */
+  error: text("error"),
+  fetchedAt: text("fetched_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+});
+
+export type LinkPreviewRow = typeof linkPreviews.$inferSelect;
+export type NewLinkPreviewRow = typeof linkPreviews.$inferInsert;

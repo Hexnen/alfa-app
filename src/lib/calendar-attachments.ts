@@ -18,7 +18,7 @@ import { dirname, extname, join, resolve, sep } from "node:path";
 import sharp, { type OutputInfo } from "sharp";
 import { inArray } from "drizzle-orm";
 import { DATA_DIR, schema } from "../db/index.js";
-import type { CalendarAttachmentKind, CalendarNoteAttachment } from "../db/schema.js";
+import type { CalendarAttachmentKind, CalendarNoteAttachment, NoteAttachmentOrigin } from "../db/schema.js";
 import type { DbOrTx } from "./activity-log.js";
 import { ApiError } from "./calendar-labels.js";
 
@@ -52,6 +52,10 @@ const DOC_MIME_BY_EXT: Record<string, string> = {
   csv: "text/csv",
   txt: "text/plain",
   rtf: "application/rtf",
+  // Maile: `.msg` z Outlooka (drag&drop na kalendarz — src/lib/outlook-msg.ts)
+  // i `.eml` z klientów pocztowych. Oryginał zostaje przy notatce jako dowód treści.
+  msg: "application/vnd.ms-outlook",
+  eml: "message/rfc822",
 };
 const DOC_MIMES = new Set([...Object.values(DOC_MIME_BY_EXT), "text/rtf", "application/x-rtf"]);
 
@@ -80,6 +84,8 @@ export interface NoteAttachmentJson {
   mime: string;
   size: number;
   kind: CalendarAttachmentKind;
+  /** „upload” = plik dodany ręcznie, „msg” = wypakowany z maila (migracja 0096). */
+  origin: NoteAttachmentOrigin;
   width: number | null;
   height: number | null;
   url: string;
@@ -92,6 +98,7 @@ export function attachmentOfRow(r: CalendarNoteAttachment): NoteAttachmentJson {
     mime: r.mime,
     size: r.size,
     kind: r.kind,
+    origin: r.origin,
     width: r.width,
     height: r.height,
     url: `${ATTACHMENT_URL_PREFIX}/${r.id}`,
@@ -154,6 +161,23 @@ export function validateUploads(files: IncomingFile[]): void {
     if (f.data.length === 0) throw new ApiError(400, `Plik ${baseName(f.name)} jest pusty`);
     classify(f.name, f.mime);
   }
+}
+
+/**
+ * Ta sama walidacja co `validateUploads`, ale dla POJEDYNCZEGO pliku i BEZ rzucania:
+ * zwraca polski powód odrzucenia albo null, gdy plik przejdzie. Używa tego
+ * wypakowywanie załączników z maila `.msg` — tam odrzucony plik ma być POMINIĘTY
+ * (mail zapisuje się dalej), a nie zamieniać całego zapisu notatki w błąd 400.
+ */
+export function uploadRejectReason(file: IncomingFile): string | null {
+  if (file.data.length === 0) return "pusty plik";
+  if (file.data.length > ATTACHMENT_MAX_BYTES) return "przekracza 5 MB";
+  try {
+    classify(file.name, file.mime);
+  } catch {
+    return "nieobsługiwany typ";
+  }
+  return null;
 }
 
 /**

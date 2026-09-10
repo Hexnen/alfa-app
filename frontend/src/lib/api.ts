@@ -5564,9 +5564,13 @@ export interface CalendarNoteRef {
   attachmentsCount: number;
   /** Tylko w `sourceNote`; wyszukiwarka pola nie zwraca. */
   source?: CalendarNoteSource;
+  /** Rodzaj wpisu; dla maila `text` ma już prefiks „📧 temat”. Brak = starszy backend. */
+  kind?: CalendarNoteKind;
 }
 
 export type CalendarNoteSource = "user" | "assistant" | "system";
+/** „text” = zwykły wpis dziennika, „email” = mail z Outlooka (pole `mail`). */
+export type CalendarNoteKind = "text" | "email";
 
 /** Załącznik notatki (obrazki serwer konwertuje do WebP — `fileName` może różnić się od oryginału). */
 export interface CalendarNoteAttachment {
@@ -5575,6 +5579,11 @@ export interface CalendarNoteAttachment {
   mime: string;
   size: number;
   kind: "image" | "file";
+  /**
+   * „upload” = plik dodany ręcznie, „msg” = wypakowany z maila .msg przy zapisie
+   * notatki (migracja 0096). Brak = starszy backend — traktuj jak „upload”.
+   */
+  origin?: "upload" | "msg";
   width: number | null;
   height: number | null;
   /** Ścieżka względem origin (`/api/calendar/attachments/:id`); `?download=1` wymusza pobranie. */
@@ -5585,7 +5594,81 @@ export interface CalendarNoteAttachment {
 export const CALENDAR_ATTACHMENT_MAX_FILES = 15;
 export const CALENDAR_ATTACHMENT_MAX_SIZE = 5 * 1024 * 1024;
 export const CALENDAR_ATTACHMENT_ACCEPT =
-  "image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.odt,.ods,.odp,.csv,.txt,.rtf";
+  "image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.odt,.ods,.odp,.csv,.txt,.rtf,.msg,.eml";
+
+/**
+ * Nagłówek maila w notatce `kind === "email"` — dokładnie te pola, które
+ * backend trzyma w kolumnach `mail_*` (migracja 0094).
+ */
+export interface CalendarNoteMailHeader {
+  subject: string;
+  /** „Jan Kowalski <jan@x.pl>” albo sam adres. */
+  from: string;
+  to: string[];
+  cc: string[];
+  /** ISO 8601 albo null. */
+  sentAt: string | null;
+  /**
+   * NAZWY załączników maila — także tych, których nie dało się wypakować
+   * (nieobsługiwany typ, >5 MB). Brak = starszy backend / zwykła notatka.
+   */
+  attachments?: string[];
+}
+
+/** Obiekt podpowiedziany po adresach z maila (src/lib/mail-object-match.ts). */
+export interface MailObjectSuggestion {
+  objectId: number;
+  objectName: string;
+  contractorName: string | null;
+  /** Adresy z maila, które doprowadziły do tego obiektu. */
+  matchedEmails: string[];
+  /** „object_contact” = kontakt przypięty do obiektu (mocna przesłanka). */
+  via: "object_contact" | "contractor";
+}
+
+/** Metadane załącznika maila BEZ bajtów — chipy w szkicu notatki (przed zapisem). */
+export interface ParsedMsgAttachmentMeta {
+  name: string;
+  /** MIME z maila; bywa pusty — wtedy typ rozstrzyga rozszerzenie. */
+  mime: string;
+  size: number;
+  isImage: boolean;
+}
+
+/** Mail `.msg` z Outlooka rozłożony przez backend (src/lib/outlook-msg.ts). */
+export interface ParsedOutlookMsg {
+  subject: string;
+  from: string;
+  to: string[];
+  cc: string[];
+  /** ISO 8601 albo null, gdy plik nie niósł daty. */
+  sentAt: string | null;
+  bodyText: string;
+  /** Same nazwy załączników maila (z mailami zagnieżdżonymi włącznie). */
+  attachments: string[];
+  /** Załączniki z treścią — bez bajtów. Brak = starszy backend. */
+  attachmentsMeta?: ParsedMsgAttachmentMeta[];
+}
+
+/**
+ * Odpowiedź `POST /calendar/events/:id/notes`. `skippedAttachments` (tylko przy
+ * wypakowywaniu z maila) to nazwy załączników, których backend NIE zapisał —
+ * nieobsługiwany typ, ponad 5 MB albo limit 15 plików.
+ */
+export type CalendarAddNoteResponse = ApiResponse<CalendarNote> & { skippedAttachments?: string[] };
+
+/** Odpowiedź `POST /calendar/msg/parse` — nic jeszcze nie zapisano. */
+export interface CalendarMsgParseResult {
+  parsed: ParsedOutlookMsg;
+  /** Nagłówek do zapisania przy notatce (`kind='email'`). */
+  mail: CalendarNoteMailHeader;
+  /** SAMA treść maila — nagłówek renderuje karta notatki, nie tekst. */
+  noteText: string;
+  /** Temat bez „RE:/FW:/ODP.:”, przycięty do 200 znaków. */
+  suggestedTitle: string;
+  /** Obiekty podpowiedziane po adresach (posortowane: kontakt obiektu → liczba trafień). */
+  objectSuggestions: MailObjectSuggestion[];
+}
 
 /** Notatka do wydarzenia (dziennik) — osobna od `description` (stały opis). */
 export interface CalendarNote {
@@ -5594,7 +5677,12 @@ export interface CalendarNote {
   userId: number | null;
   userLabel: string | null;
   source: CalendarNoteSource;
+  /** Brak = starszy backend (traktuj jak „text”). */
+  kind?: CalendarNoteKind;
+  /** Dla maila: SAMA treść (body) — nagłówek renderuje UI z pola `mail`. */
   text: string;
+  /** Nagłówek maila; null/brak dla zwykłej notatki. */
+  mail?: CalendarNoteMailHeader | null;
   createdAt: string;
   updatedAt: string;
   /** Brak = starszy backend bez załączników. */
@@ -6031,14 +6119,27 @@ export const calendarApi = {
     });
   },
 
-  /** Notatka z załącznikami — multipart (`text` + wiele pól `files`). Tekst może być pusty, gdy są pliki. */
-  async addNoteWithFiles(eventId: number, text: string, files: File[], opts?: { copyToObject?: boolean }) {
+  /**
+   * Notatka z załącznikami — multipart (`text` + wiele pól `files`). Tekst może
+   * być pusty, gdy są pliki albo gdy jedzie nagłówek maila (`mail`) — wtedy
+   * backend zapisuje wpis jako `kind='email'`.
+   */
+  async addNoteWithFiles(
+    eventId: number,
+    text: string,
+    files: File[],
+    opts?: { copyToObject?: boolean; mail?: CalendarNoteMailHeader | null; extractMsgAttachments?: boolean }
+  ) {
     const formData = new FormData();
     formData.append("text", text);
     for (const f of files) formData.append("files", f, f.name);
     // Multipart nie zna booleanów — backend czyta „1”.
     if (opts?.copyToObject) formData.append("copyToObject", "1");
-    return requestMultipart<ApiResponse<CalendarNote>>(`/calendar/events/${eventId}/notes`, formData);
+    // Nagłówek maila jako JSON w jednym polu (backend: parseMailField).
+    if (opts?.mail) formData.append("mail", JSON.stringify(opts.mail));
+    // Wypakowanie załączników z jadącego obok pliku .msg (backend pomija te, których nie wolno zapisać).
+    if (opts?.extractMsgAttachments) formData.append("extractMsgAttachments", "1");
+    return requestMultipart<CalendarAddNoteResponse>(`/calendar/events/${eventId}/notes`, formData);
   },
 
   /**
@@ -6067,6 +6168,22 @@ export const calendarApi = {
   /** Soft delete; autor lub admin. */
   async deleteNote(noteId: number) {
     return request<ApiResponse<null>>(`/calendar/notes/${noteId}`, { method: "DELETE" });
+  },
+
+  /**
+   * Czyta mail `.msg` upuszczony na kalendarz — NIC nie zapisuje. Zwraca gotowy
+   * tytuł wydarzenia i tekst pierwszej notatki; sam plik front dokłada potem
+   * jako załącznik notatki (`addNoteWithFiles`).
+   */
+  async parseMsg(file: File, department: CalendarDepartment) {
+    const fd = new FormData();
+    fd.append("file", file, file.name);
+    // Dział idzie i w polu, i w query — backend czyta oba, a proxy bywa wybredne.
+    fd.append("department", department);
+    return requestMultipart<ApiResponse<CalendarMsgParseResult>>(
+      `/calendar/msg/parse?department=${encodeURIComponent(department)}`,
+      fd
+    );
   },
 
   /** Bieżący token ICS (null, jeśli jeszcze nie wygenerowano) — bez rotacji. */
@@ -9647,3 +9764,33 @@ export type ContractTemplateJson = ContractTemplate;
 export type ContractDraftFieldDefJson = ContractDraftFieldDef;
 export type ContractDraftPrefillJson = ContractDraftPrefill;
 export type ContractDraftAttachmentJson = ContractDraftAttachment;
+
+// ---------------------------------------------------------------------------
+// Podgląd linków (unfurl) — karty pod adresami wpisanymi w notatkach
+// ---------------------------------------------------------------------------
+
+/**
+ * Metadane cudzej strony. `status: "error"` znaczy „nie udało się pobrać” —
+ * wypełnione są wtedy tylko `url`, `host` i zastępczy `favicon`, a front i tak
+ * pokazuje klikalny link z domeną.
+ */
+export interface LinkPreview {
+  url: string;
+  finalUrl: string;
+  host: string;
+  title: string | null;
+  description: string | null;
+  image: string | null;
+  favicon: string | null;
+  siteName: string | null;
+  status: "ok" | "error";
+  error: string | null;
+  fetchedAt: string;
+}
+
+export const linksApi = {
+  /** GET /links/preview?url=… — wynik jest cache'owany po stronie serwera (7 dni). */
+  async preview(url: string) {
+    return request<ApiResponse<LinkPreview>>(`/links/preview?url=${encodeURIComponent(url)}`);
+  },
+};

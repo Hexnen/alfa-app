@@ -35,6 +35,8 @@ import { useAuth } from "@/auth/AuthProvider";
 import { objectsApi, type ObjectNote, type ObjectNoteSource } from "@/lib/api";
 import { NOTE_MAX, fmtRelative, fmtShort, fmtTimestamp, initials, notesLabel } from "@/lib/calendar-labels";
 import { cn } from "@/lib/utils";
+import { RichText } from "@/components/RichText";
+import { looksLikeMailNote } from "@/lib/richtext";
 
 const errMsg = (e: unknown, fallback: string) => (e instanceof Error && e.message ? e.message : fallback);
 
@@ -311,7 +313,11 @@ export function ObjectNotes({ objectId, canEdit, reloadKey = 0 }: ObjectNotesPro
                     ) : (
                       <div className="flex items-start gap-2">
                         <div className="min-w-0 flex-1">
-                          <p className="whitespace-pre-wrap break-words text-sm leading-relaxed">{n.text}</p>
+                          <RichText
+                            text={n.text}
+                            mode={looksLikeMailNote(n.text) ? "mail" : "note"}
+                            className="text-sm leading-relaxed"
+                          />
                           {n.source && (
                             <Link
                               to={sourceHref(n.source)}

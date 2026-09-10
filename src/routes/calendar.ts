@@ -26,7 +26,7 @@ import { createReadStream, statSync } from "node:fs";
 import { Readable } from "node:stream";
 import { db, schema } from "../db/index.js";
 import { eq, and, desc, asc, isNull, inArray, sql, lt, gt, gte, ne } from "drizzle-orm";
-import { type CalendarEventType, type CalendarEventStatus, type CalendarBilling, type CalendarDepartment, type User } from "../db/schema.js";
+import { CALENDAR_DEPARTMENTS, CALENDAR_NOTE_MAX, type CalendarEventType, type CalendarEventStatus, type CalendarBilling, type CalendarDepartment, type User } from "../db/schema.js";
 import { getUser } from "../middleware/auth.js";
 import { describeRule } from "../lib/calendar-recurrence.js";
 import {
@@ -35,6 +35,7 @@ import {
   loadEvent,
   loadEvents,
   loadNotes,
+  noteWithAttachments,
   searchNotes,
   type CalendarEventJson,
   type Note,
@@ -73,15 +74,28 @@ import {
   type CalendarChangeKind,
 } from "../lib/calendar-live.js";
 import {
+  ATTACHMENT_MAX_FILES,
   attachmentFilePath,
   contentDisposition,
   removeStoredFiles,
   storeUploads,
+  uploadRejectReason,
   type IncomingFile,
 } from "../lib/calendar-attachments.js";
 import { canManageNote, getNoteRow } from "../lib/calendar-mutations.js";
+import {
+  attachmentsMetaOf,
+  clampBody,
+  emailsOf,
+  formatMsgAsNote,
+  mailHeaderOf,
+  parseOutlookMsg,
+  suggestedTitleFrom,
+  type MsgMail,
+} from "../lib/outlook-msg.js";
+import { suggestObjectsForEmails } from "../lib/mail-object-match.js";
 import { copyCalendarNoteToObject, objectNoteIdsForCalendarNotes } from "../lib/object-notes.js";
-import { canEdit } from "../lib/auth/permissions.js";
+import { canEdit, canView } from "../lib/auth/permissions.js";
 import { loadWeatherEvents, weatherBriefs, weatherDetail, type WeatherBrief } from "../lib/weather.js";
 import calendarFilterSetsRoutes from "./calendar-filter-sets.js";
 import calendarDayRouteRoutes from "./calendar-day-route.js";
@@ -440,17 +454,58 @@ app.get("/notes/search", (c) => {
 });
 
 /**
- * Ciało POST /events/:id/notes: JSON `{text}` jak dotąd albo `multipart/form-data`
- * z polami `text` (opcjonalne) i `files` (wiele). Pliki trafiają do pamięci — limit
- * ciała pilnuje src/routes/index.ts (bodyLimitFor), limit per plik storeUploads.
+ * Nagłówek maila z pola formularza `mail` (JSON string) — obecny robi z notatki
+ * wpis `kind='email'`. Śmieci odrzucamy komunikatem, zamiast po cichu zapisywać
+ * notatkę bez nagłówka: front wysyła to pole tylko świadomie.
  */
-async function readNoteBody(
-  c: Context
-): Promise<{ text: string; files: IncomingFile[]; copyToObject: boolean }> {
+function parseMailField(raw: unknown): MsgMail | null {
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  let v: unknown;
+  try {
+    v = JSON.parse(raw);
+  } catch {
+    throw new ApiError(400, "Nieprawidłowe dane maila");
+  }
+  if (!v || typeof v !== "object" || Array.isArray(v)) throw new ApiError(400, "Nieprawidłowe dane maila");
+  const o = v as Record<string, unknown>;
+  const str = (x: unknown) => (typeof x === "string" ? x.trim() : "");
+  const list = (x: unknown) =>
+    Array.isArray(x) ? x.map(str).filter((e) => e.length > 0).slice(0, 100) : [];
+  const sentAt = str(o.sentAt);
+  return {
+    subject: str(o.subject).slice(0, 500),
+    from: str(o.from).slice(0, 320),
+    to: list(o.to),
+    cc: list(o.cc),
+    sentAt: sentAt && !Number.isNaN(Date.parse(sentAt)) ? new Date(sentAt).toISOString() : null,
+    // Nazwy załączników maila — snapshot, po którym UI dopasowuje chipy do plików.
+    attachments: list(o.attachments).map((n) => n.slice(0, 260)),
+  };
+}
+
+/**
+ * Ciało POST /events/:id/notes: JSON `{text}` jak dotąd albo `multipart/form-data`
+ * z polami `text` (opcjonalne), `files` (wiele) i `mail` (JSON nagłówka maila —
+ * patrz parseMailField). Pliki trafiają do pamięci — limit ciała pilnuje
+ * src/routes/index.ts (bodyLimitFor), limit per plik storeUploads.
+ */
+async function readNoteBody(c: Context): Promise<{
+  text: string;
+  files: IncomingFile[];
+  copyToObject: boolean;
+  mail: MsgMail | null;
+  extractMsgAttachments: boolean;
+}> {
   const ct = c.req.header("content-type") ?? "";
   if (!/multipart\/form-data/i.test(ct)) {
     const body = (await c.req.json().catch(() => null)) as { text?: unknown; copyToObject?: unknown } | null;
-    return { text: String(body?.text ?? ""), files: [], copyToObject: body?.copyToObject === true };
+    return {
+      text: String(body?.text ?? ""),
+      files: [],
+      copyToObject: body?.copyToObject === true,
+      mail: null,
+      extractMsgAttachments: false,
+    };
   }
   const form = await c.req.formData().catch(() => null);
   if (!form) throw new ApiError(400, "Nieprawidłowe dane formularza");
@@ -461,9 +516,71 @@ async function readNoteBody(
     files.push({ name: entry.name, mime: entry.type, data: Buffer.from(await entry.arrayBuffer()) });
   }
   // Multipart nie zna typów — checkbox przychodzi jako "1"/"true".
-  const copyField = form.get("copyToObject");
-  const copyToObject = typeof copyField === "string" && (copyField === "1" || copyField.toLowerCase() === "true");
-  return { text: typeof textField === "string" ? textField : "", files, copyToObject };
+  const flag = (name: string) => {
+    const v = form.get(name);
+    return typeof v === "string" && (v === "1" || v.toLowerCase() === "true");
+  };
+  return {
+    text: typeof textField === "string" ? textField : "",
+    files,
+    copyToObject: flag("copyToObject"),
+    mail: parseMailField(form.get("mail")),
+    extractMsgAttachments: flag("extractMsgAttachments"),
+  };
+}
+
+/**
+ * Załączniki wypakowane z pliku `.msg` jadącego w tej samej notatce (pole
+ * `extractMsgAttachments=1`). Zasada: mail zapisuje się ZAWSZE — plik, którego
+ * nie wolno zapisać (nieobsługiwany typ, >5 MB) albo który nie mieści się w
+ * limicie 15 plików, jest POMIJANY, a jego nazwa wraca w `skippedAttachments`.
+ *
+ * Deduplikacja po (nazwa, rozmiar): ten sam plik dołączony ręcznie i siedzący
+ * w mailu ma zostać przy notatce raz.
+ */
+function extractMsgAttachments(files: IncomingFile[]): { extra: IncomingFile[]; skipped: string[] } {
+  const msg = files.find((f) => /\.msg$/i.test(f.name) || f.mime.toLowerCase() === MSG_MIME);
+  if (!msg) return { extra: [], skipped: [] };
+  let parsed;
+  try {
+    parsed = parseOutlookMsg(msg.data);
+  } catch {
+    // Nieczytelny .msg nie może wywrócić zapisu notatki — zostaje sam plik.
+    return { extra: [], skipped: [] };
+  }
+  const extra: IncomingFile[] = [];
+  const skipped: string[] = [];
+  const seen = new Set(files.map((f) => `${f.name.toLowerCase()}|${f.data.length}`));
+  for (const a of parsed.attachmentFiles) {
+    const key = `${a.name.toLowerCase()}|${a.data.length}`;
+    if (seen.has(key)) continue;
+    const file: IncomingFile = { name: a.name, mime: a.mime, data: a.data };
+    const reason = uploadRejectReason(file);
+    if (reason) {
+      skipped.push(a.name);
+      continue;
+    }
+    if (files.length + extra.length >= ATTACHMENT_MAX_FILES) {
+      skipped.push(a.name);
+      continue;
+    }
+    seen.add(key);
+    extra.push(file);
+  }
+  return { extra, skipped };
+}
+
+/**
+ * Tekst notatki do KOPII w kartotece obiektu. Kartoteka nie ma karty maila, więc
+ * mail spłaszczamy do nagłówka + treści (formatMsgAsNote) i tniemy do limitu
+ * notatki — inaczej temat, nadawca i data zniknęłyby po drodze.
+ */
+function noteCopyText(n: Note): string {
+  if (n.kind !== "email" || !n.mail) return n.text;
+  // Nazwy z maila mają pierwszeństwo: obrazki zapisujemy jako .webp, więc lista
+  // plików notatki nie jest już tym, co widział nadawca.
+  const names = n.mail.attachments.length ? n.mail.attachments : n.attachments.map((a) => a.fileName);
+  return clampBody(formatMsgAsNote({ ...n.mail, bodyText: n.text, attachments: names }), CALENDAR_NOTE_MAX);
 }
 
 app.post("/events/:id/notes", async (c) => {
@@ -471,7 +588,7 @@ app.post("/events/:id/notes", async (c) => {
   const id = Number(c.req.param("id"));
   if (!Number.isInteger(id)) return c.json({ success: false, error: "Nieprawidłowe id" }, 400);
   try {
-    const { text, files, copyToObject } = await readNoteBody(c);
+    const { text, files, copyToObject, mail, extractMsgAttachments: extractMsg } = await readNoteBody(c);
     // Wydarzenie i treść sprawdzamy PRZED zapisem plików (żeby nie mielić obrazków
     // dla nieistniejącego wydarzenia); pliki lądują na dysku przed transakcją, a przy
     // błędzie wstawiania są sprzątane.
@@ -479,18 +596,24 @@ app.post("/events/:id/notes", async (c) => {
     if (ev.deletedAt) throw new ApiError(409, "Wydarzenie jest usunięte — najpierw je przywróć");
     // Kafelek notatki tylko wskazuje cudzą notatkę — własnego dziennika nie ma (też w addNote).
     if (ev.type === "notatka") throw new ApiError(400, "Wydarzenie typu notatka nie może mieć własnych notatek");
-    if (!text.trim() && files.length === 0) throw new ApiError(400, "Treść notatki jest wymagana");
+    // Mail liczy się jak załącznik — sam nagłówek (temat + nadawca) niesie treść.
+    if (!text.trim() && files.length === 0 && !mail) throw new ApiError(400, "Treść notatki jest wymagana");
     // Warunki kopii sprawdzamy PRZED zapisem plików — 400/403 nie ma prawa
     // zostawić obrazków na dysku ani wiersza notatki bez kopii w kartotece.
     if (copyToObject) assertCanCopyToObject(user, ev);
-    const attachments = await storeUploads(id, files);
+    // Wypakowanie PRZED zapisem: obrazki z maila mają przejść tę samą drogę co
+    // zwykły upload (WebP + wymiary), a sprzątanie plików przy błędzie jest jedno.
+    const { extra, skipped } = mail && extractMsg ? extractMsgAttachments(files) : { extra: [], skipped: [] };
+    const stored = await storeUploads(id, [...files, ...extra]);
+    // storeUploads oddaje wyniki w kolejności wejścia — wszystko po `files` przyszło z maila.
+    const attachments = stored.map((a, i) => (i < files.length ? a : { ...a, origin: "msg" as const }));
     let note: Note;
     try {
       note = db.transaction((tx) => {
-        const added = addNote(tx, { eventId: id, text, ctx: { user }, attachments });
+        const added = addNote(tx, { eventId: id, text, ctx: { user }, attachments, mail });
         if (!copyToObject) return added;
         // TA SAMA transakcja: albo notatka i jej kopia w kartotece, albo nic.
-        const copy = copyCalendarNoteToObject(tx, { note: { id: added.id, text: added.text }, ev, ctx: { user } });
+        const copy = copyCalendarNoteToObject(tx, { note: { id: added.id, text: noteCopyText(added) }, ev, ctx: { user } });
         return { ...added, objectNoteId: copy.id };
       });
     } catch (error) {
@@ -498,7 +621,8 @@ app.post("/events/:id/notes", async (c) => {
       throw error;
     }
     publishChange(c, "notes", asDepartment(ev.department), [id], user);
-    return c.json({ success: true, data: note }, 201);
+    // `skippedAttachments` tylko gdy jest co zgłosić — front robi z tego toast.
+    return c.json(skipped.length ? { success: true, data: note, skippedAttachments: skipped } : { success: true, data: note }, 201);
   } catch (error) {
     return handleError(c, error, "dodawania notatki");
   }
@@ -579,7 +703,9 @@ app.post("/notes/:noteId/copy-to-object", (c) => {
     // Edycja kalendarza (dział wydarzenia) ORAZ edycja kartoteki obiektów.
     const { note, ev } = eventOfNoteForAccess(noteId, user, "edit");
     assertCanCopyToObject(user, ev);
-    const copy = db.transaction((tx) => copyCalendarNoteToObject(tx, { note, ev, ctx: { user } }));
+    // Mail kopiujemy z nagłówkiem — w kartotece obiektu nie ma karty maila.
+    const text = noteCopyText(noteWithAttachments(db, note));
+    const copy = db.transaction((tx) => copyCalendarNoteToObject(tx, { note: { id: note.id, text }, ev, ctx: { user } }));
     // Znacznik „w obiekcie ✓" przy notatce widzą wszyscy — inne karty mają go zobaczyć bez F5.
     publishChange(c, "notes", asDepartment(ev.department), [ev.id], user);
     return c.json({ success: true, data: copy });
@@ -614,6 +740,91 @@ app.delete("/notes/:noteId", (c) => {
     return c.json({ success: true, data: { id: noteId } });
   } catch (error) {
     return handleError(c, error, "usuwania notatki");
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /msg/parse — mail .msg z Outlooka upuszczony na kalendarz
+// ---------------------------------------------------------------------------
+
+/** Sufit dla pojedynczego pliku .msg (limit CAŁEGO ciała pilnuje src/routes/index.ts). */
+const MSG_MAX_BYTES = 10 * 1024 * 1024;
+/** MIME, którym Outlook opisuje `.msg`; przeglądarki zwykle dają octet-stream albo nic. */
+const MSG_MIME = "application/vnd.ms-outlook";
+
+/**
+ * Dział z `?department=` albo z pola formularza (multipart nie ma query przy
+ * niektórych klientach). Ta sama walidacja co w `departmentsFromQuery`, tylko
+ * dla JEDNEJ wartości: nieznana → 400.
+ */
+function msgDepartment(c: Context, form: FormData): CalendarDepartment {
+  const fromForm = form.get("department");
+  const raw = (c.req.query("department") || (typeof fromForm === "string" ? fromForm : "")).trim();
+  if (!raw) return "technical";
+  if (!CALENDAR_DEPARTMENTS.includes(raw as CalendarDepartment)) {
+    throw new ApiError(400, `Parametr department: dozwolone ${CALENDAR_DEPARTMENTS.join(", ")}`);
+  }
+  return raw as CalendarDepartment;
+}
+
+/**
+ * Czyta mail bez zapisywania czegokolwiek: front dostaje gotowy tytuł i tekst
+ * notatki, a wydarzenie tworzy dopiero użytkownik (POST /events) — dzięki temu
+ * upuszczenie maila niczego nie zapisuje, dopóki nikt nie kliknie „Zapisz”.
+ * Sam plik .msg dojeżdża osobno, jako załącznik pierwszej notatki.
+ */
+app.post("/msg/parse", async (c) => {
+  const user = getUser(c);
+  try {
+    const ct = c.req.header("content-type") ?? "";
+    if (!/multipart\/form-data/i.test(ct)) throw new ApiError(400, "Wymagany formularz z plikiem .msg");
+    const form = await c.req.formData().catch(() => null);
+    if (!form) throw new ApiError(400, "Nieprawidłowe dane formularza");
+    // Prawo EDYCJI kalendarza działu — z maila powstaje wydarzenie, więc bramka
+    // jest ta sama co przy tworzeniu (samo `view` nie wystarcza).
+    if (!canEditDepartment(user, msgDepartment(c, form))) {
+      throw new ApiError(403, "Brak uprawnień do tworzenia wydarzeń tego działu");
+    }
+    const file = form.get("file");
+    if (!(file instanceof File)) throw new ApiError(400, "Brak pliku");
+    const name = file.name || "";
+    const mime = (file.type || "").split(";")[0].trim().toLowerCase();
+    // Rozszerzenie ma pierwszeństwo: przeglądarka przy drag&drop z Outlooka
+    // podaje pusty typ albo application/octet-stream.
+    if (!/\.msg$/i.test(name) && mime !== MSG_MIME) {
+      throw new ApiError(400, "Obsługiwane są tylko pliki .msg z Outlooka");
+    }
+    if (file.size > MSG_MAX_BYTES) throw new ApiError(400, "Plik .msg przekracza 10 MB");
+    const buf = Buffer.from(await file.arrayBuffer());
+    if (buf.length === 0) throw new ApiError(400, "Plik jest pusty");
+    let parsed;
+    try {
+      parsed = parseOutlookMsg(buf);
+    } catch {
+      throw new ApiError(400, "Nie udało się odczytać pliku .msg");
+    }
+    // Podpowiedź obiektu po adresach z maila — tylko dla kogoś, kto w ogóle ma
+    // wgląd w kartotekę obiektów (tak jak picker obiektu w dialogu, za prefiksem
+    // /objects w API_TAB_MAP). Bez wglądu podpowiedzi i tak nie dałoby się użyć.
+    const objectSuggestions = canView(user, "objects") ? suggestObjectsForEmails(db, emailsOf(parsed)) : [];
+    // Bajty załączników zostają na serwerze — front dostaje same metadane
+    // (nazwa/typ/rozmiar/obrazek?), po których rysuje chipy w szkicu notatki.
+    const { attachmentFiles, ...parsedPublic } = parsed;
+    // `noteText` to SAMA treść maila: nagłówek jedzie w `mail` i renderuje go UI
+    // (notatka `kind='email'`). Limit długości notatki jest twardy w bazie,
+    // więc tniemy TU — inaczej zapis skończyłby się 400.
+    return c.json({
+      success: true,
+      data: {
+        parsed: { ...parsedPublic, attachmentsMeta: attachmentsMetaOf(attachmentFiles) },
+        mail: mailHeaderOf(parsed),
+        noteText: clampBody(parsed.bodyText, CALENDAR_NOTE_MAX),
+        suggestedTitle: suggestedTitleFrom(parsed.subject),
+        objectSuggestions,
+      },
+    });
+  } catch (error) {
+    return handleError(c, error, "czytania pliku .msg");
   }
 });
 

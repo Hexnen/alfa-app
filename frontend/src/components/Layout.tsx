@@ -31,6 +31,7 @@ import { Button } from "./ui/button";
 import { tip } from "./ui/tooltip";
 import { useAuth } from "@/auth/AuthProvider";
 import { usePerms, TABS } from "@/auth/permissions";
+import { initials } from "@/lib/calendar-labels";
 import { APP_VERSION } from "@/lib/version";
 
 type NavChild = {
@@ -350,12 +351,16 @@ export function Layout({ children }: LayoutProps) {
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
   const { user, logout } = useAuth();
   const perms = usePerms();
+  /** Podpis konta: nazwa własna, a gdy jej brak — adres e-mail. */
+  const userName = user ? user.displayName || user.email : "";
 
   // --- Zwijanie sidebara (tylko desktop; mobile ma swój drawer) -------------
   const [collapsed, setCollapsed] = useState(readCollapsed);
   const [desktop, setDesktop] = useState(isDesktopWidth);
   /** Flyout z podzakładkami sekcji w trybie zwiniętym (pozycja = ikona sekcji). */
   const [flyout, setFlyout] = useState<{ item: NavItem; top: number } | null>(null);
+  /** Menu konta pod miniaturką użytkownika (tylko tryb zwinięty). */
+  const [userMenu, setUserMenu] = useState(false);
   /** Pasek ikon: zwinięty sidebar renderujemy tylko na desktopie. */
   const rail = collapsed && desktop;
 
@@ -368,6 +373,7 @@ export function Layout({ children }: LayoutProps) {
 
   const toggleCollapsed = () => {
     setFlyout(null);
+    setUserMenu(false);
     setCollapsed((c) => {
       const next = !c;
       try {
@@ -386,6 +392,7 @@ export function Layout({ children }: LayoutProps) {
       if (isTypingTarget(e.target) || !isDesktopWidth()) return;
       e.preventDefault();
       setFlyout(null);
+      setUserMenu(false);
       setCollapsed((c) => {
         const next = !c;
         try {
@@ -400,16 +407,27 @@ export function Layout({ children }: LayoutProps) {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  // Flyout: zamknij klikiem obok / Esc.
+  // Flyouty paska ikon (podzakładki sekcji i menu konta): zamknij klikiem obok / Esc.
   useEffect(() => {
-    if (!flyout) return;
+    if (!flyout && !userMenu) return;
     const onDown = (e: MouseEvent) => {
       const t = e.target as HTMLElement | null;
-      if (t?.closest?.("[data-sidebar-flyout]") || t?.closest?.("[data-sidebar-rail-group]")) return;
+      // Kliknięcia w same przełączniki obsługuje ich onClick (inaczej mousedown
+      // zamknąłby menu, a klik otworzyłby je z powrotem).
+      if (
+        t?.closest?.("[data-sidebar-flyout]") ||
+        t?.closest?.("[data-sidebar-rail-group]") ||
+        t?.closest?.("[data-sidebar-user-button]")
+      )
+        return;
       setFlyout(null);
+      setUserMenu(false);
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setFlyout(null);
+      if (e.key === "Escape") {
+        setFlyout(null);
+        setUserMenu(false);
+      }
     };
     document.addEventListener("mousedown", onDown);
     document.addEventListener("keydown", onKey);
@@ -417,7 +435,12 @@ export function Layout({ children }: LayoutProps) {
       document.removeEventListener("mousedown", onDown);
       document.removeEventListener("keydown", onKey);
     };
-  }, [flyout]);
+  }, [flyout, userMenu]);
+
+  // Wyjście z trybu paska ikon (rozwinięcie menu, zwężenie okna) zabiera menu konta.
+  useEffect(() => {
+    if (!rail) setUserMenu(false);
+  }, [rail]);
 
   // Mapuje ścieżkę SPA na klucz zakładki z katalogu uprawnień. Ścieżki
   // szczegółowe bez własnego klucza (np. /orders/formularz) dziedziczą
@@ -556,6 +579,7 @@ export function Layout({ children }: LayoutProps) {
         aria-expanded={open}
         onClick={(e) => {
           const r = e.currentTarget.getBoundingClientRect();
+          setUserMenu(false);
           setFlyout(open ? null : { item, top: r.top });
         }}
       >
@@ -769,16 +793,26 @@ export function Layout({ children }: LayoutProps) {
 
         {/* Bottom bar: user + logout */}
         {rail ? (
+          // W pasku ikon nie ma miejsca na nazwę — zostaje miniaturka konta
+          // (inicjały; aplikacja nie ma zdjęć profilowych), a wylogowanie
+          // chowa się w małym menu obok.
           <div className="flex flex-col items-center border-t p-2">
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={() => logout()}
-              aria-label="Wyloguj"
-              title={`Wyloguj${user ? ` — ${user.displayName || user.email}` : ""}`}
+            <button
+              type="button"
+              data-sidebar-user-button
+              data-testid="sidebar-user-avatar"
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-semibold uppercase text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              title={userName || "Konto"}
+              aria-label={`Konto: ${userName || "użytkownik"}`}
+              aria-haspopup="menu"
+              aria-expanded={userMenu}
+              onClick={() => {
+                setFlyout(null);
+                setUserMenu((v) => !v);
+              }}
             >
-              <LogOut className="h-5 w-5" />
-            </Button>
+              {initials(userName)}
+            </button>
           </div>
         ) : (
           <div className="border-t p-4">
@@ -837,6 +871,38 @@ export function Layout({ children }: LayoutProps) {
               </Link>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* Menu konta spod miniaturki (tylko przy zwiniętym sidebarze) */}
+      {rail && userMenu && (
+        <div
+          data-sidebar-flyout
+          data-testid="sidebar-user-menu"
+          role="menu"
+          aria-label="Konto"
+          className="fixed bottom-2 left-16 z-50 ml-1 w-56 rounded-lg border bg-popover p-2 text-popover-foreground shadow-xl"
+        >
+          <div className="px-2 py-1.5">
+            <div className="truncate text-sm font-semibold">{userName || "Konto"}</div>
+            {user && user.displayName && user.displayName !== user.email && (
+              <div className="truncate text-xs text-muted-foreground">{user.email}</div>
+            )}
+          </div>
+          <div className="my-1 border-t" />
+          <button
+            type="button"
+            role="menuitem"
+            data-testid="sidebar-logout"
+            className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            onClick={() => {
+              setUserMenu(false);
+              logout();
+            }}
+          >
+            <LogOut className="h-4 w-4" />
+            Wyloguj
+          </button>
         </div>
       )}
 

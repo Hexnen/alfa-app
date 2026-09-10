@@ -87,8 +87,11 @@ import {
   type CalendarEventStatus,
   type CalendarEventType,
   type CalendarNote,
+  type CalendarNoteMailHeader,
+  type MailObjectSuggestion,
   type CalendarNoteAttachment,
   type CalendarNoteRef,
+  type ParsedMsgAttachmentMeta,
   type CalendarSeriesFreq,
   type CalendarSeriesScope,
   type ObjectWithContractor,
@@ -161,11 +164,13 @@ import {
 import { LEAD_STAGE_META } from "@/lib/sales-labels";
 import { travelLine, travelSourceLabel, useTravel } from "@/lib/travel";
 import { cn } from "@/lib/utils";
-import { CalendarEventNotes, type CalendarEventNotesHandle } from "@/components/CalendarEventNotes";
+import { CalendarEventNotes, MailNoteHeader, type CalendarEventNotesHandle } from "@/components/CalendarEventNotes";
 import { ContactPicker } from "@/components/sales/ContactPicker";
 import { LeadPicker, type LeadRef } from "@/components/sales/LeadPicker";
 import { WeatherSection } from "@/components/CalendarWeather";
 import { tip } from "@/components/ui/tooltip";
+import { RichText } from "@/components/RichText";
+import { looksLikeMailNote } from "@/lib/richtext";
 
 export type CalendarDialogMode = "create" | "edit" | "view";
 
@@ -190,6 +195,36 @@ export interface CalendarEventPrefill {
   /** Dział handlowy: szansa i osoba kontaktowa („Zaplanuj następną”). */
   leadId?: number | null;
   contactId?: number | null;
+  /**
+   * Szkic PIERWSZEJ notatki (tylko tryb `create`): treść i pliki. Wypełnia go
+   * drag&drop maila `.msg` z Outlooka na kalendarz — treść maila idzie do notatki,
+   * a oryginalny plik zostaje jej załącznikiem. Szkic jedzie na serwer sam,
+   * zaraz po utworzeniu wydarzenia (tak jak ręcznie wpisana pierwsza notatka),
+   * więc użytkownik nie dostaje dodatkowego pytania.
+   */
+  noteDraft?: {
+    text: string;
+    files?: File[];
+    mail?: CalendarNoteMailHeader | null;
+    /** Załączniki maila (metadane bez bajtów) — chipy w szkicu; wypakuje je backend przy zapisie. */
+    attachmentsMeta?: ParsedMsgAttachmentMeta[];
+  };
+  /**
+   * Obiekty podpowiedziane po adresach z maila (backend: src/lib/mail-object-match.ts).
+   * JEDNA podpowiedź z kontaktu obiektu ustawia pole od razu; pozostałe pokazują
+   * się jako chipy pod pickerem. Ręczny wybór chowa jedno i drugie.
+   */
+  objectSuggestions?: MailObjectSuggestion[];
+}
+
+/**
+ * Podpowiedź na tyle mocna, żeby wypełnić pole obiektu bez pytania: DOKŁADNIE
+ * jedna i z kontaktu przypiętego do obiektu. Reszta zostaje propozycją do kliknięcia.
+ */
+function autoPickedObject(prefill: CalendarEventPrefill | null | undefined): MailObjectSuggestion | null {
+  if (!prefill || prefill.objectId) return null;
+  const strong = (prefill.objectSuggestions ?? []).filter((s) => s.via === "object_contact");
+  return strong.length === 1 ? strong[0] : null;
 }
 
 interface CalendarEventDialogProps {
@@ -245,6 +280,11 @@ interface CalendarEventDialogProps {
    * przycisk się nie pokazuje — dialog nie ma jak sam otworzyć drugiego siebie.
    */
   onPlanNext?: (prefill: CalendarEventPrefill) => void;
+  /**
+   * Komunikat dla użytkownika po zapisie, którego dialog nie ma już gdzie pokazać
+   * (zamyka się) — np. „Pominięto załączniki: …”. Rodzic robi z tego toast.
+   */
+  onNotice?: (message: string) => void;
 }
 
 const plural = (n: number, one: string, few: string, many: string) => {
@@ -314,7 +354,8 @@ interface DraftPrompt {
 }
 
 /** Domyślny czas trwania nowego wydarzenia (minuty). */
-const DEFAULT_DURATION_MIN = 180;
+/** Domyślny czas trwania nowego wydarzenia (min.) — używa go też drop maila na siatkę. */
+export const DEFAULT_DURATION_MIN = 180;
 
 /** Domyślny zakres: najbliższa pełna godzina, 3h (typowy wyjazd na obiekt). */
 function defaultRange(): { start: string; end: string } {
@@ -394,7 +435,11 @@ function buildInitial(
     start,
     end,
     status: prefill?.status ?? "planned",
-    objectId: prefill?.objectId ? String(prefill.objectId) : "",
+    objectId: prefill?.objectId
+      ? String(prefill.objectId)
+      : autoPickedObject(prefill)
+        ? String(autoPickedObject(prefill)!.objectId)
+        : "",
     location: prefill?.location ?? "",
     description: prefill?.description ?? "",
     assigneeIds: [...(prefill?.assigneeIds ?? prefill?.technicianIds ?? [])],
@@ -1429,9 +1474,17 @@ function SourceNoteCard({
       <div className="flex items-start gap-2">
         <StickyNote className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
         <div className="min-w-0 flex-1">
-          <div className="whitespace-pre-wrap break-words" data-testid="source-note-text">
-            {note.text?.trim() || <span className="text-muted-foreground">notatka bez treści (sam załącznik)</span>}
-          </div>
+          {note.text?.trim() ? (
+            <RichText
+              text={note.text}
+              mode={looksLikeMailNote(note.text) ? "mail" : "note"}
+              testId="source-note-text"
+            />
+          ) : (
+            <div className="whitespace-pre-wrap break-words" data-testid="source-note-text">
+              <span className="text-muted-foreground">notatka bez treści (sam załącznik)</span>
+            </div>
+          )}
           <div className="mt-0.5 text-xs text-muted-foreground">{noteMetaLine(note)}</div>
         </div>
       </div>
@@ -1996,6 +2049,7 @@ export function CalendarEventDialog({
   variant = "modal",
   config: cfg = TECHNICAL_CALENDAR,
   onPlanNext,
+  onNotice,
 }: CalendarEventDialogProps) {
   const docked = variant === "drawer";
   const readOnly = mode === "view";
@@ -2004,8 +2058,35 @@ export function CalendarEventDialog({
   /** Notatki z GET /calendar/events/:id; null = jeszcze nie wczytane (komponent notatek sam dociągnie). */
   const [notes, setNotes] = useState<CalendarNote[] | null>(null);
   const [notesCount, setNotesCount] = useState<number>(event?.notesCount ?? 0);
-  /** Tryb create: „Pierwsza notatka” wysyłana po utworzeniu wydarzenia. */
-  const [firstNote, setFirstNote] = useState("");
+  /**
+   * Tryb create: „Pierwsza notatka” wysyłana po utworzeniu wydarzenia.
+   * Startowa treść i pliki mogą przyjść z prefillu (`noteDraft`) — tak działa
+   * upuszczenie maila `.msg` na kalendarz. Dialog jest remountowany przy każdym
+   * otwarciu (klucz w CalendarPage), więc inicjalizacja stanu wystarczy.
+   */
+  const [firstNote, setFirstNote] = useState(() => prefill?.noteDraft?.text ?? "");
+  const [firstNoteFiles, setFirstNoteFiles] = useState<File[]>(() => [...(prefill?.noteDraft?.files ?? [])]);
+  /** Nagłówek maila szkicu — tylko do odczytu; z nim notatka zapisze się jako `kind='email'`. */
+  const firstNoteMail = mode === "create" ? (prefill?.noteDraft?.mail ?? null) : null;
+  const firstNoteMeta = mode === "create" ? (prefill?.noteDraft?.attachmentsMeta ?? []) : [];
+  /**
+   * „Wypakuj załączniki z maila” — domyślnie TAK: zdjęcie z maila ma być widoczne
+   * bez pobierania .msg. Backend pomija te, których nie wolno zapisać.
+   */
+  const [extractMsgAtt, setExtractMsgAtt] = useState(true);
+  /** Podpowiedź, która sama wypełniła pole obiektu (pokazujemy skąd + „Wyczyść”). */
+  const [objectHint, setObjectHint] = useState<MailObjectSuggestion | null>(() =>
+    mode === "create" ? autoPickedObject(prefill) : null
+  );
+  /** Propozycje do kliknięcia — puste, gdy obiekt już jest (z prefillu albo z podpowiedzi). */
+  const [objectSuggestions, setObjectSuggestions] = useState<MailObjectSuggestion[]>(() =>
+    mode === "create" && !prefill?.objectId && !autoPickedObject(prefill) ? (prefill?.objectSuggestions ?? []) : []
+  );
+  /** Ręczny wybór obiektu kończy podpowiadanie — i notkę, i pasek chipów. */
+  const dismissObjectSuggestions = useCallback(() => {
+    setObjectHint(null);
+    setObjectSuggestions([]);
+  }, []);
   const handleNotesCount = useCallback(
     (count: number) => {
       setNotesCount(count);
@@ -2059,7 +2140,9 @@ export function CalendarEventDialog({
     quote: mode !== "create" && !!(init.quoteId || event?.quote),
     realization: mode !== "create" && !!(init.realizationId || event?.realization || init.realizationOptout),
     journal: true,
-    firstNote: false,
+    // Szkic z prefillu (mail .msg upuszczony na kalendarz) ma być widoczny od razu —
+    // inaczej użytkownik zapisałby notatkę, której nawet nie zobaczył.
+    firstNote: mode === "create" && !!prefill?.noteDraft,
     history: false,
   });
   const toggleSec = (k: keyof typeof openSec) =>
@@ -2146,8 +2229,13 @@ export function CalendarEventDialog({
   const [hasNoteDraft, setHasNoteDraft] = useState(false);
 
   const dirty = useMemo(
-    () => !readOnly && (JSON.stringify(form) !== JSON.stringify(initialRef.current) || firstNote.trim() !== ""),
-    [form, readOnly, firstNote]
+    () =>
+      !readOnly &&
+      (JSON.stringify(form) !== JSON.stringify(initialRef.current) ||
+        firstNote.trim() !== "" ||
+        firstNoteFiles.length > 0 ||
+        !!firstNoteMail),
+    [form, readOnly, firstNote, firstNoteFiles, firstNoteMail]
   );
 
   // Słowniki
@@ -2646,10 +2734,23 @@ export function CalendarEventDialog({
           ? await calendarApi.update(event!.id, input, scope)
           : await calendarApi.create(input);
         let saved = res.data;
-        // Pierwsza notatka: osobne API po utworzeniu. Błąd nie cofa utworzenia — wydarzenie już istnieje.
-        if (!isEdit && saved && firstNote.trim()) {
+        // Pierwsza notatka: osobne API po utworzeniu. Błąd nie cofa utworzenia — wydarzenie już istnieje
+        // (typ „notatka” notatek nie przyjmuje — backend odpowie 400, a my to przemilczamy jak dotąd).
+        if (!isEdit && saved && (firstNote.trim() || firstNoteFiles.length > 0 || firstNoteMail)) {
           try {
-            await calendarApi.addNote(saved.id, firstNote.trim());
+            // Załączniki (oryginalny .msg) i nagłówek maila jadą tylko multipartem.
+            if (firstNoteFiles.length > 0 || firstNoteMail) {
+              const noteRes = await calendarApi.addNoteWithFiles(saved.id, firstNote.trim(), firstNoteFiles, {
+                mail: firstNoteMail,
+                // Wypakowanie ma sens tylko przy mailu — bez niego nie ma z czego.
+                extractMsgAttachments: !!firstNoteMail && extractMsgAtt,
+              });
+              // Backend pomija załączniki, których nie wolno zapisać — mówimy o tym wprost.
+              const skipped = noteRes.skippedAttachments ?? [];
+              if (skipped.length) onNotice?.(`Pominięto załączniki: ${skipped.join(", ")}`);
+            } else {
+              await calendarApi.addNote(saved.id, firstNote.trim());
+            }
             saved = { ...saved, notesCount: (saved.notesCount ?? 0) + 1 };
           } catch {
             /* notatkę można dopisać w edycji */
@@ -2663,7 +2764,7 @@ export function CalendarEventDialog({
         setSaving(false);
       }
     },
-    [form, isEdit, event, onSaved, onClose, firstNote]
+    [form, isEdit, event, onSaved, onClose, firstNote, firstNoteFiles, firstNoteMail, extractMsgAtt, onNotice]
   );
 
   /** Właściwy zapis (po walidacji i po rozstrzygnięciu szkicu notatki). */
@@ -3347,8 +3448,12 @@ export function CalendarEventDialog({
             <dt className="flex items-center gap-1.5 text-muted-foreground">
               <FileText className="h-3.5 w-3.5" /> Opis
             </dt>
-            <dd className="whitespace-pre-wrap">
-              {event.description || <span className="text-muted-foreground">—</span>}
+            <dd>
+              {event.description ? (
+                <RichText text={event.description} />
+              ) : (
+                <span className="text-muted-foreground">—</span>
+              )}
             </dd>
           </>
         )}
@@ -3538,6 +3643,8 @@ export function CalendarEventDialog({
               value={form.objectId}
               onChange={(id) => {
                 set("objectId", id);
+                // Ręczny wybór jest rozstrzygający — podpowiedzi z maila znikają.
+                dismissObjectSuggestions();
                 // Podpowiedź adresu do lokalizacji, gdy pusta
                 const o = objects.find((x) => String(x.id) === id);
                 const addr = o ? [o.address, o.city].filter(Boolean).join(", ") : "";
@@ -3545,6 +3652,51 @@ export function CalendarEventDialog({
               }}
               fallbackName={event?.objectName}
             />
+            {objectHint && (
+              <p className="flex flex-wrap items-center gap-1 text-[11px] text-muted-foreground" data-testid="object-suggestion-hint">
+                <Mail className="h-3 w-3" aria-hidden />
+                Obiekt podpowiedziany z adresu {objectHint.matchedEmails[0] ?? "z maila"}
+                <button
+                  type="button"
+                  className="font-medium underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  onClick={() => {
+                    set("objectId", "");
+                    dismissObjectSuggestions();
+                  }}
+                >
+                  Wyczyść
+                </button>
+              </p>
+            )}
+            {objectSuggestions.length > 0 && (
+              <div className="space-y-1" data-testid="object-suggestions">
+                <span className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+                  <Mail className="h-3 w-3" aria-hidden /> Sugerowane obiekty:
+                </span>
+                <div className="flex flex-wrap gap-1">
+                  {objectSuggestions.map((sug) => (
+                    <button
+                      key={sug.objectId}
+                      type="button"
+                      data-testid={`object-suggestion-${sug.objectId}`}
+                      className="inline-flex max-w-full items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      onClick={() => {
+                        set("objectId", String(sug.objectId));
+                        const o = objects.find((x) => x.id === sug.objectId);
+                        const addr = o ? [o.address, o.city].filter(Boolean).join(", ") : "";
+                        if (addr && !form.location.trim()) set("location", addr);
+                        dismissObjectSuggestions();
+                      }}
+                      title={`Dopasowano po adresie: ${sug.matchedEmails.join(", ")}`}
+                    >
+                      <span className="truncate font-medium">{sug.objectName}</span>
+                      {sug.contractorName && <span className="truncate text-muted-foreground">· {sug.contractorName}</span>}
+                      <span className="truncate text-muted-foreground">· {sug.matchedEmails[0]}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
           <div className="space-y-1">
             <Label htmlFor="cal-location" className="flex items-center gap-1">
@@ -4453,13 +4605,26 @@ export function CalendarEventDialog({
       ) : mode === "create" ? (
         <Section
           id="sec-first-note"
-          icon={StickyNote}
-          title="Pierwsza notatka"
+          icon={firstNoteMail ? Mail : StickyNote}
+          title={firstNoteMail ? "Mail z Outlooka" : "Pierwsza notatka"}
           open={openSec.firstNote}
           onToggle={() => toggleSec("firstNote")}
-          summary={firstNote.trim() ? firstNote.trim().slice(0, 60) : "opcjonalnie"}
+          summary={
+            firstNote.trim()
+              ? firstNote.trim().slice(0, 60)
+              : firstNoteFiles.length > 0
+                ? `${firstNoteFiles.length} ${plural(firstNoteFiles.length, "plik", "pliki", "plików")}`
+                : "opcjonalnie"
+          }
         >
           <div className="space-y-1">
+            {/* Mail z Outlooka: nagłówek tylko do odczytu — zapisze się w polach notatki. */}
+            {firstNoteMail && <MailNoteHeader mail={firstNoteMail} className="mb-1.5" meta={firstNoteMeta} />}
+            {firstNoteMail && firstNoteMeta.length > 0 && (
+              <ToggleChip id="cal-extract-msg-att" checked={extractMsgAtt} onChange={setExtractMsgAtt}>
+                Wypakuj załączniki z maila ({firstNoteMeta.length})
+              </ToggleChip>
+            )}
             <Label htmlFor="cal-first-note" className="sr-only">
               Pierwsza notatka
             </Label>
@@ -4467,12 +4632,38 @@ export function CalendarEventDialog({
               id="cal-first-note"
               value={firstNote}
               onChange={(e) => setFirstNote(e.target.value)}
-              rows={2}
+              // Szkic z maila to kilkanaście linijek — dwa wiersze zmusiłyby do przewijania w polu.
+              rows={prefill?.noteDraft ? 8 : 2}
               maxLength={4000}
               placeholder="np. Klient prosi o telefon przed przyjazdem"
               data-testid="first-note-input"
             />
-            <p className="text-[11px] text-muted-foreground">Zostanie dodana do dziennika zaraz po utworzeniu wydarzenia.</p>
+            {firstNoteFiles.length > 0 && (
+              <ul className="flex flex-wrap gap-1.5 pt-1" data-testid="first-note-files">
+                {firstNoteFiles.map((f) => (
+                  <li
+                    key={`${f.name}-${f.size}-${f.lastModified}`}
+                    className="inline-flex max-w-full items-center gap-1 rounded-full border bg-muted/40 px-2 py-0.5 text-[11px]"
+                  >
+                    <Paperclip className="h-3 w-3 shrink-0 text-muted-foreground" aria-hidden />
+                    <span className="truncate">{f.name}</span>
+                    <button
+                      type="button"
+                      className="shrink-0 rounded-full p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      onClick={() => setFirstNoteFiles((list) => list.filter((x) => x !== f))}
+                      aria-label={`Usuń załącznik ${f.name}`}
+                    >
+                      <X className="h-3 w-3" aria-hidden />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <p className="text-[11px] text-muted-foreground">
+              {firstNoteMail
+                ? "Mail zostanie zapisany w dzienniku zaraz po utworzeniu wydarzenia — z nagłówkiem i oryginalnym plikiem."
+                : "Zostanie dodana do dziennika zaraz po utworzeniu wydarzenia."}
+            </p>
           </div>
         </Section>
       ) : null}

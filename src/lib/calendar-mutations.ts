@@ -24,11 +24,13 @@ import {
   type CalendarSeriesFreq,
   type CalendarEventNote as CalendarEventNoteRow,
   type CalendarNoteSource,
+  type NoteAttachmentOrigin,
   CALENDAR_NOTE_MAX,
 } from "../db/schema.js";
 import { logActivity, logFieldDiffs, userLabelOf, type ActivityUser, type DbOrTx, type Tx } from "./activity-log.js";
 import { onEventCreated, onEventDeleted, onEventRestored, onEventUpdated } from "./calendar-realizations.js";
-import { noteEventLinks, noteOfRow, noteWithAttachments, type Note } from "./calendar-queries.js";
+import { briefTextOf, noteEventLinks, noteOfRow, noteWithAttachments, type Note } from "./calendar-queries.js";
+import type { MsgMail } from "./outlook-msg.js";
 import { attachmentOfRow, type StoredAttachment } from "./calendar-attachments.js";
 import { expandOccurrences, describeRule, shiftLocal, diffMinutes, type RecurrenceRule } from "./calendar-recurrence.js";
 import { ApiError, BILLING_HIDDEN_TYPES, BILLING_LABELS, STATUS_LABELS, TYPE_LABELS } from "./calendar-labels.js";
@@ -1141,10 +1143,18 @@ export interface AddNoteInput {
   eventId: number;
   text: string;
   ctx: MutationCtx;
+  /**
+   * Nagłówek maila z Outlooka — obecny robi z wpisu notatkę `kind='email'`
+   * (migracja 0094). W `text` idzie wtedy SAMA treść maila; nagłówek renderuje UI.
+   */
+  mail?: MsgMail | null;
   /** Domyślnie "user"; asystent → "assistant" (etykieta „Asystent (kto zatwierdził)”). */
   source?: CalendarNoteSource;
-  /** Pliki już zapisane na dysku (src/lib/calendar-attachments.ts storeUploads) — tu tylko wiersze. */
-  attachments?: StoredAttachment[];
+  /**
+   * Pliki już zapisane na dysku (src/lib/calendar-attachments.ts storeUploads) — tu tylko wiersze.
+   * `origin` odróżnia upload ręczny od załącznika wypakowanego z maila (domyślnie „upload”).
+   */
+  attachments?: Array<StoredAttachment & { origin?: NoteAttachmentOrigin }>;
 }
 
 /** Dodaje notatkę do wydarzenia (event musi istnieć i nie być usunięty). */
@@ -1155,13 +1165,31 @@ export function addNote(tx: DbOrTx, input: AddNoteInput): Note {
   // Kafelek notatki tylko WSKAZUJE cudzą notatkę — własnego dziennika nie ma (brak rekurencji).
   if (ev.type === "notatka") throw new ApiError(400, "Wydarzenie typu notatka nie może mieć własnych notatek");
   const attachments = input.attachments ?? [];
-  const text = parseNoteText(input.text, attachments.length > 0);
+  const mail = input.mail ?? null;
+  // Mail bez treści jest sensowny (samo „FYI" w temacie + załącznik), więc
+  // nagłówek liczy się jak załącznik: pusty `text` przechodzi.
+  const text = parseNoteText(input.text, attachments.length > 0 || !!mail);
   const source = input.source ?? "user";
   const who = userLabelOf(input.ctx.user);
   const userLabel = source === "assistant" ? `Asystent${who ? ` (${who})` : ""}` : source === "system" ? "System" : who;
   const row = tx
     .insert(schema.calendarEventNotes)
-    .values({ eventId: ev.id, userId: input.ctx.user.id, userLabel, source, text })
+    .values({
+      eventId: ev.id,
+      userId: input.ctx.user.id,
+      userLabel,
+      source,
+      text,
+      kind: mail ? "email" : "text",
+      mailSubject: mail?.subject ?? null,
+      mailFrom: mail?.from ?? null,
+      // Listy odbiorców jako JSON — SQLite nie ma typu tablicowego.
+      mailTo: mail ? JSON.stringify(mail.to) : null,
+      mailCc: mail ? JSON.stringify(mail.cc) : null,
+      mailSentAt: mail?.sentAt ?? null,
+      // Nazwy załączników maila — snapshot wiersza „Załączniki:” (migracja 0096).
+      mailAttachments: mail ? JSON.stringify(mail.attachments ?? []) : null,
+    })
     .returning()
     .get();
   const attRows = attachments.length
@@ -1170,7 +1198,8 @@ export function addNote(tx: DbOrTx, input: AddNoteInput): Note {
   const attInfo = attachments.length ? `${text ? " " : ""}(załączniki: ${attachments.length})` : "";
   logActivity(tx, {
     entityType: CALENDAR_ENTITY, entityId: ev.id, objectId: ev.objectId, user: input.ctx.user, summarySuffix: input.ctx.summarySuffix,
-    action: "note_added", field: "note", newValue: row.id, summary: `Dodano notatkę: ${noteSummary(text)}${attInfo}`,
+    action: "note_added", field: "note", newValue: row.id,
+    summary: `Dodano ${mail ? "mail" : "notatkę"}: ${noteSummary(briefTextOf(row))}${attInfo}`,
   });
   // Wzmianki dat w treści (@piątek, @15.09) → kafelki w kalendarzu, w tej samej transakcji.
   syncNoteMentionEvents(tx, row, ev, input.ctx);
