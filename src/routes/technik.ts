@@ -51,10 +51,12 @@ import {
 } from "../lib/protocols.js";
 import type { ProtocolItem } from "../lib/protocol-prefill.js";
 import { getTechnikActivities } from "../lib/technik-config.js";
+import { deleteSubscription, isPushEnabled, pushConfig, saveSubscription } from "../lib/push.js";
 import { distanceForObject, isGeoError } from "../lib/geo.js";
 import { getCompanyConfig } from "../lib/company-config.js";
 import { CALENDAR_NOTE_MAX } from "../db/schema.js";
 import { zonedToday } from "../lib/tz.js";
+import { loadWeatherEvents, weatherBriefs, type WeatherBrief } from "../lib/weather.js";
 
 const app = new Hono();
 
@@ -452,6 +454,67 @@ app.get("/me", (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /jobs/weather?ids= — pogoda dla zleceń technika (batch)
+//
+// Rola `technik` nie ma dostępu do /api/calendar (technikRoleGuard), więc
+// kalendarzowe GET /calendar/weather jest dla panelu nieosiągalne. Liczy to
+// DOKŁADNIE ta sama funkcja (`weatherBriefs`) i odpowiedź ma ten sam kształt
+// `{ items, retry }` — front panelu może użyć tej samej logiki ponawiania.
+//
+// KOLEJNOŚĆ REJESTRACJI MA ZNACZENIE: ta trasa musi stać PRZED `/jobs/:id`,
+// bo Hono dopasowuje w kolejności rejestracji i `:id` złapałby „weather”
+// (Number("weather") = NaN → 400). Dlatego blok siedzi tutaj, a nie na końcu pliku.
+//
+// Cudze id są odfiltrowane tak samo jak wszędzie w tym routerze — przez
+// `mineConditions`, a nie przez samo istnienie wydarzenia; nie ma ich nawet
+// w kluczach `items` (po odpowiedzi nie da się zgadywać cudzych wydarzeń).
+//
+// Pogoda NIGDY nie wywraca listy: brak sieci, brak punktu czy dzień poza oknem
+// prognozy to `null` w HTTP 200, a wyjątek — pusta mapa, też w 200.
+// ---------------------------------------------------------------------------
+
+/** Ile zleceń wolno spytać jednym batchem (jak w kalendarzu). */
+const WEATHER_MAX_IDS = 200;
+
+/** „1,2,3” → unikalne dodatnie liczby całkowite (jak `parseIdList` kalendarza). */
+function parseIdList(raw: string | undefined): number[] {
+  if (!raw) return [];
+  return [...new Set(raw.split(",").map((s) => Number(s.trim())).filter((n) => Number.isInteger(n) && n > 0))];
+}
+
+app.get("/jobs/weather", async (c) => {
+  const empty = { items: {} as Record<string, WeatherBrief | null>, retry: [] as number[] };
+  try {
+    const tech = linkedTechnician(getUser(c));
+    if (!tech) return c.json({ success: true, data: empty });
+
+    const requested = parseIdList(c.req.query("ids")).slice(0, WEATHER_MAX_IDS);
+    if (requested.length === 0) return c.json({ success: true, data: empty });
+
+    const mine = db
+      .select({ id: schema.calendarEvents.id })
+      .from(schema.calendarEvents)
+      .where(and(inArray(schema.calendarEvents.id, requested), ...mineConditions(tech.id)))
+      .all()
+      .map((r) => r.id);
+
+    const items: Record<string, WeatherBrief | null> = {};
+    for (const id of mine) items[String(id)] = null;
+    if (mine.length === 0) return c.json({ success: true, data: { items, retry: [] } });
+
+    const batch = await weatherBriefs(loadWeatherEvents(mine), {});
+    for (const [id, brief] of batch.items) items[String(id)] = brief;
+    // `retry` odróżnia „null, bo nie ma pogody” (poza oknem, brak punktu) od
+    // „null, bo się nie udało” (offline, limit geokodowań) — front ponawia tylko te drugie.
+    return c.json({ success: true, data: { items, retry: batch.retry } });
+  } catch (error) {
+    // Świadomie NIE handleError: pogoda ma się degradować do pustki, a nie psuć listę zleceń.
+    console.error("[technik] Błąd pogody:", error);
+    return c.json({ success: true, data: empty });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // GET /jobs — lista zleceń w zakresie dat
 // ---------------------------------------------------------------------------
 
@@ -524,6 +587,12 @@ app.get("/jobs/:id/distance", async (c) => {
         // To, co ma trafić do pola „Kilometry” — front nie powtarza reguły firmy.
         suggestedKm: roundTrip ? roundTripKm : d.km,
         roundTrip,
+        // Czas przejazdu w JEDNĄ stronę: OSRM liczy go razem z trasą, więc nie
+        // kosztuje osobnego zapytania. `minutesEstimated` = wynik z szacunku
+        // (trasa prosta / cache sprzed dodania czasu), nie z routera — front
+        // pokazuje wtedy „≈”. Pole jest DODATKOWE; protokół czyta tylko km.
+        minutes: d.minutes,
+        minutesEstimated: d.minutesEstimated,
         method: d.method,
         from: d.from.label,
         to: d.to.label,
@@ -1058,6 +1127,73 @@ app.post("/protocols/:id/sign", async (c) => {
     });
   } catch (error) {
     return handleError(c, error, "podpisywania protokołu");
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POWIADOMIENIA PUSH (Web Push / VAPID) — wyłącznie panel technika
+//
+// Trzy trasy i tyle: konfiguracja publiczna (klucz VAPID do `subscribe()`),
+// zapis subskrypcji i wypisanie. Bez kluczy w env `config` oddaje
+// `enabled: false`, a front chowa przełącznik zamiast pokazywać zepsutą opcję.
+//
+// Wystarczy dostęp do modułu (bramka prefiksu jest już za nami) — także
+// `view`: włączenie sobie powiadomień to nie edycja cudzych danych, a technik
+// „tylko do odczytu" też musi wiedzieć, że dostał zlecenie.
+// ---------------------------------------------------------------------------
+
+/** Wyciąga `{endpoint, keys}` z `PushSubscription.toJSON()` przysłanego przez front. */
+function parseSubscription(body: Record<string, unknown>): {
+  endpoint: string;
+  p256dh: string;
+  auth: string;
+} {
+  const endpoint = typeof body.endpoint === "string" ? body.endpoint.trim() : "";
+  const keys = (body.keys ?? {}) as Record<string, unknown>;
+  const p256dh = typeof keys.p256dh === "string" ? keys.p256dh.trim() : "";
+  const auth = typeof keys.auth === "string" ? keys.auth.trim() : "";
+  if (!/^https:\/\//i.test(endpoint)) throw new ApiError(400, "endpoint: wymagany adres https push service");
+  if (endpoint.length > 2000) throw new ApiError(400, "endpoint: adres jest za długi");
+  if (!p256dh || !auth) throw new ApiError(400, "keys: wymagane p256dh i auth");
+  return { endpoint, p256dh, auth };
+}
+
+app.get("/push/config", (c) => c.json({ success: true, data: pushConfig() }));
+
+app.post("/push/subscribe", async (c) => {
+  try {
+    const user = getUser(c);
+    if (!isPushEnabled()) {
+      // Brak kluczy to konfiguracja środowiska, nie błąd klienta — front i tak
+      // zapyta najpierw o `config`, ale zapis „w próżnię" byłby mylący.
+      return c.json({ success: false, error: "Powiadomienia push nie są skonfigurowane na serwerze" }, 503);
+    }
+    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    const parsed = parseSubscription(body);
+    const row = saveSubscription({
+      ...parsed,
+      userId: user.id,
+      userAgent: c.req.header("user-agent")?.slice(0, 300) ?? null,
+    });
+    return c.json({ success: true, data: { id: row.id, endpoint: row.endpoint } }, 201);
+  } catch (error) {
+    return handleError(c, error, "zapisu subskrypcji powiadomień");
+  }
+});
+
+app.delete("/push/subscribe", async (c) => {
+  try {
+    const user = getUser(c);
+    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    const endpoint = typeof body.endpoint === "string" ? body.endpoint.trim() : "";
+    if (!endpoint) throw new ApiError(400, "endpoint: wymagany");
+    // Cudzej subskrypcji się nie kasuje — `false` znaczy „nie było czego",
+    // a nie „nie wolno": endpointu i tak nie da się zgadnąć, więc 404 tylko
+    // mnożyłoby przypadki do obsłużenia na froncie.
+    const removed = deleteSubscription(user.id, endpoint);
+    return c.json({ success: true, data: { removed } });
+  } catch (error) {
+    return handleError(c, error, "usuwania subskrypcji powiadomień");
   }
 });
 

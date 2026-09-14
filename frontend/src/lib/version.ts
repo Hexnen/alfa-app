@@ -3,7 +3,7 @@
  * Podbijana przez skill `/commit` razem z wpisem changelogu i polem `version`
  * w głównym `package.json` — te trzy miejsca muszą się zgadzać.
  */
-export const APP_VERSION = "1.6.0";
+export const APP_VERSION = "1.7.0";
 
 /**
  * Wersja PANELU TECHNIKA (`/technik`) — podbijana niezależnie od `APP_VERSION`
@@ -12,4 +12,4 @@ export const APP_VERSION = "1.6.0";
  * własne tempo wydań i własny changelog, pisany językiem pracownika w terenie,
  * a nie biura.
  */
-export const TECHNIK_VERSION = "1.0.0";
+export const TECHNIK_VERSION = "1.1.0";

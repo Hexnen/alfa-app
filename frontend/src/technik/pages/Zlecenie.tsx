@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   AlertTriangle,
@@ -15,8 +15,11 @@ import {
   StickyNote,
   Users,
 } from "lucide-react";
-import { technikApi, type TechnikProtocolConflict } from "@/lib/api";
+import { technikApi, type TechnikJobDistance, type TechnikProtocolConflict } from "@/lib/api";
 import { Button } from "@/components/ui/button";
+// Znacznik pogody wprost z kalendarza — ta sama ikona WMO i ta sama paleta.
+import { WeatherMark } from "@/components/CalendarWeather";
+import { fmtMinutes } from "@/lib/calendar-labels";
 import { ClearableTextarea } from "../ui/clearable-input";
 import { cn } from "@/lib/utils";
 import { Section } from "../ui/section";
@@ -24,6 +27,7 @@ import { EmptyState } from "../ui/empty-state";
 import { ActionTimeDialog } from "../ui/action-time";
 import { useToast } from "../ui/toast";
 import { useJob } from "../lib/useJob";
+import { useJobWeather } from "../lib/useWeather";
 import { useTechnikAccess } from "../lib/access";
 import { clockOf, formatDayTitle, dayOf, timeOf } from "../lib/dates";
 import {
@@ -61,6 +65,39 @@ export function Zlecenie() {
   const [noteBusy, setNoteBusy] = useState(false);
   /** Które działanie pyta o godzinę („Teraz” / „Inna godzina”). */
   const [askTime, setAskTime] = useState<"start" | "finish" | null>(null);
+
+  // Pogoda dnia zlecenia — ten sam batch co na listach, tu dla jednego id.
+  const weather = useJobWeather(job);
+
+  // --- Dojazd z biura (pod „Nawiguj") ---------------------------------
+  // Ta sama trasa, z której protokół bierze kilometry; dokłada tylko `minutes`.
+  // Bez obiektu nie ma dokąd liczyć, więc w ogóle nie pytamy.
+  const [distance, setDistance] = useState<TechnikJobDistance | null>(null);
+  const [distanceLoading, setDistanceLoading] = useState(false);
+  const distanceJobId = job?.objectId != null ? job.id : null;
+  useEffect(() => {
+    if (distanceJobId == null) {
+      setDistance(null);
+      return;
+    }
+    let cancelled = false;
+    setDistanceLoading(true);
+    technikApi
+      .jobDistance(distanceJobId)
+      .then((d) => {
+        if (!cancelled) setDistance(d);
+      })
+      .catch(() => {
+        // Geokoder/sieć: linijka po prostu się nie pojawi.
+        if (!cancelled) setDistance(null);
+      })
+      .finally(() => {
+        if (!cancelled) setDistanceLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [distanceJobId]);
 
   if (loading && !job) {
     return <p className="py-10 text-center text-sm text-muted-foreground">Ładuję zlecenie…</p>;
@@ -215,13 +252,18 @@ export function Zlecenie() {
               {TypeIcon && <TypeIcon className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />}
               {typeMeta?.label ?? job.typeLabel}
             </h1>
-            <p className="truncate text-xs tabular-nums text-muted-foreground">
-              {job.allDay
-                ? formatDayTitle(dayOf(job.startAt))
-                : `${formatDayTitle(dayOf(job.startAt))}, ${timeOf(job.startAt)}${
-                    timeOf(job.endAt) ? `–${timeOf(job.endAt)}` : ""
-                  }`}
-            </p>
+            {/* Data i godzina, a tuż obok pogoda tego dnia — jedna linia,
+                znacznik `shrink-0`, więc data ucina się przed nim. */}
+            <div className="flex items-center gap-1.5">
+              <p className="truncate text-xs tabular-nums text-muted-foreground">
+                {job.allDay
+                  ? formatDayTitle(dayOf(job.startAt))
+                  : `${formatDayTitle(dayOf(job.startAt))}, ${timeOf(job.startAt)}${
+                      timeOf(job.endAt) ? `–${timeOf(job.endAt)}` : ""
+                    }`}
+              </p>
+              <WeatherMark brief={weather} />
+            </div>
           </div>
           <span
             className={cn(
@@ -253,12 +295,26 @@ export function Zlecenie() {
             </p>
           )}
           {navHref && (
-            <Button asChild size="lg" className="h-12 w-full text-base">
-              <a href={navHref} target="_blank" rel="noreferrer">
-                <Navigation className="mr-2 h-5 w-5" />
-                Nawiguj
-              </a>
-            </Button>
+            // Przycisk i linijka dojazdu to JEDNO dziecko sekcji — odstępy
+            // `space-y-3` sekcji zostają takie same, a przycisk nie zmienia
+            // ani wysokości, ani pozycji.
+            <div>
+              <Button asChild size="lg" className="h-12 w-full text-base">
+                <a href={navHref} target="_blank" rel="noreferrer">
+                  <Navigation className="mr-2 h-5 w-5" />
+                  Nawiguj
+                </a>
+              </Button>
+              {/* „Z biura: 23,4 km · ok. 35 min" — w JEDNĄ stronę, tak jak
+                  liczy backend. Brak danych (`km: null`) = nic nie pokazujemy. */}
+              {distanceLoading && !distance ? (
+                <p className="mt-1 text-center text-xs text-muted-foreground">…</p>
+              ) : distance?.km != null ? (
+                <p className="mt-1 text-center text-xs tabular-nums text-muted-foreground">
+                  {officeTripLabel(distance)}
+                </p>
+              ) : null}
+            </div>
           )}
         </Section>
 
@@ -452,4 +508,22 @@ export function Zlecenie() {
       />
     </>
   );
+}
+
+/** „23,4” — jedno miejsce po przecinku, z polskim przecinkiem. */
+const kmText = (km: number): string => km.toLocaleString("pl-PL", { maximumFractionDigits: 1 });
+
+/**
+ * „Z biura: 23,4 km · ok. 35 min” — dystans i czas w JEDNĄ stronę (tak liczy
+ * backend). Czas z routera dostaje „ok.”, czas z szacunku (trasa w linii
+ * prostej, stary wpis cache'u) — „≈”, żeby nie udawał wyniku nawigacji.
+ * Starszy backend bez `minutes` pokazuje same kilometry.
+ */
+function officeTripLabel(d: TechnikJobDistance): string {
+  const head = `Z biura: ${kmText(d.km ?? 0)} km`;
+  if (d.minutes == null || !Number.isFinite(d.minutes)) return head;
+  // Powyżej godziny „95 min” nic technikowi nie mówi — `fmtMinutes` daje
+  // „1 godz. 35 min” (ten sam format, co w kalendarzu).
+  const mins = Math.max(1, Math.round(d.minutes));
+  return `${head} · ${d.minutesEstimated ? "≈" : "ok."} ${fmtMinutes(mins)}`;
 }

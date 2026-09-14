@@ -722,6 +722,13 @@
       "when": 1789300010000,
       "tag": "0102_protocol_note",
       "breakpoints": true
+    },
+    {
+      "idx": 103,
+      "version": "6",
+      "when": 1789300011000,
+      "tag": "0103_push_subscriptions",
+      "breakpoints": true
     }
   ]
 }

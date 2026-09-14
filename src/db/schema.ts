@@ -3862,3 +3862,48 @@ export const linkPreviews = sqliteTable("link_previews", {
 
 export type LinkPreviewRow = typeof linkPreviews.$inferSelect;
 export type NewLinkPreviewRow = typeof linkPreviews.$inferInsert;
+
+/**
+ * Subskrypcje Web Push — na razie wyłącznie panel technika (`/technik`).
+ *
+ * Jeden wiersz = jedna instalacja przeglądarki/PWA jednego użytkownika.
+ * Tożsamością jest `endpoint` (adres push service), nie para user+urządzenie:
+ * ta sama osoba ma osobne subskrypcje na tablecie i na telefonie, a ponowne
+ * `subscribe()` na tym samym urządzeniu zwraca ten sam endpoint — dlatego zapis
+ * to upsert po `endpoint` (UNIQUE), a nie ślepy INSERT.
+ *
+ * `p256dh` + `auth` to klucze szyfrowania ładunku (Base64URL) wystawione przez
+ * przeglądarkę; bez nich nie da się wysłać nic poza pustym „tickle”.
+ *
+ * Sprzątanie: 404/410 z push service = subskrypcja wygasła → wiersz kasujemy
+ * przy wysyłce (`src/lib/push.ts`). Inne błędy tylko podbijają `failures`.
+ */
+export const pushSubscriptions = sqliteTable(
+  "push_subscriptions",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    userId: integer("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    /** Adres push service danej przeglądarki — klucz tożsamości subskrypcji. */
+    endpoint: text("endpoint").notNull(),
+    p256dh: text("p256dh").notNull(),
+    auth: text("auth").notNull(),
+    /** Do rozpoznania urządzenia w panelu („iPad, Safari”); wyłącznie informacyjne. */
+    userAgent: text("user_agent"),
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+    /** Ostatnia UDANA wysyłka — po niej widać, czy tablet jeszcze żyje. */
+    lastUsedAt: text("last_used_at"),
+    /** Nieudane próby inne niż 404/410 (te kasują wiersz od razu). */
+    failures: integer("failures").default(0).notNull(),
+  },
+  (t) => ({
+    endpointIdx: uniqueIndex("push_subscriptions_endpoint_uidx").on(t.endpoint),
+    userIdx: index("push_subscriptions_user_idx").on(t.userId),
+  })
+);
+
+export type PushSubscriptionRow = typeof pushSubscriptions.$inferSelect;
+export type NewPushSubscriptionRow = typeof pushSubscriptions.$inferInsert;

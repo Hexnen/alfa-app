@@ -25,13 +25,14 @@ const NAV_ITEMS: NavItem[] = [
   },
 ];
 
-/** Tytuł górnego paska dla tras, które nie ustawiają własnego. */
-const ROUTE_TITLES: [RegExp, string][] = [
-  [/^\/technik\/?$/, "Dziś"],
-  [/^\/technik\/nadchodzace/, "Nadchodzące"],
-  [/^\/technik\/co-nowego/, "Co nowego"],
-  [/^\/technik\/wiecej/, "Więcej"],
-];
+/**
+ * Tytuł górnego paska — WYŁĄCZNIE dla podstron bez własnej zakładki.
+ *
+ * Ekrany zakładek (Dziś / Nadchodzące / Więcej) nagłówka nie dostają: nazwa
+ * stoi już podświetlona w dolnym tab barze, a powtórzona u góry zjadała
+ * 48 px ekranu, żeby powiedzieć to samo drugi raz.
+ */
+const ROUTE_TITLES: [RegExp, string][] = [[/^\/technik\/co-nowego/, "Co nowego"]];
 
 /**
  * Cel strzałki „wstecz” — konkretna ścieżka, a nie `history.back()`: do
@@ -43,15 +44,23 @@ const ROUTE_BACK: [RegExp, string][] = [[/^\/technik\/co-nowego/, "/technik/wiec
 /**
  * POWŁOKA PANELU.
  *
- * Górny pasek 48 px + treść `max-w-3xl` + dolny tab bar 56 px. Szerokość jest
- * ograniczona celowo: na tablecie w poziomie (1180 px) rozciągnięta karta
- * zlecenia rozjeżdżała godzinę i przycisk na pół metra pustego miejsca, a to
- * jest lista czytana z góry na dół, nie tabela.
+ * Treść `max-w-3xl` + dolny tab bar 56 px. Szerokość jest ograniczona celowo:
+ * na tablecie w poziomie (1180 px) rozciągnięta karta zlecenia rozjeżdżała
+ * godzinę i przycisk na pół metra pustego miejsca, a to jest lista czytana
+ * z góry na dół, nie tabela.
  *
- * Ekrany szczegółu niosą WŁASNY sticky nagłówek (typ, godzina, status) i
- * własny pasek akcji, więc powłoka nie dubluje im chromu. Protokół idzie
- * dodatkowo bez tab bara: to formularz wypełniany u klienta i każdy piksel
- * nad klawiaturą jest tam wart więcej niż skrót do „Dziś”.
+ * GÓRNEGO PASKA NIE MA TAM, GDZIE NIE NIESIE TREŚCI. Zostaje wyłącznie na
+ * podstronach bez własnej zakładki (dziś: „Co nowego”) — tam jest jedyną drogą
+ * powrotną. Ekrany zakładek go nie mają, bo dublował tab bar; ekrany szczegółu
+ * (zlecenie, protokół) niosą WŁASNY sticky nagłówek z typem, godziną i statusem.
+ *
+ * Bez górnego paska treść dotyka krawędzi ekranu, a w trybie standalone PWA
+ * stoi tam pasek stanu iPada / notch — stąd `pt-safe-3` (odstęp + bezpieczny
+ * obszar w jednej deklaracji, patrz technik.css). Ekrany z własnym nagłówkiem
+ * mają `pt-safe` w nim samym i drugi raz go nie potrzebują.
+ *
+ * Protokół idzie dodatkowo bez tab bara: to formularz wypełniany u klienta
+ * i każdy piksel nad klawiaturą jest tam wart więcej niż skrót do „Dziś”.
  */
 export function TechnikShell({ children }: { children: ReactNode }) {
   const { pathname } = useLocation();
@@ -59,20 +68,22 @@ export function TechnikShell({ children }: { children: ReactNode }) {
   // Wysokość klawiatury → `--kb` (sticky paski akcji, FAB, toasty).
   useKeyboardVar();
 
-  const bare = /^\/technik\/zlecenie\//.test(pathname);
+  const ownHeader = /^\/technik\/zlecenie\//.test(pathname);
   const nav = !/\/protokol\/?$/.test(pathname);
 
-  const title = ROUTE_TITLES.find(([re]) => re.test(pathname))?.[1] ?? "Panel technika";
+  const title = ROUTE_TITLES.find(([re]) => re.test(pathname))?.[1];
   const back = ROUTE_BACK.find(([re]) => re.test(pathname))?.[1];
+  const topBar = !ownHeader && title != null;
 
   return (
     <div className="min-h-dvh bg-background">
-      {!bare && <TopBar title={title} back={back} />}
+      {topBar && <TopBar title={title} back={back} />}
 
       <main
         className={cn(
           "mx-auto w-full max-w-3xl px-4",
-          bare ? "pt-0" : "pt-3",
+          // Nagłówek (własny albo `TopBar`) niesie już `pt-safe`.
+          ownHeader ? "pt-0" : topBar ? "pt-3" : "pt-safe-3",
           // Miejsce na tab bar (56 px) + bezpieczny obszar.
           nav ? "pb-[calc(3.5rem+1.5rem+env(safe-area-inset-bottom,0px))]" : "pb-6",
         )}

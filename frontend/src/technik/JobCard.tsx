@@ -1,6 +1,9 @@
 import { Link } from "react-router-dom";
 import { ChevronRight, FileText, MapPin, Users } from "lucide-react";
-import type { TechnikJob } from "@/lib/api";
+import type { TechnikJob, WeatherBrief } from "@/lib/api";
+// Ten sam znacznik co na kafelku kalendarza (ikona WMO + temperatura) — jedna
+// mapa kodów i jedna paleta dla biura i dla tabletu, bez kopii w panelu.
+import { WeatherMark } from "@/components/CalendarWeather";
 import { cn } from "@/lib/utils";
 import { timeOf } from "./lib/dates";
 import {
@@ -24,7 +27,16 @@ import {
  * Poniżej `sm` karta jest dwuwierszowa: na 390 px z „Centrum Handlowe…”
  * zostawało „Centr…”, gdy w tym samym wierszu stała jeszcze pigułka.
  */
-export function JobCard({ job, className }: { job: TechnikJob; className?: string }) {
+export function JobCard({
+  job,
+  weather,
+  className,
+}: {
+  job: TechnikJob;
+  /** Skrót pogody dnia zlecenia; `null`/brak = nie renderujemy nic. */
+  weather?: WeatherBrief | null;
+  className?: string;
+}) {
   const state = jobStateOf(job);
   const title = job.objectName || job.title;
   // Typ ma już swój chip z ikoną, więc w linii adresu nie powtarzamy etykiety.
@@ -118,6 +130,11 @@ export function JobCard({ job, className }: { job: TechnikJob; className?: strin
             <MapPin className="h-3.5 w-3.5 shrink-0" aria-hidden />
             {meta}
           </div>
+
+          {/* Pogoda tuż przed pigułką statusu: `shrink-0` + `whitespace-nowrap`
+              pigułki trzymają wiersz w całości nawet na 390 px — adres obok
+              i tak się ucina, a ikona z temperaturą to ~34 px. */}
+          <WeatherMark brief={weather} compact />
 
           <span
             className={cn(

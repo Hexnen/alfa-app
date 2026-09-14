@@ -70,6 +70,21 @@
   margin-bottom: env(safe-area-inset-bottom, 0px);
 }
 
+/* Ekrany zakładek (Dziś / Nadchodzące / Więcej) nie mają górnego paska, więc
+   treść zaczyna się przy samej krawędzi — a w trybie standalone PWA na iPadzie
+   i telefonie z notchem tam stoi pasek stanu. Zwykły `pt-3` obok `pt-safe` nie
+   zadziała (obie reguły ustawiają `padding-top`, wygrywa bardziej szczegółowa),
+   dlatego odstęp i bezpieczny obszar są sumowane w jednej klasie. */
+.technik-root .pt-safe-3 {
+  padding-top: calc(0.75rem + env(safe-area-inset-top, 0px));
+}
+
+/* Sticky element przyklejany do górnej krawędzi bezpiecznego obszaru — na
+   ekranach zakładek nie ma już paska 48 px, pod którym można by go schować. */
+.technik-root .top-safe {
+  top: env(safe-area-inset-top, 0px);
+}
+
 /* Sticky pasek akcji unoszony nad klawiaturę: Safari nie zna
    `interactive-widget`, więc wysokość liczy `lib/keyboard.ts` → `--kb`. */
 .technik-root .bottom-kb {

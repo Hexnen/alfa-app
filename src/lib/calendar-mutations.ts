@@ -8,7 +8,7 @@
  * better-sqlite3 jest synchroniczny — wszystkie funkcje są synchroniczne i rzucają ApiError.
  */
 import { and, asc, eq, gt, inArray, isNotNull, isNull, ne, sql } from "drizzle-orm";
-import { schema } from "../db/index.js";
+import { db, schema } from "../db/index.js";
 import {
   CALENDAR_EVENT_TYPES,
   CALENDAR_EVENT_STATUSES,
@@ -33,7 +33,8 @@ import { briefTextOf, noteEventLinks, noteOfRow, noteWithAttachments, type Note 
 import type { MsgMail } from "./outlook-msg.js";
 import { attachmentOfRow, type StoredAttachment } from "./calendar-attachments.js";
 import { expandOccurrences, describeRule, shiftLocal, diffMinutes, type RecurrenceRule } from "./calendar-recurrence.js";
-import { ApiError, BILLING_HIDDEN_TYPES, BILLING_LABELS, STATUS_LABELS, TYPE_LABELS } from "./calendar-labels.js";
+import { ApiError, BILLING_HIDDEN_TYPES, BILLING_LABELS, PROTOCOL_TYPES, STATUS_LABELS, TYPE_LABELS } from "./calendar-labels.js";
+import { queueTechnicianPush } from "./push.js";
 import { mentionKeys } from "./note-mentions.js";
 import { leadTitleById, touchLead } from "./sales-leads.js";
 import { zonedToday } from "./tz.js";
@@ -505,7 +506,7 @@ function syncTechnicians(tx: Tx, ev: CalendarEventRow, technicianIds: number[], 
     tx.insert(schema.calendarEventAssignees).values({ eventId: ev.id, technicianId: id }).run();
     logActivity(tx, { ...base, action: "assigned", field: "technician", oldValue: null, newValue: id, summary: `Przypisano technika: ${techNameById(tx, id)}` });
   }
-  return { added: toAdd.length, removed: toRemove.length };
+  return { added: toAdd, removed: toRemove };
 }
 
 /** To samo dla handlowców — osobna tabela, ten sam dziennik (assigned/unassigned). */
@@ -527,10 +528,14 @@ function syncSalespeople(tx: Tx, ev: CalendarEventRow, salespersonIds: number[],
   return { added: toAdd.length, removed: toRemove.length };
 }
 
-/** Przypisania obu rodzajów — wołane z jednego miejsca, żeby żadne nie umknęło. */
-function syncAssignees(tx: Tx, ev: CalendarEventRow, input: Pick<ParsedInput, "technicianIds" | "salespersonIds">, ctx: MutationCtx) {
-  syncTechnicians(tx, ev, input.technicianIds, ctx);
+/**
+ * Przypisania obu rodzajów — wołane z jednego miejsca, żeby żadne nie umknęło.
+ * Zwraca id DOPISANYCH techników: to oni dostaną push „Nowe zlecenie”.
+ */
+function syncAssignees(tx: Tx, ev: CalendarEventRow, input: Pick<ParsedInput, "technicianIds" | "salespersonIds">, ctx: MutationCtx): { addedTechnicianIds: number[] } {
+  const tech = syncTechnicians(tx, ev, input.technicianIds, ctx);
   syncSalespeople(tx, ev, input.salespersonIds, ctx);
+  return { addedTechnicianIds: tech.added };
 }
 
 /** Loguje diff pól (bez dat i bez statusu — te mają własne akcje) + moved + status_changed. */
@@ -586,6 +591,126 @@ function logEventDiff(tx: Tx, before: CalendarEventRow, after: CalendarEventRow,
 
 export function getEventRow(dbx: DbOrTx, id: number): CalendarEventRow | undefined {
   return dbx.select().from(schema.calendarEvents).where(eq(schema.calendarEvents.id, id)).get();
+}
+
+// ---------------------------------------------------------------------------
+// PUSH DO PANELU TECHNIKA
+//
+// Zlecenie dorzucone na dziś po południu ma dojść do technika, zanim on sam
+// otworzy panel. Zgłoszenia idą przez `queueTechnicianPush` — synchronicznie,
+// bez I/O, a faktyczna wysyłka leci dopiero po zamknięciu transakcji
+// (src/lib/push.ts). Ani jeden z tych wywołań nie ma prawa opóźnić ani wywalić
+// mutacji kalendarza.
+//
+// CO WYSYŁAMY. Tylko to, co dla technika jest ZLECENIEM: dział techniczny
+// i typy objęte protokołem (serwis, montaż, demontaż, konserwacja, wizja).
+// Biuro, przygotowanie, urlopy, kafelki notatek i cały dział handlowy — nie.
+//
+// KOMU NIE WYSYŁAMY. Osobie, która sama tę zmianę zrobiła: technik klikający
+// „Zakończ" w panelu nie ma dostawać powiadomienia o własnym kliknięciu
+// (`excludeUserId` = `ctx.user.id`).
+// ---------------------------------------------------------------------------
+
+/** Typy, które w panelu technika są „zleceniem”. */
+const PUSH_TYPES = PROTOCOL_TYPES;
+
+/** Czy o tym wydarzeniu w ogóle powiadamiamy. */
+function isPushableEvent(ev: Pick<CalendarEventRow, "department" | "type">): boolean {
+  return ev.department === "technical" && PUSH_TYPES.includes(ev.type);
+}
+
+/**
+ * „dziś 09:00" / „jutro 09:00" / „12.11 09:00". Powiadomienie czyta się z
+ * ekranu blokady jednym rzutem oka — pełna data jest tam szumem, dopóki termin
+ * mieści się w najbliższych dniach.
+ */
+function pushWhenLabel(startAt: string, allDay: boolean): string {
+  const day = startAt.slice(0, 10);
+  const today = zonedToday();
+  const tomorrow = shiftLocal(`${today}T00:00`, 24 * 60, false).slice(0, 10);
+  const dayLabel = day === today ? "dziś" : day === tomorrow ? "jutro" : fmtDate(day);
+  return allDay ? `${dayLabel} (cały dzień)` : `${dayLabel} ${startAt.slice(11, 16)}`;
+}
+
+/** „Serwis — Magazyn Sp. z o.o., jutro 09:00” — treść powiadomienia bez tytułu. */
+function pushBody(dbx: DbOrTx, ev: CalendarEventRow): string {
+  const where = ev.objectId != null ? objectNameById(dbx, ev.objectId) : ev.location || ev.title;
+  return `${TYPE_LABELS[ev.type]} — ${where}, ${pushWhenLabel(ev.startAt, ev.allDay)}`;
+}
+
+type PushKind = "new" | "moved" | "cancelled";
+
+const PUSH_TITLES: Record<PushKind, string> = {
+  new: "Nowe zlecenie",
+  moved: "Zmiana terminu",
+  cancelled: "Zlecenie odwołane",
+};
+
+/**
+ * Zgłasza jedno powiadomienie. `guard` sprawdza stan JUŻ PO commicie — gdyby
+ * transakcja się wycofała, alert o nieistniejącej zmianie nigdy nie wyjdzie.
+ */
+function queueJobPush(
+  dbx: DbOrTx,
+  kind: PushKind,
+  ev: CalendarEventRow,
+  technicianIds: number[],
+  ctx: MutationCtx
+): void {
+  if (technicianIds.length === 0 || !isPushableEvent(ev)) return;
+  const body = pushBody(dbx, ev);
+  const eventId = ev.id;
+  queueTechnicianPush(
+    technicianIds,
+    {
+      title: PUSH_TITLES[kind],
+      body,
+      url: `/technik/zlecenie/${eventId}`,
+      // Jeden tag na zlecenie: kolejne zmiany terminu podmieniają poprzednie
+      // powiadomienie zamiast dokładać nowe.
+      tag: `job-${eventId}`,
+    },
+    {
+      excludeUserId: ctx.user.id,
+      guard: () => {
+        const row = getEventRow(db, eventId);
+        if (!row) return false;
+        return kind === "cancelled"
+          ? row.deletedAt != null || row.status === "cancelled"
+          : row.deletedAt == null && row.status !== "cancelled";
+      },
+    }
+  );
+}
+
+/**
+ * Wspólne rozstrzygnięcie „co się właściwie stało" dla ścieżek edycji
+ * (PUT, drag&drop, Rozpocznij/Zakończ). Kolejność ma znaczenie: odwołanie
+ * zjada wszystko inne — nikt nie chce dostać „Nowe zlecenie" o czymś, co tą
+ * samą zmianą zostało anulowane.
+ */
+function queueEventChangePush(
+  dbx: DbOrTx,
+  before: CalendarEventRow,
+  after: CalendarEventRow,
+  addedTechnicianIds: number[],
+  ctx: MutationCtx
+): void {
+  if (!isPushableEvent(after)) return;
+  const assignees = currentAssignees(dbx, after.id);
+  if (assignees.length === 0) return;
+
+  if (after.status === "cancelled" && before.status !== "cancelled") {
+    queueJobPush(dbx, "cancelled", after, assignees, ctx);
+    return;
+  }
+  // Dopisani do zlecenia widzą je pierwszy raz — dla nich to nowe zlecenie,
+  // niezależnie od tego, czy przy okazji ruszył się termin.
+  queueJobPush(dbx, "new", after, addedTechnicianIds, ctx);
+  if (before.startAt !== after.startAt) {
+    const rest = assignees.filter((id) => !addedTechnicianIds.includes(id));
+    queueJobPush(dbx, "moved", after, rest, ctx);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -835,7 +960,9 @@ function applyUpdate(
     .returning()
     .get();
   logEventDiff(tx, row, after, ctx);
-  syncAssignees(tx, after, input, ctx);
+  const { addedTechnicianIds } = syncAssignees(tx, after, input, ctx);
+  // Push do panelu technika: nowo dopisani, przesunięty termin, odwołanie.
+  queueEventChangePush(tx, row, after, addedTechnicianIds, ctx);
   // Realizacje: utworzenie / synchronizacja / odpięcie wg ustawień (calendar-realizations.ts).
   // `row` (stan sprzed) pozwala wykryć przejście statusu na „wykonane” → wstępne podliczenie.
   onEventUpdated(tx, after, ctx, row);
@@ -938,6 +1065,8 @@ export function createEvent(tx: Tx, input: ParsedInput, ctx: MutationCtx): { fir
     });
     // Realizacja + protokół dla typów objętych (wg ustawień calendar.*).
     onEventCreated(tx, ev, ctx);
+    // Push „Nowe zlecenie" do przypisanych techników (poza autorem zmiany).
+    queueJobPush(tx, "new", ev, input.technicianIds, ctx);
     // Zaplanowana aktywność to ruch na szansie — reguła „zawsze następna aktywność”.
     touchLead(tx, ev.leadId);
     ids.push(ev.id);
@@ -1028,6 +1157,8 @@ export function moveEvent(tx: Tx, id: number, body: Record<string, unknown>, ctx
     .returning()
     .get();
   logEventDiff(tx, row, after, ctx);
+  // Drag&drop w kalendarzu biura = „Zmiana terminu" na tablecie technika.
+  queueEventChangePush(tx, row, after, [], ctx);
   onEventUpdated(tx, after, ctx, row);
   touchLead(tx, after.leadId);
   return after;
@@ -1083,6 +1214,9 @@ export function setEventProgress(
     .returning()
     .get();
   logEventDiff(tx, row, after, ctx);
+  // Praktycznie zawsze to sam technik z panelu (a jego `excludeUserId` odcina),
+  // ale odwołanie zlecenia z tej ścieżki ma dojść do POZOSTAŁYCH z ekipy.
+  queueEventChangePush(tx, row, after, [], ctx);
   onEventUpdated(tx, after, ctx, row);
   touchLead(tx, after.leadId);
   return after;
@@ -1103,6 +1237,9 @@ export function deleteEvent(tx: Tx, id: number, scope: Scope, ctx: MutationCtx):
       entityType: CALENDAR_ENTITY, entityId: t.id, objectId: t.objectId, user: ctx.user, summarySuffix: ctx.summarySuffix, action: "deleted",
       summary: `Usunięto wydarzenie „${t.title}” (${fmtDate(t.startAt)})${scope !== "this" ? ` — zakres: ${scope === "all" ? "cała seria" : "to i kolejne"}` : ""}`,
     });
+    // Push „Zlecenie odwołane" — usunięcie z kalendarza biura wygląda z tabletu
+    // dokładnie tak samo jak odwołanie i musi dojść zanim ekipa wyjedzie.
+    queueJobPush(tx, "cancelled", t, currentAssignees(tx, t.id), ctx);
     // Realizacja „nietknięta” znika razem z wydarzeniem; z kwotami/podpisem zostaje z adnotacją.
     onEventDeleted(tx, t, ctx);
     // Skasowanie jedynej przyszłej aktywności zapala szansie „Brak następnej aktywności”.

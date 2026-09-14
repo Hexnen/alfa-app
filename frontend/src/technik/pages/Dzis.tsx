@@ -7,6 +7,7 @@ import { JobCard } from "../JobCard";
 import { addDays, formatDayTitle, todayIso } from "../lib/dates";
 import { jobStateOf } from "../lib/jobs";
 import { useJobs } from "../lib/useJobs";
+import { useWeather } from "../lib/useWeather";
 import { useTechnikMe } from "../lib/me";
 import { useSwipeDay } from "../lib/use-swipe-day";
 
@@ -24,6 +25,8 @@ export function Dzis() {
   const today = todayIso();
   const [date, setDate] = useState(today);
   const { jobs, loading, error } = useJobs(date, addDays(date, 1));
+  // Jeden batch pogody na dzień — karty dostają gotowy skrót, nie pytają same.
+  const weather = useWeather(jobs);
   const { me } = useTechnikMe();
 
   const swipeRef = useSwipeDay<HTMLDivElement>(
@@ -106,10 +109,10 @@ export function Dzis() {
       ) : (
         <ul className="space-y-2">
           {running.map((j) => (
-            <JobCard key={j.id} job={j} />
+            <JobCard key={j.id} job={j} weather={weather[j.id]} />
           ))}
           {rest.map((j) => (
-            <JobCard key={j.id} job={j} />
+            <JobCard key={j.id} job={j} weather={weather[j.id]} />
           ))}
         </ul>
       )}

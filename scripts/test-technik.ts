@@ -30,6 +30,9 @@ import calendarRoutes from "../src/routes/calendar.js";
 import adminRoutes from "../src/routes/admin.js";
 import adminTechnikRoutes from "../src/routes/admin-technik.js";
 import { TECHNIK_ACTIVITIES_KEY } from "../src/lib/technik-config.js";
+import { createEvent, deleteEvent, moveEvent, parseInput } from "../src/lib/calendar-mutations.js";
+import { flushPush, setPushTransport, type PushPayload } from "../src/lib/push.js";
+import { deleteSetting, getSetting, setSetting } from "../src/lib/settings.js";
 import { tabPermissionGuard, technikRoleGuard } from "../src/middleware/auth.js";
 import type { PermissionMap } from "../src/lib/auth/permissions.js";
 import type { User } from "../src/db/schema.js";
@@ -118,6 +121,9 @@ function cleanup(): number {
   db.delete(schema.contractors).where(like(schema.contractors.name, `${PREFIX}%`)).run();
   for (const u of db.select().from(schema.users).where(like(schema.users.email, `${PREFIX}%`)).all()) {
     db.delete(schema.sessions).where(eq(schema.sessions.userId, u.id)).run();
+    // Subskrypcje push wiszą na koncie przez ON DELETE CASCADE, ale kasujemy je
+    // jawnie — skrypt musi sprzątać także wtedy, gdy klucze obce są wyłączone.
+    db.delete(schema.pushSubscriptions).where(eq(schema.pushSubscriptions.userId, u.id)).run();
   }
   db.delete(schema.users).where(like(schema.users.email, `${PREFIX}%`)).run();
   return eventIds.length;
@@ -258,6 +264,57 @@ function restoreActivitiesSetting() {
   db.delete(schema.activityLog)
     .where(and(eq(schema.activityLog.entityType, "app_settings"), eq(schema.activityLog.field, TECHNIK_ACTIVITIES_KEY)))
     .run();
+}
+
+/**
+ * Dystans z czasem przejazdu testujemy BEZ SIECI: biuro dostaje współrzędne
+ * wprost, a `company.km_source` na czas testu to „linia prosta” (OSRM wyszedłby
+ * do internetu). Ustawienia firmy są wspólne dla całej aplikacji — zapamiętujemy
+ * je tak samo jak słownik czynności i oddajemy w finally.
+ */
+const COMPANY_KEYS = ["company.office_lat", "company.office_lng", "company.km_source"] as const;
+const companyBefore = new Map<string, string | null>(COMPANY_KEYS.map((k) => [k, getSetting(k)]));
+
+function restoreCompanySettings() {
+  for (const [key, value] of companyBefore) {
+    if (value === null) deleteSetting(key);
+    else setSetting(key, value, null);
+  }
+}
+
+/**
+ * Klucz publiczny VAPID do testów. Prawdziwa para nie jest tu do niczego
+ * potrzebna — wysyłka idzie przez podstawiony transport, a klucz sprawdzamy
+ * tylko jako wartość przepisywaną z env do odpowiedzi `push/config`.
+ */
+const TEST_VAPID_PUBLIC = "BHeY6wM8hTPdvjAOacOvbuZJsf5gHibjKgRLKgY-NpO0EidxCWVeMaKrNszZrGXftTHjjKSrqs34tAgYgTOsBzo";
+
+/** Klucze VAPID sprzed testu — skrypt na prawdziwej bazie nie może zmienić env procesu na trwałe. */
+const pushEnvBefore = {
+  VAPID_PUBLIC_KEY: process.env.VAPID_PUBLIC_KEY,
+  VAPID_PRIVATE_KEY: process.env.VAPID_PRIVATE_KEY,
+  VAPID_SUBJECT: process.env.VAPID_SUBJECT,
+};
+
+function restorePushEnv() {
+  for (const [k, v] of Object.entries(pushEnvBefore)) {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+}
+
+// Skrypt uruchamiany lokalnie mógłby mieć klucze z `.env` — sekcja push ma
+// zaczynać od stanu „push wyłączony", niezależnie od środowiska.
+delete process.env.VAPID_PUBLIC_KEY;
+delete process.env.VAPID_PRIVATE_KEY;
+
+/** Subskrypcje push danego konta. */
+function subsOf(userId: number) {
+  return db
+    .select()
+    .from(schema.pushSubscriptions)
+    .where(eq(schema.pushSubscriptions.userId, userId))
+    .all();
 }
 
 const contractor = db
@@ -644,11 +701,281 @@ try {
     afterSign[0].text.includes("podpisany") && afterSign[0].text.includes("Anna Odbierająca"),
     afterSign[0]?.text
   );
+
+  // =========================================================================
+  // 14. Pogoda (batch) — cudze id odfiltrowane, brak sieci to nie 500
+  //
+  // `GEO_OFFLINE=1` na czas sekcji: trasa ma działać bez internetu i bez
+  // sekundowej kolejki geokodera. Obiekt testowy nie ma jeszcze współrzędnych,
+  // więc każdy skrót wraca jako `null` — i to jest poprawna odpowiedź, nie błąd.
+  // =========================================================================
+  const weatherJob = insertEvent({
+    title: "Pogoda jutro",
+    type: "serwis",
+    technicianIds: [tech.id],
+    hour: 8,
+    day: FUTURE_DAY,
+  });
+
+  const itemsOf = (r: { data?: unknown }) =>
+    ((r.data as { items?: Record<string, unknown> } | undefined)?.items ?? {}) as Record<string, unknown>;
+
+  process.env.GEO_OFFLINE = "1";
+  const wx = await T("GET", `/jobs/weather?ids=${weatherJob},${job},${otherJob}`);
+  const wxItems = itemsOf(wx);
+  ok(
+    "pogoda: batch → 200 z mapą items i listą retry",
+    wx.status === 200 &&
+      wx.success === true &&
+      Array.isArray((wx.data as { retry?: unknown })?.retry),
+    wx
+  );
+  ok(
+    "pogoda: moje zlecenia w items, cudze odfiltrowane",
+    String(weatherJob) in wxItems && String(job) in wxItems && !(String(otherJob) in wxItems),
+    Object.keys(wxItems)
+  );
+  ok(
+    "pogoda: brak współrzędnych i brak sieci → same null (nie 500)",
+    Object.values(wxItems).every((v) => v === null),
+    wxItems
+  );
+
+  const wxOther = await T("GET", `/jobs/weather?ids=${otherJob}`);
+  ok(
+    "pogoda: same cudze id → pusta mapa w 200",
+    wxOther.status === 200 && Object.keys(itemsOf(wxOther)).length === 0,
+    wxOther
+  );
+  // Gdyby `/jobs/weather` wpadło w `/jobs/:id`, dostalibyśmy 400 „Nieprawidłowe id”.
+  ok("pogoda: trasa nie wpada w /jobs/:id (nie 400)", wxOther.status !== 400, wxOther.status);
+
+  const wxNoIds = await T("GET", "/jobs/weather");
+  ok(
+    "pogoda: bez parametru ids → pusta mapa w 200",
+    wxNoIds.status === 200 && Object.keys(itemsOf(wxNoIds)).length === 0,
+    wxNoIds
+  );
+  const wxBadIds = await T("GET", "/jobs/weather?ids=abc,-5,0");
+  ok(
+    "pogoda: śmieci w ids → pusta mapa w 200",
+    wxBadIds.status === 200 && Object.keys(itemsOf(wxBadIds)).length === 0,
+    wxBadIds
+  );
+  const wxUnlinked = await N("GET", `/jobs/weather?ids=${weatherJob}`);
+  ok(
+    "pogoda: konto bez powiązania → pusta mapa w 200",
+    wxUnlinked.status === 200 && Object.keys(itemsOf(wxUnlinked)).length === 0,
+    wxUnlinked
+  );
+  ok(
+    "pogoda: konto bez klucza `technik` → 403 (strażnik zakładki)",
+    (await K("GET", `/jobs/weather?ids=${weatherJob}`)).status === 403
+  );
+
+  // =========================================================================
+  // 15. Dystans niesie też czas przejazdu (linijka pod „Nawiguj”)
+  //
+  // Wszystko liczone offline: biuro ze współrzędnych w ustawieniach, obiekt ze
+  // swoich kolumn lat/lng, `km_source = straight` (bez OSRM). Czas jest wtedy
+  // z szacunku, więc `minutesEstimated` MUSI być true — front pokazuje „≈”.
+  // =========================================================================
+  setSetting("company.office_lat", "52.4064", null);
+  setSetting("company.office_lng", "16.9252", null);
+  setSetting("company.km_source", "straight", null);
+  db.update(schema.objects)
+    .set({ latitude: 52.3500, longitude: 17.0500 })
+    .where(eq(schema.objects.id, object.id))
+    .run();
+
+  const dist2 = await T("GET", `/jobs/${job}/distance`);
+  const d2 = dist2.data as {
+    km: number | null;
+    minutes?: number;
+    minutesEstimated?: boolean;
+    method?: string;
+  };
+  ok(
+    "dystans: km i czas przejazdu w jednej odpowiedzi",
+    dist2.status === 200 && typeof d2?.km === "number" && typeof d2?.minutes === "number" && d2.minutes > 0,
+    dist2
+  );
+  ok(
+    "dystans: czas z szacunku (linia prosta) oznaczony jako przybliżony",
+    d2?.minutesEstimated === true && d2?.method === "straight",
+    d2
+  );
+  delete process.env.GEO_OFFLINE;
+
+  // =========================================================================
+  // 16. POWIADOMIENIA PUSH — subskrypcje i kto dostaje ładunek
+  //
+  // Wysyłka idzie przez WSTRZYKNIĘTY transport (`setPushTransport`): prawdziwy
+  // strzał wymagałby push service Google/Mozilli i sieci, a sprawdzić chcemy
+  // nie szyfrowanie, tylko REGUŁY — kto dostaje powiadomienie, o czym i z jakim
+  // adresem. Klucze VAPID podstawiamy w env na czas tej sekcji, bo bez nich
+  // moduł jest (celowo) no-opem.
+  // =========================================================================
+  const cfgNoKeys = await T("GET", "/push/config");
+  ok(
+    "push/config: bez kluczy VAPID → enabled:false i brak klucza publicznego",
+    cfgNoKeys.status === 200 &&
+      (cfgNoKeys.data as { enabled: boolean; publicKey: string | null })?.enabled === false &&
+      (cfgNoKeys.data as { publicKey: string | null })?.publicKey === null,
+    cfgNoKeys
+  );
+
+  const SUB_A = {
+    endpoint: "https://push.example.invalid/__TECHNIK_TEST__/a",
+    keys: { p256dh: "BFakeP256dhKeyForTests0000000000", auth: "FakeAuthSecret00" },
+  };
+  const SUB_B = {
+    endpoint: "https://push.example.invalid/__TECHNIK_TEST__/b",
+    keys: { p256dh: "BFakeP256dhKeyForTests1111111111", auth: "FakeAuthSecret11" },
+  };
+
+  ok(
+    "push/subscribe: bez kluczy na serwerze → 503, nie cichy zapis w próżnię",
+    (await T("POST", "/push/subscribe", SUB_A)).status === 503
+  );
+
+  process.env.VAPID_PUBLIC_KEY = TEST_VAPID_PUBLIC;
+  process.env.VAPID_PRIVATE_KEY = "0bw6pjCvok_06kE6DrpV2AclukIo2cHuLjXW5rqrwE0";
+  process.env.VAPID_SUBJECT = "mailto:test@example.invalid";
+
+  const cfgKeys = await T("GET", "/push/config");
+  ok(
+    "push/config: z kluczami → enabled:true i klucz publiczny do subscribe()",
+    cfgKeys.status === 200 &&
+      (cfgKeys.data as { enabled: boolean; publicKey: string })?.enabled === true &&
+      (cfgKeys.data as { publicKey: string })?.publicKey === TEST_VAPID_PUBLIC,
+    cfgKeys
+  );
+
+  ok("push/subscribe: zapis → 201", (await T("POST", "/push/subscribe", SUB_A)).status === 201);
+  await T("POST", "/push/subscribe", { ...SUB_A, keys: { ...SUB_A.keys, auth: "RotatedAuth000" } });
+  const mine = subsOf(techUser.id);
+  ok(
+    "push/subscribe: ten sam endpoint drugi raz → UPSERT, nie duplikat",
+    mine.length === 1 && mine[0].auth === "RotatedAuth000",
+    mine
+  );
+
+  ok("push/subscribe: drugie konto zapisuje własny endpoint", (await O("POST", "/push/subscribe", SUB_B)).status === 201);
+  const foreign = await T("DELETE", "/push/subscribe", { endpoint: SUB_B.endpoint });
+  ok(
+    "push/subscribe DELETE: cudzej subskrypcji nie da się skasować",
+    foreign.status === 200 &&
+      (foreign.data as { removed: boolean })?.removed === false &&
+      subsOf(otherUser.id).length === 1,
+    foreign
+  );
+
+  // --- Kto dostaje ładunek -------------------------------------------------
+  const sent: PushPayload[] = [];
+  const restoreTransport = setPushTransport(async (_target, payload) => {
+    sent.push(payload);
+  });
+  try {
+    const pushEventId = db.transaction((tx) =>
+      createEvent(
+        tx,
+        parseInput({
+          type: "serwis",
+          title: `${PREFIX} Push nowe zlecenie`,
+          department: "technical",
+          startAt: `${FUTURE_DAY}T09:00`,
+          endAt: `${FUTURE_DAY}T10:00`,
+          objectId: object.id,
+          technicianIds: [tech.id],
+        }),
+        { user: adminUser }
+      ).firstId
+    );
+    await flushPush();
+    ok(
+      "push: nowe zlecenie z przypisanym technikiem → 1 ładunek z adresem zlecenia",
+      sent.length === 1 &&
+        sent[0].title === "Nowe zlecenie" &&
+        sent[0].url === `/technik/zlecenie/${pushEventId}` &&
+        sent[0].body.startsWith("Serwis — "),
+      sent
+    );
+
+    // Zmiana robiona Z PANELU przez samego technika nie ma prawa wrócić do
+    // niego powiadomieniem — to jego własne kliknięcie.
+    sent.length = 0;
+    await T("POST", `/jobs/${pushEventId}/start`);
+    await T("POST", `/jobs/${pushEventId}/finish`);
+    await flushPush();
+    ok("push: zmiana z panelu przez samego technika → 0 ładunków", sent.length === 0, sent);
+
+    // Ta sama operacja z biura (inny użytkownik) już powiadamia.
+    sent.length = 0;
+    db.transaction((tx) =>
+      moveEvent(tx, pushEventId, { startAt: `${FUTURE_DAY}T14:00`, endAt: `${FUTURE_DAY}T15:00` }, { user: adminUser })
+    );
+    await flushPush();
+    ok(
+      "push: przesunięcie terminu przez biuro → „Zmiana terminu”",
+      sent.length === 1 && sent[0].title === "Zmiana terminu" && sent[0].url === `/technik/zlecenie/${pushEventId}`,
+      sent
+    );
+
+    // …ale to samo przesunięcie zrobione przez konto technika — już nie.
+    sent.length = 0;
+    db.transaction((tx) =>
+      moveEvent(tx, pushEventId, { startAt: `${FUTURE_DAY}T16:00`, endAt: `${FUTURE_DAY}T17:00` }, { user: techUser })
+    );
+    await flushPush();
+    ok("push: przesunięcie zrobione przez samego technika → 0 ładunków", sent.length === 0, sent);
+
+    sent.length = 0;
+    db.transaction((tx) => deleteEvent(tx, pushEventId, "this", { user: adminUser }));
+    await flushPush();
+    ok(
+      "push: usunięcie wydarzenia → „Zlecenie odwołane”",
+      sent.length === 1 && sent[0].title === "Zlecenie odwołane",
+      sent
+    );
+
+    // Typy spoza protokołu i cudze działy nie są zleceniem technika.
+    sent.length = 0;
+    db.transaction((tx) =>
+      createEvent(
+        tx,
+        parseInput({
+          type: "biuro",
+          title: `${PREFIX} Push biuro`,
+          department: "technical",
+          startAt: `${FUTURE_DAY}T11:00`,
+          endAt: `${FUTURE_DAY}T12:00`,
+          technicianIds: [tech.id],
+        }),
+        { user: adminUser }
+      )
+    );
+    await flushPush();
+    ok("push: typ spoza protokołów (biuro) → 0 ładunków", sent.length === 0, sent);
+  } finally {
+    restoreTransport();
+  }
+
+  const removedMine = await T("DELETE", "/push/subscribe", { endpoint: SUB_A.endpoint });
+  ok(
+    "push/subscribe DELETE: własna subskrypcja znika",
+    removedMine.status === 200 &&
+      (removedMine.data as { removed: boolean })?.removed === true &&
+      subsOf(techUser.id).length === 0,
+    removedMine
+  );
 } catch (err) {
   console.error("BŁĄD:", err);
   failures++;
 } finally {
+  restorePushEnv();
   restoreActivitiesSetting();
+  restoreCompanySettings();
   const n = cleanup();
   console.log(`(posprzątano ${n} wydarzeń testowych)`);
 }

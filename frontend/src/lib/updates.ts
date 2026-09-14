@@ -63,7 +63,7 @@ export interface VersionUpdate {
  */
 export const UPDATES_CURRENT: VersionUpdate[] = [
   {
-    version: "1.6.0",
+    version: "1.6.0–1.7.0",
     date: "2026-09-14",
     title: "Panel technika",
     entries: [
@@ -86,6 +86,11 @@ export const UPDATES_CURRENT: VersionUpdate[] = [
         text: "Strona Co nowego ma osobną zakładkę z historią zmian panelu technika",
         type: "tweak",
         module: "ogolne",
+      },
+      {
+        text: "Panel technika: instalacja na ekranie tabletu, powiadomienia o zleceniach, pogoda i dojazd z biura",
+        type: "feat",
+        module: "technik",
       },
     ],
   },
@@ -195,7 +200,7 @@ export const UPDATES: VersionUpdate[] = [...UPDATES_CURRENT, ...UPDATES_2026];
  */
 export const UPDATES_TECHNIK: VersionUpdate[] = [
   {
-    version: "1.0.0",
+    version: "1.0.0–1.1.0",
     date: "2026-09-14",
     title: "Panel technika",
     entries: [
@@ -226,6 +231,26 @@ export const UPDATES_TECHNIK: VersionUpdate[] = [
       },
       {
         text: "Rozpoczęcie i zakończenie można cofnąć na inną godzinę, gdy zapomniało się kliknąć na miejscu",
+        type: "tweak",
+        module: "technik",
+      },
+      {
+        text: "Panel można zainstalować na ekranie głównym tabletu i otwierać jak zwykłą aplikację, bez paska przeglądarki",
+        type: "feat",
+        module: "technik",
+      },
+      {
+        text: "Powiadomienie o nowym zleceniu, zmianie terminu i odwołaniu przychodzi na tablet, bez sprawdzania listy co chwilę",
+        type: "feat",
+        module: "technik",
+      },
+      {
+        text: "Przy każdym zleceniu widać pogodę z temperaturą, a pod „Nawiguj” kilometry i czas dojazdu z biura",
+        type: "feat",
+        module: "technik",
+      },
+      {
+        text: "Ekrany zakładek nie mają już powtórzonego tytułu u góry, więcej miejsca na listę",
         type: "tweak",
         module: "technik",
       },

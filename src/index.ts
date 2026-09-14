@@ -9,6 +9,16 @@ import { secureHeaders } from "hono/secure-headers";
 import { readFileSync } from "fs";
 import { runMigrations } from "./db/migrate.js";
 
+// Lokalny `.env` (gitignored, wzorzec w `.env.example`) — wyłącznie dla
+// uruchomień z dysku. Prawdziwe env ma PIERWSZEŃSTWO (`loadEnvFile` nie
+// nadpisuje ustawionych zmiennych), więc na Dokploy, gdzie konfiguracja idzie
+// z panelu serwisu, ten plik zwykle w ogóle nie istnieje i nic się nie dzieje.
+try {
+  process.loadEnvFile();
+} catch {
+  /* brak .env to normalny stan */
+}
+
 // Apply DB migrations BEFORE importing anything that opens the shared db
 // connection or queries tables. Makes the app self-sufficient regardless of
 // how the process is started (Dockerfile CMD, `npm start`, Nixpacks, ...).

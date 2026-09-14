@@ -1,12 +1,14 @@
+import { useEffect } from "react";
 import { Link, Navigate, Route, Routes } from "react-router-dom";
-import { ShieldOff } from "lucide-react";
+import { RefreshCw, ShieldOff } from "lucide-react";
 import { useAuth } from "@/auth/AuthProvider";
 import { Button } from "@/components/ui/button";
 import { useTechnikAccess } from "./lib/access";
 import { TechnikMeProvider } from "./lib/me";
+import { useTechnikPwaHead, useTechnikServiceWorker } from "./lib/pwa";
 import { TechnikAuthScreen } from "./TechnikAuthScreen";
 import { TechnikShell } from "./TechnikShell";
-import { ToastProvider } from "./ui/toast";
+import { ToastProvider, useToast } from "./ui/toast";
 import { Dzis } from "./pages/Dzis";
 import { Nadchodzace } from "./pages/Nadchodzace";
 import { Wiecej } from "./pages/Wiecej";
@@ -28,6 +30,10 @@ import "./technik.css";
  */
 export function TechnikApp() {
   const { user, loading } = useAuth();
+
+  // Manifest i meta tagi PWA wchodzą do `<head>` TYLKO na czas życia panelu —
+  // biurowy CRM (ta sama SPA, ten sam build) nie ma być instalowalny.
+  useTechnikPwaHead();
 
   if (loading) {
     return (
@@ -76,6 +82,7 @@ function TechnikRoutes() {
 
   return (
     <ToastProvider>
+      <TechnikUpdateWatcher />
       <TechnikShell>
         <Routes>
           <Route path="/" element={<Dzis />} />
@@ -90,6 +97,34 @@ function TechnikRoutes() {
       </TechnikShell>
     </ToastProvider>
   );
+}
+
+/**
+ * Rejestruje service workera panelu i pilnuje wydań.
+ *
+ * Nowy worker nie wchodzi sam z siebie — technik w połowie protokołu nie ma
+ * prawa dostać przeładowania ekranu. Zamiast tego podnosimy toast, który
+ * zostaje na ekranie (`duration: 0`), dopóki ktoś go nie odrzuci albo nie
+ * kliknie „Odśwież".
+ *
+ * Komponent musi siedzieć WEWNĄTRZ `ToastProvider` — stąd osobny byt zamiast
+ * hooka wołanego w `TechnikApp`.
+ */
+function TechnikUpdateWatcher() {
+  const { updateReady, applyUpdate } = useTechnikServiceWorker();
+  const { toast } = useToast();
+
+  useEffect(() => {
+    if (!updateReady) return;
+    toast({
+      message: "Dostępna nowa wersja panelu",
+      kind: "info",
+      duration: 0,
+      action: { label: "Odśwież", icon: RefreshCw, onClick: applyUpdate },
+    });
+  }, [updateReady, applyUpdate, toast]);
+
+  return null;
 }
 
 export default TechnikApp;

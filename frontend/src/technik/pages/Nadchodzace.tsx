@@ -5,6 +5,7 @@ import { EmptyState } from "../ui/empty-state";
 import { JobCard } from "../JobCard";
 import { addDays, dayOf, groupLabel, todayIso } from "../lib/dates";
 import { useJobs } from "../lib/useJobs";
+import { useWeather } from "../lib/useWeather";
 
 /** Ile dni do przodu pokazuje panel. Dalej planowanie i tak się zmienia. */
 const HORIZON_DAYS = 14;
@@ -26,6 +27,9 @@ export function Nadchodzace() {
   const today = todayIso();
   const to = addDays(today, RANGE_END_OFFSET);
   const { jobs, loading, error } = useJobs(today, to);
+  // Dwa tygodnie mieszczą się w jednym batchu; backend liczy tylko dni z okna
+  // prognozy, dalsze zlecenia wracają po prostu bez pogody.
+  const weather = useWeather(jobs);
 
   const groups = useMemo(() => groupByDay(jobs), [jobs]);
 
@@ -60,14 +64,16 @@ export function Nadchodzace() {
           <h2
             id={`d-${day}`}
             // Sticky nagłówek dnia: przy przewijaniu dwóch tygodni trzeba
-            // wiedzieć, którego dnia dotyczy karta pod palcem.
-            className="sticky top-12 z-10 -mx-4 bg-background/95 px-4 py-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground backdrop-blur-sm"
+            // wiedzieć, którego dnia dotyczy karta pod palcem. Przykleja się do
+            // samej góry (`top-safe`), bo ekran zakładki nie ma już górnego
+            // paska 48 px, pod którym trzeba by go chować.
+            className="sticky top-safe z-10 -mx-4 bg-background/95 px-4 py-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground backdrop-blur-sm"
           >
             {groupLabel(day, today)}
           </h2>
           <ul className="mt-2 space-y-2">
             {items.map((j) => (
-              <JobCard key={j.id} job={j} />
+              <JobCard key={j.id} job={j} weather={weather[j.id]} />
             ))}
           </ul>
         </section>

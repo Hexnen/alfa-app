@@ -1,11 +1,14 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import {
   ArrowLeftRight,
+  Bell,
   ChevronRight,
+  Download,
   HardHat,
   LogOut,
   Phone,
+  Share,
   Sparkles,
   User,
 } from "lucide-react";
@@ -14,6 +17,9 @@ import { TECHNIK_VERSION } from "@/lib/version";
 import { cn } from "@/lib/utils";
 import { useTechnikAccess } from "../lib/access";
 import { useTechnikMe } from "../lib/me";
+import { useInstallPrompt, usePushNotifications } from "../lib/pwa";
+import { Switch } from "../ui/switch";
+import { useToast } from "../ui/toast";
 
 /**
  * WIĘCEJ — szuflada, do której wchodzi się raz na tydzień.
@@ -70,6 +76,8 @@ export function Wiecej() {
         </p>
       )}
 
+      <TabletGroup />
+
       <Group title="Aplikacja">
         <LinkRow
           icon={Sparkles}
@@ -93,6 +101,106 @@ export function Wiecej() {
         Wyloguj
       </button>
     </div>
+  );
+}
+
+/**
+ * NA TABLECIE — instalacja panelu i powiadomienia o zleceniach.
+ *
+ * Kolejność wierszy nie jest przypadkowa: na iPhonie i iPadzie Safari daje
+ * `PushManager` WYŁĄCZNIE aplikacji dodanej do ekranu początkowego (iOS 16.4+),
+ * więc instalacja musi stać NAD powiadomieniami — inaczej technik klika
+ * przełącznik, dostaje „niedostępne” i nie wie dlaczego.
+ *
+ * Cała sekcja znika, gdy nie ma czego pokazać: panel jest już zainstalowany,
+ * a serwer nie ma kluczy VAPID.
+ */
+function TabletGroup() {
+  const install = useInstallPrompt();
+  const push = usePushNotifications();
+  const { toast, toastError } = useToast();
+  const [iosHint, setIosHint] = useState(false);
+
+  const showInstall = !install.standalone && (install.canPrompt || install.ios);
+  // Wiersz powiadomień chowamy tylko wtedy, gdy serwer ich nie umie wysłać —
+  // „niedostępne na tym urządzeniu” to informacja, nie powód do ukrywania.
+  const showPush = push.blocker !== "server";
+  if (!showInstall && !showPush) return null;
+
+  const pushNote =
+    push.blocker === "unsupported"
+      ? install.ios && !install.standalone
+        ? "Na iPadzie i iPhonie działa dopiero po dodaniu panelu do ekranu początkowego (iOS 16.4 lub nowszy)."
+        : "Ta przeglądarka nie obsługuje powiadomień."
+      : push.blocker === "denied"
+        ? "Powiadomienia są zablokowane w ustawieniach przeglądarki dla tej strony."
+        : null;
+
+  return (
+    <section>
+      <h2 className="px-1 pb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        Na tablecie
+      </h2>
+      <div className="divide-y overflow-hidden rounded-xl border bg-card">
+        {showInstall && (
+          <button
+            type="button"
+            onClick={() => {
+              // iOS nie ma API instalacji — zostaje pokazanie, gdzie kliknąć.
+              if (!install.canPrompt) {
+                setIosHint((v) => !v);
+                return;
+              }
+              void install.promptInstall().then((accepted) => {
+                if (accepted) toast({ message: "Panel dodany do ekranu głównego", kind: "success" });
+              });
+            }}
+            className={cn(ROW, "w-full text-left active:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring")}
+          >
+            <Download className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+            <span className="shrink-0 font-medium">Zainstaluj na ekranie głównym</span>
+            <ChevronRight className="ml-auto h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+          </button>
+        )}
+
+        {showInstall && iosHint && (
+          <p className="flex items-start gap-2 px-3 py-2.5 text-sm text-muted-foreground">
+            <Share className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+            <span>
+              W Safari dotknij <strong className="font-medium text-foreground">Udostępnij</strong>, a
+              potem <strong className="font-medium text-foreground">Do ekranu początkowego</strong>.
+            </span>
+          </p>
+        )}
+
+        {showPush && (
+          <>
+            <div className={ROW}>
+              <Bell className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+              <span className="shrink-0 font-medium">Powiadomienia o zleceniach</span>
+              <span className="ml-auto flex items-center gap-2">
+                {push.blocker != null && (
+                  <span className="text-xs text-muted-foreground">niedostępne</span>
+                )}
+                <Switch
+                  label="Powiadomienia o zleceniach"
+                  checked={push.enabled}
+                  busy={push.busy}
+                  disabled={push.loading || push.blocker != null}
+                  onCheckedChange={(next) => {
+                    void push.toggle(next).then((error) => {
+                      if (error) toastError(error);
+                      else if (next) toast({ message: "Powiadomienia włączone", kind: "success" });
+                    });
+                  }}
+                />
+              </span>
+            </div>
+            {pushNote && <p className="px-3 py-2.5 text-sm text-muted-foreground">{pushNote}</p>}
+          </>
+        )}
+      </div>
+    </section>
   );
 }
 

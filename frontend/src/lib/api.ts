@@ -10159,10 +10159,22 @@ export interface TechnikJobDistance {
   roundTripKm?: number;
   suggestedKm?: number;
   roundTrip?: boolean;
+  /** Czas przejazdu w JEDNĄ stronę (minuty) — z tej samej trasy co `km`. */
+  minutes?: number;
+  /** `true` = czas z szacunku (trasa prosta / stary wpis cache'u), nie z routera. */
+  minutesEstimated?: boolean;
   method?: string;
   from?: string;
   to?: string;
   reason?: string;
+}
+
+/** Odpowiedź `GET /technik/push/config` — stan powiadomień push po stronie serwera. */
+export interface TechnikPushConfig {
+  /** `false` = brak kluczy VAPID w env; przełącznik w „Więcej" się nie pokazuje. */
+  enabled: boolean;
+  /** Klucz publiczny VAPID (Base64URL) do `pushManager.subscribe()`; `null` gdy wyłączone. */
+  publicKey: string | null;
 }
 
 export const technikApi = {
@@ -10198,6 +10210,18 @@ export const technikApi = {
   async activities(): Promise<string[]> {
     const r = await request<ApiResponse<string[]>>("/technik/activities");
     return Array.isArray(r.data) ? r.data : [];
+  },
+
+  /**
+   * Pogoda dla zleceń (batch) — panel ma własną trasę, bo rola `technik` nie
+   * ma dostępu do `/api/calendar`. Kształt i semantyka `retry` dokładnie jak
+   * w `calendarApi.weather`: `null` spoza `retry` = pogody nie będzie,
+   * `null` w `retry` = warto spytać jeszcze raz. Cudze id nie wracają wcale.
+   */
+  async weather(ids: number[]) {
+    return request<ApiResponse<{ items: Record<string, WeatherBrief | null>; retry?: number[] }>>(
+      `/technik/jobs/weather?ids=${ids.join(",")}`
+    );
   },
 
   /** Odległość biuro → obiekt zlecenia (do podpowiedzi kilometrów w protokole). */
@@ -10306,5 +10330,31 @@ export const technikApi = {
       body: JSON.stringify(data),
     });
     return r.data as TechnikProtocol;
+  },
+
+  /**
+   * Czy serwer w ogóle umie wysyłać push (klucze VAPID w env) i jaki jest klucz
+   * publiczny do `pushManager.subscribe()`. `enabled: false` = front chowa
+   * przełącznik zamiast pokazywać opcję, która nic nie zrobi.
+   */
+  async pushConfig(): Promise<TechnikPushConfig> {
+    const r = await request<ApiResponse<TechnikPushConfig>>("/technik/push/config");
+    return r.data ?? { enabled: false, publicKey: null };
+  },
+
+  /** Zapis subskrypcji (upsert po `endpoint` — ponowne włączenie to ten sam wiersz). */
+  async pushSubscribe(subscription: PushSubscriptionJSON): Promise<void> {
+    await request<ApiResponse<{ id: number }>>("/technik/push/subscribe", {
+      method: "POST",
+      body: JSON.stringify(subscription),
+    });
+  },
+
+  /** Wypisanie po adresie endpointu; cudzego nie da się skasować. */
+  async pushUnsubscribe(endpoint: string): Promise<void> {
+    await request<ApiResponse<{ removed: boolean }>>("/technik/push/subscribe", {
+      method: "DELETE",
+      body: JSON.stringify({ endpoint }),
+    });
   },
 };
