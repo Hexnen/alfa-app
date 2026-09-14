@@ -1153,6 +1153,14 @@ export const protocols = sqliteTable("protocols", {
    * drizzle (TS7022 na trzech tabelach naraz).
    */
   noteId: integer("note_id"),
+  /**
+   * SHA-256 treści notatki, którą OSTATNIO zapisaliśmy sami (migracja 0104).
+   * Odpowiada na pytanie, na które `note_id` nie odpowiada: czy wiersz notatki
+   * nadal jest naszym lustrem, czy ktoś już poprawił go ręką. Rozjazd odcisku
+   * = treść obca → zakładamy nową notatkę zamiast nadpisywać cudzy dopisek.
+   * `null` = protokół sprzed migracji (wtedy decyduje prefiks nagłówka).
+   */
+  noteHash: text("note_hash"),
   status: text("status", { enum: ["draft", "final"] })
     .default("draft")
     .notNull(),

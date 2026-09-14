@@ -482,7 +482,7 @@ export function ensureRealizationForEvent(tx: Tx, ev: CalendarEventRow, ctx: Rea
     .get();
   // `ev` przekazujemy jawnie: `calendar_events.realization_id` ustawiamy dopiero niżej,
   // więc prefill protokołu nie odnalazłby jeszcze wydarzenia (src/lib/protocol-prefill.ts).
-  const protocol = createProtocolForRealizationSync(tx, created, ev);
+  const protocol = createProtocolForRealizationSync(tx, created, ev, ctx.user.id);
   tx.update(schema.calendarEvents)
     .set({ realizationId: created.id, updatedAt: sql`(datetime('now'))` })
     .where(eq(schema.calendarEvents.id, ev.id))

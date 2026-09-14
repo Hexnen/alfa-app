@@ -15,17 +15,36 @@
  *   • S8  — `toPayload` nie kasuje kontaktu (telefon/mail) samym otwarciem protokołu,
  *   • S9  — wielodniowe zlecenie ląduje pod dniem „dziś”, nie pod dniem startu,
  *   • S11 — znacznik z przyszłości jest odrzucany jeszcze przed wysyłką,
- *   • N21 — `YYYY-MM-DD HH:MM` (SQLite bez sekund) czytamy jako UTC, nie lokalnie.
+ *   • N21 — `YYYY-MM-DD HH:MM` (SQLite bez sekund) czytamy jako UTC, nie lokalnie,
+ *   • K1  — Enter, spacja i wcięcie przeżywają drogę przez stan pola „Uwagi”,
+ *   • N1  — linia rozwinięta ręcznie („… - kanał 3”) to nadal czynność ze słownika,
+ *   • N3  — `shortContactName` wycina nawiasy, telefony i maile z KAŻDEGO miejsca,
+ *   • S4  — dzień podpisu liczony ze znacznika, a nie z pierwszych pięciu znaków ISO.
  */
 process.env.TZ = "Europe/Warsaw";
 
 import {
   clockOf,
+  formatDatePl,
+  formatStampDayMonth,
   isFutureStamp,
   parseStamp,
   upcomingDayOf,
 } from "../frontend/src/technik/lib/dates.js";
-import { toForm, toPayload, type FormState } from "../frontend/src/technik/lib/protocol.js";
+import {
+  shortContactName,
+  toForm,
+  toPayload,
+  type FormState,
+} from "../frontend/src/technik/lib/protocol.js";
+import {
+  isActivityPicked,
+  matchedActivity,
+  normalizeActivities,
+  setActivityNotes,
+  splitActivities,
+  toggleActivity,
+} from "../frontend/src/technik/lib/activities.js";
 
 let failures = 0;
 function ok(label: string, cond: boolean, extra?: unknown) {
@@ -151,6 +170,131 @@ ok("prosty kontakt zostaje prostym kontaktem", plain.contact === "Anna Kowalska"
 const empty = toForm({ ...protocol, contact: null } as unknown as typeof protocol);
 ok("brak kontaktu = puste pola", empty.contact === "" && empty.signerName === "", empty);
 ok("…i pusty kontakt w PUT", toPayload({ ...protocol, contact: null } as unknown as typeof protocol, empty).contact === "", toPayload({ ...protocol, contact: null } as unknown as typeof protocol, empty).contact);
+
+/* ------------------------------------------------------------------ *
+ * K1 — pole „Uwagi / inne czynności” jest KONTROLOWANE, więc każda podróż
+ *      tekstu przez split→compose musi być wierna co do znaku
+ * ------------------------------------------------------------------ */
+
+console.log("\n— K1: Enter, spacja i wcięcie w uwagach —");
+const DICT = ["Wymiana kamery", "Przegląd rejestratora"];
+
+// Technik pisze „linia pierwsza”, naciska Enter, pisze „linia druga”.
+let pole = "";
+pole = setActivityNotes(pole, DICT, "linia pierwsza");
+pole = setActivityNotes(pole, DICT, "linia pierwsza\n");
+ok("Enter zostaje w tekście (nie zlewa linii)", pole === "linia pierwsza\n", pole);
+pole = setActivityNotes(pole, DICT, "linia pierwsza\nlinia druga");
+ok("obie linie w polu", splitActivities(pole, DICT).notes === "linia pierwsza\nlinia druga", splitActivities(pole, DICT).notes);
+
+ok(
+  "spacja na końcu przeżywa (technik jest w połowie słowa)",
+  splitActivities(setActivityNotes("", DICT, "kamera "), DICT).notes === "kamera ",
+  splitActivities(setActivityNotes("", DICT, "kamera "), DICT).notes,
+);
+ok(
+  "wcięcie na początku zostaje",
+  splitActivities(setActivityNotes("", DICT, "  wcięcie"), DICT).notes === "  wcięcie",
+  splitActivities(setActivityNotes("", DICT, "  wcięcie"), DICT).notes,
+);
+
+// Uwagi obok czynności ze słownika — czynności zostają na górze, uwagi wierne.
+const zChynnoscia = setActivityNotes("Wymiana kamery", DICT, "uwaga\n");
+ok(
+  "czynność ze słownika + świeży Enter w uwagach",
+  zChynnoscia === "Wymiana kamery\nuwaga\n",
+  zChynnoscia,
+);
+
+// Porządki robi dopiero droga na serwer.
+ok(
+  "normalizeActivities ucina końcówki, zostawia wcięcie",
+  normalizeActivities("  wcięcie   \n\n\n\nkoniec  \n") === "  wcięcie\n\nkoniec",
+  normalizeActivities("  wcięcie   \n\n\n\nkoniec  \n"),
+);
+ok(
+  "toPayload odsyła uwagi wyprostowane",
+  toPayload(protocol, { ...form, activities: "Wymiana kamery\nuwaga  \n" }).activities ===
+    "Wymiana kamery\nuwaga",
+  toPayload(protocol, { ...form, activities: "Wymiana kamery\nuwaga  \n" }).activities,
+);
+
+/* ------------------------------------------------------------------ *
+ * N1 — linia rozwinięta ręcznie nadal należy do słownika
+ * ------------------------------------------------------------------ */
+
+console.log("\n— N1: chip przy ręcznie rozwiniętej linii —");
+const ROZWINIETA = "Wymiana kamery - kanał 3";
+ok(
+  "linia z dopiskiem wskazuje na pozycję słownika",
+  matchedActivity(ROZWINIETA, DICT) === "Wymiana kamery",
+  matchedActivity(ROZWINIETA, DICT),
+);
+ok(
+  "„Wymiana kamerynowej” to JUŻ nie ta czynność",
+  matchedActivity("Wymiana kamerynowej", DICT) === null,
+  matchedActivity("Wymiana kamerynowej", DICT),
+);
+const rozbita = splitActivities(ROZWINIETA, DICT);
+ok("rozwinięta linia stoi na liście czynności, nie w uwagach", rozbita.picked.length === 1 && rozbita.notes === "", rozbita);
+ok("chip jest zaznaczony", isActivityPicked(rozbita.picked, DICT, "Wymiana kamery"));
+ok(
+  "stuknięcie chipa USUWA tę linię, zamiast dokładać duplikat",
+  toggleActivity(ROZWINIETA, DICT, "Wymiana kamery") === "",
+  toggleActivity(ROZWINIETA, DICT, "Wymiana kamery"),
+);
+ok(
+  "ponowne stuknięcie dopisuje czystą czynność",
+  toggleActivity("", DICT, "Wymiana kamery") === "Wymiana kamery",
+  toggleActivity("", DICT, "Wymiana kamery"),
+);
+
+/* ------------------------------------------------------------------ *
+ * N3 — kontakt zapisany nietypowo
+ * ------------------------------------------------------------------ */
+
+console.log("\n— N3: shortContactName niezależnie od kolejności —");
+ok(
+  "rola w nawiasie NA POCZĄTKU nie zostaje w polu",
+  shortContactName("(recepcja) Anna Nowak, 600 100 200") === "Anna Nowak",
+  shortContactName("(recepcja) Anna Nowak, 600 100 200"),
+);
+ok(
+  "telefon i mail wypadają z każdego miejsca",
+  shortContactName("+48 600 100 200 Jan Kowalski jan@x.pl") === "Jan Kowalski",
+  shortContactName("+48 600 100 200 Jan Kowalski jan@x.pl"),
+);
+ok(
+  "nazwa firmy z kropkami zostaje w całości",
+  shortContactName("Firma Sp. z o.o., Jan") === "Firma Sp. z o.o.",
+  shortContactName("Firma Sp. z o.o., Jan"),
+);
+ok(
+  "gdy nie zostaje nic — wraca cała wartość (przycięta)",
+  shortContactName("(brak), 600") === "(brak), 600",
+  shortContactName("(brak), 600"),
+);
+ok("pusty kontakt zostaje pusty", shortContactName(null) === "", shortContactName(null));
+
+/* ------------------------------------------------------------------ *
+ * S4 — dzień podpisu (ISO w UTC) na karcie i w kroku „Odbiór”
+ * ------------------------------------------------------------------ */
+
+console.log("\n— S4: dzień podpisu ze znacznika, nie z cięcia tekstu —");
+// Podpis 15.09 o 01:30 czasu warszawskiego = 2026-09-14T23:30Z.
+const PODPIS = "2026-09-14T23:30:00.000Z";
+ok('formatStampDayMonth(po północy) = "15.09"', formatStampDayMonth(PODPIS) === "15.09", formatStampDayMonth(PODPIS));
+ok(
+  "stare cięcie tekstu dawało inny dzień (dowód regresji)",
+  formatDatePl(PODPIS).slice(0, 5) !== formatStampDayMonth(PODPIS),
+  { tekstowo: formatDatePl(PODPIS).slice(0, 5), znacznikiem: formatStampDayMonth(PODPIS) },
+);
+ok(
+  "znacznik SQLite bez „Z” też jest UTC",
+  formatStampDayMonth("2026-09-14 23:30:00") === "15.09",
+  formatStampDayMonth("2026-09-14 23:30:00"),
+);
+ok("brak podpisu = myślnik", formatStampDayMonth(null) === "—", formatStampDayMonth(null));
 
 console.log(`\n${failures === 0 ? "WSZYSTKO OK" : `BŁĘDÓW: ${failures}`}`);
 process.exit(failures === 0 ? 0 : 1);

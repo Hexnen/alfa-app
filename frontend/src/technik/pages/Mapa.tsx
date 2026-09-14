@@ -8,9 +8,10 @@ import { useToast } from "../ui/toast";
 import { addDays, todayIso } from "../lib/dates";
 import { useJobs } from "../lib/useJobs";
 import { useWeather } from "../lib/useWeather";
+import { jobsLabel } from "../lib/jobs";
 import { JobsMap } from "../mapa/JobsMap";
 import { MapSheet, PinJobs, PlainJobs } from "../mapa/MapSheet";
-import { pinSubtitle, pinTitle, pinsOf, withoutLocation, type MapRange } from "../mapa/pins";
+import { pinPlaceTitle, pinSubtitle, pinsOf, withoutLocation, type MapRange } from "../mapa/pins";
 
 /**
  * MAPA — „gdzie dziś jadę”, zakładka obok „Nadchodzących”.
@@ -42,6 +43,16 @@ export function Mapa() {
 
   const [sheet, setSheet] = useState<Sheet>(null);
   const [sheetHeight, setSheetHeight] = useState(0);
+  /**
+   * Czy mapa zdążyła się już raz pokazać. Szkielet należy WYŁĄCZNIE do
+   * pierwszego wejścia: przy zmianie zakresu odmontowywał `JobsMap`, a z nią
+   * całego Leafleta — mapa budowała się od zera, kafelki leciały drugi raz
+   * z sieci, kadr technika przepadał, a `invalidateSize` na usuniętej mapie
+   * rzucał `TypeError: _leaflet_pos`. Ponowne wczytanie pokazuje teraz samą
+   * plakietkę na mapie.
+   */
+  const [shown, setShown] = useState(false);
+  if (!shown && !loading) setShown(true);
 
   const pins = useMemo(() => pinsOf(jobs), [jobs]);
   const missing = useMemo(() => withoutLocation(jobs), [jobs]);
@@ -60,7 +71,7 @@ export function Mapa() {
     setSheet(null);
   };
 
-  if (loading && jobs.length === 0) {
+  if (loading && jobs.length === 0 && !shown) {
     return (
       <div className="tm-screen flex flex-col gap-2">
         <div className="h-11 shrink-0 animate-pulse rounded-xl bg-muted" />
@@ -117,13 +128,14 @@ export function Mapa() {
         selectedKey={sheet?.kind === "pin" ? sheet.key : null}
         onSelect={selectPin}
         sheetHeight={sheetHeight}
+        refreshing={loading}
         onGeoError={toastError}
       />
 
       {selected && (
         <MapSheet
           testId="technik-mapa-karta"
-          title={pinTitle(selected.jobs[0])}
+          title={pinPlaceTitle(selected)}
           subtitle={pinSubtitle(selected, today)}
           onClose={() => setSheet(null)}
           onHeight={setSheetHeight}
@@ -160,13 +172,4 @@ export function Mapa() {
       )}
     </div>
   );
-}
-
-/** „1 zlecenie” / „2 zlecenia” / „5 zleceń” — polska odmiana, nie „5 zlecenie”. */
-function jobsLabel(n: number): string {
-  if (n === 1) return "1 zlecenie";
-  const last = n % 10;
-  const tens = n % 100;
-  const few = last >= 2 && last <= 4 && !(tens >= 12 && tens <= 14);
-  return `${n} ${few ? "zlecenia" : "zleceń"}`;
 }

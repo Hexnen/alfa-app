@@ -25,7 +25,7 @@
 import { Hono, type Context } from "hono";
 import { createReadStream, statSync } from "node:fs";
 import { Readable } from "node:stream";
-import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, ne, or, sql } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
 import type { CalendarEvent as CalendarEventRow, Protocol, User } from "../db/schema.js";
 import { getUser } from "../middleware/auth.js";
@@ -167,16 +167,26 @@ function handleError(c: Context, error: unknown, what: string) {
  * Warunki „to jest zlecenie TEGO technika": dział techniczny, żywe, nieanulowane,
  * typ z pracami na obiekcie (PROTOCOL_TYPES) i przypisanie do niego.
  * Urlopy, biuro i przygotowanie celowo poza listą — to nie są wyjazdy do klienta.
+ *
+ * `includeCancelled` — wyłącznie dla POJEDYNCZEGO zlecenia (`myEvent`). Push
+ * „Zlecenie odwołane" prowadzi wprost na `/technik/zlecenie/<id>`, a odwołane
+ * odpadało tu na 404 i technik czytał „to zlecenie nie jest już przypisane do
+ * Ciebie" zamiast „odwołane" — czyli komunikat, który sugeruje pomyłkę
+ * w przypisaniach. Na LISTACH, licznikach i mapie odwołanych dalej nie ma:
+ * tam pokazujemy pracę do zrobienia.
  */
-function mineConditions(technicianId: number) {
+function mineConditions(technicianId: number, opts: { includeCancelled?: boolean } = {}) {
   return [
     eq(schema.calendarEvents.department, "technical"),
     isNull(schema.calendarEvents.deletedAt),
-    ne(schema.calendarEvents.status, "cancelled"),
+    ...(opts.includeCancelled ? [] : [ne(schema.calendarEvents.status, "cancelled")]),
     inArray(schema.calendarEvents.type, [...PROTOCOL_TYPES]),
     sql`${schema.calendarEvents.id} IN (SELECT event_id FROM calendar_event_assignees WHERE technician_id = ${technicianId})`,
   ];
 }
+
+/** Komunikat 409 dla każdej próby zmiany odwołanego zlecenia. */
+const JOB_CANCELLED_MESSAGE = "Zlecenie zostało odwołane";
 
 /**
  * Warunki zakresu [from, to) dla dni „YYYY-MM-DD”.
@@ -246,7 +256,10 @@ function myEvent(technicianId: number, id: number): CalendarEventRow {
   const row = db
     .select()
     .from(schema.calendarEvents)
-    .where(and(eq(schema.calendarEvents.id, id), ...mineConditions(technicianId)))
+    // Z odwołanymi: po tapnięciu powiadomienia „Zlecenie odwołane" technik ma
+    // zobaczyć TO zlecenie z adnotacją, a nie 404. Zmiany na nim odcina osobno
+    // `mutationTarget` (409), więc pokazanie go niczego nie otwiera.
+    .where(and(eq(schema.calendarEvents.id, id), ...mineConditions(technicianId, { includeCancelled: true })))
     .get();
   // 404, a nie 403: inaczej po samym kodzie odpowiedzi dałoby się sprawdzać,
   // które wydarzenia w firmie w ogóle istnieją.
@@ -692,6 +705,85 @@ app.get("/jobs", (c) => {
 // GET /jobs/:id — szczegóły + notatki + skrót protokołu
 // ---------------------------------------------------------------------------
 
+/** Jedna pozycja na liście „do kogo zadzwonić” na ekranie zlecenia. */
+interface JobContact {
+  name: string;
+  role: string | null;
+  phone: string;
+  /** Skąd kontakt: z wydarzenia, z kartoteki kontrahenta, z listy kontaktów. */
+  source: "event" | "contractor" | "contact";
+}
+
+/** Sam ciąg cyfr (z wiodącym plusem) — do odsiewania tego samego numeru zapisanego inaczej. */
+function phoneKey(raw: string): string {
+  return raw.replace(/[^\d+]/g, "").replace(/^00/, "+");
+}
+
+/**
+ * Kontakty do zlecenia w kolejności „najbardziej na temat”: osoba wskazana
+ * w wydarzeniu, potem osoba kontaktowa kontrahenta, potem aktywne kontakty
+ * z kartoteki przypięte do obiektu albo kontrahenta (główny pierwszy).
+ * Ten sam numer zapisany na dwa sposoby wchodzi raz. Kontakty bez telefonu
+ * nie wchodzą wcale — lista jest do dzwonienia, nie do czytania.
+ */
+function jobContacts(ev: CalendarEventRow, job: JobJson): JobContact[] {
+  const out: JobContact[] = [];
+  const seen = new Set<string>();
+  const push = (name: string | null, role: string | null, phone: string | null, source: JobContact["source"]) => {
+    const p = (phone ?? "").trim();
+    if (!p) return;
+    const key = phoneKey(p);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    out.push({ name: (name ?? "").trim() || p, role: role?.trim() || null, phone: p, source });
+  };
+
+  if (ev.contactId) {
+    const row = db
+      .select({
+        firstName: schema.contacts.firstName,
+        lastName: schema.contacts.lastName,
+        role: schema.contacts.role,
+        phone: schema.contacts.phone,
+      })
+      .from(schema.contacts)
+      .where(eq(schema.contacts.id, ev.contactId))
+      .get();
+    if (row) push(`${row.firstName} ${row.lastName}`, row.role, row.phone, "event");
+  }
+  push(job.contactPerson, null, job.contactPhone, "contractor");
+
+  const object = ev.objectId
+    ? db.select({ contractorId: schema.objects.contractorId }).from(schema.objects).where(eq(schema.objects.id, ev.objectId)).get()
+    : null;
+  const scope = [
+    ...(ev.objectId ? [eq(schema.contacts.objectId, ev.objectId)] : []),
+    ...(object?.contractorId ? [eq(schema.contacts.contractorId, object.contractorId)] : []),
+  ];
+  if (scope.length) {
+    const rows = db
+      .select({
+        firstName: schema.contacts.firstName,
+        lastName: schema.contacts.lastName,
+        role: schema.contacts.role,
+        phone: schema.contacts.phone,
+        isPrimary: schema.contacts.isPrimary,
+        objectId: schema.contacts.objectId,
+      })
+      .from(schema.contacts)
+      .where(and(eq(schema.contacts.active, true), isNotNull(schema.contacts.phone), or(...scope)))
+      .all()
+      // Kontakt przypięty do TEGO obiektu przed kontaktami całej firmy, główny przed resztą.
+      .sort(
+        (a, b) =>
+          Number((b.objectId ?? 0) === ev.objectId) - Number((a.objectId ?? 0) === ev.objectId) ||
+          Number(b.isPrimary) - Number(a.isPrimary)
+      );
+    for (const r of rows) push(`${r.firstName} ${r.lastName}`, r.role, r.phone, "contact");
+  }
+  return out;
+}
+
 app.get("/jobs/:id", (c) => {
   try {
     const user = getUser(c);
@@ -701,7 +793,10 @@ app.get("/jobs/:id", (c) => {
     if (!Number.isInteger(id)) throw new ApiError(400, "Nieprawidłowe id");
     const ev = myEvent(tech.id, id);
     const [job] = toJobs([ev], tech.id);
-    return c.json({ success: true, data: { ...job, notes: jobNotes(ev.id, user.id) } });
+    return c.json({
+      success: true,
+      data: { ...job, contacts: jobContacts(ev, job), notes: jobNotes(ev.id, user.id) },
+    });
   } catch (error) {
     return handleError(c, error, "pobierania zlecenia");
   }
@@ -777,7 +872,12 @@ function mutationTarget(c: Context, rawId: string): { tech: LinkedTechnician; ev
   }
   const id = Number(rawId);
   if (!Number.isInteger(id)) throw new ApiError(400, "Nieprawidłowe id");
-  return { tech, ev: myEvent(tech.id, id), ctx: ctxOf(c) };
+  const ev = myEvent(tech.id, id);
+  // Odwołane zlecenie WOLNO obejrzeć (patrz `myEvent`), ale nie wolno go
+  // rozpocząć, zakończyć ani dopisać do niego notatki: praca się nie odbędzie,
+  // a wpis w dzienniku odwołanego terminu nikomu już nie trafi przed oczy.
+  if (ev.status === "cancelled") throw new ApiError(409, JOB_CANCELLED_MESSAGE);
+  return { tech, ev, ctx: ctxOf(c) };
 }
 
 /** „HH:MM" z czasu lokalnego serwera — do treści notatki systemowej. */
@@ -890,7 +990,13 @@ app.post("/jobs/:id/finish", async (c) => {
     // (albo odświeżona karta) nie przestawia godziny i nie dokłada drugiej
     // notatki. Jawnie wpisana godzina („Inna godzina”) to świadoma poprawka
     // i przechodzi dalej.
-    if (ev.finishedAt && ev.status === "done" && typeof body.at !== "string") {
+    //
+    // ROZSTRZYGA SAM `finishedAt`, nie status. Gdy biuro cofnęło status
+    // („wykonane" → „potwierdzone"), a technik odświeżył kartę i tapnął
+    // „Zakończ" jeszcze raz, warunek ze statusem przepuszczał żądanie i
+    // dokładał do dziennika drugie „Zakończono o 16:20". Świadome wznowienie
+    // pracy idzie przez `POST /jobs/:id/reopen`, który czyści `finished_at`.
+    if (ev.finishedAt && typeof body.at !== "string") {
       const [current] = toJobs([ev], tech.id);
       return c.json({ success: true, data: current, message: "Zlecenie jest już zakończone" });
     }
@@ -939,6 +1045,61 @@ app.post("/jobs/:id/finish", async (c) => {
     return c.json({ success: true, data: job, message: "Zlecenie zakończone" });
   } catch (error) {
     return handleError(c, error, "kończenia zlecenia");
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /jobs/:id/reopen — „Wznów" po omyłkowym „Zakończ"
+//
+// „Zakończ" to jedno tapnięcie kciukiem w rękawicy i dało się je trafić na
+// cudzym zleceniu albo o godzinę za wcześnie. Odkręcenie tego wymagało telefonu
+// do biura: panel nie miał niczego, co zdejmuje `finished_at`, a `finish` jest
+// idempotentne, więc drugie tapnięcie nic nie zmieniało.
+//
+// OKNO 24 GODZIN od zakończenia. Wznawianie zleceń sprzed tygodnia to już nie
+// pomyłka kciuka, tylko przepisywanie historii (realizacja bywa wtedy policzona
+// i zafakturowana) — od tego jest biuro.
+// ---------------------------------------------------------------------------
+
+/** Jak długo po zakończeniu wolno wznowić zlecenie z panelu. */
+const REOPEN_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+app.post("/jobs/:id/reopen", (c) => {
+  try {
+    const { tech, ev, ctx } = mutationTarget(c, c.req.param("id"));
+    if (!ev.finishedAt || ev.status !== "done") {
+      throw new ApiError(409, "Zlecenie nie jest zakończone");
+    }
+    const finishedMs = Date.parse(ev.finishedAt);
+    if (Number.isFinite(finishedMs) && Date.now() - finishedMs > REOPEN_WINDOW_MS) {
+      throw new ApiError(409, "Zlecenie zakończono ponad dobę temu — wznowienie zgłoś do biura");
+    }
+    const now = new Date();
+    const after = db.transaction((tx) => {
+      // Przez `setEventProgress`, nie surowym UPDATE-em: to stąd bierze się
+      // `onEventUpdated`, a z nim synchronizacja realizacji. Realizacja
+      // ZOSTAJE (odpina ją wyłącznie anulowanie albo usunięcie wydarzenia),
+      // więc ponowne „Zakończ" nie założy drugiej — `ensureRealizationForEvent`
+      // przerywa na „realizacja już podpięta”.
+      const row = setEventProgress(
+        tx,
+        ev.id,
+        { status: "confirmed", finishedAt: null },
+        ctx
+      );
+      addNote(tx, {
+        eventId: ev.id,
+        text: `Wznowiono ${whenLabel(now)}`,
+        ctx,
+        source: "system",
+      });
+      return row;
+    });
+    publish(c, "updated", [ev.id]);
+    const [job] = toJobs([after], tech.id);
+    return c.json({ success: true, data: job, message: "Zlecenie wznowione" });
+  } catch (error) {
+    return handleError(c, error, "wznawiania zlecenia");
   }
 });
 
@@ -1129,7 +1290,7 @@ app.post("/jobs/:id/protocol", (c) => {
         .where(eq(schema.realizations.id, row.realizationId))
         .get();
       if (!realization) return { status: 409 as const, reason: "realizacja zlecenia nie istnieje" };
-      const created = createProtocolForRealizationSync(tx, realization);
+      const created = createProtocolForRealizationSync(tx, realization, null, ctx.user.id);
       if (!created) {
         // ON CONFLICT DO NOTHING → protokół powstał równolegle.
         const raced = tx
@@ -1187,7 +1348,11 @@ app.post("/jobs/:id/protocol", (c) => {
  * Protokół należy do technika, gdy JEGO zlecenie wskazuje go wprost
  * (`protocol_id`) albo przez realizację. Cudzy = 404, tak jak cudze zlecenie.
  */
-function myProtocol(technicianId: number, protocolId: number): { protocol: Protocol; event: CalendarEventRow } {
+function myProtocol(
+  technicianId: number,
+  protocolId: number,
+  opts: { write?: boolean } = {}
+): { protocol: Protocol; event: CalendarEventRow } {
   const protocol = db.select().from(schema.protocols).where(eq(schema.protocols.id, protocolId)).get();
   if (!protocol) throw new ApiError(404, "Nie znaleziono protokołu");
   const event = db
@@ -1196,11 +1361,14 @@ function myProtocol(technicianId: number, protocolId: number): { protocol: Proto
     .where(
       and(
         sql`(${schema.calendarEvents.protocolId} = ${protocolId} OR ${schema.calendarEvents.realizationId} = ${protocol.realizationId})`,
-        ...mineConditions(technicianId)
+        // Odczyt widzi też protokół odwołanego zlecenia (ekran odwołanego
+        // zlecenia pokazuje jego kartę); zapis i podpis — jak każda mutacja — 409.
+        ...mineConditions(technicianId, { includeCancelled: true })
       )
     )
     .get();
   if (!event) throw new ApiError(404, "Nie znaleziono protokołu");
+  if (opts.write && event.status === "cancelled") throw new ApiError(409, "Zlecenie zostało odwołane");
   return { protocol, event };
 }
 
@@ -1231,15 +1399,21 @@ app.put("/protocols/:id", async (c) => {
     if (!tech) throw new ApiError(409, "Konto nie jest powiązane z technikiem — zgłoś to administratorowi");
     const id = Number(c.req.param("id"));
     if (!Number.isInteger(id)) throw new ApiError(400, "Nieprawidłowe id");
-    const { event } = myProtocol(tech.id, id);
+    const { event } = myProtocol(tech.id, id, { write: true });
     // `null` zamiast obiektu (ciało ucięte przez zerwane łącze na tablecie)
     // trafia do `updateProtocolSync` i wraca jako 400, a nie jako 200
     // z wyczyszczonym dokumentem.
     const body = (await c.req.json().catch(() => null)) as unknown;
 
     const outcome = db.transaction((tx) =>
-      // Panel NIE zmienia pól identyfikacyjnych klienta — nawet gdyby je przysłał.
-      updateProtocolSync(tx, id, body, { lockClientFields: true })
+      // Panel NIE zmienia pól identyfikacyjnych klienta ani statusu („final"
+      // nadaje wyłącznie podpis) — nawet gdyby je przysłał. Data wykonania
+      // trzyma się terminu zlecenia: literówka w roku na klawiaturze tabletu
+      // wypychała protokół poza raport miesięczny i wracała z 200.
+      updateProtocolSync(tx, id, body, {
+        lockClientFields: true,
+        workDateAround: event.startAt.slice(0, 10),
+      })
     );
     if (outcome.status === 400) return c.json({ success: false, error: outcome.error }, 400);
     if (outcome.status === 404) return c.json({ success: false, error: "Nie znaleziono protokołu" }, 404);
@@ -1267,7 +1441,7 @@ app.post("/protocols/:id/sign", async (c) => {
     if (!tech) throw new ApiError(409, "Konto nie jest powiązane z technikiem — zgłoś to administratorowi");
     const id = Number(c.req.param("id"));
     if (!Number.isInteger(id)) throw new ApiError(400, "Nieprawidłowe id");
-    const { event } = myProtocol(tech.id, id);
+    const { event } = myProtocol(tech.id, id, { write: true });
 
     const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
     const signaturePng = typeof body.signaturePng === "string" ? body.signaturePng : "";

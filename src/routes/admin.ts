@@ -15,7 +15,7 @@ import {
   setUserTechnician,
   setUserTechnicianSync,
   updateUserSync,
-  technicianIdOfUser,
+  technicianLinkOfUser,
   findTechnicianOwner,
   unlinkUserFromDirectories,
   coerceRole,
@@ -127,7 +127,8 @@ admin.post("/users", async (c) => {
       );
     }
   }
-  return c.json({ success: true, data: publicUser(user, technicianIdOfUser(user.id)) });
+  const link = technicianLinkOfUser(user.id);
+  return c.json({ success: true, data: publicUser(user, link?.id ?? null, link ? link.active : null) });
 });
 
 /** Błąd wewnątrz transakcji PATCH-a: niesie kod i komunikat, a przy okazji wycofuje zapis. */
@@ -148,7 +149,15 @@ class PatchError extends Error {
  */
 admin.patch("/users/:id", async (c) => {
   const id = Number(c.req.param("id"));
-  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  // Ciało MUSI być obiektem JSON. Tablica, `null`, liczba albo nieparsowalny
+  // tekst dawały pusty patch i odpowiedź 200 „zapisano" — a nie zapisano nic
+  // (żaden klucz nie przechodził przez `!== undefined`), więc panel admina
+  // meldował sukces po żądaniu, które w całości przepadło.
+  const raw = (await c.req.json().catch(() => undefined)) as unknown;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return c.json({ success: false, error: "Nieprawidłowe dane." }, 400);
+  }
+  const body = raw as Record<string, unknown>;
 
   // --- walidacja wejścia (jeszcze przed otwarciem transakcji) ---------------
   let displayName: string | undefined;
@@ -172,8 +181,26 @@ admin.patch("/users/:id", async (c) => {
   // Optimistic concurrency: front odsyła wersję, którą wczytał. Jeśli inny admin
   // zapisał w międzyczasie, wersja się nie zgadza i zwracamy 409 zamiast po cichu
   // nadpisać jego zmiany (lost update na mapie uprawnień).
-  const expectedVersion =
-    typeof body.expectedVersion === "number" ? body.expectedVersion : undefined;
+  //
+  // WERSJA W STRINGU TEŻ LICZY. `typeof === "number"` po cichu WYŁĄCZAŁ blokadę:
+  // klient wysyłający `"7"` (a tak wygląda wartość z pola formularza) dostawał
+  // zapis bez żadnego warunku, czyli dokładnie ten lost update, przed którym
+  // ten mechanizm miał chronić. Śmieć („abc", `{}`, `[]`) to teraz 400, a nie
+  // cichy zapis.
+  let expectedVersion: number | undefined;
+  if (body.expectedVersion !== undefined && body.expectedVersion !== null) {
+    const rawVersion = body.expectedVersion;
+    const parsed =
+      typeof rawVersion === "number"
+        ? rawVersion
+        : typeof rawVersion === "string" && /^\d+$/.test(rawVersion.trim())
+          ? Number(rawVersion.trim())
+          : NaN;
+    if (!Number.isInteger(parsed) || parsed < 0) {
+      return c.json({ success: false, error: "Nieprawidłowa wersja użytkownika." }, 400);
+    }
+    expectedVersion = parsed;
+  }
 
   try {
     const data = db.transaction((tx) => {
@@ -219,7 +246,8 @@ admin.patch("/users/:id", async (c) => {
           );
         }
       }
-      return publicUser(result.user, technicianIdOfUser(id));
+      const link = technicianLinkOfUser(id);
+      return publicUser(result.user, link?.id ?? null, link ? link.active : null);
     });
     return c.json({ success: true, data });
   } catch (e) {

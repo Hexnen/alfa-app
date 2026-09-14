@@ -1,12 +1,23 @@
-import { AlertTriangle, CheckCircle2, ClipboardCheck, PenLine } from "lucide-react";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  ClipboardCheck,
+  PenLine,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { REALIZATION_WORK_TYPE_META } from "@/lib/calendar-labels";
 import { ClearableInput } from "../ui/clearable-input";
 import { Field, Panel, ReadRow } from "../ui/panel";
 import { scrollFieldIntoView } from "../lib/keyboard";
-import { clockOf, formatDatePl } from "../lib/dates";
+import { clockOf, formatDatePl, formatStampDayMonth } from "../lib/dates";
 import { activityLines } from "../lib/activities";
-import { cleanItems, countLabel, gapsOf, pl, shortContactName } from "../lib/protocol";
+import {
+  cleanItems,
+  countLabel,
+  gapsOf,
+  pl,
+  shortContactName,
+} from "../lib/protocol";
 import type { StepProps } from "./types";
 
 /**
@@ -62,11 +73,20 @@ export function KrokOdbior({
             />
             <div className="min-w-0">
               <p className="font-semibold leading-snug">
-                Podpisano {formatDatePl(protocol.signedAt).slice(0, 5)}
-                {clockOf(protocol.signedAt) ? ` o ${clockOf(protocol.signedAt)}` : ""}
+                {/* Dzień podpisu przez `parseStamp`, nie przez cięcie tekstu:
+                    `signedAt` to ISO w UTC, więc `slice(0, 5)` po 22:00 naszego
+                    czasu pokazywało dzień wcześniejszy niż karta protokołu. */}
+                Podpisano {formatStampDayMonth(protocol.signedAt)}
+                {clockOf(protocol.signedAt)
+                  ? ` o ${clockOf(protocol.signedAt)}`
+                  : ""}
               </p>
+              {/* Stare podpisy mają w signerName całą sklejkę „Imię (rola), tel, mail”
+                  — pokazujemy samo nazwisko; pełny kontakt technik ma na ekranie zlecenia. */}
               <p className="text-sm text-muted-foreground">
-                Odebrał: {protocol.signerName || form.signerName || "—"}
+                Odebrał(a):{" "}
+                {shortContactName(protocol.signerName || form.signerName) ||
+                  "—"}
               </p>
             </div>
           </div>
@@ -74,7 +94,7 @@ export function KrokOdbior({
             <div className="rounded-lg border bg-white p-2">
               <img
                 src={protocol.signaturePng}
-                alt={`Podpis: ${protocol.signerName ?? "klient"}`}
+                alt="Podpis odbierającego"
                 className="mx-auto max-h-28"
               />
             </div>
@@ -91,24 +111,35 @@ export function KrokOdbior({
           <ReadRow label="Klient" value={protocol.clientName} />
           <ReadRow
             label="Adres montażu"
-            value={protocol.installationAddress || protocol.clientCity || job?.address}
+            value={
+              protocol.installationAddress ||
+              protocol.clientCity ||
+              job?.address
+            }
           />
           <ReadRow label="Rodzaj prac" value={workType.label} />
           <ReadRow label="Data wykonania" value={formatDatePl(form.workDate)} />
-          <ReadRow label="Godziny" value={form.actualHours > 0 ? `${pl(form.actualHours)} h` : ""} />
-          <ReadRow label="Kilometry" value={form.actualKm > 0 ? `${pl(form.actualKm)} km` : ""} />
+          <ReadRow
+            label="Godziny"
+            value={form.actualHours > 0 ? `${pl(form.actualHours)} h` : ""}
+          />
+          <ReadRow
+            label="Kilometry"
+            value={form.actualKm > 0 ? `${pl(form.actualKm)} km` : ""}
+          />
           <ReadRow
             label="Czynności"
-            value={lines.length > 0 ? lines.map((l) => `• ${l}`).join("\n") : ""}
+            value={
+              lines.length > 0 ? lines.map((l) => `• ${l}`).join("\n") : ""
+            }
           />
           <ReadRow
             label="Urządzenia"
             value={
               items.length > 0
                 ? items
-                    .map(
-                      (i) =>
-                        `• ${i.name || "—"}${i.serial ? ` (nr ${i.serial})` : ""} — ${i.qty || "1"} ${i.unit || ""}`.trim(),
+                    .map((i) =>
+                      `• ${i.name || "—"}${i.serial ? ` (nr ${i.serial})` : ""} — ${i.qty || "1"} ${i.unit || ""}`.trim(),
                     )
                     .join("\n")
                 : ""
@@ -138,71 +169,80 @@ export function KrokOdbior({
                     aria-hidden
                   />
                   <span className="min-w-0 flex-1">{g.label}</span>
-                  <span className="shrink-0 text-xs text-muted-foreground">uzupełnij →</span>
+                  <span className="shrink-0 text-xs text-muted-foreground">
+                    uzupełnij →
+                  </span>
                 </button>
               </li>
             ))}
           </ul>
           <p className="text-xs leading-snug text-muted-foreground">
-            Braki nie blokują podpisu — jeśli nie ma czego wpisać, podpisz protokół tak, jak jest.
+            Braki nie blokują podpisu — jeśli nie ma czego wpisać, podpisz
+            protokół tak, jak jest.
           </p>
         </Panel>
       )}
 
-      {/* --- OSOBA ODBIERAJĄCA + PODPIS ------------------------------ */}
-      <Panel icon={PenLine} title="Odbiór">
-        <Field
-          label="Osoba odbierająca"
-          htmlFor="p-contact"
-          hint={
-            contactHint ? (
-              <span data-testid="contact-hint">Kontakt z kartoteki: {contactHint}</span>
-            ) : null
-          }
-        >
-          <ClearableInput
-            id="p-contact"
-            value={form.signerName}
-            disabled={readOnly}
-            onChange={(v) => set("signerName", v)}
-            onFocus={(e) => scrollFieldIntoView(e.currentTarget)}
-            placeholder="Imię i nazwisko"
-            autoComplete="off"
-            clearLabel="Wyczyść osobę odbierającą"
-            className="h-12 text-base"
-          />
-          {!readOnly && !form.signerName.trim() && contactHint && (
+      {/* --- OSOBA ODBIERAJĄCA + PODPIS ------------------------------
+          Po podpisie ten panel znika: nagłówek „Podpisano … Odebrał(a)” mówi
+          to samo, a powtórzone pole i „Kontakt z kartoteki” dublowały treść. */}
+      {!signed && (
+        <Panel icon={PenLine} title="Odbiór">
+          <Field
+            label="Osoba odbierająca"
+            htmlFor="p-contact"
+            hint={
+              contactHint ? (
+                <span data-testid="contact-hint">
+                  Kontakt z kartoteki: {contactHint}
+                </span>
+              ) : null
+            }
+          >
+            <ClearableInput
+              id="p-contact"
+              value={form.signerName}
+              disabled={readOnly}
+              onChange={(v) => set("signerName", v)}
+              onFocus={(e) => scrollFieldIntoView(e.currentTarget)}
+              placeholder="Imię i nazwisko"
+              autoComplete="off"
+              clearLabel="Wyczyść osobę odbierającą"
+              className="h-12 text-base"
+            />
+            {!readOnly && !form.signerName.trim() && contactHint && (
+              <Button
+                variant="outline"
+                className="mt-2 h-11 w-full justify-start text-base"
+                onClick={() => set("signerName", shortContactName(contactHint))}
+              >
+                Wstaw z kartoteki: {shortContactName(contactHint)}
+              </Button>
+            )}
+          </Field>
+
+          {!signed && (
             <Button
-              variant="outline"
-              className="mt-2 h-11 w-full justify-start text-base"
-              onClick={() => set("signerName", shortContactName(contactHint))}
+              size="lg"
+              className="h-12 w-full text-base"
+              disabled={readOnly}
+              data-testid="protokol-podpis-krok"
+              onClick={onSign}
             >
-              Wstaw z kartoteki: {shortContactName(contactHint)}
+              <PenLine className="mr-2 h-5 w-5" />
+              Podpis klienta
             </Button>
           )}
-        </Field>
 
-        {!signed && (
-          <Button
-            size="lg"
-            className="h-12 w-full text-base"
-            disabled={readOnly}
-            data-testid="protokol-podpis-krok"
-            onClick={onSign}
-          >
-            <PenLine className="mr-2 h-5 w-5" />
-            Podpis klienta
-          </Button>
-        )}
-
-        {!signed && (
-          <p className="text-xs leading-snug text-muted-foreground">
-            {countLabel(lines.length, "czynność", "czynności", "czynności")} ·{" "}
-            {countLabel(items.length, "pozycja", "pozycje", "pozycji")} · po podpisie protokołu nie
-            da się już zmienić.
-          </p>
-        )}
-      </Panel>
+          {!signed && (
+            <p className="text-xs leading-snug text-muted-foreground">
+              {countLabel(lines.length, "czynność", "czynności", "czynności")} ·{" "}
+              {countLabel(items.length, "pozycja", "pozycje", "pozycji")} · po
+              podpisie protokołu nie da się już zmienić.
+            </p>
+          )}
+        </Panel>
+      )}
     </div>
   );
 }

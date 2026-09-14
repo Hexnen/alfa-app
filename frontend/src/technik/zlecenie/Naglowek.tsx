@@ -4,6 +4,7 @@ import type { TechnikJobDetails, WeatherBrief } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 // Ten sam znacznik pogody co na kafelku kalendarza i na karcie zlecenia.
 import { WeatherMark } from "@/components/CalendarWeather";
+import { fmtMinutes } from "@/lib/calendar-labels";
 import { cn } from "@/lib/utils";
 import { clockOf, dayOf, groupLabel, parseStamp, timeOf } from "../lib/dates";
 import {
@@ -123,7 +124,10 @@ export function Naglowek({
 function Licznik({ startedAt }: { startedAt: string | null }) {
   const minutes = useElapsedMinutes(startedAt);
   const from = clockOf(startedAt);
-  const label = `w toku od ${from}${minutes == null ? "" : ` (${minutes} min)`}`;
+  // „431 min” nic nie mówi — od godziny w górę pokazujemy „7 godz. 11 min”
+  // (ten sam format co dojazd i kalendarz). Poniżej minuty: „< 1 min”.
+  const elapsed = minutes == null ? null : minutes < 1 ? "< 1 min" : fmtMinutes(minutes);
+  const label = `w toku od ${from}${elapsed == null ? "" : ` (${elapsed})`}`;
   const PlayIcon = JOB_STATE_ICONS.running;
 
   return (
@@ -139,7 +143,7 @@ function Licznik({ startedAt }: { startedAt: string | null }) {
         <PlayIcon className="h-3 w-3" aria-hidden />
         od {from || "—"}
       </span>
-      {minutes != null && <span className="whitespace-nowrap">{minutes} min</span>}
+      {elapsed != null && <span className="whitespace-nowrap">{elapsed}</span>}
     </span>
   );
 }

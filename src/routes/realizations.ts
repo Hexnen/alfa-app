@@ -425,7 +425,7 @@ app.post("/", async (c) => {
       .values(data as NewRealization)
       .returning()
       .get();
-    const proto = createProtocolForRealizationSync(tx, created);
+    const proto = createProtocolForRealizationSync(tx, created, null, getUser(c)?.id ?? null);
     return { realization: created, protocol: proto ? briefOf(proto) : null };
   });
 
@@ -467,7 +467,7 @@ app.post("/:id/protocol", (c) => {
     const existing = readProtocol(tx);
     if (existing) return { status: 409 as const, protocol: briefOf(existing) };
 
-    const created = createProtocolForRealizationSync(tx, realization);
+    const created = createProtocolForRealizationSync(tx, realization, null, getUser(c)?.id ?? null);
     // ON CONFLICT DO NOTHING → brak zwrotki znaczy, że protokół powstał równolegle.
     if (!created) {
       const raced = readProtocol(tx);

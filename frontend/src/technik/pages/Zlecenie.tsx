@@ -10,6 +10,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { ActionTimeDialog } from "../ui/action-time";
+import { ConfirmDialog } from "../ui/confirm";
 import { WarnNote } from "../ui/panel";
 import { useToast } from "../ui/toast";
 import { useJob } from "../lib/useJob";
@@ -48,6 +49,8 @@ export function Zlecenie() {
   const [busy, setBusy] = useState(false);
   /** Które działanie pyta o godzinę („Teraz” / „Inna godzina”). */
   const [askTime, setAskTime] = useState<"start" | "finish" | null>(null);
+  /** Otwarte pytanie „Wznowić zlecenie?”. */
+  const [askReopen, setAskReopen] = useState(false);
 
   // Pogoda dnia zlecenia — ten sam batch co na listach, tu dla jednego id.
   const weather = useJobWeather(job);
@@ -175,6 +178,26 @@ export function Zlecenie() {
     }
   };
 
+  /**
+   * „Wznów” — powrót zakończonego zlecenia do stanu „w toku”. Backend kasuje
+   * `finishedAt` i zdejmuje status `done`; biuro zobaczy zlecenie jako
+   * niezakończone, więc pytamy przed, a nie po.
+   */
+  const reopen = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const next = await technikApi.reopen(job.id);
+      patch(next);
+      toast({ message: "Zlecenie wznowione", kind: "success" });
+      reload();
+    } catch (e) {
+      toastError(e instanceof Error ? e.message : "Nie udało się wznowić zlecenia.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   /** Otwiera protokół; gdy go jeszcze nie ma — zakłada i od razu otwiera. */
   const openProtocol = async () => {
     if (job.protocol) {
@@ -207,6 +230,16 @@ export function Zlecenie() {
       {/* Pasek akcji stoi nad tab barem — treść musi mieć pod sobą tyle miejsca,
           żeby ostatnia linijka nie chowała się za „Rozpocznij”. */}
       <div className={cn("space-y-3", canEdit && state !== "cancelled" ? "pb-24" : "pb-16")}>
+        {/* Odwołane zlecenie zostaje do wglądu (notatki, papier), ale mówi
+            wprost, że nie ma po co jechać — technik trafia tu z powiadomienia
+            „biuro odwołało zlecenie” i musi to zobaczyć w pierwszej linijce. */}
+        {state === "cancelled" && (
+          <WarnNote data-testid="zlecenie-odwolane">
+            Biuro odwołało to zlecenie. Notatki i protokół zostają do wglądu, ale nic już tu nie
+            zmienisz.
+          </WarnNote>
+        )}
+
         <KafleAkcji job={job} distance={distance} distanceLoading={distanceLoading} />
 
         {/* Zlecenie bez obiektu: protokół wyjdzie niepełny, a dojazdu nie ma
@@ -220,7 +253,12 @@ export function Zlecenie() {
 
         <CoDoZrobienia job={job} />
 
-        <Notatki jobId={job.id} notes={job.notes} canEdit={canEdit} onChanged={reload} />
+        <Notatki
+          jobId={job.id}
+          notes={job.notes}
+          canEdit={canEdit && state !== "cancelled"}
+          onChanged={reload}
+        />
 
         <ProtokolKarta
           jobId={job.id}
@@ -228,6 +266,7 @@ export function Zlecenie() {
           detail={protocolDetail}
           canEdit={canEdit}
           busy={busy}
+          cancelled={state === "cancelled"}
           onCreate={() => void openProtocol()}
         />
       </div>
@@ -242,6 +281,22 @@ export function Zlecenie() {
         onStart={() => setAskTime("start")}
         onFinish={() => setAskTime("finish")}
         onProtocol={() => void openProtocol()}
+        onReopen={() => setAskReopen(true)}
+      />
+
+      {/* Wznowienie cofa to, co biuro już widziało jako zrobione — stąd pytanie
+          zamiast jednego tapnięcia. */}
+      <ConfirmDialog
+        open={askReopen}
+        onOpenChange={(o) => !o && !busy && setAskReopen(false)}
+        variant="default"
+        title="Wznowić zlecenie?"
+        description="Wróci do stanu „w toku”, a biuro zobaczy je jako niezakończone."
+        confirmLabel={busy ? "Wznawiam…" : "Wznów"}
+        onConfirm={() => {
+          setAskReopen(false);
+          void reopen();
+        }}
       />
 
       {/* Jedno okno dla obu akcji: „Teraz” (jeden tap) albo wpisana godzina.

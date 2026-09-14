@@ -39,24 +39,56 @@ export interface PublicUser {
   createdAt?: string;
   /** Powiązany technik z kartoteki (`technicians.user_id`); null = brak powiązania. */
   technicianId: number | null;
+  /**
+   * Czy powiązany technik jest AKTYWNY. `null` = konto nie ma powiązania.
+   *
+   * Bez tego pola panel admina i `/auth/me` mówiły dwie różne rzeczy o tym
+   * samym koncie: lista użytkowników pokazywała podpiętego technika, a
+   * `/auth/me` oddawało `technicianId: null`, bo dezaktywowany technik nie
+   * uprawnia do panelu (`linkedTechnician` w src/routes/technik.ts). Admin
+   * widział „powiązany", technik — „konto nie jest powiązane z technikiem".
+   * Teraz powiązanie widać dalej, ale z adnotacją „(nieaktywny)".
+   */
+  technicianActive: boolean | null;
+}
+
+/** Powiązanie konto → kartoteka techników (id + czy technik jest aktywny). */
+export interface UserTechnicianLink {
+  id: number;
+  active: boolean;
+}
+
+/** Powiązany technik konta — NULL, gdy konta nikt nie podpiął. */
+export function technicianLinkOfUser(userId: number): UserTechnicianLink | null {
+  return (
+    db
+      .select({ id: technicians.id, active: technicians.active })
+      .from(technicians)
+      .where(eq(technicians.userId, userId))
+      .get() ?? null
+  );
 }
 
 /** Id technika powiązanego z kontem — NULL, gdy konta nikt nie podpiął. */
 export function technicianIdOfUser(userId: number): number | null {
-  return (
-    db
-      .select({ id: technicians.id })
-      .from(technicians)
-      .where(eq(technicians.userId, userId))
-      .get()?.id ?? null
-  );
+  return technicianLinkOfUser(userId)?.id ?? null;
 }
 
 /**
  * `technicianId` podajemy z zewnątrz tam, gdzie mapa jest już wczytana
  * (listUsers robi jedno zapytanie na całą listę zamiast N+1).
+ *
+ * `technicianActive` pominięte = doczytujemy je z kartoteki; `null` znaczy
+ * „konto bez powiązania". Wołający, który świadomie ZERUJE `technicianId`
+ * (`/auth/me` dla nieaktywnego technika), podaje flagę jawnie — inaczej
+ * front nie miałby jak odróżnić „nie ma powiązania" od „jest, ale wygasło".
  */
-export function publicUser(u: User, technicianId?: number | null): PublicUser {
+export function publicUser(
+  u: User,
+  technicianId?: number | null,
+  technicianActive?: boolean | null
+): PublicUser {
+  const link = technicianId === undefined || technicianActive === undefined ? technicianLinkOfUser(u.id) : null;
   return {
     id: u.id,
     email: u.email,
@@ -65,7 +97,9 @@ export function publicUser(u: User, technicianId?: number | null): PublicUser {
     permissions: parsePermissions(u.permissions),
     version: u.version,
     createdAt: u.createdAt,
-    technicianId: technicianId !== undefined ? technicianId : technicianIdOfUser(u.id),
+    technicianId: technicianId !== undefined ? technicianId : (link?.id ?? null),
+    technicianActive:
+      technicianActive !== undefined ? technicianActive : (link ? link.active : null),
   };
 }
 
@@ -81,15 +115,18 @@ export function listUsers(): PublicUser[] {
   const rows = db.select().from(users).all();
   // Jedno zapytanie na całą listę zamiast N+1 (macierz uprawnień woła listę przy
   // każdym otwarciu panelu).
-  const byUser = new Map<number, number>();
+  const byUser = new Map<number, UserTechnicianLink>();
   for (const t of db
-    .select({ id: technicians.id, userId: technicians.userId })
+    .select({ id: technicians.id, userId: technicians.userId, active: technicians.active })
     .from(technicians)
     .where(isNotNull(technicians.userId))
     .all()) {
-    if (t.userId != null) byUser.set(t.userId, t.id);
+    if (t.userId != null) byUser.set(t.userId, { id: t.id, active: t.active });
   }
-  return rows.map((u) => publicUser(u, byUser.get(u.id) ?? null));
+  return rows.map((u) => {
+    const link = byUser.get(u.id) ?? null;
+    return publicUser(u, link?.id ?? null, link ? link.active : null);
+  });
 }
 
 /** Technicy dla selecta w panelu admina (aktywni + aktualnie powiązany z kontem). */

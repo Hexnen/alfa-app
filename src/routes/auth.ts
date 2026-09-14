@@ -94,7 +94,10 @@ function withLinks(user: User) {
   const technicianRow = findTechnicianByUserId(user.id, db);
   const technician = technicianRow?.active ? technicianRow : null;
   return {
-    ...publicUser(user, technician?.id ?? null),
+    // `technicianActive` podajemy JAWNIE: `technicianId` jest tu wyzerowane dla
+    // nieaktywnego technika (panel i tak go nie wpuści), więc bez tej flagi
+    // front nie odróżniłby konta bez powiązania od konta z wygaszonym.
+    ...publicUser(user, technician?.id ?? null, technicianRow ? technicianRow.active : null),
     salespersonId: salesperson?.id ?? null,
     technicianId: technician?.id ?? null,
   };

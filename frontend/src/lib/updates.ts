@@ -63,7 +63,7 @@ export interface VersionUpdate {
  */
 export const UPDATES_CURRENT: VersionUpdate[] = [
   {
-    version: "1.6.0–1.9.0",
+    version: "1.6.0–1.10.0",
     date: "2026-09-14",
     title: "Panel technika",
     entries: [
@@ -116,6 +116,21 @@ export const UPDATES_CURRENT: VersionUpdate[] = [
         text: "Protokół podpisuje się tylko na wersji, którą widać na ekranie, a usunięty protokół nie oddaje numeru",
         type: "fix",
         module: "techniczny",
+      },
+      {
+        text: "Panel technika: poprawki po drugiej fali testów, „Wznów” po omyłkowym zakończeniu, lista kontaktów do zlecenia",
+        type: "fix",
+        module: "technik",
+      },
+      {
+        text: "Dopisek biura w notatce protokołu nie ginie już przy zapisie z tabletu, a puste „Wykonane czynności” nie dostają tytułu zlecenia",
+        type: "fix",
+        module: "techniczny",
+      },
+      {
+        text: "Aplikacja ładuje się szybciej po aktualizacji: niezmienione pliki nie są pobierane ponownie",
+        type: "tweak",
+        module: "ogolne",
       },
     ],
   },
@@ -225,7 +240,7 @@ export const UPDATES: VersionUpdate[] = [...UPDATES_CURRENT, ...UPDATES_2026];
  */
 export const UPDATES_TECHNIK: VersionUpdate[] = [
   {
-    version: "1.0.0–1.3.0",
+    version: "1.0.0–1.4.0",
     date: "2026-09-14",
     title: "Panel technika",
     entries: [
@@ -336,6 +351,41 @@ export const UPDATES_TECHNIK: VersionUpdate[] = [
       },
       {
         text: "Powiadomienia: seria terminów to jedno powiadomienie, a przełącznik pokazuje prawdziwy stan konta",
+        type: "tweak",
+        module: "technik",
+      },
+      {
+        text: "Po podpisaniu protokołu panel od razu pyta, czy zakończyć wizytę",
+        type: "feat",
+        module: "technik",
+      },
+      {
+        text: "„Zadzwoń” pyta przed połączeniem, a przy kilku osobach pokazuje listę kontaktów do zlecenia",
+        type: "feat",
+        module: "technik",
+      },
+      {
+        text: "Omyłkowe „Zakończ” da się cofnąć przyciskiem „Wznów” do 24 godzin",
+        type: "feat",
+        module: "technik",
+      },
+      {
+        text: "Odwołane zlecenie otwiera się z informacją od biura zamiast komunikatu o braku dostępu",
+        type: "feat",
+        module: "technik",
+      },
+      {
+        text: "W uwagach protokołu działają spacje i nowe linie, a wyjście z protokołu zapisuje ostatnie zmiany",
+        type: "fix",
+        module: "technik",
+      },
+      {
+        text: "Mapa nie gubi już zbliżenia po powrocie z nawigacji, obrocie ekranu ani zmianie zakresu",
+        type: "fix",
+        module: "technik",
+      },
+      {
+        text: "Czas trwania wizyty w godzinach i minutach, jedna informacja o odbiorze po podpisie",
         type: "tweak",
         module: "technik",
       },

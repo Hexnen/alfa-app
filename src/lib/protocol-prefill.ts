@@ -175,6 +175,28 @@ function clip(s: string, max: number): string {
   return s.length > max ? `${s.slice(0, max - 1)}…` : s;
 }
 
+/** Prefiks adnotacji realizacji założonej z kalendarza („[Kalendarz #123] ”). */
+const CALENDAR_NOTE_PREFIX = /^\[Kalendarz #\d+\]\s*/;
+
+/**
+ * „Wykonane czynności" z adnotacji realizacji.
+ *
+ * Realizacja z kalendarza ma w `note` etykietę „[Kalendarz #123] Tytuł — opis"
+ * (`realizationNote` w src/lib/calendar-realizations.ts). Do protokołu nadaje
+ * się WYŁĄCZNIE opis: tytuł to nazwa kafelka w kalendarzu („Serwis 7RSA"), a
+ * nie praca, którą ktoś wykonał — wydarzenie bez opisu wpisywało technikowi
+ * w czynności „[Kalendarz #6105] Serwis 7RSA”, czyli sam identyfikator.
+ *
+ * Adnotacja wpisana ręcznie (bez prefiksu) zostaje w całości — to świadomy
+ * opis zakresu prac, a nie etykieta automatu.
+ */
+function activitiesFromRealizationNote(note: string): string {
+  if (!CALENDAR_NOTE_PREFIX.test(note)) return note;
+  const rest = note.replace(CALENDAR_NOTE_PREFIX, "");
+  const sep = rest.indexOf(" — ");
+  return sep === -1 ? "" : rest.slice(sep + 3).trim();
+}
+
 /** Długość wydarzenia w godzinach zaokrąglona do 0,25 (all-day → 0) — jak w kalendarzu. */
 function hoursOfEvent(ev: Pick<CalendarEvent, "startAt" | "endAt" | "allDay">): number {
   if (ev.allDay) return 0;
@@ -510,7 +532,11 @@ export function buildProtocolPrefill(
   // („Serwis 7RSA”), a nie praca, którą ktoś wykonał — wpisany w „Wykonane
   // czynności” robił z prefillu meldunek o robocie, której jeszcze nie było.
   // Opis planujący wpisuje świadomie jako zakres prac, więc ten zostaje.
-  let activities = clean(r.note);
+  let activities = activitiesFromRealizationNote(clean(r.note));
+  if (activities) {
+    activities = clip(activities, 400);
+    from("activities", "realizacja", `opis w adnotacji realizacji #${r.id}`);
+  }
   const eventDescription = ev ? clean(ev.description) : "";
   if (eventDescription) {
     activities = clip(eventDescription, 400);

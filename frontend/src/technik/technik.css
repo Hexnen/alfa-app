@@ -139,9 +139,14 @@
   min-height: 20rem;
 }
 
-/* Gest mapy zostaje w mapie (Safari inaczej „odbija" całą stronę). */
+/* Gest mapy zostaje w mapie (Safari inaczej „odbija" całą stronę).
+   Tło z tokenu, a nie `#ddd` z arkusza Leafleta: ten ładuje się z CDN PO
+   Tailwindzie, więc `.leaflet-container` wygrywało z `bg-muted` i mapa miała
+   w ciemnym motywie jasnoszare ramy wokół kafelków (i taki sam prostokąt
+   w trakcie ładowania). Dwie klasy = wyższa szczegółowość, bez `!important`. */
 .technik-root .tm-canvas {
   overscroll-behavior: contain;
+  background: hsl(var(--muted));
 }
 
 /* Kontener ikony — bez białego prostokąta, który Leaflet daje `divIcon`

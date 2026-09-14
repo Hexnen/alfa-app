@@ -34,7 +34,7 @@ import protocolsRoutes from "../src/routes/protocols.js";
 import adminTechnikRoutes from "../src/routes/admin-technik.js";
 import { TECHNIK_ACTIVITIES_KEY } from "../src/lib/technik-config.js";
 import { removeEventAttachmentDir, resolveStoredPath } from "../src/lib/calendar-attachments.js";
-import { createEvent, deleteEvent, moveEvent, parseInput } from "../src/lib/calendar-mutations.js";
+import { createEvent, deleteEvent, deleteNote, moveEvent, parseInput, updateNote } from "../src/lib/calendar-mutations.js";
 import { flushPush, notifyTechnicians, setPushTransport, type PushPayload } from "../src/lib/push.js";
 import { deleteSetting, getSetting, setSetting } from "../src/lib/settings.js";
 import { tabPermissionGuard, technikRoleGuard } from "../src/middleware/auth.js";
@@ -1306,6 +1306,49 @@ try {
   );
 
   // =========================================================================
+  // 19b. Lista „do kogo zadzwonić” — kontakty zlecenia
+  // =========================================================================
+  // Kontrahent ma osobę kontaktową (contact_person + phone); dokładamy dwa
+  // kontakty z kartoteki: jeden z TYM SAMYM numerem kontrahenta zapisanym
+  // inaczej (ma się nie dublować) i jeden bez telefonu (ma nie wejść).
+  const contractorPhone = db
+    .select({ phone: schema.contractors.phone })
+    .from(schema.contractors)
+    .where(eq(schema.contractors.id, contractor.id))
+    .get()?.phone;
+  db.update(schema.contractors)
+    .set({ contactPerson: `${PREFIX} Osoba Kontrahenta`, phone: "+48 600 100 200" })
+    .where(eq(schema.contractors.id, contractor.id))
+    .run();
+  const kc1 = db
+    .insert(schema.contacts)
+    .values({ contractorId: contractor.id, objectId: object.id, firstName: PREFIX, lastName: "Portier", role: "portiernia", phone: "+48 500 000 111", isPrimary: true, active: true })
+    .returning()
+    .get();
+  const kc2 = db
+    .insert(schema.contacts)
+    .values({ contractorId: contractor.id, firstName: PREFIX, lastName: "Dubel", phone: "0048600100200", active: true })
+    .returning()
+    .get();
+  const kc3 = db
+    .insert(schema.contacts)
+    .values({ contractorId: contractor.id, firstName: PREFIX, lastName: "BezTelefonu", phone: null, active: true })
+    .returning()
+    .get();
+  try {
+    const det = await T("GET", `/jobs/${job}`);
+    const contacts = ((det.data as { contacts?: { name: string; phone: string; source: string }[] })?.contacts) ?? [];
+    ok("kontakty: osoba kontrahenta pierwsza", contacts[0]?.source === "contractor" && contacts[0]?.phone === "+48 600 100 200", contacts);
+    ok("kontakty: kontakt z kartoteki (obiekt, główny) na liście", contacts.some((k) => k.name.includes("Portier") && k.source === "contact"), contacts);
+    ok("kontakty: ten sam numer zapisany inaczej nie dubluje się", !contacts.some((k) => k.name.includes("Dubel")), contacts);
+    ok("kontakty: bez telefonu nie wchodzi", !contacts.some((k) => k.name.includes("BezTelefonu")), contacts);
+    ok("kontakty: dokładnie 2 pozycje", contacts.length === 2, contacts.length);
+  } finally {
+    db.delete(schema.contacts).where(inArray(schema.contacts.id, [kc1.id, kc2.id, kc3.id])).run();
+    db.update(schema.contractors).set({ contactPerson: null, phone: contractorPhone ?? null }).where(eq(schema.contractors.id, contractor.id)).run();
+  }
+
+  // =========================================================================
   // 20. Fala 1 — znaczniki czasu, liczniki i granice okien
   // =========================================================================
 
@@ -1556,6 +1599,357 @@ try {
   );
 
   // =========================================================================
+  // 21b. FALA 2 — protokół z panelu, wznawianie i odwołane zlecenia
+  // =========================================================================
+
+  // --- S1: „final” nadaje wyłącznie podpis --------------------------------
+  const statusJob = insertEvent({ title: "Status protokolu", type: "serwis", technicianIds: [tech.id], hour: 11, day: dayOffset(6) });
+  const statusProtoId =
+    ((await T("POST", `/jobs/${statusJob}/protocol`)).data as { protocol?: { id: number } })?.protocol?.id ?? 0;
+  const statusRow = () => db.select().from(schema.protocols).where(eq(schema.protocols.id, statusProtoId)).get()!;
+  const fakeFinal = await T("PUT", `/protocols/${statusProtoId}`, { status: "final", activities: "coś tam" });
+  ok(
+    "S1 protokół: PUT {status:'final'} z panelu NIE robi z brudnopisu podpisanego",
+    fakeFinal.status === 200 && statusRow().status === "draft" && statusRow().signaturePng == null,
+    { status: statusRow().status, signed: statusRow().signaturePng != null }
+  );
+  const officeFinal = await officeProtocolsFor(adminUser)("PUT", `/${statusProtoId}`, {
+    status: "final",
+    expectedUpdatedAt: statusRow().updatedAt,
+  });
+  ok(
+    "S1 protokół: to samo z BIURA — status zostaje `draft`",
+    officeFinal.status === 200 && statusRow().status === "draft",
+    statusRow().status
+  );
+
+  // --- N3: obecny klucz z bezsensowną wartością → 400, nie ciche 200 ------
+  const beforeGarbage = statusRow();
+  ok(
+    "N3 protokół: items nie będące tablicą → 400",
+    (await T("PUT", `/protocols/${statusProtoId}`, { items: "kamera" })).status === 400
+  );
+  ok(
+    "N3 protokół: actualHours: null → 400 (kolumna NOT NULL, nie „0”)",
+    (await T("PUT", `/protocols/${statusProtoId}`, { actualHours: null })).status === 400
+  );
+  ok(
+    "N3 protokół: actualKm jako tekst bez liczby → 400",
+    (await T("PUT", `/protocols/${statusProtoId}`, { actualKm: "dużo" })).status === 400
+  );
+  ok(
+    "N3 protokół: activities jako liczba → 400",
+    (await T("PUT", `/protocols/${statusProtoId}`, { activities: 42 })).status === 400
+  );
+  ok(
+    "N3 protokół: po każdym 400 dokument bez zmian",
+    statusRow().actualHours === beforeGarbage.actualHours && statusRow().items === beforeGarbage.items,
+    { hours: statusRow().actualHours }
+  );
+  const clearContact = await T("PUT", `/protocols/${statusProtoId}`, { contact: null });
+  ok(
+    "N3 protokół: `null` w polu NULLABLE czyści kolumnę (a nie wpisuje pusty string)",
+    clearContact.status === 200 && statusRow().contact === null,
+    statusRow().contact
+  );
+
+  // --- N4: data wykonania z panelu trzyma się terminu zlecenia ------------
+  const jobDay = dayOffset(6);
+  ok(
+    "N4 protokół: data wykonania sprzed lat → 400",
+    (await T("PUT", `/protocols/${statusProtoId}`, { workDate: "2019-03-04" })).status === 400
+  );
+  ok(
+    "N4 protokół: data o 8 dni od terminu → 400",
+    (await T("PUT", `/protocols/${statusProtoId}`, { workDate: dayOffset(14) })).status === 400
+  );
+  const nearDate = await T("PUT", `/protocols/${statusProtoId}`, { workDate: dayOffset(3) });
+  ok(
+    "N4 protokół: data w oknie ±7 dni przechodzi",
+    nearDate.status === 200 && statusRow().workDate === dayOffset(3),
+    statusRow().workDate
+  );
+  // Biuro tego limitu NIE ma — poprawka daty wstecz to jego normalna praca.
+  const officeFar = await officeProtocolsFor(adminUser)("PUT", `/${statusProtoId}`, {
+    workDate: "2019-03-04",
+    expectedUpdatedAt: statusRow().updatedAt,
+  });
+  ok(
+    "N4 protokół: biuro dalej może wpisać dowolną datę",
+    officeFar.status === 200 && statusRow().workDate === "2019-03-04",
+    statusRow().workDate
+  );
+  db.update(schema.protocols).set({ workDate: jobDay }).where(eq(schema.protocols.id, statusProtoId)).run();
+
+  // --- W1: dopisek biura wykrywany po TREŚCI, nie po znaczniku czasu ------
+  //
+  // Stare porównanie `updated_at` notatki z `updated_at` protokołu było martwe:
+  // notatkę odświeżamy w tej samej transakcji, ZARAZ PO zapisie protokołu, więc
+  // wychodziło „to nadal nasza notatka" i dopisek biura ginął bez śladu.
+  // Tutaj dopisek idzie BEZ ruszania znacznika — czyli dokładnie tak, jak
+  // wyglądał przypadek, który stara heurystyka przepuszczała.
+  const hashJob = insertEvent({ title: "Notatka hash", type: "serwis", technicianIds: [tech.id], hour: 12, day: dayOffset(6) });
+  const hashProtoId =
+    ((await T("POST", `/jobs/${hashJob}/protocol`)).data as { protocol?: { id: number } })?.protocol?.id ?? 0;
+  const hashRow = () => db.select().from(schema.protocols).where(eq(schema.protocols.id, hashProtoId)).get()!;
+  const hashNotes = () =>
+    db
+      .select()
+      .from(schema.calendarEventNotes)
+      .where(and(eq(schema.calendarEventNotes.eventId, hashJob), isNull(schema.calendarEventNotes.deletedAt)))
+      .all();
+  await T("PUT", `/protocols/${hashProtoId}`, { activities: "Pierwszy zapis" });
+  ok(
+    "W1 notatka: po pierwszym zapisie jest jedna notatka i zapisany odcisk treści",
+    hashNotes().length === 1 && !!hashRow().noteHash,
+    { notes: hashNotes().length, hash: hashRow().noteHash }
+  );
+  const ownNoteId = hashRow().noteId;
+  await T("PUT", `/protocols/${hashProtoId}`, { activities: "Drugi zapis" });
+  ok(
+    "W1 notatka: własny kolejny zapis PODMIENIA tę samą notatkę",
+    hashNotes().length === 1 && hashRow().noteId === ownNoteId && hashNotes()[0].text.includes("Drugi zapis"),
+    hashNotes().map((n) => n.id)
+  );
+  // Biuro dopisuje zdanie — bez dotykania `updated_at` notatki.
+  db.update(schema.calendarEventNotes)
+    .set({ text: `${hashNotes()[0].text}\nUWAGA BIURA: klient zapłaci gotówką` })
+    .where(eq(schema.calendarEventNotes.id, ownNoteId ?? 0))
+    .run();
+  await T("PUT", `/protocols/${hashProtoId}`, { activities: "Trzeci zapis" });
+  const afterOfficeEdit = hashNotes();
+  ok(
+    "W1 notatka: dopisek biura bez zmiany updated_at ZOSTAJE, streszczenie idzie do nowej notatki",
+    afterOfficeEdit.length === 2 &&
+      afterOfficeEdit.some((n) => n.id === ownNoteId && n.text.includes("UWAGA BIURA")) &&
+      afterOfficeEdit.some((n) => n.id !== ownNoteId && n.text.includes("Trzeci zapis")),
+    afterOfficeEdit.map((n) => ({ id: n.id, t: n.text.slice(0, 40) }))
+  );
+  ok(
+    "W1 notatka: note_id i odcisk przepięte na nową notatkę",
+    hashRow().noteId !== ownNoteId && !!hashRow().noteHash,
+    { noteId: hashRow().noteId, was: ownNoteId }
+  );
+
+  // --- N8: notatka protokołu nie ląduje w USUNIĘTYM wydarzeniu ------------
+  {
+    const { eventIdForProtocol } = await import("../src/lib/protocols.js");
+    const protoRow = hashRow();
+    const liveId = eventIdForProtocol(db, protoRow);
+    ok("N8 notatka: wydarzenie protokołu znalezione", liveId === hashJob, { liveId, hashJob });
+    db.update(schema.calendarEvents)
+      .set({ deletedAt: new Date().toISOString() })
+      .where(eq(schema.calendarEvents.id, hashJob))
+      .run();
+    ok(
+      "N8 notatka: po usunięciu wydarzenia nie ma dokąd pisać (null, nie kosz)",
+      eventIdForProtocol(db, protoRow) === null,
+      eventIdForProtocol(db, protoRow)
+    );
+    db.update(schema.calendarEvents)
+      .set({ deletedAt: null })
+      .where(eq(schema.calendarEvents.id, hashJob))
+      .run();
+  }
+
+  // --- N7: nieudany insert protokołu nie zjada numeru ---------------------
+  const seqDay = dayOffset(7);
+  const seqJobA = insertEvent({ title: "Numeracja A", type: "serwis", technicianIds: [tech.id], hour: 8, day: seqDay });
+  const seqJobB = insertEvent({ title: "Numeracja B", type: "serwis", technicianIds: [tech.id], hour: 9, day: seqDay });
+  const numberOf = (r: { data?: unknown }) =>
+    ((r.data as { protocol?: { number: string } })?.protocol?.number ?? "");
+  const seqA = numberOf(await T("POST", `/jobs/${seqJobA}/protocol`));
+  // Drugie żądanie odbija się o „to zlecenie ma już protokół" — licznik NIE
+  // ma prawa się przy tym ruszyć (wcześniej podbijał się przed insertem).
+  ok("N7 numeracja: drugi protokół tego samego zlecenia → 409", (await T("POST", `/jobs/${seqJobA}/protocol`)).status === 409);
+  const seqB = numberOf(await T("POST", `/jobs/${seqJobB}/protocol`));
+  const seqNum = (n: string) => parseInt(n.slice(n.lastIndexOf("/") + 1), 10);
+  ok(
+    "N7 numeracja: kolejny protokół dostaje numer +1, bez dziury po nieudanym zapisie",
+    !!seqA && !!seqB && seqNum(seqB) === seqNum(seqA) + 1,
+    { seqA, seqB }
+  );
+  const seqKey = `protocols.lastSeq.${seqDay.slice(0, 4)}-${seqDay.slice(5, 7)}`;
+  ok(
+    "N7 numeracja: wysoki stan w app_settings zgadza się z ostatnim WYDANYM numerem",
+    parseInt(getSetting(seqKey) ?? "", 10) === seqNum(seqB),
+    { stored: getSetting(seqKey), seqB }
+  );
+  const seqSetting = db.select().from(schema.appSettings).where(eq(schema.appSettings.key, seqKey)).get();
+  ok(
+    "N7 numeracja: wpis licznika jest podpisany kontem, nie NULL-em",
+    seqSetting?.updatedBy === techUser.id,
+    seqSetting?.updatedBy
+  );
+
+  // --- N6: „Wznów” po omyłkowym „Zakończ” --------------------------------
+  const reopenJob = insertEvent({ title: "Do wznowienia", type: "serwis", technicianIds: [tech.id], hour: 8, day: PAST_DAY });
+  const reopenRow = () => db.select().from(schema.calendarEvents).where(eq(schema.calendarEvents.id, reopenJob)).get()!;
+  ok(
+    "N6 wznów: zlecenie niezakończone → 409",
+    (await T("POST", `/jobs/${reopenJob}/reopen`)).status === 409
+  );
+  await T("POST", `/jobs/${reopenJob}/finish`);
+  const realizationAfterFinish = reopenRow().realizationId;
+  ok("N6 wznów: po „Zakończ” jest realizacja i status done", realizationAfterFinish != null && reopenRow().status === "done", reopenRow());
+  const reopened = await T("POST", `/jobs/${reopenJob}/reopen`);
+  ok(
+    "N6 wznów: 200, finishedAt wyczyszczony, status wraca na `confirmed`",
+    reopened.status === 200 && reopenRow().finishedAt == null && reopenRow().status === "confirmed",
+    { status: reopenRow().status, finishedAt: reopenRow().finishedAt }
+  );
+  ok(
+    "N6 wznów: w dzienniku notatka „Wznowiono…”",
+    db
+      .select()
+      .from(schema.calendarEventNotes)
+      .where(eq(schema.calendarEventNotes.eventId, reopenJob))
+      .all()
+      .some((n) => n.text.startsWith("Wznowiono")),
+    db.select().from(schema.calendarEventNotes).where(eq(schema.calendarEventNotes.eventId, reopenJob)).all().map((n) => n.text)
+  );
+  ok(
+    "N6 wznów: realizacja ZOSTAJE ta sama (nie odpięta, nie skasowana)",
+    reopenRow().realizationId === realizationAfterFinish,
+    { przed: realizationAfterFinish, po: reopenRow().realizationId }
+  );
+  // Ponowne „Zakończ” po wznowieniu ma działać i NIE może założyć drugiej realizacji.
+  const refinish = await T("POST", `/jobs/${reopenJob}/finish`);
+  ok(
+    "N6 wznów: ponowne „Zakończ” przechodzi (finishedAt był wyczyszczony)",
+    refinish.status === 200 && reopenRow().status === "done" && reopenRow().finishedAt != null,
+    refinish
+  );
+  ok(
+    "N6 wznów: ponowne „Zakończ” NIE zakłada drugiej realizacji",
+    reopenRow().realizationId === realizationAfterFinish,
+    { przed: realizationAfterFinish, po: reopenRow().realizationId }
+  );
+  const protocolsOfRealization = db
+    .select()
+    .from(schema.protocols)
+    .where(eq(schema.protocols.realizationId, realizationAfterFinish ?? 0))
+    .all();
+  ok(
+    "N6 wznów: realizacja ma dokładnie jeden protokół",
+    protocolsOfRealization.length === 1,
+    protocolsOfRealization.map((p) => p.number)
+  );
+  // Po dobie wznawianie jest już dla biura.
+  db.update(schema.calendarEvents)
+    .set({ finishedAt: new Date(Date.now() - 30 * 3600_000).toISOString() })
+    .where(eq(schema.calendarEvents.id, reopenJob))
+    .run();
+  const tooLate = await T("POST", `/jobs/${reopenJob}/reopen`);
+  ok(
+    "N6 wznów: ponad dobę po zakończeniu → 409 z odesłaniem do biura",
+    tooLate.status === 409 && /biura/i.test(tooLate.error ?? ""),
+    tooLate
+  );
+  ok(
+    "N6 wznów: tryb tylko-do-odczytu nie wznawia (403)",
+    (await V("POST", `/jobs/${job}/reopen`)).status === 403
+  );
+
+  // --- N11: idempotencja „Zakończ” po cofnięciu statusu przez biuro -------
+  const idemJob = insertEvent({ title: "Idempotencja finish", type: "serwis", technicianIds: [tech.id], hour: 7, day: PAST_DAY });
+  await T("POST", `/jobs/${idemJob}/finish`);
+  const idemRow = () => db.select().from(schema.calendarEvents).where(eq(schema.calendarEvents.id, idemJob)).get()!;
+  const idemFinishedAt = idemRow().finishedAt;
+  // Biuro cofa status (ale `finished_at` zostaje) — drugie tapnięcie technika
+  // nie ma prawa dołożyć drugiego „Zakończono o…”.
+  db.update(schema.calendarEvents).set({ status: "confirmed" }).where(eq(schema.calendarEvents.id, idemJob)).run();
+  const idemAgain = await T("POST", `/jobs/${idemJob}/finish`, { note: "Drugi raz" });
+  const idemNotes = db
+    .select()
+    .from(schema.calendarEventNotes)
+    .where(eq(schema.calendarEventNotes.eventId, idemJob))
+    .all();
+  ok(
+    "N11 finish: po cofnięciu statusu drugie tapnięcie jest bezczynne",
+    idemAgain.status === 200 &&
+      /już zakończone/i.test(idemAgain.message ?? "") &&
+      idemRow().finishedAt === idemFinishedAt,
+    { message: idemAgain.message, finishedAt: idemRow().finishedAt }
+  );
+  ok(
+    "N11 finish: bez zdublowanej notatki „Zakończono”",
+    idemNotes.filter((n) => n.text.startsWith("Zakończono")).length === 1,
+    idemNotes.map((n) => n.text)
+  );
+
+  // --- N5: poprawka i usunięcie notatki też zapalają plakietkę -----------
+  const noteBadgeJob = insertEvent({ title: "Plakietka notatki", type: "serwis", technicianIds: [tech.id, editTech.id], hour: 13, day: dayOffset(0) });
+  const seenNote = new Date(Date.now() - 60_000).toISOString();
+  const badgeCount = async () =>
+    ((await T("GET", `/me?seenToday=${seenNote}`)).data as { counts: Record<string, number> }).counts.changedToday;
+  const officeNote = await E("POST", `/jobs/${noteBadgeJob}/notes`, { text: `${PREFIX} pierwsza wersja` });
+  const officeNoteId = (officeNote.data as { id: number })?.id ?? 0;
+  db.update(schema.calendarEvents)
+    .set({ updatedBy: techUser.id, updatedAt: sql`(datetime('now','-1 hour'))` })
+    .where(eq(schema.calendarEvents.id, noteBadgeJob))
+    .run();
+  const beforeEdit = await badgeCount();
+  db.transaction((tx) => updateNote(tx, officeNoteId, `${PREFIX} jednak o 8:00`, { user: editUser }));
+  ok("N5 notatka: POPRAWKA notatki biura podbija updated_at zlecenia", (await badgeCount()) === beforeEdit + 1, {
+    przed: beforeEdit,
+    po: await badgeCount(),
+  });
+  db.update(schema.calendarEvents)
+    .set({ updatedBy: techUser.id, updatedAt: sql`(datetime('now','-1 hour'))` })
+    .where(eq(schema.calendarEvents.id, noteBadgeJob))
+    .run();
+  const beforeDelete = await badgeCount();
+  db.transaction((tx) => deleteNote(tx, officeNoteId, { user: editUser }));
+  ok("N5 notatka: USUNIĘCIE notatki też podbija updated_at zlecenia", (await badgeCount()) === beforeDelete + 1, {
+    przed: beforeDelete,
+    po: await badgeCount(),
+  });
+
+  // --- Odwołane zlecenie: widoczne pojedynczo, nietykalne -----------------
+  const cancelDetail = await T("GET", `/jobs/${cancelledJob}`);
+  ok(
+    "odwołane: GET /jobs/:id → 200 ze statusem `cancelled` (push prowadzi wprost tutaj)",
+    cancelDetail.status === 200 && (cancelDetail.data as { status?: string })?.status === "cancelled",
+    cancelDetail
+  );
+  ok(
+    "odwołane: lista nadal go nie pokazuje",
+    !ids(await T("GET", `/jobs${RANGE}`)).includes(cancelledJob)
+  );
+  for (const [label, path, body] of [
+    ["Rozpocznij", `/jobs/${cancelledJob}/start`, undefined],
+    ["Zakończ", `/jobs/${cancelledJob}/finish`, undefined],
+    ["notatka", `/jobs/${cancelledJob}/notes`, { text: "cokolwiek" }],
+    ["protokół", `/jobs/${cancelledJob}/protocol`, undefined],
+    ["Wznów", `/jobs/${cancelledJob}/reopen`, undefined],
+  ] as const) {
+    const res = await T("POST", path, body);
+    ok(
+      `odwołane: ${label} → 409 „Zlecenie zostało odwołane”`,
+      res.status === 409 && /odwołane/i.test(res.error ?? ""),
+      res
+    );
+  }
+  ok("odwołane: cudze odwołane zlecenie dalej 404", (await O("GET", `/jobs/${cancelledJob}`)).status === 404);
+
+  // Protokół założony PRZED odwołaniem: ekran odwołanego zlecenia ma go dalej
+  // pokazać (odczyt 200), ale nic już w nim nie zmieni (zapis/podpis 409).
+  const cancelLater = insertEvent({ title: "Odwołane po protokole", type: "serwis", technicianIds: [tech.id], hour: 18 });
+  const cancelProto = await T("POST", `/jobs/${cancelLater}/protocol`);
+  const cancelProtoId = (cancelProto.data as { protocol?: { id: number } } | undefined)?.protocol?.id;
+  ok("odwołane: protokół założony przed odwołaniem", cancelProto.status === 201 && !!cancelProtoId, cancelProto);
+  db.update(schema.calendarEvents).set({ status: "cancelled" }).where(eq(schema.calendarEvents.id, cancelLater)).run();
+  if (cancelProtoId) {
+    const rd = await T("GET", `/protocols/${cancelProtoId}`);
+    ok("odwołane: GET protokołu odwołanego zlecenia → 200", rd.status === 200, rd);
+    const wr = await T("PUT", `/protocols/${cancelProtoId}`, { activities: "x", expectedUpdatedAt: (rd.data as { updatedAt?: string })?.updatedAt });
+    ok("odwołane: PUT protokołu → 409", wr.status === 409, wr);
+    const sg = await T("POST", `/protocols/${cancelProtoId}/sign`, { signaturePng: "data:image/png;base64,iVBORw0KGgo=", signerName: "X", expectedUpdatedAt: (rd.data as { updatedAt?: string })?.updatedAt });
+    ok("odwołane: podpis protokołu → 409", sg.status === 409, sg);
+  }
+
+  // =========================================================================
   // 22. PUSH — seria, pary znoszące się i próg awarii (W8, N16, S16)
   // =========================================================================
   process.env.VAPID_PUBLIC_KEY = TEST_VAPID_PUBLIC;
@@ -1655,27 +2049,125 @@ try {
     restoreSeries();
   }
 
-  // --- S16: po progu nieudanych prób subskrypcja znika --------------------
+  // --- S2 (fala 2): co kasuje subskrypcję, a co tylko liczy ---------------
+  //
+  // Kasuje WYŁĄCZNIE jednoznaczna odpowiedź push service (401/403/404/410).
+  // Awaria bez statusu („socket hang up") i 5xx to problem po drugiej stronie:
+  // wcześniej po dziesiątej takiej próbie wiersz znikał i technik przestawał
+  // dostawać powiadomienia na zawsze — cicho, bo przełącznik w panelu dalej
+  // pokazywał „włączone".
   const failEndpoint = "https://push.example.invalid/__TECHNIK_TEST__/fail";
-  await T("POST", "/push/subscribe", { endpoint: failEndpoint, keys: SUB_A.keys });
-  const failRow = subsOf(techUser.id).find((s) => s.endpoint === failEndpoint);
-  db.update(schema.pushSubscriptions)
-    .set({ failures: 9 })
-    .where(eq(schema.pushSubscriptions.id, failRow?.id ?? 0))
-    .run();
-  const restoreFail = setPushTransport(async () => {
-    throw Object.assign(new Error("VAPID key mismatch"), { statusCode: 403 });
-  });
-  try {
-    await notifyTechnicians([tech.id], { title: "x", body: "y", url: "/technik" }, {});
-  } finally {
-    restoreFail();
-  }
+  const withTransport = async (err: unknown) => {
+    // Rzuca WYŁĄCZNIE dla badanego endpointu: `notifyTechnicians` strzela do
+    // wszystkich subskrypcji technika, a pozostałe (SUB_A) są potrzebne dalej.
+    const restore = setPushTransport(async (target) => {
+      if (target.endpoint === failEndpoint) throw err;
+    });
+    try {
+      await notifyTechnicians([tech.id], { title: "x", body: "y", url: "/technik" }, {});
+    } finally {
+      restore();
+    }
+  };
+  const failRowOf = () => subsOf(techUser.id).find((s) => s.endpoint === failEndpoint);
+  const primeFailures = async (failures: number) => {
+    db.delete(schema.pushSubscriptions).where(eq(schema.pushSubscriptions.endpoint, failEndpoint)).run();
+    await T("POST", "/push/subscribe", { endpoint: failEndpoint, keys: SUB_A.keys });
+    db.update(schema.pushSubscriptions)
+      .set({ failures })
+      .where(eq(schema.pushSubscriptions.id, failRowOf()?.id ?? 0))
+      .run();
+  };
+
+  await primeFailures(99);
+  await withTransport(new Error("socket hang up"));
   ok(
-    "S16 push: 10. nieudana próba (403 po rotacji VAPID) kasuje wiersz",
-    !subsOf(techUser.id).some((s) => s.endpoint === failEndpoint),
+    "S2 push: błąd bez statusu (socket hang up) NIE kasuje subskrypcji, tylko liczy",
+    failRowOf()?.failures === 100,
+    failRowOf()
+  );
+  await withTransport(Object.assign(new Error("bad gateway"), { statusCode: 502 }));
+  ok(
+    "S2 push: 5xx po stronie push service też nie kasuje wiersza",
+    failRowOf()?.failures === 101,
+    failRowOf()
+  );
+
+  await primeFailures(0);
+  await withTransport(Object.assign(new Error("VAPID key mismatch"), { statusCode: 403 }));
+  ok(
+    "S2 push: 403 (rotacja kluczy VAPID) kasuje wiersz OD RAZU, bez czekania na próg",
+    failRowOf() == null,
     subsOf(techUser.id).map((s) => ({ e: s.endpoint, f: s.failures }))
   );
+  await primeFailures(0);
+  await withTransport(Object.assign(new Error("gone"), { statusCode: 410 }));
+  ok("S2 push: 410 kasuje wiersz", failRowOf() == null, failRowOf());
+  await primeFailures(0);
+  await withTransport(Object.assign(new Error("unauthorized"), { statusCode: 401 }));
+  ok("S2 push: 401 kasuje wiersz", failRowOf() == null, failRowOf());
+  db.delete(schema.pushSubscriptions).where(eq(schema.pushSubscriptions.endpoint, failEndpoint)).run();
+
+  // --- N9 (fala 2): zwinięcie serii liczy terminy PER TECHNIK -------------
+  //
+  // Seria bywa obsadzona nierówno. Wcześniej zbiorczy ładunek szedł z sumą
+  // WSZYSTKICH zdarzeń w grupie, więc technik z jednym terminem dostawał
+  // „10 terminów przesunięto" — informację o cudzych zleceniach.
+  const perTech = new Map<string, PushPayload[]>();
+  const restorePerTech = setPushTransport(async (target, payload) => {
+    const list = perTech.get(target.endpoint) ?? [];
+    list.push(payload);
+    perTech.set(target.endpoint, list);
+  });
+  const SUB_SOLO = {
+    endpoint: "https://push.example.invalid/__TECHNIK_TEST__/solo",
+    keys: SUB_A.keys,
+  };
+  await O("POST", "/push/subscribe", SUB_SOLO);
+  try {
+    const seriesStart = dayOffset(6);
+    const series = db.transaction((tx) =>
+      createEvent(
+        tx,
+        parseInput({
+          type: "serwis",
+          title: `${PREFIX} Seria nierówno obsadzona`,
+          department: "technical",
+          startAt: `${seriesStart}T09:00`,
+          endAt: `${seriesStart}T10:00`,
+          objectId: object.id,
+          technicianIds: [tech.id],
+          recurrence: { freq: "weekly", interval: 1, count: 4 },
+        }),
+        { user: adminUser }
+      )
+    );
+    await flushPush();
+    perTech.clear();
+    // Drugi technik (otherTech) wchodzi tylko na PIERWSZY termin serii.
+    db.insert(schema.calendarEventAssignees)
+      .values({ eventId: series.firstId, technicianId: otherTech.id })
+      .run();
+    // Odwołanie całej serii: obsadzony na wszystkich dostaje zbiorcze
+    // „4 terminy odwołano", dopisany do jednego — powiadomienie o tym jednym.
+    db.transaction((tx) => deleteEvent(tx, series.firstId, "all", { user: adminUser }));
+    await flushPush();
+    const fullPayloads = perTech.get(SUB_A.endpoint) ?? [];
+    const soloPayloads = perTech.get(SUB_SOLO.endpoint) ?? [];
+    ok(
+      "N9 push: technik z całą serią dostaje ZBIORCZE powiadomienie o 4 terminach",
+      fullPayloads.length === 1 && /4 termin(y|ów)? odwołano/.test(fullPayloads[0]?.body ?? ""),
+      fullPayloads
+    );
+    ok(
+      "N9 push: technik z JEDNYM terminem nie dostaje liczby cudzych zleceń",
+      soloPayloads.length === 1 && !/4 termin/.test(soloPayloads[0]?.body ?? ""),
+      soloPayloads
+    );
+  } finally {
+    restorePerTech();
+    db.delete(schema.pushSubscriptions).where(eq(schema.pushSubscriptions.endpoint, SUB_SOLO.endpoint)).run();
+  }
 } catch (err) {
   console.error("BŁĄD:", err);
   failures++;

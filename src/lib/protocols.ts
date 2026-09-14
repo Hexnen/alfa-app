@@ -14,7 +14,7 @@
  * transakcji; efekty po commicie są w `afterProtocolSigned` (async).
  */
 import { createHash } from "crypto";
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
 import { CALENDAR_NOTE_MAX, type Protocol } from "../db/schema.js";
 import { AUTOFILL_SHORT_LABELS, autofillAfterProtocolSigned } from "./realization-autofill.js";
@@ -77,7 +77,15 @@ export function parseProtocolItemsInput(raw: unknown): ProtocolItem[] | undefine
     }));
 }
 
-/** Pola, których panel technika nie ma prawa nadpisać (tożsamość klienta i wykonawcy). */
+/**
+ * Pola, których panel technika nie ma prawa nadpisać (tożsamość klienta
+ * i wykonawcy) — plus `status`.
+ *
+ * `status` jest tu, bo „final" znaczy PODPISANY, a podpis nadaje wyłącznie
+ * `signProtocolSync` (razem z PNG, nazwiskiem i `contentHash`). Bez tej blokady
+ * `PUT {"status":"final"}` z tabletu robił z brudnopisu dokument oznaczony jako
+ * podpisany — bez podpisu, bez odbierającego i bez dowodu integralności.
+ */
 const CLIENT_LOCKED_FIELDS = [
   "clientName",
   "clientNip",
@@ -85,7 +93,23 @@ const CLIENT_LOCKED_FIELDS = [
   "installationAddress",
   "contractor",
   "salesperson",
+  "status",
 ] as const;
+
+/** Tekstowe pola dokumentu — kolumny NULLABLE, więc `null` znaczy „wyczyść". */
+const NULLABLE_TEXT_FIELDS = [
+  "contractor",
+  "salesperson",
+  "clientName",
+  "clientNip",
+  "clientCity",
+  "installationAddress",
+  "contact",
+  "activities",
+] as const;
+
+/** Ile dni od terminu zlecenia wolno wpisać jako datę wykonania z panelu. */
+export const PANEL_WORK_DATE_TOLERANCE_DAYS = 7;
 
 export interface ProtocolUpdateOptions {
   /**
@@ -95,6 +119,19 @@ export interface ProtocolUpdateOptions {
    * przysłać pustym stringiem i wyczyścić dokument.
    */
   lockClientFields?: boolean;
+  /**
+   * Termin zlecenia („RRRR-MM-DD") dla zapisów z panelu. Data wykonania musi
+   * się trzymać ±`PANEL_WORK_DATE_TOLERANCE_DAYS` dni od niego: literówka na
+   * tablecie („2019" zamiast „2026") wyrzucała protokół poza każdy raport
+   * miesięczny i wracała z 200.
+   */
+  workDateAround?: string | null;
+}
+
+/** Dzień („RRRR-MM-DD") → liczba dni od epoki; NaN dla śmiecia. */
+function dayNumber(day: string): number {
+  const ms = Date.parse(`${day}T00:00:00Z`);
+  return Number.isFinite(ms) ? Math.round(ms / 86_400_000) : NaN;
 }
 
 /**
@@ -131,6 +168,40 @@ export function updateProtocolSync(
   if (has("workDate") && workDate && !/^\d{4}-\d{2}-\d{2}$/.test(workDate)) {
     return { status: 400, error: "Nieprawidłowa data wykonania" };
   }
+  // Data wykonania z panelu trzyma się terminu zlecenia (patrz `workDateAround`).
+  if (has("workDate") && workDate && opts.workDateAround) {
+    const around = dayNumber(opts.workDateAround.slice(0, 10));
+    const target = dayNumber(workDate);
+    if (Number.isFinite(around) && Number.isFinite(target) && Math.abs(target - around) > PANEL_WORK_DATE_TOLERANCE_DAYS) {
+      return {
+        status: 400,
+        error: `Data wykonania musi mieścić się w ±${PANEL_WORK_DATE_TOLERANCE_DAYS} dniach od terminu zlecenia`,
+      };
+    }
+  }
+  // OBECNY KLUCZ Z BEZSENSOWNĄ WARTOŚCIĄ TO 400, NIE CICHE 200.
+  // Wcześniej `items: "x"` przechodziło bez zapisu (parser oddawał `undefined`),
+  // `activities: null` kasowało czynności do pustego stringa, a
+  // `actualHours: null` wpisywało 0 — tablet z uciętym JSON-em dostawał
+  // potwierdzenie zapisu, którego nie było albo który skasował treść.
+  if (has("items") && !Array.isArray(input.items)) {
+    return { status: 400, error: "Pole items: oczekiwano listy pozycji" };
+  }
+  for (const key of ["actualHours", "actualKm"] as const) {
+    if (!has(key)) continue;
+    const raw = input[key];
+    const n = typeof raw === "string" ? parseFloat(raw.replace(",", ".")) : raw;
+    if (typeof n !== "number" || !Number.isFinite(n)) {
+      return { status: 400, error: `Pole ${key}: oczekiwano liczby` };
+    }
+  }
+  for (const key of NULLABLE_TEXT_FIELDS) {
+    if (!has(key)) continue;
+    const raw = input[key];
+    if (typeof raw !== "string" && raw !== null) {
+      return { status: 400, error: `Pole ${key}: oczekiwano tekstu` };
+    }
+  }
   const items = has("items") ? parseProtocolItemsInput(input.items) : undefined;
   const expectedUpdatedAt =
     typeof input.expectedUpdatedAt === "string" ? input.expectedUpdatedAt : null;
@@ -146,9 +217,13 @@ export function updateProtocolSync(
     ? (input.workType as "serwis" | "montaz" | "wizja" | "inne")
     : existing.workType;
 
-  /** Pole tekstowe tylko wtedy, gdy przyszło w ciele (i nie jest zablokowane). */
-  const text = (key: keyof Protocol & string) =>
-    has(key) ? { [key]: str(input[key]) } : {};
+  /**
+   * Pole tekstowe tylko wtedy, gdy przyszło w ciele (i nie jest zablokowane).
+   * `null` = wyczyść kolumnę (wszystkie te kolumny są NULLABLE), a nie „wpisz
+   * pusty string" — w dokumencie to ta sama pustka, ale w bazie już nie.
+   */
+  const text = (key: keyof Protocol & string): Record<string, string | null> =>
+    has(key) ? { [key]: input[key] === null ? null : str(input[key]) } : {};
 
   const updated = tx
     .update(schema.protocols)
@@ -166,7 +241,10 @@ export function updateProtocolSync(
       ...text("contact"),
       ...text("activities"),
       ...(items !== undefined ? { items: JSON.stringify(items) } : {}),
-      ...(has("status") ? { status: input.status === "final" ? "final" : "draft" } : {}),
+      // „final" NIE przychodzi z ciała żądania — nadaje go wyłącznie
+      // `signProtocolSync` razem z podpisem (S1). Tu zostaje tylko powrót do
+      // brudnopisu, żeby stare klienty wysyłające `status` nie dostawały 400.
+      ...(has("status") ? { status: "draft" as const } : {}),
       updatedAt: new Date().toISOString(),
     })
     .where(
@@ -453,37 +531,26 @@ export function protocolNoteText(
   return `${text.slice(0, CALENDAR_NOTE_MAX - tail.length)}${tail}`;
 }
 
-/**
- * `updated_at` notatki to `datetime('now')` (UTC, bez „Z”), a protokołu — ISO
- * z „Z”. Bez sprowadzenia obu do milisekund porównanie tekstowe mówiło, że
- * notatka z 2026 jest starsza niż protokół z 2026 (spacja < „T”).
- */
-function stampMs(raw: string | null | undefined): number {
-  if (!raw) return 0;
-  const iso = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(raw) ? `${raw.replace(" ", "T")}Z` : raw;
-  const ms = Date.parse(iso);
-  return Number.isFinite(ms) ? ms : 0;
+/** Odcisk treści notatki, jaki trafia do `protocols.note_hash`. */
+export function protocolNoteHash(text: string): string {
+  return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
 /**
- * `datetime('now')` ma ziarnistość SEKUNDY, a `protocols.updated_at` —
- * milisekundy. Zapis protokołu i odświeżenie jego notatki idą w jednej
- * transakcji, ale potrafią wypaść po dwóch stronach tyknięcia zegara; bez
- * tolerancji własny zapis wyglądałby jak cudza edycja.
+ * Czy TA notatka to nadal nasze lustro protokołu.
+ *
+ * ROZSTRZYGA ODCISK TREŚCI, nie znacznik czasu. Poprzednia wersja porównywała
+ * `updated_at` notatki z `updated_at` protokołu — a notatkę odświeżamy w tej
+ * samej transakcji, ZARAZ PO zapisie protokołu, więc warunek był zawsze
+ * prawdziwy i dopisek biura ginął przy najbliższym zapisie, bez śladu.
+ *
+ * `note_hash` (migracja 0104) trzyma odcisk treści, którą ostatnio zapisaliśmy
+ * SAMI: zgadza się z wierszem → nikt go nie ruszał. Rozjazd → treść jest obca.
+ * `null` (protokół sprzed migracji) → zostaje stara heurystyka nagłówka.
  */
-const NOTE_EDIT_TOLERANCE_MS = 2000;
-
-/**
- * Czy TA notatka to nadal nasze lustro protokołu. Biuro może ją zwyczajnie
- * poprawić (to zwykła notatka w dzienniku) — wtedy tekst nie zaczyna się już
- * od nagłówka systemowego albo jej `updated_at` jest świeższy niż protokołu.
- */
-function isOwnProtocolNote(
-  row: { text: string; updatedAt: string | null },
-  protocol: Protocol
-): boolean {
-  if (!row.text.startsWith(`Protokół ${protocol.number} —`)) return false;
-  return stampMs(row.updatedAt) <= stampMs(protocol.updatedAt) + NOTE_EDIT_TOLERANCE_MS;
+function isOwnProtocolNote(row: { text: string }, protocol: Protocol): boolean {
+  if (protocol.noteHash) return protocolNoteHash(row.text) === protocol.noteHash;
+  return row.text.startsWith(`Protokół ${protocol.number} —`);
 }
 
 /**
@@ -511,15 +578,30 @@ export function syncProtocolNote(
 ): boolean {
   const href = input.href ?? protocolHrefOf(input.protocol.id);
   const text = protocolNoteText(input.protocol, href, input.noteOptions);
+  const hash = protocolNoteHash(text);
   const existingId = input.protocol.noteId;
   if (existingId) {
     const row = getNoteRow(tx, existingId);
     if (row && !row.deletedAt) {
-      if (row.text === text) return false;
+      if (row.text === text) {
+        // Treść bez zmian, ale odcisku mogło nie być (protokół sprzed migracji
+        // 0104) — uzupełniamy go, żeby kolejna edycja biura była wykrywalna.
+        if (input.protocol.noteHash !== hash) {
+          tx.update(schema.protocols)
+            .set({ noteHash: hash })
+            .where(eq(schema.protocols.id, input.protocol.id))
+            .run();
+        }
+        return false;
+      }
       if (isOwnProtocolNote(row, input.protocol)) {
         tx.update(schema.calendarEventNotes)
           .set({ text, updatedAt: sql`(datetime('now'))` })
           .where(eq(schema.calendarEventNotes.id, existingId))
+          .run();
+        tx.update(schema.protocols)
+          .set({ noteHash: hash })
+          .where(eq(schema.protocols.id, input.protocol.id))
           .run();
         return true;
       }
@@ -527,7 +609,7 @@ export function syncProtocolNote(
   }
   const note = addNote(tx, { eventId: input.eventId, text, ctx: input.ctx, source: "system" });
   tx.update(schema.protocols)
-    .set({ noteId: note.id })
+    .set({ noteId: note.id, noteHash: hash })
     .where(eq(schema.protocols.id, input.protocol.id))
     .run();
   return true;
@@ -541,9 +623,16 @@ export function eventIdForProtocol(dbx: DbOrTx, protocol: Protocol): number | nu
     .where(
       and(
         sql`(${schema.calendarEvents.protocolId} = ${protocol.id} OR ${schema.calendarEvents.realizationId} = ${protocol.realizationId})`,
-        eq(schema.calendarEvents.department, "technical")
+        eq(schema.calendarEvents.department, "technical"),
+        // Wydarzenie USUNIĘTE nie ma dziennika, który ktokolwiek czyta — notatka
+        // protokołu lądowała w koszu, a biuro nie widziało jej nigdzie.
+        isNull(schema.calendarEvents.deletedAt)
       )
     )
+    // Bez porządku SQLite oddawał „pierwszy z brzegu" wiersz. Gdy realizację
+    // wskazuje więcej niż jedno wydarzenie (przepięcie, kopia terminu),
+    // streszczenie skakało między nimi przy kolejnych zapisach.
+    .orderBy(desc(schema.calendarEvents.id))
     .get();
   return row?.id ?? null;
 }

@@ -9,17 +9,18 @@
  * jadę i co tam mam”.
  */
 /* eslint-disable @typescript-eslint/no-explicit-any -- Leaflet ładowany z CDN (jak w RoutePlannerMap), globalne `L` nie ma typów */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Building2, Crosshair, Maximize2, WifiOff } from "lucide-react";
 import { POLAND_RING } from "@/assets/poland-outline";
 import { LEAFLET_JS_ID, OSM_ATTRIBUTION, OSM_TILE_URL, loadLeaflet } from "@/lib/leaflet-loader";
 import { cn } from "@/lib/utils";
 import { EmptyState } from "../ui/empty-state";
 import { Button } from "@/components/ui/button";
+import { jobsLabel } from "../lib/jobs";
 import {
+  pinPlaceTitle,
   pinState,
   pinTimeLabel,
-  pinTitle,
   typeColor,
   typeIconSvg,
   type JobPin,
@@ -82,6 +83,12 @@ export interface JobsMapProps {
   onSelect: (key: string | null) => void;
   /** Wysokość otwartej dolnej karty (px) — podnosi przyciski mapy nad nią. */
   sheetHeight: number;
+  /**
+   * Trwa PONOWNE wczytywanie listy (zmiana zakresu, powrót do karty). Mapa
+   * zostaje na ekranie z delikatną plakietką zamiast znikać pod szkieletem —
+   * odmontowanie budowało Leafleta od zera i kasowało kadr technika.
+   */
+  refreshing?: boolean;
   /** Błąd geolokalizacji trafia do toasta panelu, nie do konsoli. */
   onGeoError: (message: string) => void;
   className?: string;
@@ -94,15 +101,24 @@ export function JobsMap({
   selectedKey,
   onSelect,
   sheetHeight,
+  refreshing = false,
   onGeoError,
   className,
 }: JobsMapProps) {
   const elRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<any>(null);
   const layerRef = useRef<any>(null);
+  /** Timer `invalidateSize` po starcie — sprzątany przy odmontowaniu (patrz niżej). */
+  const resizeTimer = useRef<number | null>(null);
   const meRef = useRef<any>(null);
-  /** `true` w trakcie własnego `fitBounds` — inaczej wzięlibyśmy je za ruch technika. */
-  const fittingRef = useRef(false);
+  /**
+   * Kadr, który USTAWILIŚMY SAMI (ostatnie `fitBounds`). Po każdym `moveend`
+   * porównujemy z nim aktualny środek i zoom: zgadza się = to byliśmy my,
+   * różni się = kadr należy do technika i „Dopasuj” ma sens. Wcześniej
+   * decydowało `dragstart`, więc przycisk zapalał się także po dotknięciu
+   * mapy, które niczego nie przesunęło.
+   */
+  const frameRef = useRef<{ lat: number; lng: number; zoom: number } | null>(null);
   const pinsRef = useRef(pins);
   pinsRef.current = pins;
   const selectRef = useRef(onSelect);
@@ -110,6 +126,9 @@ export function JobsMap({
 
   const [status, setStatus] = useState<"loading" | "ready" | "offline">("loading");
   const [moved, setMoved] = useState(false);
+  /** `moved` do odczytu z domknięć, które żyją dłużej niż render (ResizeObserver). */
+  const movedRef = useRef(moved);
+  movedRef.current = moved;
   const [locating, setLocating] = useState(false);
   /** Zmieniamy, gdy technik chce spróbować wczytać Leafleta jeszcze raz. */
   const [attempt, setAttempt] = useState(0);
@@ -153,10 +172,15 @@ export function JobsMap({
     });
   }, []);
 
+  /** Zapamiętanie kadru USTAWIONEGO PRZEZ NAS (patrz `frameRef`). */
+  const markFrame = useCallback((map: any) => {
+    const c = map.getCenter();
+    frameRef.current = { lat: c.lat, lng: c.lng, zoom: map.getZoom() };
+  }, []);
+
   const fit = useCallback(() => {
     const map = mapRef.current;
     if (!map) return;
-    fittingRef.current = true;
     const coords = pinsRef.current.map((p) => [p.lat, p.lng] as [number, number]);
     if (coords.length === 0) {
       map.fitBounds(POLAND_BOUNDS, { padding: [12, 12], animate: false });
@@ -168,13 +192,13 @@ export function JobsMap({
         animate: false,
       });
     }
+    // `animate: false` ustawia widok synchronicznie, więc zapamiętany kadr jest
+    // już tym docelowym — `moveend` porówna się z nim i nie weźmie naszego
+    // dopasowania za ruch technika.
+    markFrame(map);
+    movedRef.current = false;
     setMoved(false);
-    // Zdarzenia ruchu lecą synchronicznie po `fitBounds`, ale `moveend`
-    // dociera w następnej klatce — flagę zdejmujemy po niej.
-    setTimeout(() => {
-      fittingRef.current = false;
-    }, 0);
-  }, []);
+  }, [markFrame]);
 
   // --- Inicjalizacja (raz na wejście w zakładkę) ---
   useEffect(() => {
@@ -236,24 +260,41 @@ export function JobsMap({
       ).addTo(map);
 
       map.on("click", () => selectRef.current(null));
-      map.on("moveend zoomend", () => placeLabels());
-      // Ruch WŁASNY technika (nie nasze `fitBounds`) odsłania „Dopasuj”.
-      map.on("dragstart zoomstart", () => {
-        if (!fittingRef.current) setMoved(true);
+      map.on("moveend zoomend", () => {
+        placeLabels();
+        // „Dopasuj” zapala się po tym, CO SIĘ STAŁO z kadrem, a nie po samym
+        // dotknięciu mapy: porównujemy środek i zoom z ostatnim naszym.
+        const f = frameRef.current;
+        const c = map.getCenter();
+        const same =
+          !!f &&
+          Math.abs(c.lat - f.lat) < 1e-6 &&
+          Math.abs(c.lng - f.lng) < 1e-6 &&
+          map.getZoom() === f.zoom;
+        movedRef.current = !same;
+        setMoved(!same);
       });
 
       mapRef.current = map;
       layerRef.current = L.layerGroup().addTo(map);
       setStatus("ready");
       fit();
-      setTimeout(() => map.invalidateSize(), 60);
+      // Timer MUSI być sprzątnięty: po odmontowaniu mapy (wyjście z zakładki
+      // w trakcie ładowania) `invalidateSize` na usuniętej mapie rzucał
+      // `TypeError: _leaflet_pos` prosto w konsolę technika.
+      resizeTimer.current = window.setTimeout(() => {
+        resizeTimer.current = null;
+        map.invalidateSize();
+      }, 60);
 
       // Obrót tabletu i zmiana wysokości kontenera: bez `invalidateSize`
       // Leaflet rysuje kafelki na starym rozmiarze, a kadr zostaje przycięty.
       if (typeof ResizeObserver !== "undefined") {
         const ro = new ResizeObserver(() => {
           map.invalidateSize();
-          if (!moved) fit();
+          // `movedRef`, a nie `moved` z domknięcia pierwszego renderu: obrót
+          // tabletu czytał wartość sprzed godziny i kasował kadr technika.
+          if (!movedRef.current) fit();
         });
         ro.observe(elRef.current);
         (map as any).__ro = ro;
@@ -262,6 +303,10 @@ export function JobsMap({
 
     return () => {
       cancelled = true;
+      if (resizeTimer.current !== null) {
+        window.clearTimeout(resizeTimer.current);
+        resizeTimer.current = null;
+      }
       const map = mapRef.current;
       if (map) {
         (map as any).__ro?.disconnect();
@@ -271,8 +316,9 @@ export function JobsMap({
         meRef.current = null;
       }
     };
-    // `moved` czytamy w obserwatorze rozmiaru celowo przez domknięcie pierwszego
-    // renderu — ponowna inicjalizacja mapy przy każdym przesunięciu byłaby absurdem.
+    // Mapa powstaje RAZ na wejście w zakładkę; `fit` i `placeLabels` są stabilne,
+    // a `moved` czytamy refem — ponowna inicjalizacja przy każdym przesunięciu
+    // byłaby absurdem.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [attempt]);
 
@@ -303,7 +349,7 @@ export function JobsMap({
       const color = typeColor(first.type);
       const state = pinState(pin);
       const count = pin.jobs.length;
-      const name = pinTitle(first);
+      const name = pinPlaceTitle(pin);
       const when = pinTimeLabel(first, range);
       const html = `<div class="tm-pin${state === "done" ? " is-done" : ""}${
         state === "running" ? " is-running" : ""
@@ -312,11 +358,11 @@ export function JobsMap({
           ${count > 1 ? `<span class="tm-pin-count">×${count}</span>` : ""}
           <span class="tm-pin-label"><span class="tm-pin-name">${esc(name)}</span><span class="tm-pin-time">${esc(
             when,
-          )}${count > 1 ? ` · ${count} zlecenia` : ""}</span></span>
+          )}${count > 1 ? ` · ${jobsLabel(count)}` : ""}</span></span>
         </div>`;
       const title =
         count > 1
-          ? `${name} — ${count} zleceń, najbliższe ${when}`
+          ? `${name} — ${jobsLabel(count)}, najbliższe ${when}`
           : `${name} — ${first.typeLabel}, ${when}`;
       const icon = L.divIcon({ className: "tm-icon", html, iconSize: [30, 30], iconAnchor: [15, 15] });
       L.marker([pin.lat, pin.lng], {
@@ -332,12 +378,22 @@ export function JobsMap({
     placeLabels();
   }, [status, pins, office, range, selectedKey, placeLabels]);
 
-  // Kadr przelicza się przy zmianie ZESTAWU miejsc (zakres, odświeżenie listy),
-  // a nie przy każdym dotknięciu pinezki.
+  /**
+   * Kadr przelicza się przy zmianie ZESTAWU MIEJSC (inny zakres, nowe zlecenie),
+   * a nie przy każdym odświeżeniu listy: `pins` to nowa tablica po każdym
+   * powrocie do karty, więc efekt na `[status, pins]` kasował technikowi zoom
+   * i przesunięcie za każdym razem, gdy wrócił z Map Google. Kadru ustawionego
+   * ręcznie nie ruszamy wcale — od tego jest przycisk „Dopasuj”.
+   */
+  const pinsKey = useMemo(() => [...pins.map((p) => p.key)].sort().join("|"), [pins]);
+  const fittedKey = useRef<string | null>(null);
   useEffect(() => {
-    if (status === "ready") fit();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status, pins]);
+    if (status !== "ready") return;
+    if (fittedKey.current === pinsKey) return;
+    fittedKey.current = pinsKey;
+    if (movedRef.current) return;
+    fit();
+  }, [status, pinsKey, fit]);
 
   const locate = useCallback(() => {
     const map = mapRef.current;
@@ -364,12 +420,11 @@ export function JobsMap({
           alt: "Twoja pozycja",
           zIndexOffset: 600,
         }).addTo(map);
-        fittingRef.current = true;
+        // Skok na własną pozycję to kadr TECHNIKA — „Dopasuj” ma po nim zostać,
+        // więc kadru nie zapamiętujemy jako naszego.
         map.setView(here, Math.max(map.getZoom(), 12), { animate: false });
+        movedRef.current = true;
         setMoved(true);
-        setTimeout(() => {
-          fittingRef.current = false;
-        }, 0);
       },
       (err) => {
         setLocating(false);
@@ -428,6 +483,16 @@ export function JobsMap({
         <div className="absolute inset-0 grid place-items-center rounded-xl bg-muted text-sm text-muted-foreground">
           Wczytuję mapę…
         </div>
+      )}
+      {/* Ponowne wczytanie listy NIE zabiera mapy z ekranu — sama plakietka
+          mówi, że pinezki zaraz się przestawią. */}
+      {status === "ready" && refreshing && (
+        <p
+          data-testid="technik-mapa-odswiezanie"
+          className="pointer-events-none absolute left-1/2 top-3 z-[500] -translate-x-1/2 rounded-full border bg-card/90 px-3 py-1 text-xs text-muted-foreground shadow-sm"
+        >
+          Wczytuję zlecenia…
+        </p>
       )}
 
       {/* Sterowanie w prawym dolnym rogu mapy; przy otwartej karcie unosi się nad nią. */}

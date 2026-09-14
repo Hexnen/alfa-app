@@ -21,7 +21,8 @@ import {
 import { useToast } from "../ui/toast";
 import { useJob } from "../lib/useJob";
 import { useTechnikAccess } from "../lib/access";
-import { clockOf } from "../lib/dates";
+import { clockOf, dayOf } from "../lib/dates";
+import { ActionTimeDialog } from "../ui/action-time";
 import { rememberDeviceNames } from "../lib/devices";
 import {
   STEP_KEYS,
@@ -41,6 +42,9 @@ import { PasekAkcji, type SaveState } from "../protokol/PasekAkcji";
 
 /** Debounce autozapisu. Tyle mniej więcej trwa przerwa między zdaniami. */
 const AUTOSAVE_MS = 1500;
+
+/** Odstępy kolejnych ponowień zapisu po błędzie sieci (ostatni się powtarza). */
+const RETRY_MS = [5_000, 15_000, 45_000];
 
 /**
  * PROTOKÓŁ U KLIENTA — cztery kroki, jeden ekran na krok.
@@ -80,6 +84,9 @@ export function Protokol() {
   const [savedAt, setSavedAt] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
   const [signOpen, setSignOpen] = useState(false);
+  // Po podpisie: „Zakończyć wizytę?” — tylko gdy zlecenie jeszcze nie jest zakończone.
+  const [askFinish, setAskFinish] = useState(false);
+  const [finishing, setFinishing] = useState(false);
   /** Słownik czynności z panelu admina (pusty = rząd chipów się nie renderuje). */
   const [dictionary, setDictionary] = useState<string[]>([]);
   const [distance, setDistance] = useState<TechnikJobDistance | null>(null);
@@ -155,12 +162,53 @@ export function Protokol() {
   const dirtyRef = useRef(false);
   const savingRef = useRef(false);
   const conflictRef = useRef(false);
+  /**
+   * Czy ekran jeszcze żyje. Zapis potrafi dojechać PO odmontowaniu (wyjście
+   * w oknie debounce'u — patrz efekt sprzątający niżej), a wtedy wolno mu
+   * ruszać wyłącznie refy: `setState` na zdjętym komponencie nic już nie
+   * pokazuje, a w trybie deweloperskim krzyczy w konsolę technika.
+   */
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   useEffect(() => {
     protocolRef.current = protocol;
     formRef.current = form;
     dirtyRef.current = dirty;
     conflictRef.current = conflict;
   });
+
+  /** Ostatnia wersja `flush` — do wywołania z cleanupu i z timera ponowienia. */
+  const flushRef = useRef<(() => Promise<void>) | null>(null);
+  /** Numer kolejnej próby po błędzie sieci (indeks w `RETRY_MS`). */
+  const retryAt = useRef(0);
+  const retryTimer = useRef<number | null>(null);
+  const clearRetry = useCallback(() => {
+    if (retryTimer.current !== null) {
+      window.clearTimeout(retryTimer.current);
+      retryTimer.current = null;
+    }
+  }, []);
+
+  /**
+   * Ponowienia autozapisu po błędzie sieci: 5 s, 15 s, 45 s, potem co 45 s,
+   * dopóki jest co zapisywać. Dłuższe odstępy niż debounce, żeby tablet
+   * w słabym zasięgu nie tłukł serwera co sekundę.
+   */
+  const scheduleRetry = useCallback(() => {
+    clearRetry();
+    if (!dirtyRef.current || conflictRef.current) return;
+    const delay = RETRY_MS[Math.min(retryAt.current, RETRY_MS.length - 1)];
+    retryAt.current += 1;
+    retryTimer.current = window.setTimeout(() => {
+      retryTimer.current = null;
+      void flushRef.current?.();
+    }, delay);
+  }, [clearRetry]);
 
   /**
    * Zapis na serwer. Formularza po zapisie NIE podmieniamy odpowiedzią: backend
@@ -175,13 +223,17 @@ export function Protokol() {
     if (!dirtyRef.current || savingRef.current || conflictRef.current) return;
     if (p.status === "final" || p.signedAt) return;
     savingRef.current = true;
-    setSaving(true);
+    if (mountedRef.current) setSaving(true);
     const body = toPayload(p, f);
     try {
       const next = await technikApi.updateProtocol(p.id, body, p.updatedAt);
-      setProtocol(next);
       protocolRef.current = next;
-      setSavedAt(clockOf(next.updatedAt) || nowClock());
+      retryAt.current = 0;
+      clearRetry();
+      if (mountedRef.current) {
+        setProtocol(next);
+        setSavedAt(clockOf(next.updatedAt) || nowClock());
+      }
       // Ściągawka „ostatnio montowane” rośnie na zapisanych pozycjach, nie na
       // tym, co technik właśnie stuka w polu.
       rememberDeviceNames(body.items.map((i) => i.name));
@@ -189,21 +241,31 @@ export function Protokol() {
       // by nie poleciała na serwer.
       if (formRef.current === f) {
         dirtyRef.current = false;
-        setDirty(false);
+        if (mountedRef.current) setDirty(false);
       }
     } catch (e) {
       const status = (e as { status?: number }).status;
       if (status === 409) {
         conflictRef.current = true;
-        setConflict(true);
+        if (mountedRef.current) setConflict(true);
       } else {
-        toastError(e instanceof Error ? e.message : "Nie udało się zapisać protokołu.");
+        // Sieć padła w piwnicy klienta. Krzyczymy RAZ, a potem po cichu
+        // ponawiamy — wcześniej autozapis czekał na następny znak, więc
+        // technik, który skończył pisać i odłożył tablet, tracił wszystko.
+        if (retryAt.current === 0) {
+          toastError(e instanceof Error ? e.message : "Nie udało się zapisać protokołu.");
+        }
+        scheduleRetry();
       }
     } finally {
       savingRef.current = false;
-      setSaving(false);
+      if (mountedRef.current) setSaving(false);
     }
-  }, [toastError]);
+  }, [clearRetry, scheduleRetry, toastError]);
+
+  useEffect(() => {
+    flushRef.current = flush;
+  });
 
   // Debounce: każda zmiana formularza przesuwa zapis o 1,5 s do przodu.
   useEffect(() => {
@@ -211,6 +273,34 @@ export function Protokol() {
     const t = setTimeout(() => void flush(), AUTOSAVE_MS);
     return () => clearTimeout(t);
   }, [form, dirty, readOnly, conflict, flush]);
+
+  /**
+   * WYJŚCIE Z EKRANU = ZAPIS. `beforeunload` w aplikacji jednostronicowej nie
+   * odpala się wcale: strzałka w nagłówku, „Zlecenie”, tab bar i „wstecz”
+   * przeglądarki tylko przemontowują drzewo, więc niezapisane zdanie ginęło
+   * razem z timerem debounce'u. `flush` czyta wyłącznie refy, więc działa
+   * także wtedy, gdy ekranu już nie ma.
+   */
+  useEffect(
+    () => () => {
+      clearRetry();
+      void flushRef.current?.();
+    },
+    [clearRetry],
+  );
+
+  // Powrót zasięgu — zapisujemy natychmiast, bez czekania na timer ponowienia.
+  useEffect(() => {
+    const onOnline = () => {
+      if (dirtyRef.current && !conflictRef.current) {
+        retryAt.current = 0;
+        clearRetry();
+        void flushRef.current?.();
+      }
+    };
+    window.addEventListener("online", onOnline);
+    return () => window.removeEventListener("online", onOnline);
+  }, [clearRetry]);
 
   // Ostatni bezpiecznik: karta zamykana z niezapisanym protokołem. Autozapis
   // zwykle zdąży, ale „zwykle” to za mało przy godzinie roboty w polu.
@@ -223,6 +313,43 @@ export function Protokol() {
     window.addEventListener("beforeunload", onBeforeUnload);
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
   }, [dirty]);
+
+  /**
+   * TWARDE wyjście z dokumentu (zamknięcie karty, „wstecz” do strony spoza
+   * aplikacji, przełączenie na natywną nawigację): React nie zdąży odmontować
+   * ekranu, więc zwykły `flush` nie ma kiedy polecieć, a zwykły `fetch` i tak
+   * zginąłby razem z dokumentem. Ratuje `keepalive`. Pytania z `beforeunload`
+   * to za mało — technik i tak klika „Opuść”.
+   */
+  useEffect(() => {
+    /** Co najwyżej jeden taki zapis na jedno wyjście z dokumentu. */
+    let sent: string | null = null;
+    const onHide = () => {
+      const p = protocolRef.current;
+      const f = formRef.current;
+      if (!p || !f) return;
+      if (!dirtyRef.current || conflictRef.current) return;
+      if (p.status === "final" || p.signedAt) return;
+      const body = toPayload(p, f);
+      const stamp = `${p.id}|${p.updatedAt}|${JSON.stringify(body)}`;
+      if (stamp === sent) return;
+      sent = stamp;
+      // Bez `await` i bez sprzątania stanu: strona za chwilę przestanie
+      // istnieć, a przy powrocie z bfcache lepiej zostawić „niezapisane”
+      // i pozwolić autozapisowi spróbować jeszcze raz.
+      void technikApi.updateProtocol(p.id, body, p.updatedAt, { keepalive: true }).catch(() => {});
+    };
+    // `beforeunload` leci, GDY DOKUMENT JESZCZE ŻYJE — stamtąd żądanie na pewno
+    // wychodzi. `pagehide` zostaje jako druga szansa (iOS potrafi pominąć
+    // `beforeunload` przy przełączeniu aplikacji), a znacznik `sent` pilnuje,
+    // żeby nie poleciało dwa razy to samo.
+    window.addEventListener("beforeunload", onHide);
+    window.addEventListener("pagehide", onHide);
+    return () => {
+      window.removeEventListener("beforeunload", onHide);
+      window.removeEventListener("pagehide", onHide);
+    };
+  }, []);
 
   /* ---------------------------------------------------------------- *
    * Zmiany formularza
@@ -301,7 +428,12 @@ export function Protokol() {
    * Nawigacja
    * ---------------------------------------------------------------- */
 
-  const back = useCallback(() => navigate(`/technik/zlecenie/${jobId}`), [navigate, jobId]);
+  const back = useCallback(() => {
+    // Zapis leci PRZED nawigacją; efekt sprzątający i tak by go dogonił, ale
+    // tak startuje o klatkę wcześniej i nie zależy od kolejności odmontowania.
+    void flush();
+    navigate(`/technik/zlecenie/${jobId}`);
+  }, [flush, navigate, jobId]);
 
   /** Skok na krok — z zapisem tego, co technik zdążył wpisać na poprzednim. */
   const goStep = useCallback(
@@ -341,6 +473,9 @@ export function Protokol() {
       dirtyRef.current = false;
       setSavedAt(clockOf(after.updatedAt) || nowClock());
       toast({ message: "Protokół podpisany", kind: "success" });
+      // Podpisany protokół zwykle znaczy „robota skończona” — pytamy od razu,
+      // zamiast kazać technikowi wracać na zlecenie i szukać „Zakończ”.
+      if (job && job.status !== "done") setAskFinish(true);
     } catch (e) {
       if ((e as { status?: number }).status === 409) {
         conflictRef.current = true;
@@ -495,6 +630,31 @@ export function Protokol() {
           defaultSignerName={form.signerName || shortContactName(protocol.contact)}
         />
       )}
+
+      <ActionTimeDialog
+        open={askFinish}
+        onOpenChange={(o) => !o && setAskFinish(false)}
+        busy={finishing}
+        defaultDay={job ? dayOf(job.startAt) : undefined}
+        title="Protokół podpisany. Zakończyć wizytę?"
+        description="Zlecenie dostanie status „zakończone”, a biuro zobaczy je jako zrobione. Możesz też zakończyć później z ekranu zlecenia."
+        nowLabel="Zakończ teraz"
+        onSubmit={(at) => {
+          if (!job) return;
+          setFinishing(true);
+          technikApi
+            .finish(job.id, { at })
+            .then(() => {
+              setAskFinish(false);
+              toast({ message: "Zlecenie zakończone", kind: "success" });
+              navigate(`/technik/zlecenie/${job.id}`);
+            })
+            .catch((e: unknown) => {
+              toast({ message: e instanceof Error ? e.message : "Nie udało się zakończyć zlecenia", kind: "error" });
+            })
+            .finally(() => setFinishing(false));
+        }}
+      />
 
       {/* 409 — biuro ruszyło ten sam protokół z desktopa. Cicha nadpiska
           skasowałaby cudzą zmianę, więc autozapis staje i technik wybiera. */}

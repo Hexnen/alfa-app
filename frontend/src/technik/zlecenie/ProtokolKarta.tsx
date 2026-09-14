@@ -4,7 +4,7 @@ import type { TechnikJobProtocol, TechnikProtocol } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { Panel } from "../ui/panel";
-import { clockOf, parseStamp } from "../lib/dates";
+import { clockOf, formatStampDayMonth, parseStamp } from "../lib/dates";
 import { STEP_LABELS, gapsOf, toForm } from "../lib/protocol";
 
 /**
@@ -23,6 +23,7 @@ export function ProtokolKarta({
   detail,
   canEdit,
   busy,
+  cancelled = false,
   onCreate,
 }: {
   jobId: number;
@@ -30,6 +31,12 @@ export function ProtokolKarta({
   detail: TechnikProtocol | null;
   canEdit: boolean;
   busy: boolean;
+  /**
+   * Zlecenie odwołane przez biuro: karta zostaje jako informacja, ale bez
+   * żadnego wyjścia w głąb — nie ma czego zakładać ani dopisywać do papieru
+   * po robocie, która się nie odbędzie.
+   */
+  cancelled?: boolean;
   onCreate: () => void;
 }) {
   const href = `/technik/zlecenie/${jobId}/protokol`;
@@ -39,11 +46,13 @@ export function ProtokolKarta({
     return (
       <Panel icon={FileText} title="Protokół" data-testid="zlecenie-protokol">
         <p className="text-sm text-muted-foreground">
-          {canEdit
-            ? "Jeszcze go nie ma. Zakładasz go raz — dane klienta wypełnią się same."
-            : "Protokołu jeszcze nie ma."}
+          {cancelled
+            ? "Protokołu nie ma i nie będzie — biuro odwołało zlecenie."
+            : canEdit
+              ? "Jeszcze go nie ma. Zakładasz go raz — dane klienta wypełnią się same."
+              : "Protokołu jeszcze nie ma."}
         </p>
-        {canEdit && (
+        {canEdit && !cancelled && (
           <Button
             variant="outline"
             className="h-11 w-full"
@@ -98,14 +107,16 @@ export function ProtokolKarta({
                   : "Wypełniony — zostaje podpis klienta."}
           </p>
         </div>
-        <Button
-          asChild
-          variant="outline"
-          className="h-11 shrink-0"
-          data-testid="zlecenie-protokol-akcja"
-        >
-          <Link to={href}>{signed || !canEdit ? "Otwórz" : "Kontynuuj"}</Link>
-        </Button>
+        {!cancelled && (
+          <Button
+            asChild
+            variant="outline"
+            className="h-11 shrink-0"
+            data-testid="zlecenie-protokol-akcja"
+          >
+            <Link to={href}>{signed || !canEdit ? "Otwórz" : "Kontynuuj"}</Link>
+          </Button>
+        )}
       </div>
     </Panel>
   );
@@ -118,11 +129,9 @@ export function ProtokolKarta({
  * wczorajszy. Forma „odebrał(a)” — imienia nie odmieniamy za klienta.
  */
 function signedLine(detail: TechnikProtocol | null): string {
-  const at = parseStamp(detail?.signedAt);
-  if (!at) return "Podpisany przez klienta.";
-  const p = (n: number) => String(n).padStart(2, "0");
+  if (!parseStamp(detail?.signedAt)) return "Podpisany przez klienta.";
   const who = detail?.signerName?.trim();
-  return `Podpisany ${p(at.getDate())}.${p(at.getMonth() + 1)} ${clockOf(detail?.signedAt)}${
+  return `Podpisany ${formatStampDayMonth(detail?.signedAt)} ${clockOf(detail?.signedAt)}${
     who ? `, odebrał(a) ${who}` : ""
   }`;
 }

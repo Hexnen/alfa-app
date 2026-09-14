@@ -1,0 +1,25 @@
+-- ---------------------------------------------------------------------------
+-- ODCISK TREŚCI NOTATKI SYSTEMOWEJ PROTOKOŁU
+--
+-- `protocols.note_id` (migracja 0102) mówi, KTÓRA notatka jest lustrem
+-- protokołu, ale nie mówi, czy ktoś jej w międzyczasie nie poprawił. Dotąd
+-- rozstrzygał to znacznik czasu: notatka „nasza”, gdy jej `updated_at` nie jest
+-- świeższy niż `protocols.updated_at`. Porównanie było MARTWE — notatkę
+-- odświeżamy w tej samej transakcji co protokół, czyli zawsze tuż PO jego
+-- zapisie, więc warunek wychodził prawdziwy także wtedy, gdy biuro dopisało do
+-- notatki własne zdanie. Dopisek znikał przy najbliższym zapisie protokołu,
+-- bez śladu w dzienniku.
+--
+-- `note_hash` = SHA-256 treści, którą OSTATNIO zapisaliśmy sami. Zgadza się
+-- z treścią wiersza → notatka jest nadal naszym lustrem i wolno ją podmienić.
+-- Nie zgadza się → treść jest obca (ktoś ją poprawił): zakładamy NOWĄ notatkę
+-- i przepinamy `note_id`, a stara zostaje w dzienniku razem z dopiskiem.
+--
+-- NULL = protokół sprzed tej migracji (albo notatka założona starym kodem):
+-- wtedy zostaje dotychczasowa heurystyka prefiksu („Protokół <numer> —”).
+-- Pierwszy zapis takiego protokołu odcisk uzupełnia.
+--
+-- Migracja pisana RĘCZNIE (jak 0089–0092, 0098–0103) — drizzle-kit generate
+-- przy tej bazie potrafi zaproponować przebudowę niezwiązanych tabel.
+-- ---------------------------------------------------------------------------
+ALTER TABLE `protocols` ADD `note_hash` text;

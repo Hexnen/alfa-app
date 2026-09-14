@@ -293,6 +293,50 @@ try {
   );
 
   // =========================================================================
+  // 3b. Fala 2 — N1/N2: ciało i wersja w PATCH-u
+  // =========================================================================
+  // N2: ciało, które nie jest obiektem JSON, dawało pusty patch i 200 „zapisano”.
+  const patchApp = adminFor(adminUser);
+  ok("N2 PATCH: ciało jako tablica → 400", (await patchApp("PATCH", `/users/${targetUser.id}`, [1, 2])).status === 400);
+  ok("N2 PATCH: ciało `null` → 400", (await patchApp("PATCH", `/users/${targetUser.id}`, null)).status === 400);
+  ok("N2 PATCH: ciało liczbowe → 400", (await patchApp("PATCH", `/users/${targetUser.id}`, 7)).status === 400);
+  ok("N2 PATCH: brak ciała → 400, nie ciche 200", (await patchApp("PATCH", `/users/${targetUser.id}`)).status === 400);
+
+  // N1: wersja przysłana jako STRING wyłączała optimistic lock po cichu.
+  const lockRow = rowOf(targetUser.id);
+  const stringStale = await patchApp("PATCH", `/users/${targetUser.id}`, {
+    displayName: `${PREFIX}string-stale`,
+    expectedVersion: String(lockRow.version + 99),
+  });
+  ok(
+    "N1 PATCH: nieaktualna wersja w stringu → 409 (lock działa, nie jest omijany)",
+    stringStale.status === 409,
+    stringStale
+  );
+  ok(
+    "N1 PATCH: po 409 nazwa nietknięta",
+    rowOf(targetUser.id).displayName === lockRow.displayName,
+    rowOf(targetUser.id).displayName
+  );
+  const stringOk = await patchApp("PATCH", `/users/${targetUser.id}`, {
+    displayName: `${PREFIX}string-ok`,
+    expectedVersion: String(lockRow.version),
+  });
+  ok(
+    "N1 PATCH: aktualna wersja w stringu przechodzi",
+    stringOk.status === 200 && rowOf(targetUser.id).displayName === `${PREFIX}string-ok`,
+    stringOk
+  );
+  ok(
+    "N1 PATCH: śmieć w expectedVersion → 400",
+    (await patchApp("PATCH", `/users/${targetUser.id}`, { expectedVersion: "abc" })).status === 400
+  );
+  ok(
+    "N1 PATCH: pusty string w expectedVersion → 400 (nie „wersja 0”)",
+    (await patchApp("PATCH", `/users/${targetUser.id}`, { expectedVersion: "" })).status === 400
+  );
+
+  // =========================================================================
   // 4. N1 — dezaktywacja technika znika z powiązania widocznego dla frontu
   // =========================================================================
   const { findTechnicianByUserId } = await import("../src/lib/calendar-queries.js");
@@ -312,10 +356,56 @@ try {
     panelMe.status === 200 && (panelMe.data as { linked?: boolean })?.linked === false,
     panelMe
   );
+
+  // --- S3 (fala 2): panel admina widzi powiązanie z adnotacją „nieaktywny" ---
+  type PublicUserJson = { id: number; technicianId: number | null; technicianActive: boolean | null };
+  const usersList = ((await A("GET", "/users")).data as PublicUserJson[]) ?? [];
+  const listed = usersList.find((u) => u.id === targetUser.id);
+  ok(
+    "S3 lista kont: nieaktywny technik dalej widoczny jako powiązanie…",
+    listed?.technicianId === activeTech.id,
+    listed
+  );
+  ok(
+    "S3 lista kont: …ale z technicianActive = false",
+    listed?.technicianActive === false,
+    listed
+  );
+  const noLink = usersList.find((u) => u.id === admin2.id);
+  ok(
+    "S3 lista kont: konto bez powiązania → technicianId i technicianActive null",
+    noLink?.technicianId === null && noLink?.technicianActive === null,
+    noLink
+  );
+  const patched = (await A("PATCH", `/users/${targetUser.id}`, { displayName: `${PREFIX}target` }))
+    .data as PublicUserJson | undefined;
+  ok(
+    "S3 PATCH: odpowiedź niesie oba pola (id + aktywność technika)",
+    patched?.technicianId === activeTech.id && patched?.technicianActive === false,
+    patched
+  );
+  // `/auth/me` zostaje bez zmian: `technicianId` null dla nieaktywnego (panel
+  // i tak go nie wpuści), ale flaga mówi, że powiązanie ISTNIEJE.
+  const { publicUser } = await import("../src/lib/auth/users.js");
+  const { findTechnicianByUserId: findTech } = await import("../src/lib/calendar-queries.js");
+  const meRow = findTech(targetUser.id, db);
+  const meJson = publicUser(rowOf(targetUser.id), meRow?.active ? meRow.id : null, meRow ? meRow.active : null);
+  ok(
+    "S3 /auth/me: nieaktywny technik → technicianId null, technicianActive false",
+    meJson.technicianId === null && meJson.technicianActive === false,
+    meJson
+  );
+
   db.update(schema.technicians)
     .set({ active: true })
     .where(eq(schema.technicians.id, activeTech.id))
     .run();
+  const afterRestore = ((await A("GET", "/users")).data as PublicUserJson[]).find((u) => u.id === targetUser.id);
+  ok(
+    "S3 lista kont: po przywróceniu technika flaga wraca na true",
+    afterRestore?.technicianActive === true,
+    afterRestore
+  );
 
   // =========================================================================
   // 5. S1 — konto „tylko do odczytu” a powiadomienia

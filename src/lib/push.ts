@@ -19,9 +19,12 @@
  * świat — stąd `guard`: predykat sprawdzany przy opróżnianiu kolejki, już na
  * zatwierdzonych danych.
  *
- * SPRZĄTANIE. 404/410 z push service znaczy „ta subskrypcja nie istnieje" →
- * wiersz kasujemy od ręki. Każdy inny błąd (5xx, timeout) bywa chwilowy i tylko
- * podbija `failures`.
+ * SPRZĄTANIE. Wiersz kasuje WYŁĄCZNIE jednoznaczna odpowiedź push service:
+ * 404/410 („ta subskrypcja nie istnieje") i 401/403 („nie jesteś już jej
+ * właścicielem" — po rotacji kluczy VAPID). Każdy inny błąd (5xx, timeout,
+ * zerwane połączenie bez statusu) bywa chwilowy i tylko podbija `failures`:
+ * po awarii sieci technik ma dalej dostawać powiadomienia, a nie odkryć po
+ * tygodniu, że serwer po cichu wypisał mu tablet.
  */
 import { and, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
@@ -229,8 +232,24 @@ export function userIdsForTechnicians(technicianIds: number[]): number[] {
     .filter((id): id is number => id != null);
 }
 
-/** Po tylu nieudanych próbach z rzędu subskrypcja leci z bazy (patrz `notifyTechnicians`). */
-export const MAX_PUSH_FAILURES = 10;
+/**
+ * Statusy, po których push service mówi wprost „ta subskrypcja jest martwa":
+ * 404/410 = nie istnieje, 401/403 = nie jesteśmy już jej właścicielem (rotacja
+ * kluczy VAPID). Tylko one kasują wiersz.
+ */
+const DEAD_SUBSCRIPTION_STATUSES = [401, 403, 404, 410];
+
+/**
+ * Co ile nieudanych prób wpisujemy ostrzeżenie do logu.
+ *
+ * Wiersza NIE kasujemy po żadnym progu. Wcześniej robił to `MAX_PUSH_FAILURES`
+ * i wystarczyła dziesięciodniowa awaria sieci (albo „socket hang up" bez
+ * żadnego statusu, albo seria 5xx po stronie push service), żeby technikowi
+ * wyłączyć powiadomienia na zawsze — cicho, bez wiedzy jego i biura, bo
+ * przełącznik w panelu dalej pokazywał „włączone" (przeglądarka ma własną
+ * subskrypcję). Martwe wiersze zdejmuje wyłącznie odpowiedź push service.
+ */
+export const PUSH_FAILURE_LOG_EVERY = 10;
 
 function statusCodeOf(err: unknown): number | null {
   const code = (err as { statusCode?: unknown })?.statusCode;
@@ -272,22 +291,27 @@ export async function notifyTechnicians(
         .run();
     } catch (err) {
       const status = statusCodeOf(err);
-      if (status === 404 || status === 410) {
-        // Push service mówi wprost: tej subskrypcji już nie ma.
+      if (status !== null && DEAD_SUBSCRIPTION_STATUSES.includes(status)) {
+        // Push service mówi wprost: tej subskrypcji już nie ma (404/410) albo
+        // nie wolno nam w nią strzelać (401/403 po rotacji kluczy VAPID).
+        // Przeglądarka zapisze się na nowo przy najbliższym wejściu do panelu.
         db.delete(schema.pushSubscriptions).where(eq(schema.pushSubscriptions.id, sub.id)).run();
-      } else if (sub.failures + 1 >= MAX_PUSH_FAILURES) {
-        // Po rotacji kluczy VAPID push service odpowiada 403, a nie 404/410 —
-        // wiersz nie znikał, `failures` rosło w nieskończoność i każda zmiana
-        // w kalendarzu strzelała w martwy endpoint. Po progu kasujemy:
-        // przeglądarka zapisze się z nowym kluczem przy najbliższym wejściu.
-        db.delete(schema.pushSubscriptions).where(eq(schema.pushSubscriptions.id, sub.id)).run();
-        console.warn(`[push] subskrypcja #${sub.id} skasowana po ${sub.failures + 1} nieudanych próbach`);
+        console.warn(`[push] subskrypcja #${sub.id} skasowana — push service odpowiedział ${status}`);
       } else {
+        // Brak statusu („socket hang up", timeout, DNS) i 5xx to awaria PO
+        // DRUGIEJ stronie albo w sieci — liczymy ją, ale wiersza nie ruszamy.
+        const failures = sub.failures + 1;
         db.update(schema.pushSubscriptions)
           .set({ failures: sql`${schema.pushSubscriptions.failures} + 1` })
           .where(eq(schema.pushSubscriptions.id, sub.id))
           .run();
-        console.warn(`[push] wysyłka nieudana (sub #${sub.id}, status ${status ?? "?"})`);
+        // Log co dziesiątą próbę — awaria push service potrafi trwać godzinami
+        // i zalać dziennik jedną linijką na każde wydarzenie w kalendarzu.
+        if (failures % PUSH_FAILURE_LOG_EVERY === 0) {
+          console.warn(
+            `[push] subskrypcja #${sub.id}: ${failures} nieudanych prób z rzędu (ostatni status ${status ?? "brak"})`
+          );
+        }
       }
     }
   }
@@ -353,10 +377,19 @@ function dropCancelledPairs(items: QueuedPush[]): QueuedPush[] {
   });
 }
 
-/** Zgłoszenia z tym samym `collapse.key` → jeden ładunek dla sumy techników. */
+/**
+ * Zgłoszenia z tym samym `collapse.key` → zbiorczy ładunek.
+ *
+ * LICZBA TERMINÓW JEST LICZONA PER TECHNIK, nie na całą grupę. Seria bywa
+ * obsadzona nierówno (Adam jeździ na trzy terminy z dziesięciu, reszta na
+ * wszystkie) — wcześniej zwinięcie brało sumaryczną liczbę zdarzeń i wysyłało
+ * Adamowi „10 terminów przesunięto”, czyli informację o cudzych zleceniach.
+ * Technik z jednym terminem dostaje z powrotem swoje POJEDYNCZE powiadomienie
+ * (z konkretnym obiektem i godziną), a nie podsumowanie serii.
+ */
 function collapseSeries(items: QueuedPush[]): QueuedPush[] {
   const out: QueuedPush[] = [];
-  const groups = new Map<string, { item: QueuedPush; count: number; guards: Array<() => boolean> }>();
+  const groups = new Map<string, QueuedPush[]>();
   for (const it of items) {
     if (!it.collapse) {
       out.push(it);
@@ -364,30 +397,45 @@ function collapseSeries(items: QueuedPush[]): QueuedPush[] {
     }
     const key = `${it.collapse.key}|${it.excludeUserId ?? ""}`;
     const prev = groups.get(key);
-    if (!prev) {
-      groups.set(key, {
-        item: { ...it, technicianIds: [...it.technicianIds] },
-        count: 1,
-        guards: it.guard ? [it.guard] : [],
-      });
+    if (prev) prev.push(it);
+    else groups.set(key, [it]);
+  }
+  for (const group of groups.values()) {
+    if (group.length === 1) {
+      out.push(group[0]);
       continue;
     }
-    prev.count++;
-    for (const t of it.technicianIds) if (!prev.item.technicianIds.includes(t)) prev.item.technicianIds.push(t);
-    if (it.guard) prev.guards.push(it.guard);
-  }
-  for (const g of groups.values()) {
-    if (g.count > 1 && g.item.collapse) {
-      g.item.payload = {
-        ...g.item.payload,
-        body: g.item.collapse.summary(g.count),
-        tag: g.item.collapse.key,
-      };
-      // Wystarczy, że choć jedno ze zwiniętych zdarzeń faktycznie się utrwaliło.
-      const guards = g.guards;
-      g.item.guard = guards.length > 0 ? () => guards.some((fn) => fn()) : undefined;
+    // Ile terminów z tej grupy dotyczy KAŻDEGO technika z osobna.
+    const counts = new Map<number, number>();
+    for (const it of group) {
+      for (const t of new Set(it.technicianIds)) counts.set(t, (counts.get(t) ?? 0) + 1);
     }
-    out.push(g.item);
+    // Jeden termin = zwykłe powiadomienie o tym jednym zleceniu.
+    for (const it of group) {
+      const solo = it.technicianIds.filter((t) => counts.get(t) === 1);
+      if (solo.length > 0) out.push({ ...it, technicianIds: solo });
+    }
+    // Reszta — po jednym zbiorczym ładunku na każdą liczbę terminów.
+    const byCount = new Map<number, number[]>();
+    for (const [technicianId, count] of counts) {
+      if (count < 2) continue;
+      const bucket = byCount.get(count);
+      if (bucket) bucket.push(technicianId);
+      else byCount.set(count, [technicianId]);
+    }
+    if (byCount.size === 0) continue;
+    const base = group[0];
+    const collapse = base.collapse!;
+    // Wystarczy, że choć jedno ze zwiniętych zdarzeń faktycznie się utrwaliło.
+    const guards = group.map((it) => it.guard).filter((g): g is () => boolean => g != null);
+    for (const [count, technicianIds] of byCount) {
+      out.push({
+        ...base,
+        technicianIds,
+        payload: { ...base.payload, body: collapse.summary(count), tag: collapse.key },
+        guard: guards.length > 0 ? () => guards.some((fn) => fn()) : undefined,
+      });
+    }
   }
   return out;
 }

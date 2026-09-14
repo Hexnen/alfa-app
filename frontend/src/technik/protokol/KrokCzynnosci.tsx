@@ -5,6 +5,8 @@ import { ClearableTextarea } from "../ui/clearable-input";
 import { Field, Panel } from "../ui/panel";
 import { scrollFieldIntoView } from "../lib/keyboard";
 import {
+  activityLines,
+  isActivityPicked,
   removeActivityAt,
   setActivityNotes,
   splitActivities,
@@ -31,7 +33,11 @@ export function KrokCzynnosci({
   dictionary,
 }: StepProps & { dictionary: string[] }) {
   const { picked, notes } = splitActivities(form.activities, dictionary);
-  const total = picked.length + (notes.trim() ? notes.trim().split("\n").length : 0);
+  // Licznik liczy CZYNNOŚCI, a nie linie: pusta linia wpisana Enterem nie jest
+  // jeszcze niczym wykonanym.
+  const total = picked.length + activityLines(notes).length;
+  /** Czy pozycja słownika stoi już na liście — także jako linia z dopiskiem. */
+  const isPicked = (a: string) => isActivityPicked(picked, dictionary, a);
 
   /**
    * Słownik potrafi mieć dwadzieścia pozycji, a każda to całe zdanie — na
@@ -42,7 +48,7 @@ export function KrokCzynnosci({
   const [expanded, setExpanded] = useState(false);
   const visible = expanded
     ? dictionary
-    : dictionary.filter((a, i) => i < VISIBLE_CHIPS || picked.includes(a));
+    : dictionary.filter((a, i) => i < VISIBLE_CHIPS || isPicked(a));
   const hidden = dictionary.length - visible.length;
 
   return (
@@ -63,7 +69,7 @@ export function KrokCzynnosci({
             {visible.map((a) => (
               <Chip
                 key={a}
-                selected={picked.includes(a)}
+                selected={isPicked(a)}
                 showCheck
                 className="max-w-full"
                 onClick={() => set("activities", toggleActivity(form.activities, dictionary, a))}

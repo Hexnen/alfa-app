@@ -1,8 +1,23 @@
-import { CircleCheckBig, FileText, Play } from "lucide-react";
+import { CircleCheckBig, FileText, Play, RotateCcw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { clockOf } from "../lib/dates";
+import { clockOf, parseStamp } from "../lib/dates";
 import type { JobState } from "../lib/jobs";
+
+/**
+ * Jak długo po zakończeniu da się jeszcze wrócić do roboty. Doba pokrywa
+ * pomyłkę („kliknąłem Zakończ, a klient poprosił o jeszcze jedną kamerę”)
+ * i nocną zmianę, a nie zamienia „Wznów” w stały przycisk na zleceniach
+ * sprzed tygodnia, które biuro ma już rozliczone.
+ */
+const REOPEN_WINDOW_MS = 24 * 3_600_000;
+
+/** Czy zakończone zlecenie jest jeszcze w oknie wznowienia. */
+function canReopen(state: JobState, finishedAt: string | null): boolean {
+  if (state !== "done") return false;
+  const at = parseStamp(finishedAt);
+  return !!at && Date.now() - at.getTime() < REOPEN_WINDOW_MS;
+}
 
 /**
  * STICKY PASEK AKCJI — po lewej stan zlecenia tekstem, po prawej JEDEN główny
@@ -26,6 +41,7 @@ export function PasekAkcji({
   onStart,
   onFinish,
   onProtocol,
+  onReopen,
 }: {
   state: JobState;
   startedAt: string | null;
@@ -36,8 +52,11 @@ export function PasekAkcji({
   onStart: () => void;
   onFinish: () => void;
   onProtocol: () => void;
+  /** „Wznów” — powrót do stanu „w toku” po omyłkowym zakończeniu. */
+  onReopen: () => void;
 }) {
   const actions = canEdit && state !== "cancelled";
+  const reopenable = actions && canReopen(state, finishedAt);
 
   const primary =
     state === "planned"
@@ -67,6 +86,22 @@ export function PasekAkcji({
 
         {actions && (
           <>
+            {/* Robota zamknięta za wcześnie zdarza się pod bramą częściej niż
+                w biurze — przez dobę po zakończeniu stoi tu wyjście awaryjne.
+                Outline, bo główną akcją zostaje protokół. */}
+            {reopenable && (
+              <Button
+                variant="outline"
+                size="lg"
+                className="h-12 shrink-0 px-4 text-base"
+                disabled={busy}
+                onClick={onReopen}
+                data-testid="zlecenie-akcja-wznow"
+              >
+                <RotateCcw className="h-5 w-5 sm:mr-2" />
+                <span className="sr-only sm:not-sr-only">Wznów</span>
+              </Button>
+            )}
             {/* Protokół bywa potrzebny jeszcze przed „Zakończ” (klient podpisuje
                 przy aucie), więc w toku zostaje OBOK głównej akcji. */}
             {state === "running" && (
@@ -109,7 +144,7 @@ function stateLine(state: JobState, startedAt: string | null, finishedAt: string
       return at ? `Zakończone ${at}` : "Zakończone";
     }
     case "cancelled":
-      return "Odwołane";
+      return "Odwołane przez biuro";
     default:
       return "Zaplanowane";
   }

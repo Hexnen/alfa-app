@@ -729,6 +729,13 @@
       "when": 1789300011000,
       "tag": "0103_push_subscriptions",
       "breakpoints": true
+    },
+    {
+      "idx": 104,
+      "version": "6",
+      "when": 1789300012000,
+      "tag": "0104_protocol_note_hash",
+      "breakpoints": true
     }
   ]
 }

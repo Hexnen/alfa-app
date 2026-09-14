@@ -8,6 +8,7 @@ import {
   type EventTypeMeta,
 } from "@/lib/calendar-labels";
 import { cn } from "@/lib/utils";
+import { countLabel } from "./protocol";
 
 /**
  * Stan zlecenia widziany przez technika. Backend nie ma statusu `in_progress`
@@ -97,4 +98,18 @@ export function telHref(phone: string | null | undefined): string | null {
   if (!phone) return null;
   const cleaned = phone.replace(/[^\d+]/g, "");
   return cleaned.length >= 6 ? `tel:${cleaned}` : null;
+}
+
+/**
+ * Liczebnik zleceń — JEDNO miejsce dla mapy, licznika zakresu i etykiet
+ * pinezek. Wcześniej każdy z tych trzech ekranów odmieniał po swojemu
+ * („11 zlecenia”, „2 zleceń”), bo każdy miał własną kopię reguły.
+ */
+export function jobsLabel(n: number): string {
+  return countLabel(n, "zlecenie", "zlecenia", "zleceń");
+}
+
+/** Liczebnik obiektów — tytuł pinezki, pod którą stoi kilka różnych obiektów. */
+export function objectsLabel(n: number): string {
+  return countLabel(n, "obiekt", "obiekty", "obiektów");
 }

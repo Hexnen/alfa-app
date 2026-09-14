@@ -5406,6 +5406,13 @@ export interface AdminUser {
    * pole konta, więc nie podlega optimistic lockowi.
    */
   technicianId: number | null;
+  /**
+   * Czy powiązany technik jest AKTYWNY (`null` = konto bez powiązania).
+   * Dezaktywacja w kartotece odcina panel technika, ale powiązania nie zdejmuje
+   * — bez tej flagi lista kont pokazywała „powiązany”, a sam technik czytał
+   * „konto nie jest powiązane z technikiem”. Panel dopisuje „(nieaktywny)”.
+   */
+  technicianActive: boolean | null;
   version: number;
   createdAt?: string;
 }
@@ -10175,8 +10182,18 @@ export interface TechnikJobNote {
  * kontaktu — adres, `mapsUrl` i dane kontaktowe są płaskie, złożone już po
  * stronie serwera z obiektu i kontrahenta.
  */
+/** Jedna osoba z listy „do kogo zadzwonić” (kontakty z telefonem, bez duplikatów numerów). */
+export interface TechnikJobContact {
+  name: string;
+  role: string | null;
+  phone: string;
+  source: "event" | "contractor" | "contact";
+}
+
 export interface TechnikJobDetails extends TechnikJob {
   notes: TechnikJobNote[];
+  /** Wszystkie kontakty do zlecenia; pierwszy = ten z `contactPerson`/`contactPhone`. */
+  contacts?: TechnikJobContact[];
 }
 
 /** Protokół panelu = protokół biurowy + id zlecenia, z którego się wszedł. */
@@ -10312,6 +10329,19 @@ export const technikApi = {
     return r.data as TechnikJob;
   },
 
+  /**
+   * „Wznów” po omyłkowym „Zakończ” — czyści `finishedAt`, wraca do statusu
+   * „potwierdzone” i zostawia w dzienniku notatkę „Wznowiono o HH:MM”.
+   * Wolno to zrobić do doby od zakończenia; później backend oddaje 409
+   * (wznowienie starszego zlecenia zgłasza się do biura).
+   */
+  async reopen(id: number): Promise<TechnikJob> {
+    const r = await request<ApiResponse<TechnikJob>>(`/technik/jobs/${id}/reopen`, {
+      method: "POST",
+    });
+    return r.data as TechnikJob;
+  },
+
   /** Dopisanie notatki do zlecenia (`{text}` → 201 z gotowym wierszem). */
   async addNote(id: number, text: string): Promise<TechnikJobNote> {
     const r = await request<ApiResponse<TechnikJobNote>>(`/technik/jobs/${id}/notes`, {
@@ -10380,15 +10410,22 @@ export const technikApi = {
   /**
    * Zapis protokołu. `expectedUpdatedAt` to optymistyczna kontrola
    * współbieżności — biuro mogło zapisać ten sam protokół z desktopa (409).
+   *
+   * `keepalive` jest dla zapisu w chwili ZAMYKANIA karty (`pagehide`):
+   * zwykły fetch ginie razem z dokumentem, a ten dojeżdża na serwer już bez
+   * strony. Body protokołu to kilka kilobajtów, więc mieści się w limicie
+   * 64 kB, który przeglądarki nakładają na takie żądania.
    */
   async updateProtocol(
     id: number,
     data: ProtocolInput,
     expectedUpdatedAt: string,
+    opts: { keepalive?: boolean } = {},
   ): Promise<TechnikProtocol> {
     const r = await request<ApiResponse<TechnikProtocol>>(`/technik/protocols/${id}`, {
       method: "PUT",
       body: JSON.stringify({ ...data, expectedUpdatedAt }),
+      ...(opts.keepalive ? { keepalive: true } : {}),
     });
     return r.data as TechnikProtocol;
   },

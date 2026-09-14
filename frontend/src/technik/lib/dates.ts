@@ -146,6 +146,21 @@ export function groupLabel(iso: string, today = todayIso()): string {
   return formatDayShort(iso);
 }
 
+/**
+ * Dzień znacznika czasu w formacie `DD.MM`, w strefie urządzenia.
+ *
+ * NIE wolno tu ciąć tekstu (`formatDatePl(iso).slice(0, 5)`): `signedAt` to ISO
+ * w UTC, więc podpis złożony po 22:00 naszego czasu miał na ekranie datę
+ * wczorajszą. Jedna funkcja dla karty protokołu i dla kroku „Odbiór” — obie
+ * mają pokazywać ten sam dzień.
+ */
+export function formatStampDayMonth(iso: string | null | undefined): string {
+  const d = parseStamp(iso);
+  if (!d) return "—";
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(d.getDate())}.${p(d.getMonth() + 1)}`;
+}
+
 /** Data w formacie `DD.MM.YYYY` (podpisy protokołu, karty „Co nowego”). */
 export function formatDatePl(iso: string | null | undefined): string {
   if (!iso) return "—";

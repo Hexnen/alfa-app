@@ -395,6 +395,48 @@ async function main(fx: Fixtures) {
   ok("bez wydarzenia: adres = site", p3.values.installationAddress === r3.site, p3.values.installationAddress);
   ok("bez wydarzenia: brak danych klienta", p3.values.clientName === "" && p3.values.clientNip === "", p3.values);
   ok("bez wydarzenia: czynności z adnotacji", p3.values.activities === "Wymiana zasilacza", p3.values.activities);
+  ok(
+    "W2 origins: ręczna adnotacja realizacji jest udokumentowanym źródłem czynności",
+    p3.origins.activities?.source === "realizacja",
+    p3.origins.activities
+  );
+
+  // --- W2/N12: adnotacja „[Kalendarz #id] Tytuł — opis” --------------------
+  //
+  // Realizacja założona automatem ma w `note` etykietę z identyfikatorem
+  // wydarzenia. Wchodziła w całości do „Wykonanych czynności”, więc technik
+  // widział tam „[Kalendarz #6105] Serwis 7RSA” — czyli klucz bazy zamiast
+  // opisu pracy. Zostaje SAM opis; wydarzenie bez opisu → pusto.
+  db.update(schema.realizations)
+    .set({ note: `[Kalendarz #4242] ${PREFIX} Serwis 7RSA — Wymiana dysku i przegląd kamer` })
+    .where(eq(schema.realizations.id, r3.id))
+    .run();
+  const pNote = buildProtocolPrefill(db, { ...r3, note: `[Kalendarz #4242] ${PREFIX} Serwis 7RSA — Wymiana dysku i przegląd kamer` });
+  ok(
+    "W2 czynności: z adnotacji automatu zostaje SAM opis",
+    pNote.values.activities === "Wymiana dysku i przegląd kamer",
+    pNote.values.activities
+  );
+  ok(
+    "N12 origins: opis z adnotacji ma wpisane źródło",
+    pNote.origins.activities?.source === "realizacja",
+    pNote.origins.activities
+  );
+  const pNoDesc = buildProtocolPrefill(db, { ...r3, note: `[Kalendarz #4242] ${PREFIX} Serwis 7RSA` });
+  ok(
+    "W2 czynności: wydarzenie BEZ opisu → puste czynności, nie identyfikator kafelka",
+    pNoDesc.values.activities === "",
+    pNoDesc.values.activities
+  );
+  ok(
+    "W2 origins: puste czynności nie dostają źródła",
+    pNoDesc.origins.activities === undefined,
+    pNoDesc.origins.activities
+  );
+  db.update(schema.realizations)
+    .set({ note: "Wymiana zasilacza" })
+    .where(eq(schema.realizations.id, r3.id))
+    .run();
   ok("bez wydarzenia: cennik domyślny", p3.context.priceList?.via === "domyślny", p3.context.priceList);
 
   // Bez wydarzenia i bez klucza: `site` jest DOKŁADNĄ nazwą istniejącego obiektu,

@@ -1,5 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import { Camera, ChevronDown, ChevronRight, MessageSquare, Paperclip, Send, X } from "lucide-react";
+import { Link } from "react-router-dom";
+import {
+  Camera,
+  ChevronDown,
+  ChevronRight,
+  FileText,
+  MessageSquare,
+  Paperclip,
+  Send,
+  X,
+} from "lucide-react";
 import {
   technikApi,
   CALENDAR_ATTACHMENT_MAX_FILES,
@@ -189,6 +199,7 @@ export function Notatki({
                 <Wpis
                   key={n.id}
                   note={n}
+                  jobId={jobId}
                   canDeleteFiles={canEdit && n.mine === true}
                   onPreview={(index) => setLightbox({ noteId: n.id, index })}
                   onDelete={setToDelete}
@@ -314,11 +325,13 @@ export function Notatki({
  */
 function Wpis({
   note,
+  jobId,
   canDeleteFiles,
   onPreview,
   onDelete,
 }: {
   note: TechnikJobNote;
+  jobId: number;
   canDeleteFiles: boolean;
   onPreview: (index: number) => void;
   onDelete: (att: CalendarNoteAttachment) => void;
@@ -326,22 +339,40 @@ function Wpis({
   const system = note.source === "system";
   const images = imagesOf(note);
   const files = (note.attachments ?? []).filter((a) => a.kind !== "image");
+  // Notatka systemowa protokołu kończy się linkiem do CRM-a — rola „technik”
+  // nie ma tam wstępu, więc w panelu prowadzi on do TEGO SAMEGO protokołu
+  // ekranem technika. Sama ścieżka `/technical/…` znika z treści: w notatce ma
+  // stać zdanie, nie martwy adres.
+  const { body, protocolLink } = withoutCrmProtocolLink(note.text);
 
   return (
     <li className={cn("rounded-lg border p-2.5", system ? "border-dashed" : "bg-muted/30")}>
-      {note.text && (
+      {body && (
         <p
           className={cn(
             "whitespace-pre-wrap text-sm leading-snug",
             system && "italic text-muted-foreground",
           )}
         >
-          {note.text}
+          {body}
+        </p>
+      )}
+
+      {protocolLink && (
+        <p className={cn(body && "mt-1")}>
+          <Link
+            to={`/technik/zlecenie/${jobId}/protokol`}
+            data-testid="zlecenie-notatka-protokol"
+            className="inline-flex min-h-11 items-center gap-1.5 text-sm font-medium text-primary underline decoration-primary/40 underline-offset-2"
+          >
+            <FileText className="h-4 w-4 shrink-0" aria-hidden />
+            Otwórz protokół
+          </Link>
         </p>
       )}
 
       {images.length > 0 && (
-        <ul className={cn("grid grid-cols-3 gap-1.5 sm:grid-cols-5", note.text && "mt-2")}>
+        <ul className={cn("grid grid-cols-3 gap-1.5 sm:grid-cols-5", body && "mt-2")}>
           {images.map((a, i) => (
             <li key={a.id} className="relative">
               <button
@@ -376,7 +407,7 @@ function Wpis({
       )}
 
       {files.length > 0 && (
-        <ul className={cn("space-y-1", (note.text || images.length) && "mt-2")}>
+        <ul className={cn("space-y-1", (body || images.length) && "mt-2")}>
           {files.map((a) => (
             <li key={a.id}>
               <a
@@ -399,6 +430,27 @@ function Wpis({
   );
 }
 
+/**
+ * Link do protokołu w CRM-ie (`Otwórz protokół </technical/protokoly?protocol=12>`,
+ * składnia Outlooka z `lib/linkify.ts`) wycięty z treści notatki.
+ *
+ * Panel nie renderuje notatek przez `RichText`, więc technik widział surowy
+ * adres — i tak nie do otwarcia, bo router biurowy odsyła rolę `technik` do
+ * `/technik`. Ścieżkę zdejmujemy tu, a nie w backendzie: ta sama notatka wisi
+ * w kalendarzu biura, gdzie link jest jak najbardziej na miejscu.
+ */
+const CRM_PROTOCOL_LINK =
+  /(?:^|\n)[^\n<]*<\/technical\/protokoly\?protocol=\d+>[ \t]*(?=\n|$)/;
+
+function withoutCrmProtocolLink(text: string | null | undefined): {
+  body: string;
+  protocolLink: boolean;
+} {
+  const raw = text ?? "";
+  if (!CRM_PROTOCOL_LINK.test(raw)) return { body: raw, protocolLink: false };
+  return { body: raw.replace(CRM_PROTOCOL_LINK, "").replace(/[ \t\n]+$/, ""), protocolLink: true };
+}
+
 /** Zdjęcie wybrane w panelu, jeszcze niewysłane (miniatura żyje na blobie). */
 interface PickedPhoto {
   key: string;
@@ -417,7 +469,7 @@ function imagesOf(note: TechnikJobNote | undefined): CalendarNoteAttachment[] {
 
 /** Jednoliniowy podgląd wpisu: tekst, a przy notatce bez tekstu — liczba zdjęć. */
 function previewOf(note: TechnikJobNote): string {
-  const text = note.text?.trim();
+  const text = withoutCrmProtocolLink(note.text).body.trim();
   if (text) return text.replace(/\s+/g, " ");
   const images = imagesOf(note).length;
   return images ? photoCount(images) : "Załącznik";

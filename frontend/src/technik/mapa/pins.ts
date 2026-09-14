@@ -1,6 +1,6 @@
 import type { TechnikJob } from "@/lib/api";
 import { EVENT_TYPE_META } from "@/lib/calendar-labels";
-import { jobStateOf } from "../lib/jobs";
+import { jobStateOf, jobsLabel, objectsLabel } from "../lib/jobs";
 import { formatDayShort, timeOf, todayIso } from "../lib/dates";
 
 /**
@@ -73,6 +73,24 @@ export function pinTimeLabel(job: TechnikJob, range: MapRange, today = todayIso(
 /** Nazwa miejsca na etykiecie i w nagłówku dolnej karty. */
 export function pinTitle(job: TechnikJob): string {
   return job.objectName || job.title;
+}
+
+/**
+ * Tytuł PINEZKI, nie pierwszego zlecenia pod nią.
+ *
+ * Pod jednym adresem stoją w bazie RÓŻNE obiekty (dwa lokale w tym samym
+ * budynku), a pinezka pokazywała nazwę tego zlecenia, które zaczyna się
+ * najwcześniej — technik jechał pod „Wola 1”, a miał też robotę w „Wola 2”
+ * i nie widział jej nigdzie na mapie. Dwie nazwy mieszczą się w etykiecie,
+ * przy trzech i więcej mówimy, ile ich jest; komplet nazw stoi na kartach
+ * zleceń w dolnej karcie.
+ */
+export function pinPlaceTitle(pin: JobPin): string {
+  const names = [...new Set(pin.jobs.map(pinTitle).filter(Boolean))];
+  if (names.length === 0) return "";
+  if (names.length === 1) return names[0];
+  if (names.length === 2) return `${names[0]} i ${names[1]}`;
+  return `${objectsLabel(names.length)} pod jednym adresem`;
 }
 
 /**
@@ -165,6 +183,6 @@ export function pinSubtitle(pin: JobPin, today = todayIso()): string {
   const when = first.allDay ? "cały dzień" : timeOf(first.startAt) || "—";
   const stamp = day === today ? when : `${formatDayShort(day)} ${when}`;
   return pin.jobs.length > 1
-    ? `${pin.jobs.length} zlecenia · najbliższe ${stamp}`
+    ? `${jobsLabel(pin.jobs.length)} · najbliższe ${stamp}`
     : [first.typeLabel, stamp, first.address].filter(Boolean).join(" · ");
 }

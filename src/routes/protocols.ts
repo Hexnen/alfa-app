@@ -47,6 +47,28 @@ type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
  * insert były atomowe (bez wyścigu na UNIQUE(number) przy równoległych żądaniach).
  */
 export function nextProtocolNumberSync(tx: Tx, workDate: string): string {
+  return allocateProtocolNumber(tx, workDate).number;
+}
+
+/** Numer + wszystko, czego potrzeba do zatwierdzenia licznika PO udanym insercie. */
+interface AllocatedNumber {
+  number: string;
+  /** Klucz wysokiego stanu w `app_settings`. */
+  key: string;
+  seq: number;
+}
+
+/**
+ * Wylicza kolejny numer, ale LICZNIKA JESZCZE NIE PODBIJA.
+ *
+ * Insert protokołu idzie z `ON CONFLICT(realization_id) DO NOTHING`, więc
+ * potrafi nic nie zapisać (realizacja ma już protokół, wyścig dwóch żądań).
+ * Podbicie licznika przed insertem zostawiało wtedy dziurę w numeracji —
+ * miesiąc przeskakiwał z P/2026/09/007 na P/2026/09/009 i księgowość szukała
+ * dokumentu, którego nigdy nie było. Stan zapisuje dopiero
+ * `commitProtocolSeq`, w tej samej transakcji co udany insert.
+ */
+function allocateProtocolNumber(tx: Tx, workDate: string): AllocatedNumber {
   const year = workDate.slice(0, 4);
   const month = workDate.slice(5, 7);
   const prefix = `P/${year}/${month}/`;
@@ -67,8 +89,12 @@ export function nextProtocolNumberSync(tx: Tx, workDate: string): string {
   const key = protocolSeqKey(year, month);
   const stored = parseInt(getSetting(key, tx) ?? "");
   const seq = Math.max(maxSeq, Number.isFinite(stored) ? stored : 0) + 1;
-  setSetting(key, String(seq), null, tx);
-  return `${prefix}${String(seq).padStart(3, "0")}`;
+  return { number: `${prefix}${String(seq).padStart(3, "0")}`, key, seq };
+}
+
+/** Zatwierdza wysoki stan numeracji — WOŁAĆ dopiero po udanym insercie. */
+function commitProtocolSeq(tx: Tx, allocated: AllocatedNumber, userId: number | null): void {
+  setSetting(allocated.key, String(allocated.seq), userId, tx);
 }
 
 /** Klucz wysokiego stanu numeracji w app_settings (jeden na miesiąc). */
@@ -93,17 +119,20 @@ function protocolSeqKey(year: string, month: string): string {
 export function createProtocolForRealizationSync(
   tx: Tx,
   r: Realization,
-  event?: CalendarEvent | null
+  event?: CalendarEvent | null,
+  /** Kto zakłada dokument — podpisuje wpis licznika w `app_settings`. */
+  userId: number | null = null
 ) {
   const prefill = buildProtocolPrefill(tx, r, { event });
   // Szacunki (godziny z normy dnia dla wydarzenia całodniowego) nie wchodzą do dokumentu —
   // czekają jako sugestia w „Uzupełnij z danych”.
   const values = prefillInsertValues(prefill);
-  return tx
+  const allocated = allocateProtocolNumber(tx, values.workDate);
+  const created = tx
     .insert(schema.protocols)
     .values({
       realizationId: r.id,
-      number: nextProtocolNumberSync(tx, values.workDate),
+      number: allocated.number,
       workDate: values.workDate,
       workType: values.workType,
       actualHours: values.actualHours,
@@ -122,6 +151,10 @@ export function createProtocolForRealizationSync(
     .onConflictDoNothing({ target: schema.protocols.realizationId })
     .returning()
     .get();
+  // Licznik podbijamy TYLKO wtedy, gdy dokument naprawdę powstał — inaczej
+  // nieudany insert (realizacja miała już protokół) zjadałby numer na zawsze.
+  if (created) commitProtocolSeq(tx, allocated, userId);
+  return created;
 }
 
 // Parsowanie pozycji, edycja i podpis mieszkają w src/lib/protocols.ts (dzieli je
@@ -213,7 +246,7 @@ app.post("/sync", (c) => {
 
     let count = 0;
     for (const r of missing) {
-      if (createProtocolForRealizationSync(tx, r)) count++;
+      if (createProtocolForRealizationSync(tx, r, null, getUser(c)?.id ?? null)) count++;
     }
     return count;
   });

@@ -1,5 +1,15 @@
+import { useState } from "react";
 import type { LucideIcon } from "lucide-react";
 import { Navigation, Phone } from "lucide-react";
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogTitle,
+  ConfirmDialog,
+} from "../ui/confirm";
 import type { TechnikJobDetails, TechnikJobDistance } from "@/lib/api";
 import { fmtMinutes } from "@/lib/calendar-labels";
 import { cn } from "@/lib/utils";
@@ -27,6 +37,22 @@ export function KafleAkcji({
 }) {
   const navHref = mapsHref(job);
   const phoneHref = telHref(job.contactPhone);
+  const [callOpen, setCallOpen] = useState(false);
+  // Lista „do kogo zadzwonić”: backend zbiera kontakt z wydarzenia, osobę
+  // kontaktową kontrahenta i kontakty z kartoteki (bez powtórzonych numerów).
+  // Gdy jest jedna osoba — samo pytanie; gdy więcej — wybór z listy.
+  const contacts = (job.contacts ?? []).filter((k) => telHref(k.phone));
+  const many = contacts.length > 1;
+  const callSub = many
+    ? `${contacts.length} kontakty`
+    : phoneHref
+      ? job.contactPerson || job.contactPhone
+      : "Brak numeru";
+  const dial = (phone: string) => {
+    const href = telHref(phone);
+    setCallOpen(false);
+    if (href) window.location.assign(href);
+  };
   const address = job.address || job.objectName;
   const trip = distance?.km != null ? officeTripLabel(distance) : null;
 
@@ -41,13 +67,58 @@ export function KafleAkcji({
         disabledReason={navHref ? null : "Brak adresu"}
         testId="zlecenie-nawiguj"
       />
+      {/* Telefon przez pytanie: kafel siedzi pod kciukiem, a przypadkowe
+          dotknięcie w aucie wybierałoby numer klienta bez ostrzeżenia. */}
       <Kafel
         icon={Phone}
         label="Zadzwoń"
-        sub={phoneHref ? job.contactPerson || job.contactPhone : "Brak numeru"}
-        href={phoneHref}
-        disabledReason={phoneHref ? null : "Brak numeru"}
+        sub={callSub}
+        href={phoneHref ?? (many ? "#" : null)}
+        onClick={phoneHref || many ? () => setCallOpen(true) : undefined}
+        disabledReason={phoneHref || many ? null : "Brak numeru"}
         testId="zlecenie-zadzwon"
+      />
+      {many && (
+        <AlertDialog open={callOpen} onOpenChange={setCallOpen}>
+          <AlertDialogContent>
+            <AlertDialogTitle>Do kogo zadzwonić?</AlertDialogTitle>
+            <AlertDialogDescription>{job.objectName ?? "Kontakty do zlecenia"}</AlertDialogDescription>
+            <ul className="flex flex-col gap-2" data-testid="zlecenie-kontakty">
+              {contacts.map((k) => (
+                <li key={`${k.source}-${k.phone}`}>
+                  <button
+                    type="button"
+                    onClick={() => dial(k.phone)}
+                    className="flex min-h-14 w-full items-center gap-3 rounded-xl border bg-card px-3 text-left active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    <Phone className="h-5 w-5 shrink-0 text-primary" aria-hidden />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm font-semibold leading-tight">{k.name}</span>
+                      <span className="block truncate text-xs leading-tight text-muted-foreground">
+                        {[k.role, k.phone].filter(Boolean).join(" · ")}
+                      </span>
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Anuluj</AlertDialogCancel>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      )}
+      <ConfirmDialog
+        open={callOpen && !many}
+        onOpenChange={setCallOpen}
+        title={`Zadzwonić do ${job.contactPerson || "kontaktu"}?`}
+        description={job.contactPhone ?? undefined}
+        confirmLabel="Zadzwoń"
+        variant="default"
+        onConfirm={() => {
+          setCallOpen(false);
+          if (phoneHref) window.location.assign(phoneHref);
+        }}
       />
 
       {/* Dojazd z biura — pod kaflem nawigacji, bo opisuje właśnie jego.
@@ -73,6 +144,7 @@ function Kafel({
   sub,
   href,
   external,
+  onClick,
   disabledReason,
   testId,
 }: {
@@ -81,6 +153,8 @@ function Kafel({
   sub: string | null;
   href: string | null;
   external?: boolean;
+  /** Gdy podane, kafel jest przyciskiem (akcja z potwierdzeniem), nie linkiem. */
+  onClick?: () => void;
   disabledReason: string | null;
   testId: string;
 }) {
@@ -114,15 +188,25 @@ function Kafel({
     );
   }
 
+  const active = cn(
+    base,
+    "bg-card shadow-sm hover:bg-muted/40 active:scale-[0.99]",
+    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+  );
+
+  if (onClick) {
+    return (
+      <button type="button" onClick={onClick} className={cn(active, "w-full")} data-testid={testId}>
+        {body}
+      </button>
+    );
+  }
+
   return (
     <a
       href={href}
       {...(external ? { target: "_blank", rel: "noreferrer" } : {})}
-      className={cn(
-        base,
-        "bg-card shadow-sm hover:bg-muted/40 active:scale-[0.99]",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-      )}
+      className={active}
       data-testid={testId}
     >
       {body}

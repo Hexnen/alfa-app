@@ -1388,6 +1388,29 @@ export interface AddNoteInput {
   attachments?: Array<StoredAttachment & { origin?: NoteAttachmentOrigin }>;
 }
 
+/**
+ * „Na tym zleceniu coś doszło” — podbicie `updated_at`/`updated_by` wydarzenia
+ * po wpisie w jego dzienniku.
+ *
+ * Panel technika liczy z tego żółtą plakietkę „zmiany” (licznik `changedToday`
+ * w src/routes/technik.ts), więc dotyczy KAŻDEJ zmiany dziennika ręką człowieka:
+ * dopisania notatki, jej poprawienia i usunięcia. Notatki systemowe
+ * (Rozpocznij/Zakończ, streszczenie protokołu) świadomie NIE podbijają — to
+ * echo zmian, które technik właśnie sam zrobił.
+ */
+function touchEventForNote(
+  tx: DbOrTx,
+  ev: CalendarEventRow | null | undefined,
+  source: CalendarNoteSource,
+  ctx: MutationCtx
+): void {
+  if (!ev || ev.deletedAt || source === "system") return;
+  tx.update(schema.calendarEvents)
+    .set({ updatedBy: ctx.user.id, updatedAt: sql`(datetime('now'))` })
+    .where(eq(schema.calendarEvents.id, ev.id))
+    .run();
+}
+
 /** Dodaje notatkę do wydarzenia (event musi istnieć i nie być usunięty). */
 export function addNote(tx: DbOrTx, input: AddNoteInput): Note {
   const ev = getEventRow(tx, input.eventId);
@@ -1432,17 +1455,8 @@ export function addNote(tx: DbOrTx, input: AddNoteInput): Note {
     action: "note_added", field: "note", newValue: row.id,
     summary: `Dodano ${mail ? "mail" : "notatkę"}: ${noteSummary(briefTextOf(row))}${attInfo}`,
   });
-  // Wpis od CZŁOWIEKA (biuro, technik, asystent) to zmiana na wydarzeniu:
-  // podbijamy `updated_at`/`updated_by`, żeby panel technika zapalił żółtą
-  // plakietkę „coś tu doszło”. Notatki systemowe (Rozpocznij/Zakończ,
-  // streszczenie protokołu) świadomie NIE podbijają — to echo zmian, które
-  // technik właśnie sam zrobił.
-  if (source !== "system") {
-    tx.update(schema.calendarEvents)
-      .set({ updatedBy: input.ctx.user.id, updatedAt: sql`(datetime('now'))` })
-      .where(eq(schema.calendarEvents.id, ev.id))
-      .run();
-  }
+  // Wpis od CZŁOWIEKA (biuro, technik, asystent) to zmiana na wydarzeniu.
+  touchEventForNote(tx, ev, source, input.ctx);
   // Wzmianki dat w treści (@piątek, @15.09) → kafelki w kalendarzu, w tej samej transakcji.
   syncNoteMentionEvents(tx, row, ev, input.ctx);
   // Notatka przy aktywności handlowej to kontakt z klientem — szansa przestaje „gnić”.
@@ -1469,6 +1483,11 @@ export function updateNote(tx: DbOrTx, noteId: number, rawText: unknown, ctx: Mu
     entityType: CALENDAR_ENTITY, entityId: note.eventId, objectId: ev?.objectId ?? null, user: ctx.user, summarySuffix: ctx.summarySuffix,
     action: "note_updated", field: "note", oldValue: noteSummary(note.text), newValue: noteSummary(text), summary: `Zmieniono notatkę: ${noteSummary(text)}`,
   });
+  // Tak samo jak przy `addNote`: POPRAWIONA notatka biura to nadal zmiana na
+  // zleceniu i musi zapalić technikowi żółtą plakietkę. Bez tego wystarczyło
+  // dopisać do wcześniejszego wpisu („…jednak o 8:00”), żeby zmiana nie
+  // dotarła do nikogo — plakietka liczy się z `calendar_events.updated_at`.
+  touchEventForNote(tx, ev, note.source, ctx);
   // Wzmianki: nowe → kafelki, usunięte → soft delete; pozostałe kafelki dostają nowy tytuł.
   if (ev && ev.type !== "notatka" && !ev.deletedAt) {
     syncNoteMentionEvents(tx, after, ev, ctx);
@@ -1491,6 +1510,8 @@ export function deleteNote(tx: DbOrTx, noteId: number, ctx: MutationCtx): void {
     entityType: CALENDAR_ENTITY, entityId: note.eventId, objectId: ev?.objectId ?? null, user: ctx.user, summarySuffix: ctx.summarySuffix,
     action: "note_deleted", field: "note", oldValue: noteSummary(note.text), summary: `Usunięto notatkę: ${noteSummary(note.text)}`,
   });
+  // Zniknięcie wpisu to też zmiana, o której technik ma się dowiedzieć.
+  touchEventForNote(tx, ev, note.source, ctx);
   // Kafelki wskazujące tę notatkę nie mają już czego pokazywać — także te podpięte ręcznie.
   for (const tile of noteEventsOfNote(tx, noteId)) {
     softDeleteEventRow(tx, tile, ctx, `Usunięto kafelek notatki — notatka „${noteSummary(note.text, 60)}” została usunięta`);

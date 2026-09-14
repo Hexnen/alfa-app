@@ -6,6 +6,10 @@ import { useRefreshOnFocus } from "./refresh";
  * Szczegóły jednego zlecenia. Cudze zlecenie backend zwraca jako 404 — tu
  * wychodzi to jako `notFound`, żeby ekran mógł powiedzieć „nie ma takiego
  * zlecenia” zamiast pokazywać surowy błąd sieci.
+ *
+ * Zlecenie ODWOŁANE przez biuro wraca normalnym 200 ze `status: "cancelled"` —
+ * to nie jest błąd i nie ma prawa wyglądać jak brak dostępu. Ekran zlecenia
+ * pokazuje je z pigułką „Odwołane” i bez akcji.
  */
 export interface JobState {
   job: TechnikJobDetails | null;
@@ -37,8 +41,16 @@ export function useJob(id: number | null): JobState {
       setNotFound(false);
     } catch (e) {
       const status = (e as { status?: number }).status;
-      if (status === 404) setNotFound(true);
-      else setError(e instanceof Error ? e.message : "Nie udało się wczytać zlecenia.");
+      if (status === 404) {
+        setNotFound(true);
+      } else {
+        // Błąd sieci PO wcześniejszym 404 zostawiał na ekranie „zlecenie nie
+        // jest już przypisane” bez żadnego sposobu na ponowienie — a to zwykle
+        // nie była prawda, tylko brak zasięgu. Każda nieudana próba inna niż
+        // 404 zdejmuje ten stan i pokazuje „Spróbuj ponownie”.
+        setNotFound(false);
+        setError(e instanceof Error ? e.message : "Nie udało się wczytać zlecenia.");
+      }
     } finally {
       setLoading(false);
     }

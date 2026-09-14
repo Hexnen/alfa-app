@@ -4,7 +4,7 @@ import type {
   ProtocolWorkType,
   TechnikProtocol,
 } from "@/lib/api";
-import { activityLines } from "./activities";
+import { activityLines, normalizeActivities } from "./activities";
 import { dayOf, todayIso } from "./dates";
 
 /**
@@ -68,8 +68,24 @@ export function num(v: string | number | null | undefined): number {
  */
 export function shortContactName(raw: string | null | undefined): string {
   const trimmed = (raw ?? "").trim();
-  if (!/[(,]/.test(trimmed)) return trimmed;
-  return trimmed.split(/[(,]/)[0].trim() || trimmed;
+  if (!trimmed) return "";
+  // Nawiasy, maile i telefony lecą NIEZALEŻNIE OD POZYCJI. Wcześniej liczyło
+  // się tylko to, co stoi przed pierwszym „(” albo przecinkiem, więc kontakt
+  // zapisany jako „(recepcja) Anna Nowak” wracał w całości — razem z rolą,
+  // numerem i mailem — i tyle lądowało pod podpisem klienta.
+  const cleaned = trimmed
+    .replace(/\([^)]*\)/g, " ")
+    .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/g, " ")
+    .replace(/\+?\d[\d\s-]{6,}\d/g, " ")
+    .split(",")[0]
+    .replace(/\s+/g, " ")
+    // Kropki na końcu NIE ucinamy — „Firma Sp. z o.o.” ma prawo tak wyglądać.
+    .replace(/^[\s,;:.\-–—]+/, "")
+    .replace(/[\s,;:\-–—]+$/, "")
+    .trim();
+  // Nic nie zostało (sam telefon, samo „(brak)”) — lepiej pokazać całość niż
+  // puste pole; 60 znaków to tyle, ile mieści się w linijce pod podpisem.
+  return cleaned || trimmed.slice(0, 60).trim();
 }
 
 /** Edytowalny stan formularza — reszta protokołu jest tylko do odczytu. */
@@ -129,7 +145,10 @@ export function toPayload(protocol: TechnikProtocol, form: FormState): ProtocolI
     // nazwisko odsyłał — pierwszy autozapis kasował z protokołu telefon i mail
     // osoby odbierającej, a biuro nie miało już do kogo zadzwonić.
     contact: form.contactEdited ? form.signerName : (protocol.contact ?? ""),
-    activities: form.activities,
+    // Uwagi jadą na serwer wyprostowane (bez spacji na końcach linii i bez
+    // pustych brzegów) — w stanie formularza zostają dokładnie takie, jakie
+    // technik wpisał, żeby Enter i spacja nie znikały spod palca.
+    activities: normalizeActivities(form.activities),
     // Puste wiersze (technik dodał i nie wypełnił) nie mają lądować na papierze.
     items: cleanItems(form.items),
     status: protocol.status,
