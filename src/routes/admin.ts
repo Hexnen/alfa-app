@@ -6,7 +6,6 @@ import {
   listUsers,
   listTechniciansLite,
   createUserFull,
-  updateUser,
   setUserPassword,
   deleteUser,
   findUserById,
@@ -14,6 +13,8 @@ import {
   publicUser,
   revokeCalendarToken,
   setUserTechnician,
+  setUserTechnicianSync,
+  updateUserSync,
   technicianIdOfUser,
   findTechnicianOwner,
   unlinkUserFromDirectories,
@@ -129,36 +130,27 @@ admin.post("/users", async (c) => {
   return c.json({ success: true, data: publicUser(user, technicianIdOfUser(user.id)) });
 });
 
-// Aktualizacja użytkownika (nazwa, rola, uprawnienia).
+/** Błąd wewnątrz transakcji PATCH-a: niesie kod i komunikat, a przy okazji wycofuje zapis. */
+class PatchError extends Error {
+  constructor(readonly status: 400 | 404 | 409, readonly info: string) {
+    super(info);
+  }
+}
+
+/**
+ * Aktualizacja użytkownika (nazwa, rola, uprawnienia, powiązany technik).
+ *
+ * CAŁOŚĆ W JEDNEJ TRANSAKCJI, a walidacja wejścia PRZED jakimkolwiek zapisem.
+ * Wcześniej degradacja roli szła osobnym UPDATE-em na samym początku: gdy dalej
+ * coś odpadło na 400 (zła nazwa, zły technik) albo 409 (wersja), admin zostawał
+ * już zdegradowany — z odpowiedzią „nic nie zapisano” i bez podbitej wersji.
+ * Teraz każdy błąd to `throw` → ROLLBACK → konto bez jednej zmiany.
+ */
 admin.patch("/users/:id", async (c) => {
   const id = Number(c.req.param("id"));
-  const target = findUserById(id);
-  if (!target) return c.json({ success: false, error: "Nie znaleziono użytkownika." }, 404);
   const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
 
-  // Zabezpieczenie: nie można zdegradować ostatniego admina.
-  // Warunek i zapis w jednym atomowym UPDATE (podzapytanie liczy pozostałych
-  // adminów), więc dwa równoległe żądania degradacji nie zostawią 0 adminów.
-  if (body.role !== undefined && body.role !== "admin" && target.role === "admin") {
-    // Rola z koercji, nie literał 'user': degradacja admina na technika ma od razu
-    // zapisać 'technik'. Wcześniej ten UPDATE wpisywał twardo 'user', a właściwy
-    // zapis roli szedł dopiero niżej — konto przez chwilę było zwykłym userem
-    // z pełną mapą uprawnień admina.
-    const newRole = coerceRole(body.role);
-    const res = db.run(
-      sql`UPDATE users SET role = ${newRole} WHERE id = ${id} AND (SELECT COUNT(*) FROM users WHERE role = 'admin' AND id <> ${id}) > 0`,
-    );
-    if (res.changes === 0) {
-      // 0 zmian ma dwie przyczyny: wiersz zniknął (równoległy DELETE między
-      // odczytem body a tym UPDATE) albo to jedyny admin. Rozróżniamy je
-      // ponownym odczytem, aby nie zwracać mylącego komunikatu o adminie.
-      if (!findUserById(id)) {
-        return c.json({ success: false, error: "Nie znaleziono użytkownika." }, 404);
-      }
-      return c.json({ success: false, error: "Nie można zdegradować jedynego administratora." }, 400);
-    }
-  }
-
+  // --- walidacja wejścia (jeszcze przed otwarciem transakcji) ---------------
   let displayName: string | undefined;
   if (body.displayName !== undefined) {
     if (typeof body.displayName !== "string" || body.displayName.trim().length > 60) {
@@ -166,57 +158,74 @@ admin.patch("/users/:id", async (c) => {
     }
     displayName = body.displayName.trim();
   }
-
+  if (
+    body.technicianId !== undefined &&
+    body.technicianId !== null &&
+    !Number.isInteger(body.technicianId)
+  ) {
+    return c.json({ success: false, error: "Nieprawidłowy technik." }, 400);
+  }
+  // Rola z koercji, nie literał 'user': degradacja admina na technika ma od razu
+  // zapisać 'technik'. Wcześniej pierwszy UPDATE wpisywał twardo 'user', więc
+  // konto przez chwilę było zwykłym userem z pełną mapą uprawnień admina.
+  const role = body.role === undefined ? undefined : coerceRole(body.role);
   // Optimistic concurrency: front odsyła wersję, którą wczytał. Jeśli inny admin
   // zapisał w międzyczasie, wersja się nie zgadza i zwracamy 409 zamiast po cichu
   // nadpisać jego zmiany (lost update na mapie uprawnień).
   const expectedVersion =
     typeof body.expectedVersion === "number" ? body.expectedVersion : undefined;
-  const result = updateUser(
-    id,
-    {
-      displayName,
-      role: body.role === undefined ? undefined : coerceRole(body.role),
-      permissions: body.permissions,
-    },
-    expectedVersion,
-  );
-  if (!result.ok) {
-    if (result.reason === "conflict") {
-      return c.json(
-        {
-          success: false,
-          error:
-            "Ten użytkownik został zmieniony przez kogoś innego. Odśwież i zapisz ponownie.",
-        },
-        409,
-      );
-    }
-    return c.json({ success: false, error: "Nie znaleziono użytkownika." }, 404);
-  }
 
-  // Powiązanie z kartoteką techników. POZA `users.version`: to kolumna w
-  // `technicians`, a nie pole konta — optimistic lock na użytkowniku nie ma tu
-  // czego pilnować. Pominięte pole = bez zmian, `null` = odepnij.
-  if (body.technicianId !== undefined) {
-    if (body.technicianId !== null && !Number.isInteger(body.technicianId)) {
-      return c.json({ success: false, error: "Nieprawidłowy technik." }, 400);
-    }
-    const linked = setUserTechnician(id, (body.technicianId as number | null) ?? null);
-    if (!linked.ok) {
-      return c.json(
-        {
-          success: false,
-          error:
+  try {
+    const data = db.transaction((tx) => {
+      const target = findUserById(id);
+      if (!target) throw new PatchError(404, "Nie znaleziono użytkownika.");
+      // Nie można zdegradować ostatniego admina. Warunek jedzie W TYM SAMYM
+      // UPDATE (podzapytanie EXISTS), więc dwa równoległe żądania degradacji
+      // nie zostawią bazy bez ani jednego administratora.
+      const demoting = role !== undefined && role !== "admin" && target.role === "admin";
+
+      const result = updateUserSync(
+        tx,
+        id,
+        { displayName, role, permissions: body.permissions },
+        { expectedVersion, requireOtherAdmin: demoting },
+      );
+      if (!result.ok) {
+        if (result.reason === "lastadmin") {
+          throw new PatchError(400, "Nie można zdegradować jedynego administratora.");
+        }
+        if (result.reason === "conflict") {
+          throw new PatchError(
+            409,
+            "Ten użytkownik został zmieniony przez kogoś innego. Odśwież i zapisz ponownie.",
+          );
+        }
+        throw new PatchError(404, "Nie znaleziono użytkownika.");
+      }
+
+      // Powiązanie z kartoteką techników. POZA `users.version`: to kolumna w
+      // `technicians`, a nie pole konta — optimistic lock na użytkowniku nie ma
+      // tu czego pilnować. Pominięte pole = bez zmian, `null` = odepnij.
+      if (body.technicianId !== undefined) {
+        const linked = setUserTechnicianSync(tx, id, (body.technicianId as number | null) ?? null);
+        if (!linked.ok) {
+          throw new PatchError(
+            409,
             linked.reason === "taken"
               ? "Ten technik jest już powiązany z innym kontem."
-              : "Wskazany technik nie istnieje.",
-        },
-        409,
-      );
-    }
+              : linked.reason === "inactive"
+                ? "Ten technik jest nieaktywny — najpierw przywróć go w kartotece."
+                : "Wskazany technik nie istnieje.",
+          );
+        }
+      }
+      return publicUser(result.user, technicianIdOfUser(id));
+    });
+    return c.json({ success: true, data });
+  } catch (e) {
+    if (e instanceof PatchError) return c.json({ success: false, error: e.info }, e.status);
+    throw e;
   }
-  return c.json({ success: true, data: publicUser(result.user, technicianIdOfUser(id)) });
 });
 
 // Reset hasła.

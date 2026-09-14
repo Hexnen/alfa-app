@@ -505,11 +505,16 @@ export function buildProtocolPrefill(
   if (contact) from("contact", "kontrahent", `dane kontaktowe kontrahenta ${clientName || "—"}`);
 
   // --- wykonane czynności ---------------------------------------------------
+  //
+  // TYLKO opis wydarzenia, NIGDY tytuł. Tytuł to etykieta kafelka w kalendarzu
+  // („Serwis 7RSA”), a nie praca, którą ktoś wykonał — wpisany w „Wykonane
+  // czynności” robił z prefillu meldunek o robocie, której jeszcze nie było.
+  // Opis planujący wpisuje świadomie jako zakres prac, więc ten zostaje.
   let activities = clean(r.note);
-  if (ev) {
-    const desc = clean(ev.description);
-    activities = clip([clean(ev.title), desc].filter(Boolean).join(" — "), 400);
-    from("activities", "kalendarz", `tytuł i opis wydarzenia #${ev.id}`);
+  const eventDescription = ev ? clean(ev.description) : "";
+  if (eventDescription) {
+    activities = clip(eventDescription, 400);
+    from("activities", "kalendarz", `opis wydarzenia #${ev!.id}`);
   }
 
   // --- pozycje materiałowe --------------------------------------------------

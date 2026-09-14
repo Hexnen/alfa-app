@@ -1531,7 +1531,10 @@ export function Technical() {
   const handleProtoUpdate = async (data: ProtocolInput) => {
     if (!editable) return;
     if (editingProto) {
-      await updateProtocol(editingProto.id, data);
+      const res = await updateProtocol(editingProto.id, data, editingProto.updatedAt);
+      // Zapisany dokument wraca ze świeżym `updatedAt` — bez tego kolejny zapis
+      // (albo podpis z tego samego dialogu) leciałby ze starym znacznikiem i 409.
+      if (res.data) setEditingProto(res.data);
       loadProtocols();
     }
   };
@@ -1542,6 +1545,7 @@ export function Technical() {
       const res = await signProtocol(editingProto.id, {
         signaturePng,
         signerName,
+        expectedUpdatedAt: editingProto.updatedAt,
       });
       if (res.data) setEditingProto(res.data);
       // Backend po podpisie dolicza realizację i przelicza wycenę z protokołu — pokazujemy,

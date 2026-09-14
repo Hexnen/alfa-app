@@ -57,17 +57,25 @@ import { createProtocolForRealizationSync } from "./protocols.js";
 import {
   afterProtocolSigned,
   checkSignaturePng,
+  parseSignerName,
   protocolConflictMessage,
   signProtocolSync,
+  syncProtocolNoteSafely,
   updateProtocolSync,
   withParsedItems,
+  SIGNER_NAME_REQUIRED,
 } from "../lib/protocols.js";
-import type { ProtocolItem } from "../lib/protocol-prefill.js";
 import { getTechnikActivities } from "../lib/technik-config.js";
-import { deleteSubscription, isPushEnabled, pushConfig, saveSubscription } from "../lib/push.js";
+import {
+  deleteSubscription,
+  hasSubscription,
+  isPushEnabled,
+  pushConfig,
+  saveSubscription,
+} from "../lib/push.js";
 import { distanceForObject, isGeoError } from "../lib/geo.js";
 import { getCompanyConfig } from "../lib/company-config.js";
-import { CALENDAR_NOTE_MAX } from "../db/schema.js";
+import { parseLocal } from "../lib/calendar-recurrence.js";
 import { zonedToday } from "../lib/tz.js";
 import { loadWeatherEvents, weatherBriefs, type WeatherBrief } from "../lib/weather.js";
 
@@ -75,6 +83,20 @@ const app = new Hono();
 
 /** Ile dni do przodu pokazuje panel, gdy klient nie poda zakresu. */
 const DEFAULT_HORIZON_DAYS = 14;
+
+/**
+ * Koniec okna „Nadchodzące” liczony od dziś — WYŁĄCZNY, więc o jeden dzień
+ * dalej niż horyzont listy. Front pyta dokładnie o to samo (dziś + 15 dni
+ * wyłącznie, `frontend/src/technik/pages/Nadchodzace.tsx`); rozjazd o jeden
+ * dzień dawał licznik na tab barze mniejszy niż liczba pozycji na liście.
+ */
+const UPCOMING_END_OFFSET_DAYS = DEFAULT_HORIZON_DAYS + 1;
+
+/** Lokalny zapis kalendarza („2026-11-10”, „2026-11-10T09:00”) → Date w strefie serwera. */
+function localCalendarDate(s: string): Date {
+  const p = parseLocal(s);
+  return new Date(p.y, p.m - 1, p.d, p.hh, p.mm, 0, 0);
+}
 
 // ---------------------------------------------------------------------------
 // Kto pyta: konto → technik z kartoteki
@@ -156,11 +178,34 @@ function mineConditions(technicianId: number) {
   ];
 }
 
+/**
+ * Warunki zakresu [from, to) dla dni „YYYY-MM-DD”.
+ *
+ * `endAt` porównujemy z `${from}T00:00`, a nie z samym dniem: wydarzenie
+ * kończące się dokładnie o północy („2026-11-10T00:00”) jest tekstowo WIĘKSZE
+ * niż „2026-11-10”, więc wpadało na listę dnia, w którym już się skończyło.
+ * Całodniowe (endAt bez godziny) działają tak samo w obu zapisach.
+ */
+function rangeConds(from: string | null, to: string | null) {
+  const conds = [];
+  if (from) conds.push(gt(schema.calendarEvents.endAt, `${from}T00:00`));
+  if (to) conds.push(lt(schema.calendarEvents.startAt, to));
+  return conds;
+}
+
+/** Ile zleceń technika wpada w zakres [from, to) — licznik, więc BEZ limitu. */
+function myJobCount(technicianId: number, from: string | null, to: string | null): number {
+  const row = db
+    .select({ n: sql<number>`count(*)` })
+    .from(schema.calendarEvents)
+    .where(and(...mineConditions(technicianId), ...rangeConds(from, to)))
+    .get();
+  return row?.n ?? 0;
+}
+
 /** Id zleceń technika w zakresie [from, to) — nachodzenie jak w GET /calendar/events. */
 function myJobIds(technicianId: number, from: string | null, to: string | null, limit = 500): number[] {
-  const conds = mineConditions(technicianId);
-  if (from) conds.push(gt(schema.calendarEvents.endAt, from));
-  if (to) conds.push(lt(schema.calendarEvents.startAt, to));
+  const conds = [...mineConditions(technicianId), ...rangeConds(from, to)];
   return db
     .select({ id: schema.calendarEvents.id })
     .from(schema.calendarEvents)
@@ -190,8 +235,7 @@ function seenSince(raw: string | undefined): string | null {
  */
 function changedJobsCount(technicianId: number, userId: number, from: string, to: string, since: string | null): number {
   if (!since) return 0;
-  const conds = mineConditions(technicianId);
-  conds.push(gt(schema.calendarEvents.endAt, from), lt(schema.calendarEvents.startAt, to));
+  const conds = [...mineConditions(technicianId), ...rangeConds(from, to)];
   conds.push(gt(schema.calendarEvents.updatedAt, since));
   conds.push(sql`(${schema.calendarEvents.updatedBy} IS NULL OR ${schema.calendarEvents.updatedBy} <> ${userId})`);
   return db.select({ id: schema.calendarEvents.id }).from(schema.calendarEvents).where(and(...conds)).all().length;
@@ -235,6 +279,15 @@ export interface JobJson {
   objectName: string | null;
   address: string | null;
   mapsUrl: string | null;
+  /**
+   * Pinezka obiektu (`objects.latitude/longitude`) dla zakładki „Mapa”.
+   * `null` = obiekt nie ma jeszcze współrzędnych albo zlecenie jest bez
+   * obiektu. ŚWIADOMIE nie geokodujemy tu adresów w locie: lista zleceń to
+   * odczyt, a geokodowanie to zapis do `geo_cache` i strzał w sieć — robi to
+   * osobno `POST /company/travel/warm` po stronie biura.
+   */
+  lat: number | null;
+  lng: number | null;
   contactPerson: string | null;
   contactPhone: string | null;
   description: string | null;
@@ -278,6 +331,8 @@ function toJobs(rows: CalendarEventRow[], technicianId: number): JobJson[] {
           address: schema.objects.address,
           city: schema.objects.city,
           mapsUrl: schema.objects.mapsUrl,
+          latitude: schema.objects.latitude,
+          longitude: schema.objects.longitude,
           contractorId: schema.objects.contractorId,
         })
         .from(schema.objects)
@@ -371,6 +426,8 @@ function toJobs(rows: CalendarEventRow[], technicianId: number): JobJson[] {
       objectName: object?.name ?? null,
       address,
       mapsUrl: object?.mapsUrl ?? null,
+      lat: object?.latitude ?? null,
+      lng: object?.longitude ?? null,
       contactPerson: contractor?.contactPerson ?? null,
       contactPhone: contractor?.phone ?? null,
       description: ev.description,
@@ -471,6 +528,19 @@ app.get("/activities", (c) => c.json({ success: true, data: getTechnikActivities
 // GET /me — kim jestem i ile mam roboty
 // ---------------------------------------------------------------------------
 
+/**
+ * Znacznik biura na mapie panelu — TA SAMA wartość, którą biuru oddaje
+ * `GET /company/office`, ale wystawiona w `/technik/me`, bo rola `technik`
+ * ma zamknięte całe API poza `/api/technik/*` (`technikRoleGuard`).
+ * Same współrzędne, bez adresu i bez niczego kosztowego.
+ */
+function officePoint(): { lat: number; lng: number } | null {
+  const { values } = getCompanyConfig();
+  return values.officeLat != null && values.officeLng != null
+    ? { lat: values.officeLat, lng: values.officeLng }
+    : null;
+}
+
 app.get("/me", (c) => {
   const user = getUser(c);
   const tech = linkedTechnician(user);
@@ -484,27 +554,35 @@ app.get("/me", (c) => {
         technician: null,
         canEdit: canEdit(user, "technik"),
         counts: { today: 0, inProgress: 0, upcoming: 0, changedToday: 0, changedUpcoming: 0 },
+        office: officePoint(),
+        now: new Date().toISOString(),
       },
     });
   }
   const today = zonedToday();
   const tomorrow = addDays(today, 1);
-  const horizon = addDays(today, DEFAULT_HORIZON_DAYS);
+  // Koniec okna „Nadchodzące” — WYŁĄCZNY i wspólny z listą (patrz stała).
+  const horizon = addDays(today, UPCOMING_END_OFFSET_DAYS);
   // „Od kiedy” liczyć zmiany — osobno dla każdej zakładki, bo technik mógł
   // zajrzeć na Dziś, ale Nadchodzących nie otwierać od tygodnia.
   const seenToday = seenSince(c.req.query("seenToday"));
   const seenUpcoming = seenSince(c.req.query("seenUpcoming"));
-  const inProgress = db
-    .select({ id: schema.calendarEvents.id })
-    .from(schema.calendarEvents)
-    .where(
-      and(
-        ...mineConditions(tech.id),
-        isNotNull(schema.calendarEvents.startedAt),
-        ne(schema.calendarEvents.status, "done")
+  // „W toku” liczone W TYM SAMYM OKNIE co reszta liczników: bez ograniczenia
+  // wchodziło tu każde zlecenie z historii, któremu ktoś kiedyś wcisnął
+  // „Rozpocznij” i nigdy nie zamknął — licznik rósł w nieskończoność.
+  const inProgress =
+    db
+      .select({ n: sql<number>`count(*)` })
+      .from(schema.calendarEvents)
+      .where(
+        and(
+          ...mineConditions(tech.id),
+          ...rangeConds(today, horizon),
+          isNotNull(schema.calendarEvents.startedAt),
+          ne(schema.calendarEvents.status, "done")
+        )
       )
-    )
-    .all().length;
+      .get()?.n ?? 0;
   return c.json({
     success: true,
     data: {
@@ -512,12 +590,21 @@ app.get("/me", (c) => {
       technician: tech,
       canEdit: canEdit(user, "technik"),
       counts: {
-        today: myJobIds(tech.id, today, tomorrow).length,
+        // Liczniki idą przez COUNT(*), a nie przez listę id z limitem 500:
+        // technik z pełnym grafikiem widział na tab barze zaniżoną liczbę.
+        today: myJobCount(tech.id, today, tomorrow),
         inProgress,
-        upcoming: myJobIds(tech.id, today, horizon).length,
+        upcoming: myJobCount(tech.id, today, horizon),
         changedToday: changedJobsCount(tech.id, user.id, today, tomorrow, seenToday),
         changedUpcoming: changedJobsCount(tech.id, user.id, today, horizon, seenUpcoming),
       },
+      office: officePoint(),
+      /**
+       * Czas SERWERA w chwili odpowiedzi. Panel zapisuje go jako „ostatnio
+       * widziane” zamiast brać z zegara tabletu — ten potrafi spóźniać się
+       * o minuty i żółta plakietka albo nie gasła, albo gasła na zapas.
+       */
+      now: new Date().toISOString(),
     },
   });
 });
@@ -740,7 +827,9 @@ function momentFromBody(body: Record<string, unknown>, ev: CalendarEventRow): Da
   if (at.getTime() > Date.now() + AT_FUTURE_TOLERANCE_MS) {
     throw new ApiError(400, "Nie można wpisać godziny z przyszłości");
   }
-  const plannedStart = new Date(ev.startAt).getTime();
+  // `startAt` to LOKALNY zapis kalendarza bez strefy — `new Date()` czytał
+  // „2026-11-10” jako północ UTC, czyli o dwie godziny obok reszty panelu.
+  const plannedStart = localCalendarDate(ev.startAt).getTime();
   if (Number.isFinite(plannedStart) && at.getTime() < plannedStart - AT_PAST_LIMIT_MS) {
     throw new ApiError(400, "Godzina jest wcześniejsza niż tydzień przed terminem zlecenia");
   }
@@ -797,13 +886,35 @@ app.post("/jobs/:id/finish", async (c) => {
     const { tech, ev, ctx } = mutationTarget(c, c.req.param("id"));
     const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
     const noteText = typeof body.note === "string" ? body.note.trim() : "";
+    // Idempotentnie, tak jak „Rozpocznij”: drugie tapnięcie na słabym zasięgu
+    // (albo odświeżona karta) nie przestawia godziny i nie dokłada drugiej
+    // notatki. Jawnie wpisana godzina („Inna godzina”) to świadoma poprawka
+    // i przechodzi dalej.
+    if (ev.finishedAt && ev.status === "done" && typeof body.at !== "string") {
+      const [current] = toJobs([ev], tech.id);
+      return c.json({ success: true, data: current, message: "Zlecenie jest już zakończone" });
+    }
     const now = momentFromBody(body, ev);
     const finishedAt = now.toISOString();
+    // Zakończenie bez rozpoczęcia (technik zapomniał wcisnąć „Rozpocznij") nie
+    // może zostawić dziury — za początek bierzemy planowany start, ale
+    // PRZELICZONY na ISO UTC. Wpisany tam surowy `start_at` (lokalny zapis
+    // kalendarza) mieszał w jednej kolumnie dwa formaty, a porównanie tekstowe
+    // „2026-11-10T09:00” z „2026-11-10T08:00:00.000Z” dawało 400 przy każdej
+    // poprawce godziny.
+    //
     // Kolejność zdarzeń musi się zgadzać — inaczej realizacja dostałaby ujemny
-    // czas pracy, a protokół godziny „od 16:00 do 09:00”.
-    if (ev.startedAt && finishedAt < ev.startedAt) {
+    // czas pracy, a protokół godziny „od 16:00 do 09:00”. Porównanie przez
+    // `Date.parse`, nie po tekście: kolumna trzyma też starsze, lokalne zapisy.
+    if (ev.startedAt && Date.parse(finishedAt) < Date.parse(ev.startedAt)) {
       throw new ApiError(400, "Zakończenie nie może być przed rozpoczęciem");
     }
+    // Zlecenie zamknięte PRZED planowanym terminem (ekipa uwinęła się dzień
+    // wcześniej) nie może dostać początku późniejszego niż koniec — wtedy za
+    // początek bierzemy samo zakończenie, a nie plan.
+    const plannedStartIso = localCalendarDate(ev.startAt).toISOString();
+    const startedAt =
+      ev.startedAt ?? (Date.parse(plannedStartIso) > Date.parse(finishedAt) ? finishedAt : plannedStartIso);
     const after = db.transaction((tx) => {
       const row = setEventProgress(
         tx,
@@ -811,9 +922,7 @@ app.post("/jobs/:id/finish", async (c) => {
         {
           status: "done",
           finishedAt,
-          // Zakończenie bez rozpoczęcia (technik zapomniał wcisnąć „Rozpocznij")
-          // nie może zostawić dziury — za początek bierzemy planowany start.
-          ...(ev.startedAt ? {} : { startedAt: ev.startAt }),
+          ...(ev.startedAt ? {} : { startedAt }),
         },
         ctx
       );
@@ -962,136 +1071,20 @@ app.delete("/attachments/:attachmentId", (c) => {
 });
 
 // ---------------------------------------------------------------------------
-// Notatka systemowa ze streszczeniem protokołu
-//
-// Biuro patrzy na kalendarz, nie na tablet — bez tego wpisu z wydarzenia widać
-// tylko, ŻE protokół istnieje. JEDNA notatka na protokół (wskazuje ją
-// `protocols.note_id`, migracja 0102), podmieniana przy każdym zapisie
-// i przy podpisie, żeby dziennik zlecenia nie puchł od kolejnych kopii.
-// ---------------------------------------------------------------------------
-
-/** „14.09.2026 13:41” z ISO serwera — w notatce data ma być do przeczytania, nie do parsowania. */
-function plDateTime(iso: string | null): string {
-  if (!iso) return "";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  const p = (n: number) => String(n).padStart(2, "0");
-  return `${p(d.getDate())}.${p(d.getMonth() + 1)}.${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}`;
-}
-
-/** „Kamera IP 4MP, S/N 12345, 2 szt.” — puste części pomijamy. */
-function itemLine(it: ProtocolItem): string {
-  const name = (it.name ?? "").trim();
-  const serial = (it.serial ?? "").trim();
-  const qty = String(it.qty ?? "").trim();
-  const unit = (it.unit ?? "").trim();
-  const parts = [name || "(bez nazwy)"];
-  if (serial) parts.push(`S/N ${serial}`);
-  if (qty) parts.push(unit ? `${qty} ${unit}` : qty);
-  return parts.join(", ");
-}
-
-/** Treść notatki: nagłówek ze stanem podpisu, czynności, urządzenia, link. */
-function protocolNoteText(protocol: Protocol, href: string): string {
-  const parsed = withParsedItems(protocol);
-  const head = protocol.signedAt
-    ? `Protokół ${protocol.number} — podpisany ${plDateTime(protocol.signedAt)}${
-        protocol.signerName ? `, odebrał: ${protocol.signerName}` : ""
-      }`
-    : `Protokół ${protocol.number} — NIEPODPISANY`;
-
-  const lines: string[] = [head];
-
-  const activities = (protocol.activities ?? "")
-    .split("\n")
-    .map((l) => l.trim())
-    .filter(Boolean);
-  // Puste sekcje pomijamy — „Wykonane czynności: —” to szum w dzienniku.
-  if (activities.length) {
-    lines.push("Wykonane czynności:");
-    for (const a of activities) lines.push(`- ${a}`);
-  }
-
-  const items = parsed.items.filter((i) => (i.name ?? "").trim() || (i.serial ?? "").trim());
-  if (items.length) {
-    lines.push("Zamontowane urządzenia:");
-    for (const it of items) lines.push(`- ${itemLine(it)}`);
-  }
-
-  lines.push(`Otwórz protokół <${href}>`);
-
-  const text = lines.join("\n");
-  // Protokół bywa dłuższy niż limit notatki (4000 znaków) — wtedy przycinamy
-  // treść, ale link zostaje: pełna wersja i tak jest w samym protokole.
-  if (text.length <= CALENDAR_NOTE_MAX) return text;
-  const tail = `\n…\nOtwórz protokół <${href}>`;
-  return `${text.slice(0, CALENDAR_NOTE_MAX - tail.length)}${tail}`;
-}
-
-/**
- * Adres protokołu w CRM — WZGLĘDNA ścieżka, ta sama co `protocolHref` we
- * froncie. Bez hosta świadomie: notatka żyje w bazie latami, a host z devu
- * (albo z tunelu) byłby w niej martwym linkiem po pierwszym wdrożeniu.
- * Składnia „tekst <ścieżka>” to wzorzec Outlooka, który rozumie już
- * `frontend/src/lib/linkify.ts` — renderuje ją jako link SPA z etykietą.
- */
-function protocolHrefOf(protocolId: number): string {
-  return `/technical/protokoly?protocol=${protocolId}`;
-}
-
-/**
- * Zakłada albo aktualizuje notatkę systemową protokołu. Aktualizacja idzie
- * BEZPOŚREDNIM UPDATE-em, a nie przez `updateNote`: tamta funkcja wymaga, żeby
- * edytował autor albo admin, a notatkę zakłada ten technik, który pierwszy
- * dotknął protokołu — drugi technik z tej samej ekipy dostałby 403. Mija nas
- * też cały automat wzmianek dat (`@piątek`), bo tekst systemowy ich nie ma.
- * Wpisu do `activity_log` przy odświeżeniu świadomie nie robimy: sam zapis
- * protokołu jest już zalogowany, a notatka jest jego lustrem.
- */
-function syncProtocolNote(
-  tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
-  input: { eventId: number; protocol: Protocol; ctx: MutationCtx; href: string }
-): void {
-  const text = protocolNoteText(input.protocol, input.href);
-  const existingId = input.protocol.noteId;
-  if (existingId) {
-    const row = getNoteRow(tx, existingId);
-    if (row && !row.deletedAt) {
-      if (row.text !== text) {
-        tx.update(schema.calendarEventNotes)
-          .set({ text, updatedAt: sql`(datetime('now'))` })
-          .where(eq(schema.calendarEventNotes.id, existingId))
-          .run();
-      }
-      return;
-    }
-  }
-  const note = addNote(tx, { eventId: input.eventId, text, ctx: input.ctx, source: "system" });
-  tx.update(schema.protocols)
-    .set({ noteId: note.id })
-    .where(eq(schema.protocols.id, input.protocol.id))
-    .run();
-}
-
-/**
- * Notatka nie może wywrócić zapisu protokołu — technik stoi u klienta i liczy
- * się dokument, a nie jego streszczenie w kalendarzu. Zwraca true, gdy coś
- * zmieniono (wtedy warto wysłać sygnał „notes” do otwartych kart biura).
- */
-function syncProtocolNoteSafely(eventId: number, protocol: Protocol, ctx: MutationCtx): boolean {
-  try {
-    const href = protocolHrefOf(protocol.id);
-    db.transaction((tx) => syncProtocolNote(tx, { eventId, protocol, ctx, href }));
-    return true;
-  } catch (error) {
-    console.error("[technik] Nie udało się zsynchronizować notatki protokołu:", error);
-    return false;
-  }
-}
-
-// ---------------------------------------------------------------------------
 // POST /jobs/:id/protocol — załóż protokół dla zlecenia
 // ---------------------------------------------------------------------------
+
+/**
+ * Powód odmowy z automatu realizacji (`ensureBlockedReason`) w języku technika,
+ * który stoi u klienta. „ręcznie odpięte” nic mu nie mówi — a to jedyny powód,
+ * którego nie naprawi sam.
+ */
+function protocolBlockedMessage(reason: string | undefined): string {
+  if (reason === "ręcznie odpięte") {
+    return "Biuro odpięło to zlecenie od realizacji — zadzwoń do biura";
+  }
+  return `Nie można założyć protokołu: ${reason ?? "nieznany powód"}`;
+}
 
 app.post("/jobs/:id/protocol", (c) => {
   try {
@@ -1159,7 +1152,7 @@ app.post("/jobs/:id/protocol", (c) => {
           error:
             "protocol" in outcome && outcome.protocol
               ? "To zlecenie ma już protokół"
-              : `Nie można założyć protokołu: ${outcome.reason ?? "nieznany powód"}`,
+              : protocolBlockedMessage(outcome.reason),
           data: { protocol: "protocol" in outcome ? protocolBrief(outcome.protocol ?? null) : null },
         },
         409
@@ -1167,7 +1160,10 @@ app.post("/jobs/:id/protocol", (c) => {
     }
     // Streszczenie protokołu ląduje w dzienniku zlecenia od razu przy założeniu
     // — biuro widzi w kalendarzu „NIEPODPISANY” i wie, że technik jest w polu.
-    syncProtocolNoteSafely(ev.id, outcome.protocol, ctx);
+    // BEZ sekcji „Wykonane czynności”: świeży protokół ma tam prefill z tytułu
+    // i opisu wydarzenia, więc dziennik meldowałby pracę, zanim ktokolwiek ją
+    // wykonał. Pierwszy zapis z panelu (PUT) już czynności pokazuje.
+    syncProtocolNoteSafely(ev.id, outcome.protocol, ctx, { skipActivities: true });
     publish(c, "updated", [ev.id]);
     publish(c, "notes", [ev.id]);
     return c.json(
@@ -1236,9 +1232,15 @@ app.put("/protocols/:id", async (c) => {
     const id = Number(c.req.param("id"));
     if (!Number.isInteger(id)) throw new ApiError(400, "Nieprawidłowe id");
     const { event } = myProtocol(tech.id, id);
-    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    // `null` zamiast obiektu (ciało ucięte przez zerwane łącze na tablecie)
+    // trafia do `updateProtocolSync` i wraca jako 400, a nie jako 200
+    // z wyczyszczonym dokumentem.
+    const body = (await c.req.json().catch(() => null)) as unknown;
 
-    const outcome = db.transaction((tx) => updateProtocolSync(tx, id, body));
+    const outcome = db.transaction((tx) =>
+      // Panel NIE zmienia pól identyfikacyjnych klienta — nawet gdyby je przysłał.
+      updateProtocolSync(tx, id, body, { lockClientFields: true })
+    );
     if (outcome.status === 400) return c.json({ success: false, error: outcome.error }, 400);
     if (outcome.status === 404) return c.json({ success: false, error: "Nie znaleziono protokołu" }, 404);
     if (outcome.status === 409) {
@@ -1269,16 +1271,17 @@ app.post("/protocols/:id/sign", async (c) => {
 
     const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
     const signaturePng = typeof body.signaturePng === "string" ? body.signaturePng : "";
-    const signerName = typeof body.signerName === "string" ? body.signerName.trim() : "";
+    const signerName = parseSignerName(body.signerName);
     const expectedUpdatedAt =
       typeof body.expectedUpdatedAt === "string" ? body.expectedUpdatedAt : null;
     const check = checkSignaturePng(signaturePng);
     if (!check.ok) return c.json({ success: false, error: check.error }, 400);
-    if (!signerName) return c.json({ success: false, error: "Podaj imię i nazwisko osoby odbierającej" }, 400);
+    if (!signerName) return c.json({ success: false, error: SIGNER_NAME_REQUIRED }, 400);
 
     const outcome = db.transaction((tx) =>
       signProtocolSync(tx, id, { signaturePng, signerName, expectedUpdatedAt })
     );
+    if (outcome.status === 400) return c.json({ success: false, error: outcome.error }, 400);
     if (outcome.status === 404) return c.json({ success: false, error: "Nie znaleziono protokołu" }, 404);
     if (outcome.status === 409) return c.json({ success: false, error: protocolConflictMessage() }, 409);
 
@@ -1329,6 +1332,22 @@ function parseSubscription(body: Record<string, unknown>): {
 
 app.get("/push/config", (c) => c.json({ success: true, data: pushConfig() }));
 
+/**
+ * Czy TEN endpoint jest zapisany na TO konto.
+ *
+ * Sama subskrypcja w przeglądarce niczego nie dowodzi: na tablecie brygady
+ * zostaje po poprzedniej zmianie, a wiersz w bazie ma wtedy cudze `user_id` —
+ * przełącznik w „Więcej” pokazywał „włączone”, a powiadomienia szły do kogoś
+ * innego. Źródłem prawdy jest baza, i wyłącznie własny wiersz (cudzego nie
+ * potwierdzamy nawet wtedy, gdy endpoint ktoś zgadnie).
+ */
+app.get("/push/subscribe", (c) => {
+  const user = getUser(c);
+  const endpoint = (c.req.query("endpoint") ?? "").trim();
+  if (!endpoint) return c.json({ success: true, data: { subscribed: false } });
+  return c.json({ success: true, data: { subscribed: hasSubscription(user.id, endpoint) } });
+});
+
 app.post("/push/subscribe", async (c) => {
   try {
     const user = getUser(c);
@@ -1343,6 +1362,7 @@ app.post("/push/subscribe", async (c) => {
       ...parsed,
       userId: user.id,
       userAgent: c.req.header("user-agent")?.slice(0, 300) ?? null,
+      actor: user,
     });
     return c.json({ success: true, data: { id: row.id, endpoint: row.endpoint } }, 201);
   } catch (error) {

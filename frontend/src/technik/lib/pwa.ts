@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { technikApi, type TechnikPushConfig } from "@/lib/api";
-import { TECHNIK_VERSION } from "@/lib/version";
+import { APP_VERSION, TECHNIK_VERSION } from "@/lib/version";
 
 /**
  * PWA PANELU TECHNIKA — manifest, service worker, instalacja, push.
@@ -23,8 +23,15 @@ const THEME_COLOR = "#002158";
  */
 const SCOPE = "/technik";
 
-/** Adres workera z wersją panelu: nowa wersja = nowy plik = nowe cache. */
-const SW_URL = `/technik-sw.js?v=${encodeURIComponent(TECHNIK_VERSION)}`;
+/**
+ * Adres workera z wersją panelu I wersją CRM-a: nowa wersja = nowy plik = nowe
+ * cache. Sam `TECHNIK_VERSION` nie wystarczał — wydanie samego CRM-a zmienia
+ * hashe w `/assets/*`, a worker z tą samą nazwą cache'u zostawał na starych
+ * plikach (w SW nie ma `import.meta.env`, więc hash builda wjeżdża tu z URL-a).
+ * `APP_VERSION` rośnie przy KAŻDYM wydaniu, więc działa jak znacznik builda.
+ */
+const SW_VERSION = `${TECHNIK_VERSION}-${APP_VERSION}`;
+const SW_URL = `/technik-sw.js?v=${encodeURIComponent(SW_VERSION)}`;
 
 // ---------------------------------------------------------------------------
 // <head>: manifest i meta tagi
@@ -89,10 +96,21 @@ export function useTechnikServiceWorker(): TechnikSwState {
     if (!("serviceWorker" in navigator)) return;
     let cancelled = false;
 
+    /**
+     * Czy panelem JUŻ COŚ sterowało, zanim zarejestrowaliśmy workera.
+     *
+     * Przy PIERWSZYM wejściu kontrolera nie ma, a nowy worker robi
+     * `clients.claim()` w `activate` — `controllerchange` przychodzi wtedy
+     * sekundę po wejściu i przeładowywał technikowi ekran bez powodu (i gubił
+     * to, co zdążył stuknąć). Reload ma sens WYŁĄCZNIE przy podmianie starego
+     * workera na nowy, czyli gdy kontroler już był.
+     */
+    const hadController = navigator.serviceWorker.controller != null;
+
     // Przeładowanie dopiero PO przejęciu kontroli przez nowego workera —
     // inaczej strona wstałaby jeszcze na starych zasobach.
     const onControllerChange = () => {
-      if (reloading.current) return;
+      if (!hadController || reloading.current) return;
       reloading.current = true;
       window.location.reload();
     };
@@ -132,7 +150,52 @@ export function useTechnikServiceWorker(): TechnikSwState {
     waiting.postMessage({ type: "SKIP_WAITING" });
   }, [waiting]);
 
+  // Ten sam stan czyta wiersz „Dostępna nowa wersja” w „Więcej”. Drugie
+  // wywołanie hooka rejestrowałoby workera po raz drugi, więc zamiast tego
+  // zapisujemy stan do wspólnego pudełka pod modułem.
+  useEffect(() => {
+    setUpdateState({ updateReady: waiting != null, applyUpdate });
+  }, [waiting, applyUpdate]);
+
   return { updateReady: waiting != null, applyUpdate };
+}
+
+/* --------------------------------------------------------------------- *
+ * Stan wydania do odczytu spoza `TechnikUpdateWatcher`
+ * --------------------------------------------------------------------- */
+
+const NO_UPDATE: TechnikSwState = {
+  updateReady: false,
+  applyUpdate: () => window.location.reload(),
+};
+
+let updateState: TechnikSwState = NO_UPDATE;
+const updateListeners = new Set<() => void>();
+
+function setUpdateState(next: TechnikSwState): void {
+  if (next.updateReady === updateState.updateReady && next.applyUpdate === updateState.applyUpdate) {
+    return;
+  }
+  updateState = next;
+  for (const l of updateListeners) l();
+}
+
+function subscribeUpdate(listener: () => void): () => void {
+  updateListeners.add(listener);
+  return () => updateListeners.delete(listener);
+}
+
+/**
+ * Stan wydania BEZ rejestrowania workera — do wiersza w „Więcej”. Toast po
+ * odrzuceniu znika, a technik, który go przegapił, musi mieć gdzie sprawdzić,
+ * że nowa wersja czeka.
+ */
+export function useTechnikUpdateState(): TechnikSwState {
+  return useSyncExternalStore(
+    subscribeUpdate,
+    () => updateState,
+    () => NO_UPDATE,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -238,6 +301,55 @@ function urlBase64ToBytes(base64: string): ArrayBuffer {
   return buffer;
 }
 
+/** Bajty klucza (`applicationServerKey` z subskrypcji) → Base64URL do porównania. */
+function bytesToUrlBase64(buf: ArrayBuffer | null | undefined): string | null {
+  if (!buf) return null;
+  const view = new Uint8Array(buf);
+  let raw = "";
+  for (let i = 0; i < view.length; i++) raw += String.fromCharCode(view[i]);
+  return normalizeKey(btoa(raw));
+}
+
+/** Base64 i Base64URL mają opisywać ten sam klucz — porównujemy po jednej postaci. */
+function normalizeKey(key: string): string {
+  return key.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/**
+ * Czy subskrypcja z przeglądarki jest podpisana TYM kluczem VAPID, który
+ * serwer ma teraz. Po rotacji pary kluczy stara subskrypcja dalej wygląda na
+ * ważną, ale push wysłany nowym kluczem dostaje 403 — technik siedzi
+ * z przełącznikiem „włączone” i nie dostaje niczego. Brak `options` (starsze
+ * Safari) = nie mamy czego porównać, więc zostawiamy subskrypcję w spokoju.
+ */
+function matchesServerKey(sub: PushSubscription, publicKey: string): boolean {
+  const current = bytesToUrlBase64(sub.options?.applicationServerKey ?? null);
+  return current == null || current === normalizeKey(publicKey);
+}
+
+/**
+ * Sprząta subskrypcję przy WYLOGOWANIU: najpierw z przeglądarki, potem z bazy.
+ *
+ * Bez tego tablet oddany drugiemu technikowi dalej wisi pod kontem pierwszego —
+ * endpoint zostaje w `push_subscriptions`, a powiadomienia o CUDZYCH zleceniach
+ * lecą na to samo urządzenie. Błędy są tu bez znaczenia (wylogowanie musi
+ * pójść), stąd wszystko w `catch`.
+ */
+export async function unsubscribePushOnLogout(): Promise<void> {
+  try {
+    if (!("serviceWorker" in navigator) || !("PushManager" in window)) return;
+    const reg = await navigator.serviceWorker.getRegistration(SCOPE);
+    const sub = await reg?.pushManager.getSubscription();
+    if (!sub) return;
+    const { endpoint } = sub;
+    await sub.unsubscribe().catch(() => false);
+    // DELETE MUSI pójść jeszcze na ważnej sesji — stąd przed `logout()`.
+    await technikApi.pushUnsubscribe(endpoint).catch(() => {});
+  } catch {
+    /* brak SW, prywatne okno — wylogowanie i tak ma się udać */
+  }
+}
+
 /** Dlaczego przełącznik powiadomień jest nieczynny (albo `null` — jest czynny). */
 export type PushBlocker =
   /** Przeglądarka nie zna Web Push (iOS < 16.4, panel otwarty w karcie Safari). */
@@ -289,10 +401,20 @@ export function usePushNotifications(): PushState {
         if (cancelled) return;
         setConfig(cfg);
         if (!supported || !cfg.enabled) return;
-        // Zgoda wydana + subskrypcja w przeglądarce = przełącznik ma stać na „włączone”.
         const reg = await navigator.serviceWorker.ready;
         const sub = await reg.pushManager.getSubscription();
-        if (!cancelled) setEnabled(sub != null && Notification.permission === "granted");
+        if (cancelled) return;
+        if (!sub || Notification.permission !== "granted") {
+          setEnabled(false);
+          return;
+        }
+        // Subskrypcja w przeglądarce to ZA MAŁO: na tablecie brygady zostaje po
+        // poprzednim techniku, a wiersz w bazie ma jego `user_id` — przełącznik
+        // pokazywałby „włączone”, a powiadomienia leciałyby pod cudze konto.
+        // Źródłem prawdy jest serwer: `subscribed` tylko dla WŁASNEGO wiersza.
+        // Przy `false` włączenie zrobi POST, który przepisze właściciela.
+        const mine = await technikApi.pushStatus(sub.endpoint).catch(() => false);
+        if (!cancelled) setEnabled(mine);
       } catch {
         if (!cancelled) setConfig({ enabled: false, publicKey: null });
       } finally {
@@ -331,14 +453,20 @@ export function usePushNotifications(): PushState {
             : "Zgoda na powiadomienia nie została udzielona";
         }
 
-        const sub =
-          (await reg.pushManager.getSubscription()) ??
-          (await reg.pushManager.subscribe({
-            // Wymagane przez Chrome: subskrypcja BEZ widocznego powiadomienia
-            // jest odrzucana. Panel i tak pokazuje każde zdarzenie.
-            userVisibleOnly: true,
-            applicationServerKey: urlBase64ToBytes(config.publicKey),
-          }));
+        let sub = await reg.pushManager.getSubscription();
+        // Po rotacji kluczy VAPID stara subskrypcja jest bezużyteczna (push
+        // dostaje 403), a wygląda na dobrą — dlatego zanim jej użyjemy,
+        // sprawdzamy, czy niesie klucz, który serwer ma TERAZ.
+        if (sub && !matchesServerKey(sub, config.publicKey)) {
+          await sub.unsubscribe().catch(() => false);
+          sub = null;
+        }
+        sub ??= await reg.pushManager.subscribe({
+          // Wymagane przez Chrome: subskrypcja BEZ widocznego powiadomienia
+          // jest odrzucana. Panel i tak pokazuje każde zdarzenie.
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToBytes(config.publicKey),
+        });
         await technikApi.pushSubscribe(sub.toJSON() as PushSubscriptionJSON);
         setEnabled(true);
         return null;

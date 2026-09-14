@@ -260,9 +260,13 @@ export async function tabPermissionGuard(c: Context, next: Next) {
   // edycja danych modułu — wystarczy poziom "view". Tak samo dogrzanie cache'u
   // dojazdów (POST /company/travel/warm): to obliczenie dla dymków kalendarza,
   // które czytelnik i tak widzi, a nie edycja czyichś danych.
+  // Subskrypcja powiadomień panelu technika to również preferencja WŁASNEGO
+  // urządzenia, a nie edycja cudzych danych: konto „tylko do odczytu" też musi
+  // się dowiedzieć, że dostało zlecenie (POST/DELETE /technik/push/subscribe).
   const isOwnPreference =
     path.startsWith("/calendar/filter-sets") ||
     path.startsWith("/calendar/feed-token") ||
+    path === "/technik/push/subscribe" ||
     path === "/company/travel/warm";
   const isWrite = !isOwnPreference && !READ_METHODS.has(c.req.method.toUpperCase());
   if (level === "none") {

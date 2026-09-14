@@ -4,8 +4,9 @@ import { CalendarOff, CalendarCheck } from "lucide-react";
 import type { TechnikJob } from "@/lib/api";
 import { EmptyState } from "../ui/empty-state";
 import { JobCard } from "../JobCard";
-import { addDays, dayOf, groupLabel, todayIso } from "../lib/dates";
+import { addDays, groupLabel, todayIso, upcomingDayOf } from "../lib/dates";
 import { useJobs } from "../lib/useJobs";
+import { useRefreshOnFocus } from "../lib/refresh";
 import { useWeather } from "../lib/useWeather";
 
 /** Ile dni do przodu pokazuje panel. Dalej planowanie i tak się zmienia. */
@@ -30,11 +31,14 @@ export function Nadchodzace() {
   const { jobs, loading, error } = useJobs(today, to);
   // Wejście na zakładkę = „widziałem” — plakietka „Nadchodzące” przestaje być żółta.
   useEffect(() => markSeen("seenUpcoming"), []);
+  // To samo po powrocie z tła: technik patrzy na listę, więc plakietka nie ma
+  // prawa dalej świecić na żółto tylko dlatego, że nie przeładował zakładki.
+  useRefreshOnFocus(() => markSeen("seenUpcoming"));
   // Dwa tygodnie mieszczą się w jednym batchu; backend liczy tylko dni z okna
   // prognozy, dalsze zlecenia wracają po prostu bez pogody.
   const weather = useWeather(jobs);
 
-  const groups = useMemo(() => groupByDay(jobs), [jobs]);
+  const groups = useMemo(() => groupByDay(jobs, today), [jobs, today]);
 
   if (loading && jobs.length === 0) {
     return <p className="py-10 text-center text-sm text-muted-foreground">Ładuję zlecenia…</p>;
@@ -85,11 +89,18 @@ export function Nadchodzace() {
   );
 }
 
-/** Zlecenia w kubełkach dniami, dni i godziny rosnąco. */
-function groupByDay(jobs: TechnikJob[]): [string, TechnikJob[]][] {
+/**
+ * Zlecenia w kubełkach dniami, dni i godziny rosnąco.
+ *
+ * Kubełek to `max(dzień startu, dziś)`, a nie sam dzień startu: wielodniowy
+ * montaż, który ruszył w poniedziałek i trwa do piątku, wpadał w środę pod
+ * nagłówek z PRZESZŁOŚCI („pon. 15.09” nad listą zaczynającą się od „Dziś”) —
+ * a lista nazywa się „Nadchodzące” i ma mówić, co jest przede mną.
+ */
+function groupByDay(jobs: TechnikJob[], today: string): [string, TechnikJob[]][] {
   const map = new Map<string, TechnikJob[]>();
   for (const job of jobs) {
-    const day = dayOf(job.startAt);
+    const day = upcomingDayOf(job.startAt, today);
     const bucket = map.get(day);
     if (bucket) bucket.push(job);
     else map.set(day, [job]);

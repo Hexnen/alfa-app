@@ -584,6 +584,8 @@ async function main() {
   res = await call("POST", `/protocols/${p4.id}/sign`, {
     signaturePng: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==",
     signerName: "Klient Testowy",
+    // Podpis poświadcza KONKRETNĄ treść — backend wymaga znacznika wersji.
+    expectedUpdatedAt: db.select().from(schema.protocols).where(eq(schema.protocols.id, p4.id)).get()!.updatedAt,
   });
   ok("POST /protocols/:id/sign 200", res.status === 200, res);
   ok("odpowiedź podpisu niesie informację o automacie", Array.isArray(res.data?.autofill?.applied) && res.data.autofill.applied.includes("actualHours"), res.data?.autofill);
@@ -607,6 +609,7 @@ async function main() {
   res = await call("POST", `/protocols/${p5.id}/sign`, {
     signaturePng: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==",
     signerName: "Klient Testowy",
+    expectedUpdatedAt: db.select().from(schema.protocols).where(eq(schema.protocols.id, p5.id)).get()!.updatedAt,
   });
   ok("podpis przy wyłączonym automacie: 200 i brak autofill", res.status === 200 && res.data?.autofill === null, res.data?.autofill);
   const r5After = db.select().from(schema.realizations).where(eq(schema.realizations.id, r5.id)).get()!;

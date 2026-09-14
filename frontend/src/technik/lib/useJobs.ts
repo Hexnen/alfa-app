@@ -26,6 +26,24 @@ export function useJobs(from: string, to: string): JobsState {
   const [error, setError] = useState<string | null>(null);
   const seq = useRef(0);
 
+  /**
+   * Zmiana zakresu czyści listę JESZCZE PRZED pierwszym renderem nowego dnia.
+   *
+   * Wcześniej po tapnięciu „Następny dzień” nagłówek pokazywał już jutro,
+   * a pod nim przez sekundę stały wczorajsze zlecenia — bez żadnego znaku, że
+   * to stare dane. Technik zdążył na nie kliknąć. Poprawka stanu w trakcie
+   * renderu (zamiast efektu) jest tu świadoma: React przerywa render i robi go
+   * od nowa z pustą listą, więc stary dzień nie mignie ani na klatkę.
+   */
+  const rangeKey = `${from}|${to}`;
+  const [range, setRange] = useState(rangeKey);
+  if (range !== rangeKey) {
+    setRange(rangeKey);
+    setJobs([]);
+    setError(null);
+    setLoading(true);
+  }
+
   const load = useCallback(async () => {
     const my = ++seq.current;
     setLoading(true);

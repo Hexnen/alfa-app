@@ -17,11 +17,16 @@ import { logActivity } from "../lib/activity-log.js";
 import {
   afterProtocolSigned,
   checkSignaturePng,
+  parseSignerName,
   protocolConflictMessage,
   signProtocolSync,
+  softDeleteProtocolNoteSync,
+  syncProtocolNoteForOffice,
   updateProtocolSync,
   withParsedItems,
+  SIGNER_NAME_REQUIRED,
 } from "../lib/protocols.js";
+import { getSetting, setSetting } from "../lib/settings.js";
 
 const app = new Hono();
 
@@ -54,7 +59,21 @@ export function nextProtocolNumberSync(tx: Tx, workDate: string): string {
     const n = parseInt(r.number.slice(prefix.length));
     return Number.isFinite(n) && n > max ? n : max;
   }, 0);
-  return `${prefix}${String(maxSeq + 1).padStart(3, "0")}`;
+  // Licznik „najwyższy numer, jaki KIEDYKOLWIEK padł w tym miesiącu”. Protokoły
+  // usuwa się TWARDO (DELETE), więc samo max(number) po tabeli wydawało numer
+  // skasowanego dokumentu drugi raz — a protokół z podpisem klienta bywa już
+  // wtedy wydrukowany i wpięty do teczki. Wysoki stan zapisujemy obok, w
+  // app_settings, i nigdy go nie cofamy.
+  const key = protocolSeqKey(year, month);
+  const stored = parseInt(getSetting(key, tx) ?? "");
+  const seq = Math.max(maxSeq, Number.isFinite(stored) ? stored : 0) + 1;
+  setSetting(key, String(seq), null, tx);
+  return `${prefix}${String(seq).padStart(3, "0")}`;
+}
+
+/** Klucz wysokiego stanu numeracji w app_settings (jeden na miesiąc). */
+function protocolSeqKey(year: string, month: string): string {
+  return `protocols.lastSeq.${year}-${month}`;
 }
 
 /**
@@ -407,7 +426,9 @@ app.post("/:id/prefill", async (c) => {
 // Edycja protokołu — walidacja i zapis w src/lib/protocols.ts (dzielone z /technik).
 app.put("/:id", async (c) => {
   const id = parseInt(c.req.param("id"));
-  const body = await c.req.json<Record<string, unknown>>();
+  // Nieparsowalne ciało to 400, a nie 500: `c.req.json()` bez `.catch` wywalało
+  // się w środek `app.onError` i dialog protokołu dostawał „Internal Server Error”.
+  const body = (await c.req.json<Record<string, unknown>>().catch(() => null)) as unknown;
   // Odczyt + zapis w jednej synchronicznej transakcji — brak przeplotu między
   // SELECT a UPDATE, a równoległe edycje serializują się (bez zgubionych zmian).
   const outcome = db.transaction((tx) => updateProtocolSync(tx, id, body));
@@ -425,6 +446,10 @@ app.put("/:id", async (c) => {
     );
   }
 
+  // Streszczenie w dzienniku wydarzenia idzie za treścią protokołu także wtedy,
+  // gdy zapis zrobiło biuro — inaczej kalendarz pokazywał wersję sprzed edycji.
+  syncProtocolNoteForOffice(outcome.data, { user: getUser(c) });
+
   return c.json({
     success: true,
     data: withParsedItems(outcome.data),
@@ -436,9 +461,14 @@ app.put("/:id", async (c) => {
 // z treści protokołu + podpisu (dowód integralności). Logika w src/lib/protocols.ts.
 app.post("/:id/sign", async (c) => {
   const id = parseInt(c.req.param("id"));
-  const body = await c.req.json<Record<string, unknown>>();
+  const body = (await c.req.json<Record<string, unknown>>().catch(() => ({}))) as Record<
+    string,
+    unknown
+  >;
   const signaturePng = typeof body.signaturePng === "string" ? body.signaturePng : "";
-  const signerName = typeof body.signerName === "string" ? body.signerName.trim() : "";
+  // Wspólna walidacja z panelem technika: pusto → 400 (biuro potrafiło podpisać
+  // protokół bez nazwiska odbierającego), za długo → przycięte do 120 znaków.
+  const signerName = parseSignerName(body.signerName);
   const expectedUpdatedAt =
     typeof body.expectedUpdatedAt === "string" ? body.expectedUpdatedAt : null;
 
@@ -446,17 +476,27 @@ app.post("/:id/sign", async (c) => {
   if (!check.ok) {
     return c.json<ApiResponse<null>>({ success: false, error: check.error }, 400);
   }
+  if (!signerName) {
+    return c.json<ApiResponse<null>>({ success: false, error: SIGNER_NAME_REQUIRED }, 400);
+  }
 
   const outcome = db.transaction((tx) =>
     signProtocolSync(tx, id, { signaturePng, signerName, expectedUpdatedAt })
   );
 
+  if (outcome.status === 400) {
+    return c.json<ApiResponse<null>>({ success: false, error: outcome.error }, 400);
+  }
   if (outcome.status === 404) {
     return c.json<ApiResponse<null>>({ success: false, error: "Nie znaleziono protokołu" }, 404);
   }
   if (outcome.status === 409) {
     return c.json<ApiResponse<null>>({ success: false, error: protocolConflictMessage() }, 409);
   }
+
+  // Dziennik wydarzenia dostaje stan „podpisany” i nazwisko odbierającego —
+  // tak samo jak przy podpisie z tabletu.
+  syncProtocolNoteForOffice(outcome.data, { user: getUser(c) });
 
   // Automat realizacji i przeliczenie wyceny — PO commicie (patrz komentarz w module).
   const effects = await afterProtocolSigned(outcome.data.realizationId, getUser(c));
@@ -529,6 +569,11 @@ app.post("/:id/unsign", async (c) => {
     );
   }
 
+  // Notatka w kalendarzu też musi przestać twierdzić, że protokół jest
+  // podpisany — inaczej biuro widziało w dzienniku nazwisko odbierającego
+  // przy dokumencie, z którego podpis właśnie zdjęto.
+  syncProtocolNoteForOffice(outcome.data, { user: getUser(c) });
+
   return c.json({
     success: true,
     data: withParsedItems(outcome.data),
@@ -552,7 +597,15 @@ app.delete("/:id", async (c) => {
     );
   }
 
-  await db.delete(schema.protocols).where(eq(schema.protocols.id, id));
+  // Notatka systemowa znika RAZEM z protokołem (soft delete, tak jak każde inne
+  // usunięcie notatki) — inaczej w dzienniku zlecenia zostawał wpis z linkiem
+  // prowadzącym donikąd. `calendar_events.protocol_id` zeruje sam klucz obcy
+  // (ON DELETE SET NULL, patrz src/db/schema.ts), numeru protokołu nie zwalnia
+  // licznik w app_settings (patrz nextProtocolNumberSync).
+  db.transaction((tx) => {
+    softDeleteProtocolNoteSync(tx, existing[0]);
+    tx.delete(schema.protocols).where(eq(schema.protocols.id, id)).run();
+  });
 
   return c.json<ApiResponse<null>>({ success: true, message: "Protokół usunięty" });
 });

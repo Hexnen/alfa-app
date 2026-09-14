@@ -22,9 +22,25 @@ export function readSeen(): TechnikSeen {
   }
 }
 
+/**
+ * Przesunięcie zegara tabletu względem serwera (ms). Znacznik „widziałem”
+ * porównuje się z `updated_at` liczonym PRZEZ SERWER — tablet spieszący się
+ * o 10 minut gubiłby wszystkie zmiany biura z tych 10 minut. `GET /technik/me`
+ * oddaje `now`, z którego liczymy poprawkę przy każdym wczytaniu.
+ */
+let clockOffsetMs = 0;
+
+export function noteServerNow(iso: string | null | undefined): void {
+  if (!iso) return;
+  const t = Date.parse(iso);
+  if (Number.isFinite(t)) clockOffsetMs = t - Date.now();
+}
+
 export function markSeen(tab: keyof typeof KEYS): void {
   try {
-    localStorage.setItem(KEYS[tab], new Date().toISOString());
+    // −1 s: `updated_at` ma ziarnistość sekundową i backend porównuje `>`,
+    // więc zmiana z tej samej sekundy, co spojrzenie, nie może przepaść.
+    localStorage.setItem(KEYS[tab], new Date(Date.now() + clockOffsetMs - 1000).toISOString());
   } catch {
     /* tryb prywatny — plakietka po prostu nie będzie żółknąć */
   }

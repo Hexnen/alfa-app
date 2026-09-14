@@ -21,9 +21,17 @@ const QUALITY = 0.82;
 /** Poniżej tego rozmiaru nie ma czego ratować — zdjęcie leci jak jest. */
 const SKIP_BELOW_BYTES = 600 * 1024;
 
-/** Czy w ogóle warto próbować (pliki inne niż obrazki zostawiamy w spokoju). */
+/**
+ * Czy w ogóle warto próbować (pliki inne niż obrazki zostawiamy w spokoju).
+ *
+ * PUSTY `type` to NIE „nie obrazek”: iPad przy udostępnianiu z Plików potrafi
+ * oddać HEIC-a bez typu MIME, a Android robi to samo z niektórymi aparatami.
+ * Taki plik przechodził wcześniej bez kompresji i odbijał się od bramy 5 MB
+ * pod klientem. Teraz po prostu próbujemy go zdekodować — jak się nie uda,
+ * `shrinkImage` i tak odda oryginał.
+ */
 function isShrinkable(file: File): boolean {
-  if (!file.type.startsWith("image/")) return false;
+  if (file.type && !file.type.startsWith("image/")) return false;
   // Animacji nie da się przepuścić przez canvas bez utraty klatek.
   if (file.type === "image/gif") return false;
   return file.size > SKIP_BELOW_BYTES;
@@ -83,6 +91,12 @@ export async function shrinkImage(file: File): Promise<File> {
     canvas.height = height;
     const ctx = canvas.getContext("2d");
     if (!ctx) return file;
+    // BIAŁE TŁO PRZED RYSOWANIEM. Świeży canvas jest przezroczysty, a JPEG
+    // przezroczystości nie zna — zrzut ekranu czy schemat w PNG z alfą
+    // wychodził po kompresji jako CZARNA plama z białym tekstem. Tło zakrywa
+    // tylko to, co i tak było przezroczyste.
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, width, height);
     ctx.drawImage(src, 0, 0, width, height);
     if (src instanceof ImageBitmap) src.close();
     const blob = await new Promise<Blob | null>((resolve) =>

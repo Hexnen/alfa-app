@@ -27,13 +27,20 @@
  *     wcale; podany z cache stan „sprzed godziny" jest gorszy niż komunikat
  *     o braku połączenia.
  *
- * WERSJONOWANIE. Nazwa cache niesie wersję panelu wstrzykniętą przy rejestracji
- * (`/technik-sw.js?v=TECHNIK_VERSION`) — zmiana wersji to nowy bajt w URL-u
- * workera, więc przeglądarka widzi „nowy plik", a stare cache lecą w `activate`.
+ * WERSJONOWANIE. Nazwa cache niesie wersję wstrzykniętą przy rejestracji
+ * (`/technik-sw.js?v=TECHNIK_VERSION-APP_VERSION`) — zmiana wersji to nowy bajt
+ * w URL-u workera, więc przeglądarka widzi „nowy plik", a stare cache lecą
+ * w `activate`. W SW nie ma `import.meta.env`, więc hash builda nie ma jak tu
+ * wejść inaczej; `APP_VERSION` rośnie przy każdym wydaniu, także takim, które
+ * rusza wyłącznie CRM — a to ono zmienia hashe w `/assets/*`.
  */
 
 const VERSION = new URL(self.location.href).searchParams.get("v") || "dev";
 const CACHE = `technik-${VERSION}`;
+/** Wszystkie cache tego workera — po tym wzorcu poznajemy swoje, także stare. */
+const CACHE_PREFIX = /^technik-/;
+/** Ile czekamy na sieć przy nawigacji, zanim podamy zapamiętaną powłokę. */
+const NAV_TIMEOUT_MS = 3000;
 
 /** Powłoka aplikacji — pod tym kluczem leży HTML podawany offline. */
 const SHELL_URL = "/technik";
@@ -58,8 +65,12 @@ self.addEventListener("install", (event) => {
 self.addEventListener("activate", (event) => {
   event.waitUntil(
     (async () => {
+      // Kasujemy KAŻDY swój cache poza bieżącym — także ten nazwany samą
+      // wersją panelu z poprzedniego schematu. Inaczej po kilku wydaniach na
+      // tablecie leżą trzy komplety powłoki i zasobów, a technik dostaje
+      // pierwszy z brzegu.
       for (const key of await caches.keys()) {
-        if (key.startsWith("technik-") && key !== CACHE) await caches.delete(key);
+        if (CACHE_PREFIX.test(key) && key !== CACHE) await caches.delete(key);
       }
       await self.clients.claim();
     })()
@@ -85,46 +96,94 @@ self.addEventListener("fetch", (event) => {
   if (url.pathname.startsWith("/api/")) return;
 
   if (req.mode === "navigate") {
-    event.respondWith(navigateFirst(req));
+    event.respondWith(navigateFirst(event));
     return;
   }
 
   if (url.pathname.startsWith("/assets/")) {
-    event.respondWith(cacheFirst(req));
+    event.respondWith(cacheFirst(event));
   }
 });
 
-/** Nawigacja: sieć, a gdy jej nie ma — ostatnia znana powłoka panelu. */
-async function navigateFirst(req) {
-  try {
-    const res = await fetch(req);
+/** Obietnica, która spełnia się po `ms` — druga strona wyścigu o nawigację. */
+function after(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Nawigacja: sieć, a gdy jej nie ma ALBO ledwo ją widać — ostatnia znana
+ * powłoka panelu.
+ *
+ * „Network first" bez zegara wygląda przy jednej kresce zasięgu jak zawieszona
+ * aplikacja: `fetch` nie odrzuca obietnicy, tylko wisi minutę na białym
+ * ekranie. Dlatego sieć ściga się z trzema sekundami — po nich wchodzi powłoka
+ * z cache'u (jeśli jest; przy pierwszym uruchomieniu nie ma czego podać
+ * i czekamy na sieć). Odpowiedź z sieci i tak dojdzie i odświeży cache.
+ */
+async function navigateFirst(event) {
+  const req = event.request;
+  const cached = await caches.match(SHELL_URL);
+
+  const network = fetch(req).then((res) => {
     // Zapamiętujemy TYLKO powłokę (jeden wpis), nie każdy odwiedzony adres:
     // wszystkie ścieżki panelu i tak dostają ten sam `index.html`.
     if (res && res.ok && new URL(req.url).pathname.startsWith("/technik")) {
       const copy = res.clone();
-      caches.open(CACHE).then((c) => c.put(SHELL_URL, copy)).catch(() => {});
+      // `waitUntil`, nie luźna obietnica: bez tego przeglądarka bywa, że
+      // ubija workera zaraz po oddaniu odpowiedzi i zapis do cache'u nigdy się
+      // nie kończy — offline pokazywał wtedy powłokę sprzed kilku wydań.
+      event.waitUntil(
+        caches
+          .open(CACHE)
+          .then((c) => c.put(SHELL_URL, copy))
+          .catch(() => {})
+      );
     }
     return res;
+  });
+  // Wyścig rozstrzyga się na kopii; oryginał dostaje własny `catch`, żeby brak
+  // sieci nie wypłynął jako nieobsłużone odrzucenie.
+  network.catch(() => {});
+
+  if (!cached) {
+    try {
+      return await network;
+    } catch {
+      return offlineShell();
+    }
+  }
+
+  try {
+    return await Promise.race([network, after(NAV_TIMEOUT_MS).then(() => cached)]);
   } catch {
-    const cached = await caches.match(SHELL_URL);
-    if (cached) return cached;
-    return new Response(
-      "<!doctype html><meta charset=utf-8><title>Brak połączenia</title>" +
-        '<body style="font:16px system-ui;padding:2rem">' +
-        "<h1>Brak połączenia</h1><p>Panel technika wymaga sieci przy pierwszym uruchomieniu.</p>",
-      { status: 503, headers: { "Content-Type": "text/html; charset=utf-8" } }
-    );
+    return cached;
   }
 }
 
+/** Ostatnia deska ratunku: pierwsze uruchomienie panelu bez sieci. */
+function offlineShell() {
+  return new Response(
+    "<!doctype html><meta charset=utf-8><title>Brak połączenia</title>" +
+      '<body style="font:16px system-ui;padding:2rem">' +
+      "<h1>Brak połączenia</h1><p>Panel technika wymaga sieci przy pierwszym uruchomieniu.</p>",
+    { status: 503, headers: { "Content-Type": "text/html; charset=utf-8" } }
+  );
+}
+
 /** Zasoby builda: z cache, a gdy ich tam nie ma — z sieci i do cache. */
-async function cacheFirst(req) {
+async function cacheFirst(event) {
+  const req = event.request;
   const cached = await caches.match(req);
   if (cached) return cached;
   const res = await fetch(req);
   if (res && res.ok) {
     const copy = res.clone();
-    caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {});
+    event.waitUntil(
+      caches
+        .open(CACHE)
+        .then((c) => c.put(req, copy))
+        .catch(() => {})
+    );
   }
   return res;
 }
@@ -165,6 +224,56 @@ self.addEventListener("push", (event) => {
     })
   );
 });
+
+/**
+ * ODNOWIENIE SUBSKRYPCJI PRZEZ PRZEGLĄDARKĘ.
+ *
+ * Push service potrafi unieważnić endpoint sam z siebie (czyszczenie danych
+ * strony, rotacja po stronie Google/Apple, długa nieaktywność) i wysyła wtedy
+ * `pushsubscriptionchange`. Bez tej obsługi w bazie zostaje martwy adres,
+ * technik ma przełącznik na „włączone” i nie dostaje NICZEGO aż do momentu,
+ * w którym sam wejdzie w „Więcej” i przeklika powiadomienia.
+ *
+ * Nowy klucz bierzemy ze starej subskrypcji (`oldSubscription.options`) — SW
+ * nie ma dostępu do konfiguracji panelu, a klucz VAPID jest ten sam.
+ */
+self.addEventListener("pushsubscriptionchange", (event) => {
+  event.waitUntil(
+    (async () => {
+      const old = event.oldSubscription || null;
+      const key =
+        (old && old.options && old.options.applicationServerKey) ||
+        (event.newSubscription &&
+          event.newSubscription.options &&
+          event.newSubscription.options.applicationServerKey) ||
+        null;
+
+      let next = event.newSubscription || null;
+      if (!next && key) {
+        next = await self.registration.pushManager
+          .subscribe({ userVisibleOnly: true, applicationServerKey: key })
+          .catch(() => null);
+      }
+
+      // Najpierw nowy adres, potem kasowanie starego: gdyby DELETE poszedł
+      // pierwszy, a subskrypcja się nie udała, technik zostałby bez powiadomień
+      // i bez śladu, że kiedykolwiek je miał.
+      if (next) await postSubscription("POST", next.toJSON());
+      if (old && old.endpoint && (!next || next.endpoint !== old.endpoint)) {
+        await postSubscription("DELETE", { endpoint: old.endpoint });
+      }
+    })()
+  );
+});
+
+function postSubscription(method, body) {
+  return fetch("/api/technik/push/subscribe", {
+    method,
+    headers: { "Content-Type": "application/json" },
+    credentials: "same-origin",
+    body: JSON.stringify(body),
+  }).catch(() => {});
+}
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();

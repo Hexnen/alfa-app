@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -35,6 +35,45 @@ export function Lightbox({
 }) {
   const open = index !== null && index >= 0 && index < items.length;
   const [touchX, setTouchX] = useState<number | null>(null);
+  /** Czy to MY dołożyliśmy wpis do historii — tylko taki wolno nam zdjąć. */
+  const pushed = useRef(false);
+  // Nasłuch `popstate` zakładamy raz na otwarcie, więc callback czytamy z refu
+  // — inaczej zamykałby lightbox domknięciem sprzed kilku renderów.
+  const closeRef = useRef(onClose);
+  useEffect(() => {
+    closeRef.current = onClose;
+  });
+
+  /**
+   * GEST „WSTECZ" ZAMYKA PODGLĄD, A NIE ZLECENIE.
+   *
+   * Na tablecie zdjęcie na cały ekran wygląda jak osobny ekran, więc technik
+   * odruchowo przeciąga od krawędzi — i wracał na listę zleceń, tracąc
+   * otwarty protokół. Wejście do lightboxu dokłada własny wpis do historii,
+   * a `popstate` go tylko zamyka.
+   */
+  useEffect(() => {
+    if (!open) return;
+    window.history.pushState({ lightbox: true }, "");
+    pushed.current = true;
+    const onPop = () => {
+      // Wpis już zdjęła przeglądarka — zamykamy bez ruszania historii.
+      pushed.current = false;
+      closeRef.current();
+    };
+    window.addEventListener("popstate", onPop);
+    return () => {
+      window.removeEventListener("popstate", onPop);
+      // Zamknięcie krzyżykiem albo tapnięciem w tło: nasz wpis musi zejść,
+      // inaczej pierwsze „wstecz" po zamknięciu nie zrobiłoby nic.
+      if (pushed.current) {
+        pushed.current = false;
+        window.history.back();
+      }
+    };
+    // Świadomie bez `index`: przewijanie zdjęć nie ma dokładać wpisów do
+    // historii — dziesięć zdjęć znaczyłoby dziesięć tapnięć „wstecz".
+  }, [open]);
   // Klawiatura tabletu z etui i podgląd na desktopie — Esc/strzałki działają tak,
   // jak każdy się spodziewa; bez tego z lightboxu wychodziło się tylko tapnięciem.
   const count = items.length;

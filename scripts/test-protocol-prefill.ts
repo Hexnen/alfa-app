@@ -324,9 +324,12 @@ async function main(fx: Fixtures) {
   ok("actualHours = długość wydarzenia", p1.values.actualHours === 3.5, p1.values.actualHours);
   ok("actualKm z realizacji", p1.values.actualKm === 42, p1.values.actualKm);
   ok("salesperson = opiekun realizacji", p1.values.salesperson === "Opiekun Testowy", p1.values.salesperson);
+  // Tytuł wydarzenia to etykieta kafelka w kalendarzu, a nie wykonana praca —
+  // w „Wykonanych czynnościach” robił z prefillu meldunek o robocie, której
+  // jeszcze nie było. Zostaje SAM opis (ten planujący wpisuje jako zakres prac).
   ok(
-    "activities = tytuł + opis wydarzenia",
-    p1.values.activities === `${PREFIX} Wymiana rejestratora — Rejestrator 8-kanałowy, dysk 4 TB`,
+    "activities = sam opis wydarzenia (bez tytułu)",
+    p1.values.activities === "Rejestrator 8-kanałowy, dysk 4 TB",
     p1.values.activities
   );
   ok(

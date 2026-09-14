@@ -120,7 +120,10 @@ export function findTechnicianOwner(technicianId: number): number | null | "notf
 
 export type LinkTechnicianResult =
   | { ok: true }
-  | { ok: false; reason: "notfound" | "taken" };
+  | { ok: false; reason: "notfound" | "taken" | "inactive" };
+
+/** Transakcja drizzle/better-sqlite3 — pozwala wpiąć zapis w transakcję wołającego. */
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 /**
  * Ustawia powiązanie konto ↔ technik. Najpierw ZDEJMUJE dotychczasowe powiązanie
@@ -131,29 +134,40 @@ export type LinkTechnicianResult =
  * Świadomie POZA `users.version`: powiązanie nie jest polem konta, tylko kolumną
  * w kartotece techników, więc nie ma czego wersjonować przy optimistic locku.
  */
-export function setUserTechnician(userId: number, technicianId: number | null): LinkTechnicianResult {
-  return db.transaction((tx): LinkTechnicianResult => {
-    if (technicianId != null) {
-      const target = tx
-        .select({ id: technicians.id, userId: technicians.userId })
-        .from(technicians)
-        .where(eq(technicians.id, technicianId))
-        .get();
-      if (!target) return { ok: false, reason: "notfound" };
-      if (target.userId != null && target.userId !== userId) return { ok: false, reason: "taken" };
-    }
+export function setUserTechnicianSync(
+  tx: Tx,
+  userId: number,
+  technicianId: number | null
+): LinkTechnicianResult {
+  if (technicianId != null) {
+    const target = tx
+      .select({ id: technicians.id, userId: technicians.userId, active: technicians.active })
+      .from(technicians)
+      .where(eq(technicians.id, technicianId))
+      .get();
+    if (!target) return { ok: false, reason: "notfound" };
+    if (target.userId != null && target.userId !== userId) return { ok: false, reason: "taken" };
+    // Nieaktywny technik = odcięty panel (`linkedTechnician` w src/routes/technik.ts
+    // wymaga `active`). Podpięcie takiego kontaktu kończyło się kontem, które
+    // widzi „linked: false” bez żadnego wyjaśnienia — lepiej powiedzieć wprost.
+    if (!target.active) return { ok: false, reason: "inactive" };
+  }
+  tx.update(technicians)
+    .set({ userId: null, updatedAt: sql`(datetime('now'))` })
+    .where(and(eq(technicians.userId, userId), technicianId == null ? undefined : ne(technicians.id, technicianId)))
+    .run();
+  if (technicianId != null) {
     tx.update(technicians)
-      .set({ userId: null, updatedAt: sql`(datetime('now'))` })
-      .where(and(eq(technicians.userId, userId), technicianId == null ? undefined : ne(technicians.id, technicianId)))
+      .set({ userId, updatedAt: sql`(datetime('now'))` })
+      .where(eq(technicians.id, technicianId))
       .run();
-    if (technicianId != null) {
-      tx.update(technicians)
-        .set({ userId, updatedAt: sql`(datetime('now'))` })
-        .where(eq(technicians.id, technicianId))
-        .run();
-    }
-    return { ok: true };
-  });
+  }
+  return { ok: true };
+}
+
+/** To samo, ale z własną transakcją (dla wołających, którzy jej nie mają). */
+export function setUserTechnician(userId: number, technicianId: number | null): LinkTechnicianResult {
+  return db.transaction((tx) => setUserTechnicianSync(tx, userId, technicianId));
 }
 
 /** Lista techników do selecta powiązania (aktywni + ci już podpięci pod konta). */
@@ -213,7 +227,18 @@ export interface UpdateUserInput {
 
 export type UpdateUserResult =
   | { ok: true; user: User }
-  | { ok: false; reason: "notfound" | "conflict" };
+  | { ok: false; reason: "notfound" | "conflict" | "lastadmin" };
+
+export interface UpdateUserOptions {
+  /** Optimistic lock — zapis tylko gdy wiersz nadal ma tę wersję. */
+  expectedVersion?: number;
+  /**
+   * Degradacja admina: warunek „istnieje INNY administrator” doklejony do tego
+   * samego UPDATE-u. Osobne sprawdzenie przed zapisem przepuszczało dwa
+   * równoległe żądania i zostawiało bazę bez ani jednego admina.
+   */
+  requireOtherAdmin?: boolean;
+}
 
 /**
  * Aktualizuje użytkownika i bumpuje `version` w tym samym UPDATE.
@@ -223,34 +248,66 @@ export type UpdateUserResult =
  * wiersza (równoległy DELETE — 404). Bez `expectedVersion` zachowuje się jak
  * zwykły update (wciąż bumpuje wersję), by starzy klienci działali.
  */
-export function updateUser(
+export function updateUserSync(
+  tx: Tx,
   id: number,
   input: UpdateUserInput,
-  expectedVersion?: number,
+  opts: UpdateUserOptions = {},
 ): UpdateUserResult {
   const patch: Partial<User> = {};
   if (input.displayName !== undefined) patch.displayName = input.displayName;
   if (input.role !== undefined) patch.role = coerceRole(input.role);
   if (input.permissions !== undefined)
     patch.permissions = JSON.stringify(sanitizePermissions(input.permissions));
+
+  const conds = [eq(users.id, id)];
+  if (opts.expectedVersion !== undefined) conds.push(eq(users.version, opts.expectedVersion));
+  if (opts.requireOtherAdmin) {
+    conds.push(
+      sql`(${users.role} <> 'admin' OR EXISTS (SELECT 1 FROM users AS u2 WHERE u2.role = 'admin' AND u2.id <> ${id}))`,
+    );
+  }
+  const where = and(...conds);
+
   if (Object.keys(patch).length === 0) {
-    const current = findUserById(id);
-    return current ? { ok: true, user: current } : { ok: false, reason: "notfound" };
+    // Nic do zapisania, ale warunki (wersja!) nadal obowiązują — inaczej PATCH
+    // z samym `expectedVersion` udawałby sukces po cudzej zmianie.
+    const current = tx.select().from(users).where(where).get();
+    return current ? { ok: true, user: current } : { ok: false, reason: whyNoUpdate(tx, id, opts) };
   }
 
-  const where =
-    expectedVersion === undefined
-      ? eq(users.id, id)
-      : and(eq(users.id, id), eq(users.version, expectedVersion));
-  const updated = db
+  const updated = tx
     .update(users)
     .set({ ...patch, version: sql`${users.version} + 1` })
     .where(where)
     .returning()
     .get();
   if (updated) return { ok: true, user: updated };
-  // 0 wierszy: albo user zniknął (404), albo wersja się nie zgadza (409).
-  return { ok: false, reason: findUserById(id) ? "conflict" : "notfound" };
+  return { ok: false, reason: whyNoUpdate(tx, id, opts) };
+}
+
+/** 0 zmienionych wierszy ma trzy przyczyny — odróżniamy je JEDNYM odczytem w tej samej transakcji. */
+function whyNoUpdate(tx: Tx, id: number, opts: UpdateUserOptions): "notfound" | "conflict" | "lastadmin" {
+  const row = tx.select().from(users).where(eq(users.id, id)).get();
+  if (!row) return "notfound";
+  if (opts.requireOtherAdmin && row.role === "admin") {
+    const other = tx
+      .select({ id: users.id })
+      .from(users)
+      .where(and(eq(users.role, "admin"), ne(users.id, id)))
+      .get();
+    if (!other) return "lastadmin";
+  }
+  return "conflict";
+}
+
+/** Wersja z własną transakcją — dla wołających spoza panelu admina. */
+export function updateUser(
+  id: number,
+  input: UpdateUserInput,
+  opts: UpdateUserOptions = {},
+): UpdateUserResult {
+  return db.transaction((tx) => updateUserSync(tx, id, input, opts));
 }
 
 export async function setUserPassword(id: number, password: string): Promise<void> {

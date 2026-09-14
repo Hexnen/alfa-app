@@ -34,10 +34,10 @@ import type { MsgMail } from "./outlook-msg.js";
 import { attachmentOfRow, type StoredAttachment } from "./calendar-attachments.js";
 import { expandOccurrences, describeRule, shiftLocal, diffMinutes, type RecurrenceRule } from "./calendar-recurrence.js";
 import { ApiError, BILLING_HIDDEN_TYPES, BILLING_LABELS, PROTOCOL_TYPES, STATUS_LABELS, TYPE_LABELS } from "./calendar-labels.js";
-import { queueTechnicianPush } from "./push.js";
+import { queueTechnicianPush, type PushCollapse } from "./push.js";
 import { mentionKeys } from "./note-mentions.js";
 import { leadTitleById, touchLead } from "./sales-leads.js";
-import { zonedToday } from "./tz.js";
+import { zonedParts, zonedToday } from "./tz.js";
 
 export const CALENDAR_ENTITY = "calendar_event";
 
@@ -47,9 +47,20 @@ export interface MutationCtx {
   summarySuffix?: string | null;
 }
 
+/** ISO z „Z” albo z offsetem — chwila absolutna, nie lokalny zapis kalendarza. */
+const ABSOLUTE_ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})$/;
+
 /** "2026-09-12T08:00" → "12.09.2026 08:00"; "2026-09-12" → "12.09.2026". */
 export function fmtDate(s: string | null | undefined): string {
   if (!s) return "—";
+  // `started_at`/`finished_at` z panelu technika to ISO UTC, a nie lokalny zapis
+  // kalendarza — obcięcie go tekstem pokazywało w dzienniku godzinę UTC
+  // („rozpoczęcie prac: 11:33” zamiast 13:33). Przeliczamy do strefy firmy.
+  if (ABSOLUTE_ISO_RE.test(s)) {
+    const p = zonedParts(new Date(s));
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${pad(p.d)}.${pad(p.m)}.${p.y} ${pad(p.hh)}:${pad(p.mm)}`;
+  }
   const m = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}))?/.exec(s);
   if (!m) return s;
   const d = `${m[3]}.${m[2]}.${m[1]}`;
@@ -646,6 +657,29 @@ const PUSH_TITLES: Record<PushKind, string> = {
   cancelled: "Zlecenie odwołane",
 };
 
+/** Czasownik do zbiorczego powiadomienia o serii („10 terminów przesunięto”). */
+const PUSH_SERIES_VERBS: Record<PushKind, string> = {
+  new: "dodano",
+  moved: "przesunięto",
+  cancelled: "odwołano",
+};
+
+/**
+ * Opis zwijania dla wydarzenia z serii — jedna operacja na całym cyklu ma
+ * dowieźć JEDNO powiadomienie, a nie tyle, ile terminów. Wydarzenie bez serii
+ * zwrotu nie dostaje (i leci pojedynczo, jak dotąd).
+ */
+function seriesCollapseOf(dbx: DbOrTx, kind: PushKind, ev: CalendarEventRow): PushCollapse | undefined {
+  if (ev.seriesId == null) return undefined;
+  const where = ev.objectId != null ? objectNameById(dbx, ev.objectId) : ev.location || ev.title;
+  const label = `${TYPE_LABELS[ev.type]} — ${where}`;
+  return {
+    key: `series-${ev.seriesId}-${kind}`,
+    summary: (count) =>
+      `${label}: ${count} ${count === 1 ? "termin" : count < 5 ? "terminy" : "terminów"} ${PUSH_SERIES_VERBS[kind]}`,
+  };
+}
+
 /**
  * Zgłasza jedno powiadomienie. `guard` sprawdza stan JUŻ PO commicie — gdyby
  * transakcja się wycofała, alert o nieistniejącej zmianie nigdy nie wyjdzie.
@@ -672,6 +706,8 @@ function queueJobPush(
     },
     {
       excludeUserId: ctx.user.id,
+      kind,
+      collapse: seriesCollapseOf(dbx, kind, ev),
       guard: () => {
         const row = getEventRow(db, eventId);
         if (!row) return false;
@@ -1396,6 +1432,17 @@ export function addNote(tx: DbOrTx, input: AddNoteInput): Note {
     action: "note_added", field: "note", newValue: row.id,
     summary: `Dodano ${mail ? "mail" : "notatkę"}: ${noteSummary(briefTextOf(row))}${attInfo}`,
   });
+  // Wpis od CZŁOWIEKA (biuro, technik, asystent) to zmiana na wydarzeniu:
+  // podbijamy `updated_at`/`updated_by`, żeby panel technika zapalił żółtą
+  // plakietkę „coś tu doszło”. Notatki systemowe (Rozpocznij/Zakończ,
+  // streszczenie protokołu) świadomie NIE podbijają — to echo zmian, które
+  // technik właśnie sam zrobił.
+  if (source !== "system") {
+    tx.update(schema.calendarEvents)
+      .set({ updatedBy: input.ctx.user.id, updatedAt: sql`(datetime('now'))` })
+      .where(eq(schema.calendarEvents.id, ev.id))
+      .run();
+  }
   // Wzmianki dat w treści (@piątek, @15.09) → kafelki w kalendarzu, w tej samej transakcji.
   syncNoteMentionEvents(tx, row, ev, input.ctx);
   // Notatka przy aktywności handlowej to kontakt z klientem — szansa przestaje „gnić”.

@@ -31,16 +31,49 @@ export function dayOf(isoDateTime: string): string {
   return isoDateTime.slice(0, 10);
 }
 
+/**
+ * Dzień, pod którym zlecenie ma stać na liście „Nadchodzące”: `max(dzień
+ * startu, dziś)`. Wielodniowy montaż z poniedziałku oglądany w środę wpadał
+ * inaczej pod nagłówek z przeszłości, choć trwa i jest „przede mną”.
+ */
+export function upcomingDayOf(startAt: string, today: string): string {
+  const day = dayOf(startAt);
+  return day < today ? today : day;
+}
+
 /** Godzina `HH:MM` z lokalnego ISO; pusty string dla wartości całodniowej. */
 export function timeOf(isoDateTime: string | null | undefined): string {
   if (!isoDateTime || isoDateTime.length < 16) return "";
   return isoDateTime.slice(11, 16);
 }
 
+/** Ile minut do przodu jeszcze uchodzi za „teraz” (rozjazd zegara tabletu). */
+export const FUTURE_TOLERANCE_MIN = 5;
+
+/**
+ * Czy lokalny znacznik (`YYYY-MM-DDTHH:MM`) jest z przyszłości — dokładnie ta
+ * sama reguła, po której backend odrzuca „Rozpocznij / Zakończ” z 400. Front
+ * ma to powiedzieć, ZANIM technik kliknie Zapisz, a nie po okrągłej sekundzie
+ * czekania na błąd serwera.
+ */
+export function isFutureStamp(at: string, now: Date = new Date()): boolean {
+  const t = new Date(at).getTime();
+  if (Number.isNaN(t)) return false;
+  return t > now.getTime() + FUTURE_TOLERANCE_MIN * 60_000;
+}
+
 /** Lokalny ISO kalendarza bez strefy: `YYYY-MM-DDTHH:MM` — wycinamy tekstowo. */
 const LOCAL_ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
-/** Znacznik SQLite `YYYY-MM-DD HH:MM:SS` — to UTC bez oznaczenia strefy. */
-const SQLITE_UTC_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
+/**
+ * Znacznik SQLite `YYYY-MM-DD HH:MM[:SS]` — to UTC bez oznaczenia strefy.
+ *
+ * Sekundy są OPCJONALNE: `datetime('now')` je daje, ale `strftime('%Y-%m-%d
+ * %H:%M', …)` i ręcznie sklejane wartości już nie, a taki znacznik wchodził
+ * w `new Date()` jako czas LOKALNY i technik widział godzinę przesuniętą
+ * o strefę. Spacja zamiast „T” jest tu jedynym wyróżnikiem formatu, więc
+ * decyduje ona, a nie długość napisu.
+ */
+const SQLITE_UTC_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2})?$/;
 
 /**
  * Godzina znacznika czasu w strefie urządzenia. Trzy źródła, trzy formaty:

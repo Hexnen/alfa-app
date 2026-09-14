@@ -79,18 +79,31 @@ export interface FormState {
   actualHours: number;
   actualKm: number;
   activities: string;
+  /**
+   * Kontakt Z PROTOKOŁU, w całości: „Jan Nowak (kierownik), +48 600…, jan@x.pl”.
+   * Nie pokazujemy go w polu i nie ruszamy przy zapisie — dopóki technik sam
+   * nie poprawi „Osoby odbierającej”, wraca na serwer bajt w bajt taki, jaki
+   * przyszedł.
+   */
   contact: string;
+  /** Co stoi w polu „Osoba odbierająca” — samo nazwisko, to ono idzie pod podpis. */
+  signerName: string;
+  /** Czy technik ruszył pole „Osoba odbierająca” (dopiero wtedy nadpisujemy `contact`). */
+  contactEdited: boolean;
   items: ProtocolItem[];
 }
 
 export function toForm(p: TechnikProtocol): FormState {
+  const contact = p.contact ?? "";
   return {
     workDate: dayOf(p.workDate || todayIso()),
     workType: p.workType,
     actualHours: num(p.actualHours),
     actualKm: num(p.actualKm),
     activities: p.activities ?? "",
-    contact: shortContactName(p.contact ?? ""),
+    contact,
+    signerName: shortContactName(contact),
+    contactEdited: false,
     items: p.items?.length ? p.items.map((i) => ({ ...i })) : [],
   };
 }
@@ -111,7 +124,11 @@ export function toPayload(protocol: TechnikProtocol, form: FormState): ProtocolI
     clientNip: protocol.clientNip ?? "",
     clientCity: protocol.clientCity ?? "",
     installationAddress: protocol.installationAddress ?? "",
-    contact: form.contact,
+    // Kontakt wraca NIETKNIĘTY, dopóki technik sam nie poprawi pola. Wcześniej
+    // formularz pokazywał w polu samo nazwisko wycięte ze sklejki i to samo
+    // nazwisko odsyłał — pierwszy autozapis kasował z protokołu telefon i mail
+    // osoby odbierającej, a biuro nie miało już do kogo zadzwonić.
+    contact: form.contactEdited ? form.signerName : (protocol.contact ?? ""),
     activities: form.activities,
     // Puste wiersze (technik dodał i nie wypełnił) nie mają lądować na papierze.
     items: cleanItems(form.items),
@@ -145,7 +162,7 @@ export function gapsOf(form: FormState): ProtocolGap[] {
   if (form.actualHours <= 0) gaps.push({ step: "dane", label: "Brak godzin" });
   if (activityLines(form.activities).length === 0)
     gaps.push({ step: "czynnosci", label: "Brak czynności" });
-  if (!form.contact.trim()) gaps.push({ step: "odbior", label: "Brak osoby odbierającej" });
+  if (!form.signerName.trim()) gaps.push({ step: "odbior", label: "Brak osoby odbierającej" });
   return gaps;
 }
 
@@ -169,7 +186,7 @@ export function stepMarks(form: FormState): Partial<Record<StepKey, "ok" | "warn
           ? activityLines(form.activities).length > 0
           : key === "urzadzenia"
             ? cleanItems(form.items).length > 0
-            : !!form.contact.trim();
+            : !!form.signerName.trim();
     if (filled) marks[key] = "ok";
   }
   return marks;

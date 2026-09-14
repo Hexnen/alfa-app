@@ -29,9 +29,17 @@ export function TechnikAuthScreen() {
     if (busy) return;
     setBusy(true);
     setError(null);
-    const err = await login(email.trim(), password);
-    setBusy(false);
-    if (err) setError(err);
+    // `login` nie rzuca (brak sieci wraca jako komunikat), ale `finally` stoi
+    // tu jako bezpiecznik: przycisk „Logowanie…” zablokowany na zawsze to
+    // najgorsze, co może spotkać technika w bramie z jedną kreską zasięgu.
+    try {
+      const err = await login(email.trim(), password);
+      if (err) setError(err);
+    } catch {
+      setError("Nie udało się zalogować. Spróbuj ponownie.");
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (

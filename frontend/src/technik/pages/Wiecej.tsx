@@ -8,6 +8,7 @@ import {
   HardHat,
   LogOut,
   Phone,
+  RefreshCw,
   Share,
   Sparkles,
   User,
@@ -17,7 +18,12 @@ import { TECHNIK_VERSION } from "@/lib/version";
 import { cn } from "@/lib/utils";
 import { useTechnikAccess } from "../lib/access";
 import { useTechnikMe } from "../lib/me";
-import { useInstallPrompt, usePushNotifications } from "../lib/pwa";
+import {
+  unsubscribePushOnLogout,
+  useInstallPrompt,
+  usePushNotifications,
+  useTechnikUpdateState,
+} from "../lib/pwa";
 import { Switch } from "../ui/switch";
 import { useToast } from "../ui/toast";
 
@@ -33,6 +39,19 @@ export function Wiecej() {
   const { user, logout } = useAuth();
   const { isTechnikRole } = useTechnikAccess();
   const { me } = useTechnikMe();
+  const update = useTechnikUpdateState();
+
+  /**
+   * Wylogowanie ZABIERA ZE SOBĄ powiadomienia. Tablet brygady przechodzi
+   * z rąk do rąk, a subskrypcja push żyje w przeglądarce, nie w sesji — bez
+   * tego następny technik dostawałby na to urządzenie zlecenia poprzednika.
+   * Sprzątanie idzie PRZED `logout()`, bo DELETE wymaga ważnej sesji; jego
+   * niepowodzenie niczego nie blokuje.
+   */
+  const signOut = async () => {
+    await unsubscribePushOnLogout();
+    await logout();
+  };
 
   const tech = me?.technician;
   const technicianName = tech ? `${tech.firstName} ${tech.lastName}`.trim() : null;
@@ -85,6 +104,24 @@ export function Wiecej() {
           value={`v${TECHNIK_VERSION}`}
           to="/technik/co-nowego"
         />
+        {/* Toast z nową wersją da się odrzucić i sam nie wraca, a technik
+            potrafi chodzić na starym buildzie tygodniami. Ten wiersz stoi,
+            dopóki nowa wersja czeka na aktywację. */}
+        {update.updateReady && (
+          <button
+            type="button"
+            onClick={update.applyUpdate}
+            data-testid="technik-nowa-wersja"
+            className={cn(
+              ROW,
+              "w-full text-left active:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+            )}
+          >
+            <RefreshCw className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+            <span className="shrink-0 font-medium">Dostępna nowa wersja</span>
+            <span className="ml-auto text-sm text-muted-foreground">Odśwież</span>
+          </button>
+        )}
         {/* Konto biurowe z dostępem do panelu musi mieć drogę powrotną; rola
             `technik` widzi wyłącznie `/technik`, więc jej tego nie pokazujemy. */}
         {!isTechnikRole && (
@@ -94,7 +131,7 @@ export function Wiecej() {
 
       <button
         type="button"
-        onClick={() => void logout()}
+        onClick={() => void signOut()}
         className="flex min-h-12 w-full items-center justify-center gap-2 rounded-xl border border-destructive/40 bg-card px-4 text-base font-medium text-destructive active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         <LogOut className="h-5 w-5" aria-hidden />

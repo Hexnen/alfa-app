@@ -272,8 +272,8 @@ try {
   const other1 = db.transaction((tx) => addNote(tx, { eventId: src.id, text: `${PREFIX} druga notatka do wyszukania`, ctx: { user: other } }));
   const found = searchNotes(db, PREFIX, 50);
   ok("searchNotes: znajduje notatki testowe (od najnowszej)", found.length >= 2 && found[0].id === other1.id, found.map((f) => f.id));
-  ok("searchNotes: kształt {id,eventId,eventTitle,eventStartAt,eventType,text,userLabel,createdAt,attachmentsCount}",
-    (() => { const f = found[0]; return Object.keys(f).sort().join() === ["attachmentsCount", "createdAt", "eventId", "eventStartAt", "eventTitle", "eventType", "id", "text", "userLabel"].join() && f.eventId === src.id && f.eventTitle === src.title && f.eventType === "serwis" && f.attachmentsCount === 0; })(),
+  ok("searchNotes: kształt {id,eventId,eventTitle,eventStartAt,eventType,kind,text,userLabel,createdAt,attachmentsCount}",
+    (() => { const f = found[0]; return Object.keys(f).sort().join() === ["attachmentsCount", "createdAt", "eventId", "eventStartAt", "eventTitle", "eventType", "id", "kind", "text", "userLabel"].join() && f.eventId === src.id && f.eventTitle === src.title && f.eventType === "serwis" && f.attachmentsCount === 0; })(),
     found[0]);
   ok("searchNotes: szuka też po tytule wydarzenia", searchNotes(db, "Serwis źródłowy", 50).some((f) => f.id === n1.id));
   ok("searchNotes: bez rozróżniania wielkości liter", searchNotes(db, "serwis ŹRÓDŁOWY".toLowerCase(), 50).some((f) => f.id === n1.id));

@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { AlertDialog, AlertDialogContent, AlertDialogDescription, AlertDialogTitle } from "./confirm";
+import { isFutureStamp } from "../lib/dates";
 
 /**
  * KIEDY TO SIĘ STAŁO — okno „Teraz / Inna godzina” dla „Rozpocznij” i „Zakończ”.
@@ -64,12 +65,20 @@ function ActionTimeBody({
   const today = `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}`;
 
   const [custom, setCustom] = useState(false);
-  // Dzień zlecenia wygrywa z dzisiejszym: jeśli robota była wczoraj, to
-  // wczorajsza data jest tą, którą technik chce poprawić.
-  const [day, setDay] = useState(defaultDay && defaultDay !== today ? defaultDay : today);
+  // Dzień zlecenia wygrywa z dzisiejszym TYLKO wstecz: jeśli robota była
+  // wczoraj, to wczorajsza data jest tą, którą technik chce poprawić. Przy
+  // zleceniu z JUTRA podpowiadanie dnia zlecenia ustawiało okno na przyszłość,
+  // a backend przyszłych znaczników nie przyjmuje — technik dostawał 400 za
+  // wartość, której sam nie wpisał.
+  const [day, setDay] = useState(defaultDay && defaultDay < today ? defaultDay : today);
   const [time, setTime] = useState(`${p(now.getHours())}:${p(now.getMinutes())}`);
 
-  const canSave = /^\d{4}-\d{2}-\d{2}$/.test(day) && /^\d{2}:\d{2}/.test(time);
+  const at = `${day}T${time.slice(0, 5)}`;
+  const shaped = /^\d{4}-\d{2}-\d{2}$/.test(day) && /^\d{2}:\d{2}/.test(time);
+  // Ta sama reguła co na serwerze, tylko pokazana od razu: znacznik z przyszłości
+  // jest odrzucany. Pięć minut luzu bierze na siebie rozjazd zegara tabletu.
+  const future = shaped && isFutureStamp(at);
+  const canSave = shaped && !future;
 
   return (
     <>
@@ -127,13 +136,18 @@ function ActionTimeBody({
               />
             </div>
           </div>
+          {future && (
+            <p role="alert" data-testid="action-time-error" className="text-sm text-destructive">
+              Godzina z przyszłości
+            </p>
+          )}
           <div className="flex flex-col gap-2 sm:flex-row-reverse">
             <Button
               size="lg"
               className="h-12 flex-1 text-base"
               disabled={busy || !canSave}
               data-testid="action-time-save"
-              onClick={() => onSubmit(`${day}T${time.slice(0, 5)}`)}
+              onClick={() => onSubmit(at)}
             >
               {confirmLabel}
             </Button>

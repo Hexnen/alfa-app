@@ -88,7 +88,11 @@ auth.post("/register", (c) => {
  */
 function withLinks(user: User) {
   const salesperson = findSalespersonForUser(user, db);
-  const technician = findTechnicianByUserId(user.id, db);
+  // TYLKO aktywny technik — dokładnie tak, jak liczy to panel (`linkedTechnician`
+  // w src/routes/technik.ts). Bez tego filtru front dostawał `technicianId`
+  // nieaktywnego technika i pokazywał panel, który zaraz meldował „linked: false”.
+  const technicianRow = findTechnicianByUserId(user.id, db);
+  const technician = technicianRow?.active ? technicianRow : null;
   return {
     ...publicUser(user, technician?.id ?? null),
     salespersonId: salesperson?.id ?? null,

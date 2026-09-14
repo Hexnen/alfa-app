@@ -118,3 +118,177 @@
     scroll-behavior: auto !important;
   }
 }
+
+/* --- Zakładka „Mapa" --------------------------------------------------------
+ *
+ * Pinezki Leafleta rysuje `L.divIcon`, czyli goły HTML wstrzykiwany do warstwy
+ * mapy — klasy Tailwinda z szablonu w TSX nie trafiłyby do skanera, a i tak
+ * potrzebne są tu rzeczy, których Tailwind nie ma (pulsująca obwódka).
+ * Wszystko siedzi pod `.technik-root`, tak jak reszta arkusza.
+ */
+
+/* Ekran mapy = dokładnie tyle, ile zostaje między górą treści a tab barem
+   (`TechnikShell`: pt-safe-3 = 0.75rem + safe-top, pb = 3.5rem + 1.5rem +
+   safe-bottom). Dzięki temu strona SIĘ NIE PRZEWIJA i przeciąganie mapy nie
+   ciągnie tła pod spodem. */
+.technik-root .tm-screen {
+  height: calc(
+    100dvh - 0.75rem - 3.5rem - 1.5rem - env(safe-area-inset-top, 0px) -
+      env(safe-area-inset-bottom, 0px)
+  );
+  min-height: 20rem;
+}
+
+/* Gest mapy zostaje w mapie (Safari inaczej „odbija" całą stronę). */
+.technik-root .tm-canvas {
+  overscroll-behavior: contain;
+}
+
+/* Kontener ikony — bez białego prostokąta, który Leaflet daje `divIcon`
+   domyślnie; etykieta ma prawo wyjść poza obrys 30×30. */
+.technik-root .tm-icon {
+  background: none;
+  border: 0;
+  overflow: visible;
+}
+
+.technik-root .tm-pin {
+  position: relative;
+  width: 30px;
+  height: 30px;
+}
+
+/* Kropla: koło w kolorze TYPU zlecenia (`--pin`, ta sama paleta co pasek
+   karty na agendzie) z ikoną typu w środku — kolor nigdy sam nie koduje. */
+.technik-root .tm-pin-dot {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  background: var(--pin, #64748b);
+  color: #fff;
+  border: 2px solid #fff;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.45);
+}
+
+/* Licznik zleceń w jednym miejscu („×3"). */
+.technik-root .tm-pin-count {
+  position: absolute;
+  top: -6px;
+  right: -8px;
+  min-width: 18px;
+  padding: 0 3px;
+  border-radius: 9999px;
+  background: hsl(var(--foreground));
+  color: hsl(var(--background));
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  border: 1px solid hsl(var(--background));
+  font-variant-numeric: tabular-nums;
+}
+
+/* Etykieta obok pinezki: nazwa obiektu + termin. Leży absolutnie, więc nie
+   przesuwa kotwicy markera — pinezka stoi dokładnie na współrzędnych. */
+.technik-root .tm-pin-label {
+  position: absolute;
+  left: 36px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  max-width: 9rem;
+  padding: 2px 6px;
+  border-radius: 0.375rem;
+  background: hsl(var(--card));
+  color: hsl(var(--foreground));
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.3);
+  font-size: 0.75rem;
+  line-height: 1.25;
+  font-weight: 500;
+  pointer-events: none;
+}
+.technik-root .tm-pin-name,
+.technik-root .tm-pin-time {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.technik-root .tm-pin-time {
+  font-weight: 400;
+  color: hsl(var(--muted-foreground));
+  font-variant-numeric: tabular-nums;
+}
+
+/* Zakończone przygaszamy — są, ale nie zabierają uwagi. */
+.technik-root .tm-pin.is-done {
+  opacity: 0.55;
+}
+
+/* „W toku" — pulsująca obwódka. Jedyna animacja na tym ekranie i jedyny stan,
+   który naprawdę trzeba widzieć kątem oka. */
+.technik-root .tm-pin.is-running .tm-pin-dot {
+  animation: tm-pulse 1.8s ease-out infinite;
+}
+@keyframes tm-pulse {
+  0% {
+    box-shadow: 0 1px 4px rgb(0 0 0 / 0.45), 0 0 0 0 rgb(245 158 11 / 0.75);
+  }
+  70% {
+    box-shadow: 0 1px 4px rgb(0 0 0 / 0.45), 0 0 0 12px rgb(245 158 11 / 0);
+  }
+  100% {
+    box-shadow: 0 1px 4px rgb(0 0 0 / 0.45), 0 0 0 0 rgb(245 158 11 / 0);
+  }
+}
+
+/* Wybrana pinezka — obwódka w kolorze fokusu i wyróżniona etykieta. */
+.technik-root .tm-pin.is-active .tm-pin-dot {
+  outline: 3px solid hsl(var(--ring));
+  outline-offset: 1px;
+}
+.technik-root .tm-pin.is-active .tm-pin-label {
+  box-shadow: 0 0 0 2px hsl(var(--ring)), 0 1px 3px rgb(0 0 0 / 0.3);
+}
+
+/* Biuro: mały neutralny znacznik, celowo bez koloru typu — to nie zlecenie. */
+.technik-root .tm-office {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 9999px;
+  background: hsl(var(--card));
+  color: hsl(var(--muted-foreground));
+  border: 1px solid hsl(var(--muted-foreground) / 0.6);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.3);
+}
+
+/* Moja pozycja: niebieska kropka z aureolą (konwencja map systemowych). */
+.technik-root .tm-me {
+  width: 18px;
+  height: 18px;
+  border-radius: 9999px;
+  background: #2563eb;
+  border: 3px solid #fff;
+  box-shadow: 0 0 0 6px rgb(37 99 235 / 0.18);
+}
+
+/* Etykieta przerzucona na lewo — pinezka stoi przy wschodniej krawędzi mapy
+   (patrz `placeLabels` w JobsMap). */
+.technik-root .tm-pin.is-left .tm-pin-label {
+  left: auto;
+  right: 36px;
+  text-align: right;
+  align-items: flex-end;
+}
+
+/* Etykieta ustąpiła miejsca sąsiadce (patrz `placeLabels`) — zostaje kropka.
+   Nazwę i termin pokazuje dolna karta po dotknięciu pinezki. */
+.technik-root .tm-pin.is-nolabel .tm-pin-label {
+  display: none;
+}

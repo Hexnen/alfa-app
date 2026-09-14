@@ -141,6 +141,31 @@ app.get("/healthz", (c) => {
 // API routes
 app.route("/api", api);
 
+/**
+ * Cache statyków. Vite stempluje pliki w `/assets/` hashem treści, więc wolno
+ * je trzymać w przeglądarce „na zawsze” — bez tego CRM ciągnął ~3,4 MB przy
+ * każdym wejściu, a panel technika robił to na komórkowym transferze w aucie.
+ *
+ * Wszystko, co decyduje o WERSJI aplikacji (`index.html`, service worker,
+ * manifest), leci `no-cache`: przeglądarka ma je zawsze rewalidować, inaczej
+ * wdrożenie nie dochodziłoby do zainstalowanej PWA.
+ */
+app.use("/*", async (c, next) => {
+  await next();
+  if (c.req.method !== "GET" || !c.res.ok || c.res.headers.has("Cache-Control")) return;
+  const path = c.req.path;
+  if (path.startsWith("/assets/")) {
+    c.res.headers.set("Cache-Control", "public, max-age=31536000, immutable");
+  } else if (
+    path === "/" ||
+    path === "/technik-sw.js" ||
+    path === "/technik.webmanifest" ||
+    path.endsWith(".html")
+  ) {
+    c.res.headers.set("Cache-Control", "no-cache");
+  }
+});
+
 // Static frontend assets (js/css/images/monitoring html, ...)
 app.use("/*", serveStatic({ root: FRONTEND_DIR }));
 
@@ -151,6 +176,10 @@ app.get("*", (c) => {
     return c.json({ success: false, error: "Not Found" }, 404);
   }
   const html = readFileSync(`${FRONTEND_DIR}/index.html`, "utf-8");
+  // SPA fallback omija middleware wyżej (kończy się przed `next()`), więc
+  // nagłówek ustawiamy tutaj: `index.html` musi być rewalidowany przy każdym
+  // wejściu, inaczej nowa wersja nie dojdzie do zainstalowanej PWA.
+  c.header("Cache-Control", "no-cache");
   return c.html(html);
 });
 

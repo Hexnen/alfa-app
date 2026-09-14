@@ -26,6 +26,7 @@
 import { and, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
 import type { PushSubscriptionRow } from "../db/schema.js";
+import { logActivity, type ActivityUser } from "./activity-log.js";
 
 /** Ładunek widziany przez service workera (`event.data.json()`). */
 export interface PushPayload {
@@ -129,7 +130,30 @@ export function saveSubscription(input: {
   p256dh: string;
   auth: string;
   userAgent?: string | null;
+  /** Kto zapisuje — do wpisu w dzienniku przy przejęciu cudzego endpointu. */
+  actor?: ActivityUser;
 }): PushSubscriptionRow {
+  // Przejęcie endpointu (tablet brygady, druga zmiana) zmienia adresata
+  // wszystkich powiadomień tego urządzenia. Zdarza się normalnie, ale musi
+  // zostawiać ślad — inaczej „technik nie dostał powiadomienia” jest nie do
+  // odtworzenia po fakcie.
+  const previous = db
+    .select({ id: schema.pushSubscriptions.id, userId: schema.pushSubscriptions.userId })
+    .from(schema.pushSubscriptions)
+    .where(eq(schema.pushSubscriptions.endpoint, input.endpoint))
+    .get();
+  if (previous && previous.userId !== input.userId) {
+    logActivity(db, {
+      entityType: "push_subscription",
+      entityId: previous.id,
+      user: input.actor ?? null,
+      action: "updated",
+      field: "user_id",
+      oldValue: previous.userId,
+      newValue: input.userId,
+      summary: `Urządzenie z powiadomieniami przepięte z konta #${previous.userId} na #${input.userId}`,
+    });
+  }
   return db
     .insert(schema.pushSubscriptions)
     .values({
@@ -205,6 +229,9 @@ export function userIdsForTechnicians(technicianIds: number[]): number[] {
     .filter((id): id is number => id != null);
 }
 
+/** Po tylu nieudanych próbach z rzędu subskrypcja leci z bazy (patrz `notifyTechnicians`). */
+export const MAX_PUSH_FAILURES = 10;
+
 function statusCodeOf(err: unknown): number | null {
   const code = (err as { statusCode?: unknown })?.statusCode;
   return typeof code === "number" ? code : null;
@@ -248,6 +275,13 @@ export async function notifyTechnicians(
       if (status === 404 || status === 410) {
         // Push service mówi wprost: tej subskrypcji już nie ma.
         db.delete(schema.pushSubscriptions).where(eq(schema.pushSubscriptions.id, sub.id)).run();
+      } else if (sub.failures + 1 >= MAX_PUSH_FAILURES) {
+        // Po rotacji kluczy VAPID push service odpowiada 403, a nie 404/410 —
+        // wiersz nie znikał, `failures` rosło w nieskończoność i każda zmiana
+        // w kalendarzu strzelała w martwy endpoint. Po progu kasujemy:
+        // przeglądarka zapisze się z nowym kluczem przy najbliższym wejściu.
+        db.delete(schema.pushSubscriptions).where(eq(schema.pushSubscriptions.id, sub.id)).run();
+        console.warn(`[push] subskrypcja #${sub.id} skasowana po ${sub.failures + 1} nieudanych próbach`);
       } else {
         db.update(schema.pushSubscriptions)
           .set({ failures: sql`${schema.pushSubscriptions.failures} + 1` })
@@ -264,6 +298,18 @@ export async function notifyTechnicians(
 // Kolejka „po transakcji"
 // ---------------------------------------------------------------------------
 
+/**
+ * Zwijanie wielu zgłoszeń w jedno. Operacja „na całej serii” (przesuń 10
+ * terminów, odwołaj cały cykl) to z tabletu jedna wiadomość, a nie dziesięć
+ * — inaczej po jednym kliknięciu w biurze telefon technika wibruje bez końca.
+ */
+export interface PushCollapse {
+  /** Wspólny klucz zgłoszeń do zwinięcia (jest też `tag` zbiorczego ładunku). */
+  key: string;
+  /** Treść zbiorczego ładunku dla N zwiniętych zdarzeń. */
+  summary: (count: number) => string;
+}
+
 interface QueuedPush {
   technicianIds: number[];
   payload: PushPayload;
@@ -274,6 +320,9 @@ interface QueuedPush {
    * powiadomienia nie wysyłamy.
    */
   guard?: () => boolean;
+  collapse?: PushCollapse;
+  /** „new” | „moved” | „cancelled” — do odsiewu par w jednym tyknięciu. */
+  kind?: string;
 }
 
 const queue: QueuedPush[] = [];
@@ -281,14 +330,80 @@ let scheduled = false;
 /** Łańcuch obietnic — `flushPush()` w teście czeka na to, co już leci. */
 let inflight: Promise<void> = Promise.resolve();
 
+/**
+ * Zlecenie założone i od razu odwołane w JEDNYM tyknięciu (poprawka pomyłki
+ * w biurze, przepięcie ekipy) nie ma o czym powiadamiać — technik dostawał
+ * „Nowe zlecenie” i „Zlecenie odwołane” sekundę po sobie. Para na tym samym
+ * `tag` znosi się; samo odwołanie (bez „nowego”) oczywiście zostaje i zjada
+ * ewentualną „Zmianę terminu”.
+ */
+function dropCancelledPairs(items: QueuedPush[]): QueuedPush[] {
+  const byTag = new Map<string, Set<string>>();
+  for (const it of items) {
+    if (!it.payload.tag || !it.kind) continue;
+    const kinds = byTag.get(it.payload.tag) ?? new Set<string>();
+    kinds.add(it.kind);
+    byTag.set(it.payload.tag, kinds);
+  }
+  return items.filter((it) => {
+    const kinds = it.payload.tag ? byTag.get(it.payload.tag) : undefined;
+    if (!kinds || !kinds.has("cancelled")) return true;
+    if (kinds.has("new")) return false; // para nowe+odwołane — cisza
+    return it.kind === "cancelled"; // odwołanie zjada „Zmianę terminu”
+  });
+}
+
+/** Zgłoszenia z tym samym `collapse.key` → jeden ładunek dla sumy techników. */
+function collapseSeries(items: QueuedPush[]): QueuedPush[] {
+  const out: QueuedPush[] = [];
+  const groups = new Map<string, { item: QueuedPush; count: number; guards: Array<() => boolean> }>();
+  for (const it of items) {
+    if (!it.collapse) {
+      out.push(it);
+      continue;
+    }
+    const key = `${it.collapse.key}|${it.excludeUserId ?? ""}`;
+    const prev = groups.get(key);
+    if (!prev) {
+      groups.set(key, {
+        item: { ...it, technicianIds: [...it.technicianIds] },
+        count: 1,
+        guards: it.guard ? [it.guard] : [],
+      });
+      continue;
+    }
+    prev.count++;
+    for (const t of it.technicianIds) if (!prev.item.technicianIds.includes(t)) prev.item.technicianIds.push(t);
+    if (it.guard) prev.guards.push(it.guard);
+  }
+  for (const g of groups.values()) {
+    if (g.count > 1 && g.item.collapse) {
+      g.item.payload = {
+        ...g.item.payload,
+        body: g.item.collapse.summary(g.count),
+        tag: g.item.collapse.key,
+      };
+      // Wystarczy, że choć jedno ze zwiniętych zdarzeń faktycznie się utrwaliło.
+      const guards = g.guards;
+      g.item.guard = guards.length > 0 ? () => guards.some((fn) => fn()) : undefined;
+    }
+    out.push(g.item);
+  }
+  return out;
+}
+
 async function drain(): Promise<void> {
   while (queue.length > 0) {
-    const item = queue.shift()!;
-    try {
-      if (item.guard && !item.guard()) continue;
-      await notifyTechnicians(item.technicianIds, item.payload, { excludeUserId: item.excludeUserId });
-    } catch (err) {
-      console.warn("[push] błąd przy opróżnianiu kolejki:", err);
+    // Cała porcja z jednego tyknięcia naraz — dopiero na całości widać serię
+    // i pary, które się znoszą.
+    const batch = collapseSeries(dropCancelledPairs(queue.splice(0, queue.length)));
+    for (const item of batch) {
+      try {
+        if (item.guard && !item.guard()) continue;
+        await notifyTechnicians(item.technicianIds, item.payload, { excludeUserId: item.excludeUserId });
+      } catch (err) {
+        console.warn("[push] błąd przy opróżnianiu kolejki:", err);
+      }
     }
   }
 }
@@ -300,7 +415,12 @@ async function drain(): Promise<void> {
 export function queueTechnicianPush(
   technicianIds: number[],
   payload: PushPayload,
-  opts: { excludeUserId?: number | null; guard?: () => boolean } = {}
+  opts: {
+    excludeUserId?: number | null;
+    guard?: () => boolean;
+    collapse?: PushCollapse;
+    kind?: string;
+  } = {}
 ): void {
   if (technicianIds.length === 0) return;
   if (!isPushEnabled() && transport == null) return;
@@ -309,6 +429,8 @@ export function queueTechnicianPush(
     payload,
     excludeUserId: opts.excludeUserId ?? null,
     guard: opts.guard,
+    collapse: opts.collapse,
+    kind: opts.kind,
   });
   if (scheduled) return;
   scheduled = true;

@@ -25,10 +25,20 @@ export interface AuthUser {
 interface AuthCtx {
   user: AuthUser | null;
   loading: boolean;
+  /**
+   * `true` = nie wiemy, kim jest użytkownik, bo `/api/auth/me` w ogóle nie
+   * doszło (brak sieci, padł backend). To NIE jest „wylogowany”: sesja może być
+   * najzupełniej ważna, a ekran logowania w tej sytuacji tylko wprowadza
+   * w błąd — technik przy kliencie zobaczyłby „zaloguj się”, choć jest
+   * zalogowany, i wpisywał hasło w nieskończoność. 401 dalej znaczy wylogowanie.
+   */
+  offline: boolean;
   /** Zwraca komunikat błędu albo null przy sukcesie. */
   login: (email: string, password: string) => Promise<string | null>;
   register: (email: string, password: string, displayName: string) => Promise<string | null>;
   logout: () => Promise<void>;
+  /** Ponawia `/api/auth/me` — przycisk „Spróbuj ponownie” na ekranie braku połączenia. */
+  retry: () => void;
 }
 
 const Ctx = createContext<AuthCtx | null>(null);
@@ -45,32 +55,72 @@ interface AuthResponse {
   error?: string;
 }
 
-async function postJson(path: string, body: unknown): Promise<{ ok: boolean; data: AuthResponse }> {
-  const res = await fetch(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+/** Jedyny komunikat, jaki ma sens, gdy żądanie nie doszło do serwera. */
+export const OFFLINE_MESSAGE = "Brak połączenia z internetem — spróbuj ponownie.";
+
+/**
+ * POST na API, który NIGDY nie rzuca. `fetch` odrzuca obietnicę przy braku
+ * sieci, a wołający (`login`) nie miał tego jak obsłużyć — przycisk zostawał
+ * na „Logowanie…” do końca świata. Teraz odrzucenie wraca jako zwykła
+ * odpowiedź z `offline: true` i polskim zdaniem w `error`.
+ */
+async function postJson(
+  path: string,
+  body: unknown,
+): Promise<{ ok: boolean; offline: boolean; data: AuthResponse }> {
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    return { ok: false, offline: true, data: { error: OFFLINE_MESSAGE } };
+  }
   const data = await res.json().catch(() => ({}));
-  return { ok: res.ok, data };
+  return { ok: res.ok, offline: false, data };
 }
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [loading, setLoading] = useState(true);
+  const [offline, setOffline] = useState(false);
+  /** Zmiana licznika = ponowne pytanie o `/api/auth/me` (przycisk „Spróbuj ponownie”). */
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
-    fetch("/api/auth/me")
-      .then((r) => r.json())
-      .then((d) => setUser(d.user ?? null))
-      .catch(() => setUser(null))
-      .finally(() => setLoading(false));
-  }, []);
+    let cancelled = false;
+    setLoading(true);
+    void (async () => {
+      try {
+        const res = await fetch("/api/auth/me");
+        // Odpowiedź PRZYSZŁA — serwer wie, kim jesteśmy (albo że nikim).
+        // 401 to prawdziwe wylogowanie i wtedy `user` musi zejść do `null`.
+        const data = await res.json().catch(() => ({}));
+        if (cancelled) return;
+        setUser((data as { user?: AuthUser }).user ?? null);
+        setOffline(false);
+      } catch {
+        // Żądanie NIE doszło. Zerowanie usera zrobiłoby z braku zasięgu
+        // wylogowanie; zamiast tego panel pokaże ekran „Brak połączenia”.
+        if (!cancelled) setOffline(true);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [attempt]);
+
+  const retry = useCallback(() => setAttempt((n) => n + 1), []);
 
   const login = useCallback(async (email: string, password: string) => {
     const { ok, data } = await postJson("/api/auth/login", { email, password });
     if (!ok) return data.error || "Nie udało się zalogować.";
     setUser(data.user ?? null);
+    setOffline(false);
     return null;
   }, []);
 
@@ -79,6 +129,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const { ok, data } = await postJson("/api/auth/register", { email, password, displayName });
       if (!ok) return data.error || "Nie udało się zarejestrować.";
       setUser(data.user ?? null);
+      setOffline(false);
       return null;
     },
     [],
@@ -91,5 +142,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     window.location.reload();
   }, []);
 
-  return <Ctx.Provider value={{ user, loading, login, register, logout }}>{children}</Ctx.Provider>;
+  return (
+    <Ctx.Provider value={{ user, loading, offline, login, register, logout, retry }}>
+      {children}
+    </Ctx.Provider>
+  );
 }

@@ -7,9 +7,33 @@ import { JobCard } from "../JobCard";
 import { addDays, formatDayMonth, formatDayTitle, formatWeekday, todayIso } from "../lib/dates";
 import { jobStateOf } from "../lib/jobs";
 import { useJobs } from "../lib/useJobs";
+import { useRefreshOnFocus } from "../lib/refresh";
 import { useWeather } from "../lib/useWeather";
 import { useTechnikMe } from "../lib/me";
 import { useSwipeDay } from "../lib/use-swipe-day";
+
+/**
+ * Szkielet dwóch kart zamiast zdania „Ładuję dzień…”. Przy przerzucaniu dni
+ * tekst wyglądał jak pusty dzień (to samo miejsce, ten sam szary kolor) —
+ * kształt kart od razu mówi „zaraz tu coś będzie”, a nie „nic nie ma”.
+ */
+function JobsSkeleton() {
+  return (
+    <ul className="space-y-2" aria-hidden data-testid="dzis-szkielet">
+      {[0, 1].map((i) => (
+        <li key={i} className="animate-pulse rounded-xl border bg-card p-3">
+          <div className="flex items-center gap-3">
+            <div className="h-10 w-14 shrink-0 rounded-md bg-muted" />
+            <div className="min-w-0 flex-1 space-y-2">
+              <div className="h-4 w-2/3 rounded bg-muted" />
+              <div className="h-3 w-1/2 rounded bg-muted" />
+            </div>
+          </div>
+        </li>
+      ))}
+    </ul>
+  );
+}
 
 /**
  * DZIŚ — ekran domyślny, otwierany kilkanaście razy dziennie.
@@ -32,6 +56,12 @@ export function Dzis() {
   // Wejście na zakładkę = „widziałem” — efekt dziecka odpala się PRZED
   // odświeżeniem liczników w powłoce, więc plakietka „Dziś” gaśnie od razu.
   useEffect(() => markSeen("seenToday"), []);
+  // …i tak samo po powrocie z tła: bez tego technik wracał do panelu, patrzył
+  // wprost na listę i dalej miał żółtą plakietkę „Dziś”, bo znacznik „widziałem”
+  // stał na chwili wejścia sprzed godziny. Ten nasłuch stoi PRZED nasłuchem
+  // liczników z powłoki (efekty dziecka biegną pierwsze), więc `/technik/me`
+  // dostaje już nowy znacznik.
+  useRefreshOnFocus(() => markSeen("seenToday"));
 
   const swipeRef = useSwipeDay<HTMLDivElement>(
     () => setDate((d) => addDays(d, -1)),
@@ -88,7 +118,7 @@ export function Dzis() {
           description="Administrator musi połączyć to konto z kartoteką Technicy — dopiero wtedy pojawią się zlecenia."
         />
       ) : loading && jobs.length === 0 ? (
-        <p className="py-10 text-center text-sm text-muted-foreground">Ładuję dzień…</p>
+        <JobsSkeleton />
       ) : error ? (
         <EmptyState
           icon={CalendarOff}

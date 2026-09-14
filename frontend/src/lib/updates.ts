@@ -63,7 +63,7 @@ export interface VersionUpdate {
  */
 export const UPDATES_CURRENT: VersionUpdate[] = [
   {
-    version: "1.6.0–1.8.0",
+    version: "1.6.0–1.9.0",
     date: "2026-09-14",
     title: "Panel technika",
     entries: [
@@ -101,6 +101,21 @@ export const UPDATES_CURRENT: VersionUpdate[] = [
         text: "Panel technika: zdjęcia z aparatu jako notatki zlecenia (widoczne też w kalendarzu) i protokół w czterech krokach",
         type: "feat",
         module: "technik",
+      },
+      {
+        text: "Panel technika: mapa zleceń, nowy ekran zlecenia i poprawki po pierwszej fali testów",
+        type: "feat",
+        module: "technik",
+      },
+      {
+        text: "Zmiana roli konta przy błędzie zapisu nie degraduje już administratora",
+        type: "fix",
+        module: "ogolne",
+      },
+      {
+        text: "Protokół podpisuje się tylko na wersji, którą widać na ekranie, a usunięty protokół nie oddaje numeru",
+        type: "fix",
+        module: "techniczny",
       },
     ],
   },
@@ -210,7 +225,7 @@ export const UPDATES: VersionUpdate[] = [...UPDATES_CURRENT, ...UPDATES_2026];
  */
 export const UPDATES_TECHNIK: VersionUpdate[] = [
   {
-    version: "1.0.0–1.2.0",
+    version: "1.0.0–1.3.0",
     date: "2026-09-14",
     title: "Panel technika",
     entries: [
@@ -291,6 +306,36 @@ export const UPDATES_TECHNIK: VersionUpdate[] = [
       },
       {
         text: "Protokół zapisuje się sam w trakcie wypełniania, a stan zapisu widać na dole z godziną",
+        type: "tweak",
+        module: "technik",
+      },
+      {
+        text: "Zakładka Mapa pokazuje zlecenia na dziś lub 14 dni jako pinezki z rodzajem pracy i nazwą obiektu, dopasowane tak, żeby wszystko było widoczne",
+        type: "feat",
+        module: "technik",
+      },
+      {
+        text: "Ekran zlecenia: obiekt i godzina na górze, Nawiguj i Zadzwoń pod kciukiem, notatki i protokół zwinięte, jeden główny przycisk",
+        type: "feat",
+        module: "technik",
+      },
+      {
+        text: "Bez zasięgu panel mówi „Brak połączenia” zamiast wylogowywać, a logowanie nie zawiesza się na zawsze",
+        type: "fix",
+        module: "technik",
+      },
+      {
+        text: "Zapis protokołu przy zerwanym połączeniu nie czyści już wypełnionych pól",
+        type: "fix",
+        module: "technik",
+      },
+      {
+        text: "„Zakończ” bez wcześniejszego „Rozpocznij” i ponowne dotknięcie nie blokują już poprawki godziny",
+        type: "fix",
+        module: "technik",
+      },
+      {
+        text: "Powiadomienia: seria terminów to jedno powiadomienie, a przełącznik pokazuje prawdziwy stan konta",
         type: "tweak",
         module: "technik",
       },

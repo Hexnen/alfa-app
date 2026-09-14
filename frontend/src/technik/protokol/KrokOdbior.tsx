@@ -43,7 +43,7 @@ export function KrokOdbior({
 
   /** Pełna sklejka z kartoteki, gdy w polu stoi już samo nazwisko z niej wycięte. */
   const contactHint =
-    protocol.contact && protocol.contact.trim() !== form.contact.trim()
+    protocol.contact && protocol.contact.trim() !== form.signerName.trim()
       ? protocol.contact.trim()
       : null;
 
@@ -66,7 +66,7 @@ export function KrokOdbior({
                 {clockOf(protocol.signedAt) ? ` o ${clockOf(protocol.signedAt)}` : ""}
               </p>
               <p className="text-sm text-muted-foreground">
-                Odebrał: {protocol.signerName || form.contact || "—"}
+                Odebrał: {protocol.signerName || form.signerName || "—"}
               </p>
             </div>
           </div>
@@ -162,20 +162,20 @@ export function KrokOdbior({
         >
           <ClearableInput
             id="p-contact"
-            value={form.contact}
+            value={form.signerName}
             disabled={readOnly}
-            onChange={(v) => set("contact", v)}
+            onChange={(v) => set("signerName", v)}
             onFocus={(e) => scrollFieldIntoView(e.currentTarget)}
             placeholder="Imię i nazwisko"
             autoComplete="off"
             clearLabel="Wyczyść osobę odbierającą"
             className="h-12 text-base"
           />
-          {!readOnly && !form.contact.trim() && contactHint && (
+          {!readOnly && !form.signerName.trim() && contactHint && (
             <Button
               variant="outline"
               className="mt-2 h-11 w-full justify-start text-base"
-              onClick={() => set("contact", shortContactName(contactHint))}
+              onClick={() => set("signerName", shortContactName(contactHint))}
             >
               Wstaw z kartoteki: {shortContactName(contactHint)}
             </Button>

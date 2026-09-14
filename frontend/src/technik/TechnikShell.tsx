@@ -1,7 +1,7 @@
 import { useEffect, useMemo, type ReactNode } from "react";
 import { useLocation } from "react-router-dom";
 import { useTechnikMe } from "./lib/me";
-import { CalendarDays, MoreHorizontal, Sun } from "lucide-react";
+import { CalendarDays, MapPin, MoreHorizontal, Sun } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useKeyboardVar } from "./lib/keyboard";
 import type { NavItem } from "./lib/nav";
@@ -9,13 +9,17 @@ import { BottomNav } from "./ui/bottom-nav";
 import { TopBar } from "./ui/top-bar";
 
 /**
- * TRZY POZYCJE NAWIGACJI. Panel technika ma świadomie mniej zakładek niż CRM:
- * „co robię teraz”, „co mnie czeka” i szuflada z resztą. Każda pozycja z ikoną
- * I etykietą — sama ikona nie niesie znaczenia.
+ * CZTERY POZYCJE NAWIGACJI. Panel technika ma świadomie mniej zakładek niż CRM:
+ * „co robię teraz”, „co mnie czeka”, „gdzie to jest” i szuflada z resztą. Każda
+ * pozycja z ikoną I etykietą — sama ikona nie niesie znaczenia.
+ *
+ * „Mapa” stoi między listami a szufladą, bo odpowiada na pytanie zadawane
+ * zaraz po „co mnie czeka”: w jakiej kolejności to objechać.
  */
 const NAV_ITEMS: NavItem[] = [
   { to: "/technik", label: "Dziś", icon: Sun, end: true },
   { to: "/technik/nadchodzace", label: "Nadchodzące", icon: CalendarDays },
+  { to: "/technik/mapa", label: "Mapa", icon: MapPin },
   // „Co nowego” wchodzi się z „Więcej” i nie ma własnej zakładki — bez tego
   // dopasowania tab bar nie podświetlałby niczego.
   {

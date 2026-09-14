@@ -13,9 +13,16 @@ export default function AuthScreen() {
     e.preventDefault();
     setBusy(true);
     setError(null);
-    const err = await login(email.trim(), password);
-    setBusy(false);
-    if (err) setError(err);
+    // Bezpiecznik na wypadek wyjątku: bez `finally` przycisk zostawał
+    // zablokowany na „…” do przeładowania strony.
+    try {
+      const err = await login(email.trim(), password);
+      if (err) setError(err);
+    } catch {
+      setError("Nie udało się zalogować. Spróbuj ponownie.");
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (

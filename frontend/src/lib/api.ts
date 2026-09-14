@@ -2657,10 +2657,19 @@ export async function syncProtocols() {
   });
 }
 
-export async function updateProtocol(id: number, data: ProtocolInput) {
+/**
+ * Zapis protokołu z biura. `expectedUpdatedAt` to znacznik wersji dokumentu,
+ * który dialog miał wczytany — bez niego zapis po cichu nadpisywał to, co
+ * technik wpisał u klienta minutę wcześniej (backend odpowiada wtedy 409).
+ */
+export async function updateProtocol(
+  id: number,
+  data: ProtocolInput,
+  expectedUpdatedAt?: string
+) {
   return request<ApiResponse<Protocol>>(`/protocols/${id}`, {
     method: "PUT",
-    body: JSON.stringify(data),
+    body: JSON.stringify({ ...data, ...(expectedUpdatedAt ? { expectedUpdatedAt } : {}) }),
   });
 }
 
@@ -3729,9 +3738,13 @@ export async function deleteQuote(id: number) {
 
 // --- Podpisywanie protokołów ---
 
+/**
+ * Podpis protokołu z biura. `expectedUpdatedAt` jest po stronie serwera
+ * WYMAGANY: podpis poświadcza konkretną treść, więc musi wskazać, którą.
+ */
 export async function signProtocol(
   id: number,
-  data: { signaturePng: string; signerName: string }
+  data: { signaturePng: string; signerName: string; expectedUpdatedAt: string }
 ) {
   return request<ApiResponse<Protocol>>(`/protocols/${id}/sign`, {
     method: "POST",
@@ -10049,6 +10062,8 @@ export interface TechnikTechnician {
 }
 
 export interface TechnikMe {
+  /** Zegar serwera (ISO) — do korekty znaczników „widziałem” liczonych na tablecie. */
+  now?: string;
   technician: TechnikTechnician | null;
   /** `false` = konto bez wpisu w kartotece Technicy; lista jest wtedy pusta. */
   linked: boolean;
@@ -10073,6 +10088,12 @@ export interface TechnikMe {
     changedToday: number;
     changedUpcoming: number;
   };
+  /**
+   * Współrzędne biura na mapę panelu (`GET /company/office` jest dla roli
+   * `technik` zamknięte). `null` = biuro nie ma ustawionej pinezki; starszy
+   * backend tego pola nie odsyła, więc front traktuje brak jak `null`.
+   */
+  office?: { lat: number; lng: number } | null;
 }
 
 /** Znaczniki „ostatnio widziane” zakładek (ISO) — trzymane w localStorage panelu. */
@@ -10113,6 +10134,13 @@ export interface TechnikJob {
   address: string | null;
   /** Gotowy link do Map Google, jeśli obiekt go ma. */
   mapsUrl: string | null;
+  /**
+   * Pinezka obiektu dla zakładki „Mapa”. `null` = obiekt bez współrzędnych
+   * albo zlecenie bez obiektu — takie zlecenia mapa pokazuje na liście
+   * „bez lokalizacji”, a nie zgaduje ich położenia z adresu.
+   */
+  lat: number | null;
+  lng: number | null;
   contactPerson: string | null;
   contactPhone: string | null;
   description: string | null;
@@ -10210,6 +10238,7 @@ export const technikApi = {
         linked: false,
         canEdit: false,
         counts: { today: 0, inProgress: 0, upcoming: 0, changedToday: 0, changedUpcoming: 0 },
+        office: null,
       }
     );
   },
@@ -10388,6 +10417,23 @@ export const technikApi = {
   async pushConfig(): Promise<TechnikPushConfig> {
     const r = await request<ApiResponse<TechnikPushConfig>>("/technik/push/config");
     return r.data ?? { enabled: false, publicKey: null };
+  },
+
+  /**
+   * Czy TEN endpoint jest w bazie zapisany na ZALOGOWANE konto.
+   *
+   * Sama subskrypcja w przeglądarce niczego nie dowodzi: na tablecie brygady
+   * zostaje po poprzednim techniku i wiersz w bazie należy do niego — panel
+   * pokazywałby „powiadomienia włączone”, a leciałyby one pod cudze konto.
+   * Serwer odpowiada `subscribed: true` tylko dla własnego wiersza; przy
+   * `false` przełącznik stoi na „wyłączone”, a włączenie robi POST, który
+   * przepisuje właściciela.
+   */
+  async pushStatus(endpoint: string): Promise<boolean> {
+    const r = await request<ApiResponse<{ subscribed: boolean }>>(
+      `/technik/push/subscribe?endpoint=${encodeURIComponent(endpoint)}`,
+    );
+    return r.data?.subscribed === true;
   },
 
   /** Zapis subskrypcji (upsert po `endpoint` — ponowne włączenie to ten sam wiersz). */

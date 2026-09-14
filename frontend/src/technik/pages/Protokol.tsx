@@ -238,6 +238,13 @@ export function Protokol() {
       // Ręczna poprawka kilometrów kasuje adnotację „z odległości od biura” —
       // przestałaby opisywać to, co stoi w polu.
       if (key === "actualKm") setKmFromDistance(false);
+      // Dopiero ruszenie „Osoby odbierającej” pozwala nadpisać `contact`
+      // w protokole. Bez tej flagi autozapis odsyłał samo nazwisko wycięte ze
+      // sklejki i kasował biuru telefon oraz mail osoby odbierającej.
+      if (key === "signerName") {
+        update((prev) => ({ ...prev, signerName: value as string, contactEdited: true }));
+        return;
+      }
       update((prev) => ({ ...prev, [key]: value }));
     },
     [update],
@@ -485,7 +492,7 @@ export function Protokol() {
           open
           onClose={() => setSignOpen(false)}
           onSave={sign}
-          defaultSignerName={form.contact || shortContactName(protocol.contact)}
+          defaultSignerName={form.signerName || shortContactName(protocol.contact)}
         />
       )}
 

@@ -75,12 +75,32 @@ function App() {
 }
 
 function AuthedApp() {
-  const { user, loading } = useAuth();
+  const { user, loading, offline, retry } = useAuth();
 
   if (loading) {
     return (
       <div className="min-h-dvh flex items-center justify-center text-muted-foreground text-sm">
         Ładowanie…
+      </div>
+    );
+  }
+  // `/api/auth/me` nie doszło (padł backend, zerwana sieć) — nie wiemy, kim
+  // jest użytkownik, więc ekran logowania byłby fałszywą informacją „sesja
+  // wygasła”. 401 dalej kończy się `user === null` i normalnym logowaniem.
+  if (offline && !user) {
+    return (
+      <div className="min-h-dvh flex flex-col items-center justify-center gap-3 px-4 text-center">
+        <p className="text-sm text-muted-foreground">
+          Brak połączenia z serwerem — nie wiadomo, czy sesja jest jeszcze ważna. Spróbuj ponownie
+          za chwilę.
+        </p>
+        <button
+          type="button"
+          onClick={retry}
+          className="h-10 rounded-md border border-input bg-background px-4 text-sm font-medium hover:bg-accent"
+        >
+          Spróbuj ponownie
+        </button>
       </div>
     );
   }
