@@ -171,6 +171,7 @@ import {
   type CalendarEventPrefill,
 } from "@/components/CalendarEventDialog";
 import { CalendarBoard, buildBoardColumns, isOverdue, type BoardGroupBy } from "@/components/CalendarBoard";
+import { isRunning } from "@/lib/calendar-labels";
 import {
   BillingBadge,
   BillingMark,
@@ -436,6 +437,9 @@ function toFcEvent(ev: CalendarEvent, now: Date, wx?: WeatherBrief | null): Even
       `cal-status-${ev.status}`,
       ev.deletedAt ? "cal-deleted" : "",
       isOverdue(ev, now) ? "cal-overdue" : "",
+      // Technik jest u klienta: złota pulsująca poświata, żeby biuro widziało
+      // to z drugiego końca ekranu (znika po „Zakończ” albo po odwołaniu).
+      isRunning(ev) ? "cal-running" : "",
     ].filter(Boolean),
     // Usunięte nie do przesuwania; dla pozostałych NIE nadpisujemy — o DnD
     // decyduje globalne `editable` (uprawnienie edit), per-event true by je obeszło.

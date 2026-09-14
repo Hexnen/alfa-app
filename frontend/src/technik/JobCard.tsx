@@ -1,5 +1,7 @@
 import { Link } from "react-router-dom";
-import { ChevronRight, FileText, MapPin, Users } from "lucide-react";
+import { ChevronRight, FileText, MapPin, MessageSquarePlus, Users } from "lucide-react";
+import { countNewNotes } from "./lib/seen";
+import { countLabel } from "./lib/protocol";
 import type { TechnikJob, WeatherBrief } from "@/lib/api";
 // Ten sam znacznik co na kafelku kalendarza (ikona WMO + temperatura) — jedna
 // mapa kodów i jedna paleta dla biura i dla tabletu, bez kopii w panelu.
@@ -44,6 +46,8 @@ export function JobCard({
   const typeMeta = jobTypeMeta(job.type);
   const TypeIcon = typeMeta?.icon;
   const StateIcon = JOB_STATE_ICONS[state];
+  // Cudze notatki nowsze niż ostatnie otwarcie tego zlecenia na tym tablecie.
+  const newNotes = countNewNotes(job.id, job.foreignNotesAt);
 
   return (
     <li>
@@ -114,6 +118,15 @@ export function JobCard({
                 />
               )}
             </div>
+            {newNotes > 0 && (
+              <div
+                className="flex items-center gap-1 text-xs font-medium text-amber-700 dark:text-amber-300"
+                data-testid="job-new-notes"
+              >
+                <MessageSquarePlus className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                {countLabel(newNotes, "nowa notatka", "nowe notatki", "nowych notatek")}
+              </div>
+            )}
             <div className="hidden truncate text-sm text-muted-foreground sm:block">{meta}</div>
             {job.coTechnicians.length > 0 && (
               <div className="hidden items-center gap-1 truncate text-xs text-muted-foreground sm:flex">

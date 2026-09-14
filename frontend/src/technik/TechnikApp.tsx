@@ -4,6 +4,7 @@ import { RefreshCw, ShieldOff, WifiOff } from "lucide-react";
 import { useAuth } from "@/auth/AuthProvider";
 import { Button } from "@/components/ui/button";
 import { useTechnikAccess } from "./lib/access";
+import { useTechnikLive } from "./lib/live";
 import { TechnikMeProvider } from "./lib/me";
 import { useTechnikPwaHead, useTechnikServiceWorker } from "./lib/pwa";
 import { TechnikAuthScreen } from "./TechnikAuthScreen";
@@ -88,6 +89,11 @@ export function TechnikApp() {
 
 function TechnikRoutes() {
   const access = useTechnikAccess();
+
+  // Strumień „na żywo" — jeden na cały panel, otwarty tylko dla konta, które
+  // faktycznie ma panel (bez dostępu nie ma czego słuchać). Zamyka się sam przy
+  // wylogowaniu, bo cały ten poddrzewek znika razem z `user`.
+  useTechnikLive(access.canView);
 
   if (!access.canView) {
     return (

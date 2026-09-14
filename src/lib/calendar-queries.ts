@@ -265,6 +265,9 @@ export interface CalendarEventJson {
   realization: RealizationRef | null;
   /** Użytkownik ręcznie odpiął realizację — automat jej nie utworzy (także backfill). */
   realizationOptout: boolean;
+  /** Technik wcisnął „Rozpocznij” / „Zakończ” w panelu (ISO UTC) — kafelek „w toku” świeci. */
+  startedAt: string | null;
+  finishedAt: string | null;
   /** Rozliczenie: warranty | free | paid | null (nie dotyczy). */
   billing: CalendarBilling | null;
   /** Jawnie przypięty protokół (NULL → protokół realizacji, jeśli jest). */
@@ -829,6 +832,8 @@ export function loadEvents(dbx: DbOrTx, ids: number[]): CalendarEventJson[] {
       realizationId: e.realizationId,
       realization: (e.realizationId != null ? realById.get(e.realizationId) : null) ?? null,
       realizationOptout: e.realizationOptout,
+      startedAt: e.startedAt ?? null,
+      finishedAt: e.finishedAt ?? null,
       billing: e.billing,
       protocolId: e.protocolId,
       protocol: (e.protocolId != null ? protoById.get(e.protocolId) : null) ?? (e.realizationId != null ? protoByReal.get(e.realizationId) : null) ?? null,

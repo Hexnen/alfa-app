@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { AlertTriangle, WifiOff } from "lucide-react";
 import {
@@ -14,6 +14,9 @@ import { ConfirmDialog } from "../ui/confirm";
 import { WarnNote } from "../ui/panel";
 import { useToast } from "../ui/toast";
 import { useJob } from "../lib/useJob";
+import { hits, isRemoval, useLiveChanges } from "../lib/live";
+import { getJobDistance, peekJobDistance } from "../lib/distance";
+import { markJobSeen } from "../lib/seen";
 import { useJobWeather } from "../lib/useWeather";
 import { useTechnikAccess } from "../lib/access";
 import { clockOf, dayOf, timeOf } from "../lib/dates";
@@ -42,6 +45,12 @@ export function Zlecenie() {
   const { id } = useParams<{ id: string }>();
   const jobId = id ? Number(id) : null;
   const { job, loading, notFound, error, reload, patch } = useJob(jobId);
+  // Otwarcie zlecenia = „widziałem jego notatki” (kafelek liczy od tej chwili
+  // „x nowych notatek”). Znacznik odświeżany przy każdym wczytaniu szczegółów,
+  // więc notatka, która dolatuje na żywo, gdy ekran jest otwarty, też się liczy.
+  useEffect(() => {
+    if (jobId && job) markJobSeen(jobId);
+  }, [jobId, job]);
   const { canEdit } = useTechnikAccess();
   const { toast, toastError } = useToast();
   const navigate = useNavigate();
@@ -52,30 +61,52 @@ export function Zlecenie() {
   /** Otwarte pytanie „Wznowić zlecenie?”. */
   const [askReopen, setAskReopen] = useState(false);
 
+  /**
+   * Biuro zdjęło to zlecenie albo je skasowało — samo przeładowanie (robi je
+   * `useJob`) zamieniłoby ekran w „zlecenie nie jest już przypisane" bez słowa
+   * wyjaśnienia. Toast mówi, dlaczego treść zaraz zniknie sprzed nosa. Zwykłe
+   * zmiany (termin, status, opis) wchodzą po cichu — to ma być świeży ekran,
+   * a nie strumień powiadomień.
+   */
+  useLiveChanges(
+    useCallback(
+      (change) => {
+        if (!hits(change, jobId) || !isRemoval(change)) return;
+        toast({ message: "Biuro zmieniło to zlecenie", kind: "info" });
+      },
+      [jobId, toast],
+    ),
+  );
+
   // Pogoda dnia zlecenia — ten sam batch co na listach, tu dla jednego id.
   const weather = useJobWeather(job);
 
   // --- Dojazd z biura (pod „Nawiguj”) ---------------------------------
   // Ta sama trasa, z której protokół bierze kilometry; dokłada tylko `minutes`.
   // Bez obiektu nie ma dokąd liczyć, więc w ogóle nie pytamy.
-  const [distance, setDistance] = useState<TechnikJobDistance | null>(null);
-  const [distanceLoading, setDistanceLoading] = useState(false);
+  // Dojazd liczony RAZ na zlecenie (lib/distance.ts) — protokół bierze ten
+  // sam wynik, zamiast pytać backend drugi raz i pokazywać „Liczę…”.
   const distanceJobId = job?.objectId != null ? job.id : null;
+  const [distance, setDistance] = useState<TechnikJobDistance | null>(() =>
+    distanceJobId == null ? null : peekJobDistance(distanceJobId),
+  );
+  const [distanceLoading, setDistanceLoading] = useState(false);
   useEffect(() => {
     if (distanceJobId == null) {
       setDistance(null);
       return;
     }
+    const known = peekJobDistance(distanceJobId);
+    if (known) {
+      setDistance(known);
+      return;
+    }
     let cancelled = false;
     setDistanceLoading(true);
-    technikApi
-      .jobDistance(distanceJobId)
+    getJobDistance(distanceJobId)
       .then((d) => {
-        if (!cancelled) setDistance(d);
-      })
-      .catch(() => {
-        // Geokoder/sieć: linijka po prostu się nie pojawi.
-        if (!cancelled) setDistance(null);
+        // Brak wyniku (km null) — linijka po prostu się nie pojawi.
+        if (!cancelled) setDistance(d.km == null ? null : d);
       })
       .finally(() => {
         if (!cancelled) setDistanceLoading(false);

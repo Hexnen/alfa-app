@@ -9,6 +9,7 @@ import {
 } from "react";
 import { technikApi, type TechnikMe } from "@/lib/api";
 import { useRefreshOnFocus } from "./refresh";
+import { useLiveReload } from "./live";
 import { noteServerNow, readSeen } from "./seen";
 
 /**
@@ -52,6 +53,15 @@ export function TechnikMeProvider({ children }: { children: ReactNode }) {
   }, [load]);
 
   useRefreshOnFocus(() => void load());
+
+  // Liczniki na tab barze i żółta plakietka „zmienione" mają się zgadzać z tym,
+  // co biuro właśnie zrobiło — każdy sygnał (`lib/live.ts`) odświeża `/me`.
+  // Debounce w `useLiveReload` sprawia, że seria zmian w jednym zapisie to jedno
+  // zapytanie, a nie dziesięć.
+  useLiveReload(
+    () => void load(),
+    () => true,
+  );
 
   const value = useMemo<MeCtxValue>(
     () => ({ me, loading, error, reload: () => void load() }),

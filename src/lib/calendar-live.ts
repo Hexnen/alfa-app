@@ -60,8 +60,58 @@ export interface CalendarChange {
    * `null` = zapis spoza przeglądarki (skrypt, integracja) — wtedy nikt nie pomija.
    */
   actorClientId: string | null;
+  /**
+   * Technicy, którzy byli przypisani do tych wydarzeń PRZED zmianą.
+   *
+   * PO CO. Panel technika filtruje sygnały po przypisaniu (`calendar_event_assignees`),
+   * a przy odpięciu technika wiersz przypisania już nie istnieje — bez tej listy
+   * „biuro zdjęło Cię ze zlecenia" nie miałoby jak dojść do tego, kogo dotyczy.
+   * Wypełnia ją `rememberEventTechnicians` wołane z mutacji (src/lib/calendar-mutations.ts)
+   * TUŻ przed skasowaniem przypisań. Dla kalendarza CRM pole jest bez znaczenia.
+   */
+  technicianIds: number[];
   /** Znacznik czasu (ms) — id zdarzenia SSE i pomoc przy debugowaniu. */
   ts: number;
+}
+
+/**
+ * PAMIĘĆ „KTO BYŁ PRZYPISANY" — krótkotrwała, wyłącznie na potrzeby publikacji.
+ *
+ * Mutacja kasuje wiersz z `calendar_event_assignees`, a sygnał leci dopiero PO
+ * commicie transakcji — w tej chwili z bazy nie da się już odczytać, kogo zmiana
+ * dotyczyła. Mutacja odkłada więc listę tutaj, a `publishCalendarChange` dokleja ją
+ * do ładunku. Wpisy przeterminowane (`REMEMBER_TTL_MS`) są sprzątane przy każdym
+ * zapisie: gdyby transakcja się wycofała, najgorsze, co się stanie, to jeden zbędny
+ * sygnał „odświeź listę" u technika.
+ */
+const REMEMBER_TTL_MS = 60_000;
+const rememberedTechnicians = new Map<number, { ids: number[]; ts: number }>();
+
+/** Zapamiętuje przypisania wydarzenia sprzed zmiany (wołane Z WNĘTRZA transakcji). */
+export function rememberEventTechnicians(eventId: number, technicianIds: readonly number[]): void {
+  if (!Number.isInteger(eventId)) return;
+  const now = Date.now();
+  for (const [id, entry] of rememberedTechnicians) {
+    if (now - entry.ts > REMEMBER_TTL_MS) rememberedTechnicians.delete(id);
+  }
+  const prev = rememberedTechnicians.get(eventId);
+  const ids = new Set<number>(prev && now - prev.ts <= REMEMBER_TTL_MS ? prev.ids : []);
+  for (const t of technicianIds) if (Number.isInteger(t)) ids.add(t);
+  rememberedTechnicians.set(eventId, { ids: [...ids], ts: now });
+}
+
+/** Zdejmuje i zwraca zapamiętane przypisania dla listy wydarzeń. */
+function takeRememberedTechnicians(eventIds: readonly number[]): number[] {
+  const out = new Set<number>();
+  const now = Date.now();
+  for (const id of eventIds) {
+    const entry = rememberedTechnicians.get(id);
+    if (!entry) continue;
+    rememberedTechnicians.delete(id);
+    if (now - entry.ts > REMEMBER_TTL_MS) continue;
+    for (const t of entry.ids) out.add(t);
+  }
+  return [...out];
 }
 
 type Subscriber = (change: CalendarChange) => void;
@@ -91,12 +141,24 @@ export function publishCalendarChange(input: {
   eventIds?: readonly (number | null | undefined)[];
   actorUserId?: number | null;
   actorClientId?: string | null;
+  /** Dodatkowi technicy „sprzed zmiany" (poza tym, co odłożyło `rememberEventTechnicians`). */
+  technicianIds?: readonly (number | null | undefined)[];
 }): void {
+  const ids = [...new Set((input.eventIds ?? []).filter((n): n is number => Number.isInteger(n)))];
+  // Pamięć zdejmujemy ZAWSZE, także bez subskrybentów — inaczej wpisy z cichych
+  // mutacji czekałyby do wygaśnięcia i doklejały się do kolejnego sygnału.
+  const remembered = takeRememberedTechnicians(ids);
   if (subscribers.size === 0) return;
   const change: CalendarChange = {
     department: input.department,
     kind: input.kind,
-    ids: [...new Set((input.eventIds ?? []).filter((n): n is number => Number.isInteger(n)))],
+    ids,
+    technicianIds: [
+      ...new Set([
+        ...remembered,
+        ...(input.technicianIds ?? []).filter((n): n is number => Number.isInteger(n)),
+      ]),
+    ],
     actorUserId: input.actorUserId ?? null,
     actorClientId: input.actorClientId ?? null,
     ts: Date.now(),

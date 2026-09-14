@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { technikApi, type TechnikJobDetails } from "@/lib/api";
 import { useRefreshOnFocus } from "./refresh";
+import { hits, useLiveReload } from "./live";
 
 /**
  * Szczegóły jednego zlecenia. Cudze zlecenie backend zwraca jako 404 — tu
@@ -61,6 +62,18 @@ export function useJob(id: number | null): JobState {
   }, [load]);
 
   useRefreshOnFocus(() => void load());
+
+  /**
+   * Sygnał z biura o TYM zleceniu (`lib/live.ts`) — przeładowujemy zawsze, także
+   * przy `deleted`/`unassigned`: po ponownym zapytaniu backend odpowie 404 i ekran
+   * sam przejdzie w stan „zlecenie nie jest już przypisane". Technik nie traci przy
+   * tym nic z tego, co pisze: szkic notatki żyje w stanie `Notatki`, a ten komponent
+   * nie jest tu odmontowywany — podmienia się wyłącznie wczytane zlecenie.
+   */
+  useLiveReload(
+    () => void load(),
+    (change) => hits(change, id),
+  );
 
   const patch = useCallback((next: Partial<TechnikJobDetails>) => {
     setJob((prev) => (prev ? { ...prev, ...next } : prev));

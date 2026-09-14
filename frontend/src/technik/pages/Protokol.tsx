@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { AlertTriangle, ClipboardList } from "lucide-react";
+import { AlertTriangle, ClipboardList, RefreshCw } from "lucide-react";
 import {
   technikApi,
   type TechnikJobDistance,
@@ -20,8 +20,10 @@ import {
 } from "../ui/confirm";
 import { useToast } from "../ui/toast";
 import { useJob } from "../lib/useJob";
+import { hits, useLiveChanges } from "../lib/live";
 import { useTechnikAccess } from "../lib/access";
 import { clockOf, dayOf } from "../lib/dates";
+import { getJobDistance, peekJobDistance } from "../lib/distance";
 import { ActionTimeDialog } from "../ui/action-time";
 import { rememberDeviceNames } from "../lib/devices";
 import {
@@ -83,13 +85,17 @@ export function Protokol() {
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
+  /** Biuro ruszyło to zlecenie, gdy protokół był otwarty — pasek z „Odśwież". */
+  const [officeChanged, setOfficeChanged] = useState(false);
   const [signOpen, setSignOpen] = useState(false);
   // Po podpisie: „Zakończyć wizytę?” — tylko gdy zlecenie jeszcze nie jest zakończone.
   const [askFinish, setAskFinish] = useState(false);
   const [finishing, setFinishing] = useState(false);
   /** Słownik czynności z panelu admina (pusty = rząd chipów się nie renderuje). */
   const [dictionary, setDictionary] = useState<string[]>([]);
-  const [distance, setDistance] = useState<TechnikJobDistance | null>(null);
+  // Wynik z ekranu zlecenia (lib/distance.ts) — bez drugiego liczenia i bez
+  // „0 km” w polu, dopóki odpowiedź nie wróci.
+  const [distance, setDistance] = useState<TechnikJobDistance | null>(() => (jobId ? peekJobDistance(jobId) : null));
   const [distanceLoading, setDistanceLoading] = useState(false);
   /** Czy kilometry wstawił automat (wtedy pod polem stoi adnotacja skąd). */
   const [kmFromDistance, setKmFromDistance] = useState(false);
@@ -125,6 +131,23 @@ export function Protokol() {
   useEffect(() => {
     void loadProtocol();
   }, [loadProtocol]);
+
+  /**
+   * SYGNAŁ Z BIURA W TRAKCIE WYPEŁNIANIA PROTOKOŁU.
+   *
+   * Formularza NIE przeładowujemy sami: technik ma w polach rzeczy wpisane
+   * palcem u klienta, a autozapis leci dopiero za 1,5 s — podmiana treści pod
+   * kursorem skasowałaby mu je bez śladu. Zamiast tego pasek nad krokami mówi,
+   * że coś się zmieniło, a przeładowanie robi on, kiedy jest gotów.
+   */
+  useLiveChanges(
+    useCallback(
+      (change) => {
+        if (hits(change, jobId)) setOfficeChanged(true);
+      },
+      [jobId],
+    ),
+  );
 
   // Słownik czynności — brak albo błąd znaczy „bez podpowiedzi”, nigdy błąd
   // na ekranie: protokół musi dać się wypełnić także wtedy, gdy admin nic nie
@@ -393,21 +416,10 @@ export function Protokol() {
   useEffect(() => {
     if (!jobId || !protocol || readOnly || distance || distanceLoading) return;
     let alive = true;
-    setDistanceLoading(true);
-    technikApi
-      .jobDistance(jobId)
+    setDistanceLoading(!peekJobDistance(jobId));
+    getJobDistance(jobId)
       .then((d) => {
-        if (!alive) return;
-        setDistance(d);
-        const suggested = d.km == null ? null : (d.suggestedKm ?? d.km);
-        // `protocol.actualKm` to stan ZAPISANY — świeży protokół ma tu 0.
-        if (suggested == null || Number(protocol.actualKm ?? 0) > 0 || dirtyRef.current) return;
-        setForm((prev) => (prev ? { ...prev, actualKm: suggested } : prev));
-        setKmFromDistance(true);
-        setDirty(true);
-      })
-      .catch(() => {
-        if (alive) setDistance({ km: null, reason: "Nie udało się policzyć odległości" });
+        if (alive) setDistance(d);
       })
       .finally(() => {
         if (alive) setDistanceLoading(false);
@@ -416,6 +428,22 @@ export function Protokol() {
       alive = false;
     };
   }, [jobId, protocol, readOnly, distance, distanceLoading]);
+
+  // Wpis sugestii do PUSTEGO pola — osobno od pobrania, bo dystans bywa już
+  // w pamięci z ekranu zlecenia i wtedy nie ma żadnego „.then”. Raz na
+  // protokół (`suggestedAppliedRef`), nigdy na wartość wpisaną ręcznie.
+  const suggestedAppliedRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!protocol || readOnly || !distance || suggestedAppliedRef.current === protocol.id) return;
+    const suggested = distance.km == null ? null : (distance.suggestedKm ?? distance.km);
+    if (suggested == null) return;
+    suggestedAppliedRef.current = protocol.id;
+    // `protocol.actualKm` to stan ZAPISANY — świeży protokół ma tu 0.
+    if (Number(protocol.actualKm ?? 0) > 0 || dirtyRef.current) return;
+    setForm((prev) => (prev ? { ...prev, actualKm: suggested } : prev));
+    setKmFromDistance(true);
+    setDirty(true);
+  }, [protocol, readOnly, distance]);
 
   const applySuggestedKm = () => {
     const suggested = distance?.km == null ? null : (distance.suggestedKm ?? distance.km);
@@ -581,6 +609,25 @@ export function Protokol() {
         onStep={goStep}
         onBack={back}
       />
+
+      {officeChanged && (
+        <div className="mt-2 flex items-center gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm">
+          <span className="flex-1">Biuro zmieniło zlecenie</span>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-9 shrink-0"
+            onClick={() => {
+              setOfficeChanged(false);
+              reloadJob();
+              void loadProtocol();
+            }}
+          >
+            <RefreshCw className="mr-1.5 h-4 w-4" aria-hidden />
+            Odśwież
+          </Button>
+        </div>
+      )}
 
       <div className="pb-28">
         {step === "dane" && (

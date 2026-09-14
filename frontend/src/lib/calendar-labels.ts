@@ -1555,3 +1555,18 @@ export function splitTip(text: string | null | undefined): RichTip | null {
   if (dash < 0) return { title: head, text: rest.join("\n") || undefined };
   return { title: head.slice(0, dash), text: [head.slice(dash + 3), ...rest].join("\n") };
 }
+
+/**
+ * Technik wcisnął „Rozpocznij” w panelu i jeszcze nie „Zakończ”: kafelek
+ * w kalendarzu świeci złotem (klasa `cal-running`). Statusy końcowe i kosz
+ * gaszą poświatę nawet przy zostawionym znaczniku — biuro mogło zamknąć
+ * zlecenie z desktopa.
+ */
+export function isRunning(ev: {
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  status: string;
+  deletedAt?: string | null;
+}): boolean {
+  return !!ev.startedAt && !ev.finishedAt && ev.status !== "done" && ev.status !== "cancelled" && !ev.deletedAt;
+}

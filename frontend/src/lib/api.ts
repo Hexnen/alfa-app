@@ -5628,6 +5628,9 @@ export interface CalendarEvent {
   quote?: CalendarEventQuote | null;
   /** `true` = realizacja została ręcznie odpięta; automat jej nie odtworzy. */
   realizationOptout: boolean;
+  /** Znaczniki z panelu technika (ISO UTC): rozpoczęte i niezakończone = „w toku”. */
+  startedAt?: string | null;
+  finishedAt?: string | null;
   technicians: CalendarEventTechnician[];
   /**
    * Przypisani handlowcy (`department = "handlowy"`). Odpowiednik `technicians`
@@ -10152,6 +10155,8 @@ export interface TechnikJob {
   contactPhone: string | null;
   description: string | null;
   notesCount: number;
+  /** Czasy cudzych, nie-systemowych notatek (SQLite UTC), najnowsze pierwsze — do „x nowych notatek”. */
+  foreignNotesAt?: string[];
   protocol: TechnikJobProtocol | null;
   /** Imiona i nazwiska pozostałych techników z tego zlecenia. */
   coTechnicians: string[];

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { technikApi, type TechnikJob } from "@/lib/api";
 import { useRefreshOnFocus } from "./refresh";
+import { hitsAny, useLiveReload } from "./live";
 
 /**
  * DANE PANELU BEZ REACT QUERY.
@@ -65,6 +66,22 @@ export function useJobs(from: string, to: string): JobsState {
   }, [load]);
 
   useRefreshOnFocus(() => void load());
+
+  /**
+   * Sygnał z biura (`lib/live.ts`) — backend przysyła WYŁĄCZNIE zmiany zleceń tego
+   * technika, więc lista przeładowuje się po każdej z nich. Świadomie nie sprawdzamy
+   * tu, czy id leży na bieżącej liście: przesunięty termin wskakuje na dzisiejszy
+   * dzień z innej daty, a świeże przypisanie dokłada zlecenie, którego na liście
+   * jeszcze nie było — filtr po widocznych id przespałby oba przypadki.
+   *
+   * Wyjątkiem są notatki: notatka przy zleceniu spoza widocznego zakresu niczego
+   * na tej liście nie zmienia (`notesCount` dotyczy pozycji, które widać).
+   */
+  const jobIds = jobs.map((j) => j.id);
+  useLiveReload(
+    () => void load(),
+    (change) => change.kind !== "notes" || hitsAny(change, jobIds),
+  );
 
   return { jobs, loading, error, reload: () => void load() };
 }

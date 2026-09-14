@@ -63,6 +63,22 @@ export interface VersionUpdate {
  */
 export const UPDATES_CURRENT: VersionUpdate[] = [
   {
+    version: "1.11.0",
+    date: "2026-09-15",
+    entries: [
+      {
+        text: "Wydarzenie, które technik właśnie realizuje, świeci w kalendarzu złotą pulsującą poświatą, aż do zakończenia",
+        type: "feat",
+        module: "techniczny",
+      },
+      {
+        text: "Panel technika: zmiany z kalendarza pojawiają się na tablecie od razu, bez odświeżania",
+        type: "feat",
+        module: "technik",
+      },
+    ],
+  },
+  {
     version: "1.6.0–1.10.0",
     date: "2026-09-14",
     title: "Panel technika",
@@ -239,6 +255,27 @@ export const UPDATES: VersionUpdate[] = [...UPDATES_CURRENT, ...UPDATES_2026];
  * wpisów — co się zmienia w robocie, bez nazw modułów i ekranów.
  */
 export const UPDATES_TECHNIK: VersionUpdate[] = [
+  {
+    version: "1.5.0",
+    date: "2026-09-15",
+    entries: [
+      {
+        text: "Zmiany z biura (termin, opis, notatka, odwołanie, przypisanie) pojawiają się na liście i w zleceniu od razu, bez odświeżania",
+        type: "feat",
+        module: "technik",
+      },
+      {
+        text: "Kafelek zlecenia pokazuje, ile nowych notatek dopisało biuro od ostatniego zajrzenia",
+        type: "feat",
+        module: "technik",
+      },
+      {
+        text: "Dojazd z biura liczy się raz na zlecenie, więc protokół ma kilometry od razu, bez czekania",
+        type: "tweak",
+        module: "technik",
+      },
+    ],
+  },
   {
     version: "1.0.0–1.4.0",
     date: "2026-09-14",

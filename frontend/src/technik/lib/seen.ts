@@ -45,3 +45,37 @@ export function markSeen(tab: keyof typeof KEYS): void {
     /* tryb prywatny — plakietka po prostu nie będzie żółknąć */
   }
 }
+
+/**
+ * „Kiedy ostatnio otworzyłem TO zlecenie” — per zlecenie, w localStorage.
+ * Kafelek liczy z tego „x nowych notatek”: cudze notatki nowsze niż to
+ * spojrzenie. Brak zapisu (nigdy nie otwierane) = wszystkie cudze notatki są
+ * nowe — nowo przypisany technik ma zobaczyć, że biuro coś napisało.
+ */
+const JOB_KEY = (id: number) => `technik.seen.job.${id}`;
+
+export function markJobSeen(id: number): void {
+  try {
+    localStorage.setItem(JOB_KEY(id), new Date(Date.now() + clockOffsetMs).toISOString());
+  } catch {
+    /* tryb prywatny */
+  }
+}
+
+/** Ile z podanych znaczników (SQLite UTC „YYYY-MM-DD HH:MM:SS” albo ISO) jest nowszych niż ostatnie otwarcie. */
+export function countNewNotes(id: number, foreignNotesAt: string[] | undefined): number {
+  if (!foreignNotesAt || foreignNotesAt.length === 0) return 0;
+  let seenMs = 0;
+  try {
+    const raw = localStorage.getItem(JOB_KEY(id));
+    if (raw) seenMs = Date.parse(raw);
+  } catch {
+    seenMs = 0;
+  }
+  if (!Number.isFinite(seenMs)) seenMs = 0;
+  return foreignNotesAt.filter((t) => {
+    const iso = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2})?$/.test(t) ? `${t.replace(" ", "T")}Z` : t;
+    const ms = Date.parse(iso);
+    return Number.isFinite(ms) && ms > seenMs;
+  }).length;
+}

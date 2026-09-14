@@ -34,7 +34,7 @@ import protocolsRoutes from "../src/routes/protocols.js";
 import adminTechnikRoutes from "../src/routes/admin-technik.js";
 import { TECHNIK_ACTIVITIES_KEY } from "../src/lib/technik-config.js";
 import { removeEventAttachmentDir, resolveStoredPath } from "../src/lib/calendar-attachments.js";
-import { createEvent, deleteEvent, deleteNote, moveEvent, parseInput, updateNote } from "../src/lib/calendar-mutations.js";
+import { addNote, createEvent, deleteEvent, deleteNote, moveEvent, parseInput, updateNote } from "../src/lib/calendar-mutations.js";
 import { flushPush, notifyTechnicians, setPushTransport, type PushPayload } from "../src/lib/push.js";
 import { deleteSetting, getSetting, setSetting } from "../src/lib/settings.js";
 import { tabPermissionGuard, technikRoleGuard } from "../src/middleware/auth.js";
@@ -1932,6 +1932,20 @@ try {
     );
   }
   ok("odwołane: cudze odwołane zlecenie dalej 404", (await O("GET", `/jobs/${cancelledJob}`)).status === 404);
+
+  // „x nowych notatek”: kafelek dostaje czasy CUDZYCH nie-systemowych notatek.
+  {
+    const fnJob = insertEvent({ title: "Nowe notatki", type: "serwis", technicianIds: [tech.id], hour: 19 });
+    db.transaction((tx) => {
+      addNote(tx, { eventId: fnJob, text: "moja własna", ctx: { user: techUser } });
+      addNote(tx, { eventId: fnJob, text: "z biura", ctx: { user: otherUser } });
+      addNote(tx, { eventId: fnJob, text: "Rozpoczęto o 10:00", source: "system", ctx: { user: techUser } });
+    });
+    const lst = await T("GET", `/jobs${RANGE}`);
+    const row = ((lst.data as { id: number; notesCount: number; foreignNotesAt: string[] }[]) ?? []).find((j) => j.id === fnJob);
+    ok("nowe notatki: notesCount liczy wszystkie żywe", row?.notesCount === 3, row);
+    ok("nowe notatki: foreignNotesAt tylko cudze nie-systemowe", row?.foreignNotesAt?.length === 1, row?.foreignNotesAt);
+  }
 
   // Protokół założony PRZED odwołaniem: ekran odwołanego zlecenia ma go dalej
   // pokazać (odczyt 200), ale nic już w nim nie zmieni (zapis/podpis 409).

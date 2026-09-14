@@ -20,7 +20,6 @@
  *  - re-eksporty (ApiError, etykiety, loadEvents, parseInput) dla dotychczasowych importów
  */
 import { Hono, type Context } from "hono";
-import { streamSSE } from "hono/streaming";
 import { randomBytes } from "crypto";
 import { createReadStream, statSync } from "node:fs";
 import { Readable } from "node:stream";
@@ -73,6 +72,7 @@ import {
   type CalendarChange,
   type CalendarChangeKind,
 } from "../lib/calendar-live.js";
+import { streamChangeFeed } from "../lib/sse-stream.js";
 import {
   ATTACHMENT_MAX_FILES,
   attachmentFilePath,
@@ -216,11 +216,6 @@ function publishChange(
 // GET /live — strumień SSE z sygnałami o zmianach (Server-Sent Events)
 // ---------------------------------------------------------------------------
 
-/** Odstęp „pingów" (komentarz SSE) — trzyma połączenie przy życiu przez proxy. */
-const LIVE_HEARTBEAT_MS = 25_000;
-/** Ile przeglądarka ma czekać przed ponownym połączeniem po zerwaniu. */
-const LIVE_RETRY_MS = 5_000;
-
 /**
  * Strumień zdarzeń dla jednej otwartej karty. EventSource NIE wysyła własnych nagłówków,
  * więc autoryzacja idzie wyłącznie z cookie `alfa_session` (requireAuth w src/routes/index.ts) —
@@ -229,6 +224,9 @@ const LIVE_RETRY_MS = 5_000;
  * Filtr działowy jest TU: subskrybent dostaje wyłącznie zmiany z działów, które wolno mu
  * oglądać (`departmentsFromQuery` → calendar-scope). Sam sygnał nie niesie danych wydarzenia,
  * ale samo „w dziale handlowym coś się ruszyło" też nie ma prawa wyciekać do technika.
+ *
+ * Sama pętla (ramka `ready`, kolejka, heartbeat, sprzątanie subskrypcji) siedzi
+ * w `src/lib/sse-stream.ts` — dzieli ją z `GET /technik/live`.
  */
 app.get("/live", (c) => {
   const user = getUser(c);
@@ -239,71 +237,15 @@ app.get("/live", (c) => {
     return handleError(c, error, "subskrypcji zmian kalendarza");
   }
   const allowed = new Set<CalendarDepartment>(departments);
-  return streamSSE(c, async (stream) => {
-    // UWAGA na kolejność: `streamSSE` ustawia WŁASNE nagłówki (m.in. Cache-Control: no-cache)
-    // TUŻ przed wywołaniem tego callbacku, a odpowiedź składa dopiero po powrocie z jego
-    // synchronicznej części. Nagłówki dopisane wyżej (przed `streamSSE`) zostałyby więc
-    // nadpisane — muszą lecieć TUTAJ i PRZED pierwszym `await`.
-    //  - no-transform: żaden pośrednik nie ma prawa przepakować/skompresować strumienia,
-    //  - X-Accel-Buffering: wyłącza buforowanie w nginx (Dokploy stawia go przed aplikacją).
-    c.header("Cache-Control", "no-cache, no-transform");
-    c.header("X-Accel-Buffering", "no");
-    const queue: CalendarChange[] = [];
-    let closed = false;
-    /** Budzik pętli — ustawiany na czas czekania, kasowany po obudzeniu. */
-    let wake: (() => void) | null = null;
-    const bump = () => {
-      const w = wake;
-      wake = null;
-      w?.();
-    };
-    const unsubscribe = subscribeCalendarChanges((change) => {
-      if (!allowed.has(change.department)) return;
-      queue.push(change);
-      bump();
-    });
-    const close = () => {
-      closed = true;
-      bump();
-    };
-    stream.onAbort(close);
-    // Node server sygnalizuje zerwanie także przez AbortSignal żądania.
-    c.req.raw.signal?.addEventListener("abort", close, { once: true });
-
-    try {
-      // Pierwsza ramka od razu — przeglądarka uznaje połączenie za otwarte,
-      // a `retry` ustawia odstęp automatycznego wznawiania po zerwaniu.
-      await stream.writeSSE({
-        event: "ready",
-        data: JSON.stringify({ departments, ts: Date.now() }),
-        retry: LIVE_RETRY_MS,
-      });
-      while (!closed && !stream.aborted && !stream.closed) {
-        const batch = queue.splice(0, queue.length);
-        if (batch.length === 0) {
-          await new Promise<void>((resolve) => {
-            const timer = setTimeout(() => {
-              wake = null;
-              resolve();
-            }, LIVE_HEARTBEAT_MS);
-            wake = () => {
-              clearTimeout(timer);
-              resolve();
-            };
-          });
-          // Obudzeni bez pracy (timeout albo zamknięcie) → heartbeat; komentarz SSE
-          // jest ignorowany przez EventSource, ale przepycha bufory pośredników.
-          if (!closed && queue.length === 0) await stream.write(": ping\n\n");
-          continue;
-        }
-        for (const change of batch) {
-          await stream.writeSSE({ event: "calendar", data: JSON.stringify(change), id: String(change.ts) });
-        }
-      }
-    } finally {
-      unsubscribe();
-      c.req.raw.signal?.removeEventListener("abort", close);
-    }
+  return streamChangeFeed<CalendarChange>(c, {
+    event: "calendar",
+    ready: { departments, ts: Date.now() },
+    idOf: (change) => String(change.ts),
+    subscribe: (emit) =>
+      subscribeCalendarChanges((change) => {
+        if (!allowed.has(change.department)) return;
+        emit(change);
+      }),
   });
 });
 

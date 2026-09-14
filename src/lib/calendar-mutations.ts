@@ -35,6 +35,7 @@ import { attachmentOfRow, type StoredAttachment } from "./calendar-attachments.j
 import { expandOccurrences, describeRule, shiftLocal, diffMinutes, type RecurrenceRule } from "./calendar-recurrence.js";
 import { ApiError, BILLING_HIDDEN_TYPES, BILLING_LABELS, PROTOCOL_TYPES, STATUS_LABELS, TYPE_LABELS } from "./calendar-labels.js";
 import { queueTechnicianPush, type PushCollapse } from "./push.js";
+import { rememberEventTechnicians } from "./calendar-live.js";
 import { mentionKeys } from "./note-mentions.js";
 import { leadTitleById, touchLead } from "./sales-leads.js";
 import { zonedParts, zonedToday } from "./tz.js";
@@ -507,6 +508,10 @@ function syncTechnicians(tx: Tx, ev: CalendarEventRow, technicianIds: number[], 
   const toAdd = technicianIds.filter((id) => !before.includes(id));
   const toRemove = before.filter((id) => !technicianIds.includes(id));
   const base = { entityType: CALENDAR_ENTITY, entityId: ev.id, objectId: ev.objectId, user: ctx.user, summarySuffix: ctx.summarySuffix };
+  // Kto BYŁ przypisany — sygnał „na żywo" leci dopiero po commicie, a wtedy wiersza
+  // przypisania już nie ma i panel odpiętego technika nie miałby skąd wiedzieć, że
+  // zlecenie ma zniknąć z jego listy (src/lib/calendar-live.ts).
+  if (toRemove.length > 0) rememberEventTechnicians(ev.id, before);
   for (const id of toRemove) {
     tx.delete(schema.calendarEventAssignees)
       .where(and(eq(schema.calendarEventAssignees.eventId, ev.id), eq(schema.calendarEventAssignees.technicianId, id)))

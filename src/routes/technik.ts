@@ -51,7 +51,13 @@ import {
   type IncomingFile,
   type NoteAttachmentJson,
 } from "../lib/calendar-attachments.js";
-import { clientIdOf, publishCalendarChange } from "../lib/calendar-live.js";
+import {
+  clientIdOf,
+  publishCalendarChange,
+  subscribe as subscribeCalendarChanges,
+} from "../lib/calendar-live.js";
+import { technikChangesFor, type TechnikChange } from "../lib/technik-live.js";
+import { streamChangeFeed } from "../lib/sse-stream.js";
 import { ensureRealizationForEvent } from "../lib/calendar-realizations.js";
 import { createProtocolForRealizationSync } from "./protocols.js";
 import {
@@ -305,6 +311,8 @@ export interface JobJson {
   contactPhone: string | null;
   description: string | null;
   notesCount: number;
+  /** Czasy (SQLite UTC) cudzych, nie-systemowych notatek, najnowsze pierwsze — „x nowych notatek” na kafelku. */
+  foreignNotesAt: string[];
   protocol: JobProtocolBrief | null;
   /** Pozostali technicy na tym zleceniu (imię i nazwisko) — z kim jedzie. */
   coTechnicians: string[];
@@ -331,7 +339,7 @@ function protocolBrief(p: Protocol | null): JobProtocolBrief | null {
  * Wydarzenia → JobJson, wsadowo (obiekty, kontrahenci, przypisania, notatki
  * i protokoły po jednym zapytaniu na zbiór, bez N+1).
  */
-function toJobs(rows: CalendarEventRow[], technicianId: number): JobJson[] {
+function toJobs(rows: CalendarEventRow[], technicianId: number, userId: number | null = null): JobJson[] {
   if (rows.length === 0) return [];
   const ids = rows.map((r) => r.id);
 
@@ -388,7 +396,13 @@ function toJobs(rows: CalendarEventRow[], technicianId: number): JobJson[] {
   }
 
   const noteRows = db
-    .select({ eventId: schema.calendarEventNotes.eventId, id: schema.calendarEventNotes.id })
+    .select({
+      eventId: schema.calendarEventNotes.eventId,
+      id: schema.calendarEventNotes.id,
+      userId: schema.calendarEventNotes.userId,
+      source: schema.calendarEventNotes.source,
+      createdAt: schema.calendarEventNotes.createdAt,
+    })
     .from(schema.calendarEventNotes)
     .where(
       and(
@@ -396,9 +410,20 @@ function toJobs(rows: CalendarEventRow[], technicianId: number): JobJson[] {
         isNull(schema.calendarEventNotes.deletedAt)
       )
     )
+    .orderBy(desc(schema.calendarEventNotes.createdAt))
     .all();
   const notesByEvent = new Map<number, number>();
-  for (const n of noteRows) notesByEvent.set(n.eventId, (notesByEvent.get(n.eventId) ?? 0) + 1);
+  // Czasy CUDZYCH notatek (biuro, asystent — nie własne, nie „Rozpoczęto o…”):
+  // kafelek porównuje je z chwilą ostatniego otwarcia zlecenia na tablecie
+  // i pokazuje „2 nowe notatki”. Ostatnie 20 wystarczy — więcej nikt nie liczy.
+  const foreignNotesAt = new Map<number, string[]>();
+  for (const n of noteRows) {
+    notesByEvent.set(n.eventId, (notesByEvent.get(n.eventId) ?? 0) + 1);
+    if (n.source === "system" || (userId != null && n.userId === userId)) continue;
+    const arr = foreignNotesAt.get(n.eventId) ?? [];
+    if (arr.length < 20) arr.push(n.createdAt);
+    foreignNotesAt.set(n.eventId, arr);
+  }
 
   // Protokoły: jawnie przypięte (protocol_id) + protokoły realizacji.
   const protocolIds = rows.map((r) => r.protocolId).filter((v): v is number => v != null);
@@ -445,18 +470,19 @@ function toJobs(rows: CalendarEventRow[], technicianId: number): JobJson[] {
       contactPhone: contractor?.phone ?? null,
       description: ev.description,
       notesCount: notesByEvent.get(ev.id) ?? 0,
+      foreignNotesAt: foreignNotesAt.get(ev.id) ?? [],
       protocol: protocolBrief(proto ?? null),
       coTechnicians: coByEvent.get(ev.id) ?? [],
     };
   });
 }
 
-function jobsByIds(ids: number[], technicianId: number): JobJson[] {
+function jobsByIds(ids: number[], technicianId: number, userId: number | null = null): JobJson[] {
   if (ids.length === 0) return [];
   const rows = db.select().from(schema.calendarEvents).where(inArray(schema.calendarEvents.id, ids)).all();
   const order = new Map(ids.map((id, i) => [id, i]));
   rows.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
-  return toJobs(rows, technicianId);
+  return toJobs(rows, technicianId, userId);
 }
 
 /**
@@ -525,6 +551,39 @@ function publish(c: Context, kind: "updated" | "notes", ids: number[]): void {
     actorClientId: clientIdOf(c),
   });
 }
+
+// ---------------------------------------------------------------------------
+// GET /live — strumień SSE: „biuro właśnie ruszyło Twoje zlecenie"
+//
+// Panel odświeżał się dotąd wyłącznie po powrocie fokusu: technik stojący
+// z otwartym ekranem zlecenia nie widział ani przesuniętego terminu, ani
+// odwołania, dopóki sam czegoś nie tapnął. Tu podpinamy się pod ten sam broker,
+// co kalendarz CRM (src/lib/calendar-live.ts), ale przez filtr własności:
+// z sygnału działowego zostają WYŁĄCZNIE zlecenia pytającego (src/lib/technik-live.ts).
+//
+// KLIENT W QUERY, NIE W NAGŁÓWKU. `EventSource` nie potrafi wysłać nagłówka
+// `X-Alfa-Client`, więc identyfikator karty przychodzi jako `?client=`. Służy
+// do jednego: pominięcia sygnału o WŁASNYM zapisie tej karty (po odpowiedzi API
+// panel i tak odświeża się sam). Autoryzacji na nim nie ma i mieć nie może.
+// ---------------------------------------------------------------------------
+
+app.get("/live", (c) => {
+  const user = getUser(c);
+  // Konto bez powiązania z kartoteką nie ma czyich zleceń słuchać — strumień
+  // stoi otwarty (front nie musi znać tego przypadku), ale nic przez niego nie leci.
+  const tech = linkedTechnician(user);
+  const client = (c.req.query("client") || "").trim().slice(0, 64) || null;
+  return streamChangeFeed<TechnikChange>(c, {
+    event: "technik",
+    ready: { linked: tech != null, ts: Date.now() },
+    subscribe: (emit) =>
+      subscribeCalendarChanges((change) => {
+        if (!tech) return;
+        if (client && change.actorClientId === client) return;
+        for (const item of technikChangesFor(change, tech.id)) emit(item);
+      }),
+  });
+});
 
 // ---------------------------------------------------------------------------
 // GET /activities — słownik czynności do chipów w protokole
@@ -689,13 +748,14 @@ app.get("/jobs/weather", async (c) => {
 
 app.get("/jobs", (c) => {
   try {
-    const tech = linkedTechnician(getUser(c));
+    const user = getUser(c);
+    const tech = linkedTechnician(user);
     if (!tech) return c.json({ success: true, data: [] });
     const from = c.req.query("from") || zonedToday();
     const to = c.req.query("to") || addDays(from, DEFAULT_HORIZON_DAYS);
     if (!DATE_RE.test(from)) throw new ApiError(400, "Parametr from: YYYY-MM-DD");
     if (!DATE_RE.test(to)) throw new ApiError(400, "Parametr to: YYYY-MM-DD");
-    return c.json({ success: true, data: jobsByIds(myJobIds(tech.id, from, to), tech.id) });
+    return c.json({ success: true, data: jobsByIds(myJobIds(tech.id, from, to), tech.id, user.id) });
   } catch (error) {
     return handleError(c, error, "pobierania zleceń");
   }
@@ -792,7 +852,7 @@ app.get("/jobs/:id", (c) => {
     const id = Number(c.req.param("id"));
     if (!Number.isInteger(id)) throw new ApiError(400, "Nieprawidłowe id");
     const ev = myEvent(tech.id, id);
-    const [job] = toJobs([ev], tech.id);
+    const [job] = toJobs([ev], tech.id, user.id);
     return c.json({
       success: true,
       data: { ...job, contacts: jobContacts(ev, job), notes: jobNotes(ev.id, user.id) },
