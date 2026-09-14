@@ -687,6 +687,27 @@
       "when": 1789300005000,
       "tag": "0097_link_previews_map",
       "breakpoints": true
+    },
+    {
+      "idx": 98,
+      "version": "6",
+      "when": 1789300006000,
+      "tag": "0098_contract_drafts_number_code",
+      "breakpoints": true
+    },
+    {
+      "idx": 99,
+      "version": "6",
+      "when": 1789300007000,
+      "tag": "0099_contract_external_pdf",
+      "breakpoints": true
+    },
+    {
+      "idx": 100,
+      "version": "6",
+      "when": 1789300008000,
+      "tag": "0100_monitoring_projects_object",
+      "breakpoints": true
     }
   ]
 }

@@ -292,6 +292,18 @@ export const contracts = sqliteTable("contracts", {
    * (`foreign_keys = ON` w src/db/index.ts).
    */
   draftId: integer("draft_id"),
+  /**
+   * WŁASNY dokument wpisu rejestru (PDF) — podpisany skan, umowa przysłana przez
+   * klienta, aneks. Niezależny od `draftId`: umowa może mieć jedno i drugie,
+   * a wtedy w podglądzie WYGRYWA ten plik (draft niesie wersję do podpisu,
+   * rejestr — tę z podpisami). Migracja 0099; pliki w
+   * `data/attachments/contracts/<id>/`.
+   */
+  documentName: text("document_name"),
+  documentStoredPath: text("document_stored_path"),
+  documentUploadedAt: text("document_uploaded_at"),
+  /** Bez `.references()` w drizzle (FK zakłada migracja) — jak przy `draftId`. */
+  documentUploadedBy: integer("document_uploaded_by"),
   status: text("status", {
     enum: ["draft", "active", "expired", "terminated"],
   })
@@ -1252,20 +1264,34 @@ export type NewService = typeof services.$inferInsert;
 // (moduł "Monitoring", designer w frontend/public/monitoring/designer.html).
 // data to pełny stan projektu z designera (JSON: center, zoom, cameras,
 // points, cables, zones, info...) — zapisywany w całości przy autozapisie.
-export const monitoringProjects = sqliteTable("monitoring_projects", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  name: text("name").notNull(), // np. "Aluzyjna 25, Warszawa"
-  address: text("address").default("").notNull(),
-  notes: text("notes").default("").notNull(), // kontekst obiektu / research
-  data: text("data").default("").notNull(), // JSON stanu designera ("" = nowy projekt)
-  offer: text("offer").default("").notNull(), // JSON pól oferty ("" = jeszcze nie wypełniana)
-  createdAt: text("created_at")
-    .default(sql`(datetime('now'))`)
-    .notNull(),
-  updatedAt: text("updated_at")
-    .default(sql`(datetime('now'))`)
-    .notNull(),
-});
+export const monitoringProjects = sqliteTable(
+  "monitoring_projects",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    name: text("name").notNull(), // np. "Aluzyjna 25, Warszawa"
+    address: text("address").default("").notNull(),
+    /**
+     * Obiekt z kartoteki, dla którego powstaje projekt. NULL to normalny stan,
+     * a nie brak danych: plan kamer rysuje się często na zapytanie ofertowe,
+     * zanim obiekt w ogóle trafi do kartoteki. ON DELETE SET NULL — projekt to
+     * własna praca projektanta i ma przeżyć skasowanie obiektu (migracja 0100).
+     */
+    objectId: integer("object_id").references(() => objects.id, { onDelete: "set null" }),
+    notes: text("notes").default("").notNull(), // kontekst obiektu / research
+    data: text("data").default("").notNull(), // JSON stanu designera ("" = nowy projekt)
+    offer: text("offer").default("").notNull(), // JSON pól oferty ("" = jeszcze nie wypełniana)
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+    updatedAt: text("updated_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+  },
+  (t) => ({
+    /** Jedyne zapytanie wstecz: projekty obiektu na jego karcie. */
+    objectIdx: index("monitoring_projects_object_idx").on(t.objectId),
+  })
+);
 
 export type MonitoringProject = typeof monitoringProjects.$inferSelect;
 export type NewMonitoringProject = typeof monitoringProjects.$inferInsert;
@@ -3637,6 +3663,10 @@ export type NewInterventionAttachment = typeof interventionAttachments.$inferIns
 export const CONTRACT_DRAFT_STATUSES = ["draft", "sent", "signed", "rejected", "archived"] as const;
 export type ContractDraftStatus = (typeof CONTRACT_DRAFT_STATUSES)[number];
 
+/** Skąd wziął się dokument draftu — patrz kolumna `contract_drafts.source`. */
+export const CONTRACT_DRAFT_SOURCES = ["template", "external"] as const;
+export type ContractDraftSource = (typeof CONTRACT_DRAFT_SOURCES)[number];
+
 /** Etykiety PL — front nie trzyma własnego słownika (kontrakt z api.ts). */
 export const CONTRACT_DRAFT_STATUS_LABELS: Record<ContractDraftStatus, string> = {
   draft: "Szkic",
@@ -3666,10 +3696,27 @@ export const contractDrafts = sqliteTable(
     companyId: integer("company_id")
       .notNull()
       .references(() => companies.id, { onDelete: "restrict" }),
+    /**
+     * Skąd wziął się dokument draftu (migracja 0099):
+     *  - `template` — wygenerowany z otagowanego wzoru Worda (DOCX),
+     *  - `external` — WGRANY PDF (skan podpisanej umowy, umowa od klienta).
+     *
+     * Wariant `external` nie ma szablonu, więc nie ma też pól formularza,
+     * flagi `stale` ani generowania; `template_key` dostaje wtedy stałą
+     * `external-pdf`, której NIE MA w rejestrze szablonów.
+     */
+    source: text("source", { enum: CONTRACT_DRAFT_SOURCES }).default("template").notNull(),
     /** Klucz szablonu z rejestru (src/lib/contract-templates/registry.ts). */
     templateKey: text("template_key").notNull(),
     /** Pełny numer `seq/KOD/rok` — jedyne miejsce formatu: contract-numbering.ts. */
     contractNumber: text("contract_number").notNull().unique(),
+    /**
+     * Kod z numeru (`ZDW`, `RODO`) i zarazem SERIA LICZNIKA. Szablon z własnym
+     * `numberCode` prowadzi osobną numerację, więc umowy towarzyszące nie zjadają
+     * numerów umowom głównym tej samej spółki (migracja 0098, backfill kodem
+     * z istniejących numerów).
+     */
+    numberCode: text("number_code").notNull(),
     seq: integer("seq").notNull(),
     year: integer("year").notNull(),
     /** Data zawarcia ("YYYY-MM-DD"); do DOCX idzie jako DD.MM.RRRR. */
@@ -3702,7 +3749,7 @@ export const contractDrafts = sqliteTable(
     companyYearIdx: index("contract_drafts_company_year_idx").on(t.companyId, t.year),
     statusIdx: index("contract_drafts_status_idx").on(t.status),
     /** Właściwa gwarancja braku dziur i duplikatów w liczniku (wyścig dwóch POST-ów). */
-    seqUidx: uniqueIndex("contract_drafts_company_year_seq_uidx").on(t.companyId, t.year, t.seq),
+    seqUidx: uniqueIndex("contract_drafts_company_year_code_seq_uidx").on(t.companyId, t.year, t.numberCode, t.seq),
   })
 );
 

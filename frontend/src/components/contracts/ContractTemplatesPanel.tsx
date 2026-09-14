@@ -243,6 +243,12 @@ export function ContractTemplatesPanel({ editable }: Props) {
                           <dd>{t.fieldCount}</dd>
                         </div>
                         <div className="flex gap-1">
+                          <dt className="text-muted-foreground">Numeracja:</dt>
+                          {/* Wzór z własnym kodem ma osobny licznik — jego umowy nie
+                              zjadają numerów pozostałym umowom tej samej spółki. */}
+                          <dd>{t.numberCode ? `własna seria ${t.numberCode}/rok` : "seria spółki (kod z kartoteki)"}</dd>
+                        </div>
+                        <div className="flex gap-1">
                           <dt className="text-muted-foreground">Umowy z tego wzoru:</dt>
                           <dd data-testid="umowy-wzory-licznik">{draftsLabel(t.draftCount)}</dd>
                         </div>

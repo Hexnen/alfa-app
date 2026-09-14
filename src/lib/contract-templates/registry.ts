@@ -17,6 +17,7 @@ import { statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { db, schema } from "../../db/index.js";
+import { CONTRACT_TEMPLATE_RODO } from "./rodo.js";
 import { CONTRACT_TEMPLATE_ZDW } from "./zdw.js";
 
 export type ContractFieldType = "text" | "textarea" | "email" | "money" | "date" | "select";
@@ -53,6 +54,7 @@ export type ContractPrefillSource =
   | "kontrahent"
   | "spółka"
   | "kontakt obiektu"
+  | "umowa ZDW obiektu"
   | "wyliczone"
   | "domyślne";
 
@@ -81,6 +83,16 @@ export interface ContractTemplateDef {
   fileLabel: string;
   /** `companies.name` spółki, do której przywiązany jest nagłówek i stopka. */
   companyName: string;
+  /**
+   * Kod w numerze umowy (`seq/KOD/rok`) i zarazem KLUCZ WŁASNEJ SERII licznika.
+   *
+   * Puste = kod bierzemy z kartoteki spółki (`companies.contract_code`), tak jak
+   * robi to umowa ZDW: numer należy wtedy do spółki i jest jeden na wszystkie jej
+   * dokumenty tego rodzaju. Ustawiony (np. `RODO`) = wzór ma SWOJĄ serię, liczoną
+   * per spółka, rok i ten kod — umowy towarzyszące nie zjadają wtedy numerów
+   * umowom głównym, a spółka nie musi mieć uzupełnionego kodu do numeracji.
+   */
+  numberCode?: string;
   /**
    * Skąd wzięty wzór — nazwa oryginalnego pliku Worda i data wydania. Panel
    * „Wzory umów” pokazuje to wprost, żeby dało się sprawdzić, czy aplikacja
@@ -123,6 +135,8 @@ export interface ContractTemplateJson {
   fields: ContractDraftFieldDefJson[];
   /** Skąd wzięty wzór (oryginalny plik Worda + data wydania). */
   sourceNote: string;
+  /** Stały kod serii numeracji albo null, gdy numer bierze kod ze spółki. */
+  numberCode: string | null;
   /** Nazwa otagowanego pliku w `templates/umowy/`. */
   fileName: string;
   /** Rozmiar tego pliku w bajtach; 0, gdy pliku nie ma na dysku. */
@@ -140,7 +154,27 @@ export interface ContractTemplateJson {
  */
 export const TEMPLATES_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "../../../templates/umowy");
 
-export const CONTRACT_TEMPLATES: ContractTemplateDef[] = [CONTRACT_TEMPLATE_ZDW];
+export const CONTRACT_TEMPLATES: ContractTemplateDef[] = [CONTRACT_TEMPLATE_ZDW, CONTRACT_TEMPLATE_RODO];
+
+/**
+ * Klucz draftu, który NIE POWSTAŁ z żadnego wzoru — wgranego PDF-a (skan
+ * podpisanej umowy, umowa przysłana przez klienta). Kolumna `template_key`
+ * została NOT NULL, więc taki draft musi mieć jakiś klucz; ta stała CELOWO nie
+ * występuje w `CONTRACT_TEMPLATES`, żeby `getTemplate` zwrócił dla niej
+ * `undefined`, a kod rozgałęział się po `contract_drafts.source`.
+ */
+export const EXTERNAL_TEMPLATE_KEY = "external-pdf";
+
+/** Etykieta w miejscu nazwy wzoru (lista draftów, filtr, karta obiektu). */
+export const EXTERNAL_TEMPLATE_LABEL = "Wgrany PDF";
+
+/**
+ * Kod serii numeracji draftów z RĘCZNIE wpisanym numerem. Numer bierze się
+ * wtedy z papieru, a `seq` istnieje wyłącznie po to, żeby spełnić unikalny
+ * indeks (spółka, rok, kod, seq) — dlatego własna seria, osobna od ZDW i RODO,
+ * której nikt nie ogląda.
+ */
+export const EXTERNAL_NUMBER_CODE = "EXT";
 
 export function getTemplate(key: string): ContractTemplateDef | undefined {
   return CONTRACT_TEMPLATES.find((t) => t.key === key);
@@ -234,6 +268,7 @@ export function templateJson(def: ContractTemplateDef, object?: TemplateObjectCo
     groups: def.groups,
     fields: def.fields.map(fieldJson),
     sourceNote: def.sourceNote,
+    numberCode: def.numberCode ?? null,
     fileName: def.file,
     fileSize: templateFileSize(def),
     fieldCount: def.fields.length,

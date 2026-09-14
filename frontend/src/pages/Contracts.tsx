@@ -31,6 +31,9 @@ import {
   ChevronLeft,
   ChevronRight,
   FileText,
+  FileUp,
+  Loader2,
+  Trash,
   X,
 } from "lucide-react";
 import {
@@ -40,6 +43,9 @@ import {
   createContract,
   updateContract,
   deleteContract,
+  uploadContractDocument,
+  deleteContractDocument,
+  contractDocumentUrl,
   contractDraftsApi,
   type ContractorCatalogEntry,
   type ContractSortKey,
@@ -54,7 +60,7 @@ import { usePerms } from "@/auth/permissions";
 import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
 import { ContractDraftsPanel } from "@/components/contracts/ContractDraftsPanel";
 import { ContractTemplatesPanel } from "@/components/contracts/ContractTemplatesPanel";
-import { DocxPreview } from "@/components/contracts/DocxPreview";
+import { ContractPreview } from "@/components/contracts/ContractPreview";
 import { SplitLayout } from "@/components/contracts/SplitLayout";
 
 const statusColors: Record<string, "default" | "success" | "secondary" | "destructive"> = {
@@ -133,6 +139,16 @@ function ContractsRegisterPanel() {
 
   const [formOpen, setFormOpen] = useState(false);
   const [editingContract, setEditingContract] = useState<Contract | null>(null);
+  /**
+   * Dokument umowy w formularzu. Plik jedzie OSOBNYM żądaniem po zapisie:
+   * formularz jest JSON-em, a wpis musi już istnieć, żeby dokument miał gdzie
+   * usiąść (ten sam układ, co załączniki w pozostałych modułach).
+   */
+  const [docFile, setDocFile] = useState<File | null>(null);
+  /** Edycja: „usuń dokument”, wykonywane dopiero przy zapisie formularza. */
+  const [docRemove, setDocRemove] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
   const [formData, setFormData] = useState<ContractInput>({
     objectId: 0,
     contractNumber: "",
@@ -270,7 +286,7 @@ function ContractsRegisterPanel() {
   useEffect(() => {
     setSelectedId((prev) => {
       if (prev !== null && contracts.some((c) => c.id === prev)) return prev;
-      return (contracts.find((c) => c.draftFileUrl) ?? contracts[0])?.id ?? null;
+      return (contracts.find((c) => c.fileUrl) ?? contracts[0])?.id ?? null;
     });
   }, [contracts]);
 
@@ -394,19 +410,33 @@ function ContractsRegisterPanel() {
     e.preventDefault();
     if (!editable) return;
     if (!formData.objectId) {
-      alert("Wybierz obiekt");
+      setFormError("Wybierz obiekt, którego dotyczy umowa.");
       return;
     }
+    setSaving(true);
+    setFormError(null);
     try {
+      let contractId = editingContract?.id ?? null;
       if (editingContract) {
         await updateContract(editingContract.id, formData);
       } else {
-        await createContract(formData);
+        const created = await createContract(formData);
+        contractId = created.data?.id ?? null;
+      }
+      // Dokument dopiero TERAZ: wgrany plik podmienia poprzedni, a „usuń”
+      // wykonujemy tylko wtedy, gdy nie wybrano nowego (inaczej kasowałoby
+      // to, co przed chwilą doszło).
+      if (contractId !== null) {
+        if (docFile) await uploadContractDocument(contractId, docFile);
+        else if (docRemove) await deleteContractDocument(contractId);
       }
       loadContracts();
       closeForm();
     } catch (error) {
       console.error("Error saving contract:", error);
+      setFormError(error instanceof Error ? error.message : "Nie udało się zapisać umowy.");
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -435,12 +465,18 @@ function ContractsRegisterPanel() {
       value: contract.value || undefined,
       status: contract.status,
     });
+    setDocFile(null);
+    setDocRemove(false);
+    setFormError(null);
     setFormOpen(true);
   };
 
   const closeForm = () => {
     setFormOpen(false);
     setEditingContract(null);
+    setDocFile(null);
+    setDocRemove(false);
+    setFormError(null);
     setFormData({
       objectId: 0,
       contractNumber: "",
@@ -798,16 +834,37 @@ function ContractsRegisterPanel() {
   );
 
   const preview = (
-    <DocxPreview
-      url={selected?.draftFileUrl ?? null}
-      previewSrc={contractDraftsApi.previewUrl(selected?.draftFileUrl)}
-      fieldLegend
+    <ContractPreview
+      // Własny dokument wpisu (podpisany skan) wygrywa z plikiem draftu —
+      // backend liczy to w `fileUrl`, front tylko pokazuje.
+      kind={selected?.fileKind ?? null}
+      url={selected?.fileUrl ?? null}
+      // Kolorowanie pól dotyczy wyłącznie DOCX-a złożonego z wzoru.
+      previewSrc={
+        selected?.fileKind === "docx" ? contractDraftsApi.previewUrl(selected.fileUrl) : null
+      }
+      fieldLegend={selected?.fileKind === "docx"}
+      version={selected?.documentUploadedAt ?? ""}
       title={
         selected ? `${selected.contractNumber}${selected.object ? ` — ${selected.object.name}` : ""}` : null
       }
+      notice={
+        selected?.fileSource === "document" && selected.draftFileUrl ? (
+          <p
+            className="rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground"
+            data-testid="umowy-rejestr-podglad-zrodlo"
+          >
+            Widzisz dokument wgrany do tego wpisu.{" "}
+            <a className="underline" href={selected.draftFileUrl} target="_blank" rel="noreferrer">
+              Otwórz plik draftu
+            </a>
+            , jeśli szukasz wersji z generatora.
+          </p>
+        ) : null
+      }
       emptyText={
         selected
-          ? "Ta umowa nie ma powiązanego dokumentu — umowy dodane ręcznie nie mają pliku; drafty trafiają tu przez „Przenieś do rejestru”."
+          ? "Ta umowa nie ma dokumentu — wgraj PDF przez „Edytuj”, albo przenieś tu draft przyciskiem „Przenieś do rejestru”."
           : "Wybierz umowę z listy, aby zobaczyć podgląd"
       }
     />
@@ -935,12 +992,102 @@ function ContractsRegisterPanel() {
                   </Select>
                 </div>
               </div>
+
+              {/*
+                Dokument umowy: PDF wgrany do TEGO wpisu. Umowa w rejestrze
+                bywa papierem, który nigdy nie przeszedł przez generator —
+                a podpisany skan umowy z generatora i tak jest innym plikiem
+                niż wersja wysłana do podpisu, więc ma własne miejsce.
+              */}
+              <div className="space-y-2 rounded-md border p-3">
+                <Label className="text-sm">Dokument (PDF)</Label>
+                {editingContract?.documentName && !docRemove && !docFile ? (
+                  <div className="flex items-center gap-2 text-sm" data-testid="umowy-rejestr-dokument">
+                    <FileText className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                    <a
+                      href={contractDocumentUrl(editingContract.id)}
+                      className="min-w-0 flex-1 truncate text-primary hover:underline"
+                    >
+                      {editingContract.documentName}
+                    </a>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      onClick={() => setDocRemove(true)}
+                      title="Usuń dokument"
+                      data-testid="umowy-rejestr-dokument-usun"
+                    >
+                      <Trash className="h-4 w-4 text-destructive" />
+                    </Button>
+                  </div>
+                ) : null}
+                {docRemove && !docFile && (
+                  <p className="text-xs text-muted-foreground" data-testid="umowy-rejestr-dokument-do-usuniecia">
+                    Dokument zostanie usunięty przy zapisie.{" "}
+                    <button
+                      type="button"
+                      className="underline"
+                      onClick={() => setDocRemove(false)}
+                    >
+                      Cofnij
+                    </button>
+                  </p>
+                )}
+                {docFile && (
+                  <p className="flex items-center gap-2 text-sm" data-testid="umowy-rejestr-dokument-nowy">
+                    <FileUp className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                    <span className="min-w-0 flex-1 truncate">{docFile.name}</span>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      onClick={() => setDocFile(null)}
+                      title="Cofnij wybór pliku"
+                    >
+                      <X className="h-4 w-4" />
+                    </Button>
+                  </p>
+                )}
+                <Input
+                  type="file"
+                  accept="application/pdf,.pdf"
+                  className="cursor-pointer"
+                  data-testid="umowy-rejestr-dokument-plik"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0] ?? null;
+                    if (file && !/\.pdf$/i.test(file.name) && file.type !== "application/pdf") {
+                      setFormError("Dokument umowy wgraj jako plik PDF.");
+                      setDocFile(null);
+                      return;
+                    }
+                    setFormError(null);
+                    setDocFile(file);
+                    if (file) setDocRemove(false);
+                  }}
+                />
+                <p className="text-[11px] leading-tight text-muted-foreground">
+                  Skan podpisanej umowy albo dokument przysłany przez klienta — maksymalnie 5 MB.
+                  Wgranie nowego pliku podmienia poprzedni.
+                </p>
+              </div>
+
+              {formError && (
+                <p className="text-xs text-destructive" role="alert" data-testid="umowy-rejestr-form-error">
+                  {formError}
+                </p>
+              )}
             </div>
             <DialogFooter>
-              <Button type="button" variant="outline" onClick={closeForm}>
+              <Button type="button" variant="outline" onClick={closeForm} disabled={saving}>
                 Anuluj
               </Button>
-              <Button type="submit">Zapisz</Button>
+              <Button type="submit" disabled={saving}>
+                {saving && <Loader2 className="mr-1 h-4 w-4 animate-spin" aria-hidden />}
+                Zapisz
+              </Button>
             </DialogFooter>
           </form>
         </DialogContent>

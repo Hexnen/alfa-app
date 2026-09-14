@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { db, schema } from "../db/index.js";
-import { eq, desc, asc, sql } from "drizzle-orm";
+import { eq, desc, asc, or, sql } from "drizzle-orm";
 import type {
   MonitoringProject,
   NewMonitoringProject,
@@ -31,8 +31,35 @@ const stateBodyLimit = bodyLimit({
   onError: (c) => c.json({ success: false, error: "Stan projektu jest za duży (limit 30 MB)" }, 413),
 });
 
+/**
+ * Obiekt z kartoteki podpięty pod projekt — tyle, ile potrzebuje lista projektów
+ * i sekcja na karcie obiektu (reszta kartoteki siedzi za kluczem `objects`).
+ */
+type ProjectObject = { id: number; name: string; address: string | null; city: string | null };
+
+/** Ile podpowiedzi obiektów wraca do pickera (jak w draftach umów). */
+const PICK_LIMIT = 30;
+
+/** Kolumny obiektu do JOIN-a — jedno miejsce, żeby lista i detal zwracały to samo. */
+const OBJECT_COLUMNS = {
+  id: schema.objects.id,
+  name: schema.objects.name,
+  address: schema.objects.address,
+  city: schema.objects.city,
+} as const;
+
+/**
+ * LEFT JOIN bez dopasowania daje w drizzle komplet kolumn z NULL-ami, a nie
+ * `null` w miejscu całego obiektu — front chce jednego albo drugiego, więc
+ * spłaszczamy to tutaj.
+ */
+function joinedObject(row: { [K in keyof ProjectObject]: ProjectObject[K] | null } | null): ProjectObject | null {
+  if (!row || row.id === null || row.name === null) return null;
+  return { id: row.id, name: row.name, address: row.address, city: row.city };
+}
+
 // Podsumowanie stanu projektu do listy (bez odsyłania pełnego JSON-a)
-function withCounts(p: MonitoringProject) {
+function withCounts(p: MonitoringProject, object: ProjectObject | null = null) {
   let cameras = 0,
     points = 0,
     zones = 0,
@@ -49,16 +76,94 @@ function withCounts(p: MonitoringProject) {
     /* pusty/uszkodzony stan — zostają zera */
   }
   const { data: _data, offer: _offer, ...rest } = p;
-  return { ...rest, cameras, points, zones, cables, pinAddress };
+  return { ...rest, object, cameras, points, zones, cables, pinAddress };
+}
+
+/**
+ * `objectId` z ciała żądania: liczba = podpięcie pod obiekt z kartoteki,
+ * `null` (albo pusty string z formularza) = odpięcie, BRAK klucza = bez zmian.
+ * Rozróżnienie null/undefined jest tu istotne, bo PUT zapisuje tylko te pola,
+ * które przyszły — inaczej każda edycja nazwy odpinałaby projekt od obiektu.
+ */
+async function parseObjectId(
+  body: Record<string, unknown>
+): Promise<{ value?: number | null; error?: string }> {
+  if (!(body && typeof body === "object" && "objectId" in body)) return {};
+  const raw = body.objectId;
+  if (raw === null || raw === "") return { value: null };
+  const id = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isInteger(id) || id <= 0) {
+    return { error: "Nieprawidłowy identyfikator obiektu" };
+  }
+  const [object] = await db
+    .select({ id: schema.objects.id })
+    .from(schema.objects)
+    .where(eq(schema.objects.id, id));
+  if (!object) return { error: "Obiekt nie istnieje" };
+  return { value: id };
 }
 
 // Lista projektów
 app.get("/", async (c) => {
-  const projects = await db
-    .select()
+  const rows = await db
+    .select({ project: schema.monitoringProjects, object: OBJECT_COLUMNS })
     .from(schema.monitoringProjects)
+    .leftJoin(schema.objects, eq(schema.monitoringProjects.objectId, schema.objects.id))
     .orderBy(desc(schema.monitoringProjects.updatedAt));
-  return c.json({ success: true, data: projects.map(withCounts) });
+  return c.json({
+    success: true,
+    data: rows.map((r) => withCounts(r.project, joinedObject(r.object))),
+  });
+});
+
+/**
+ * Projekty JEDNEGO obiektu — sekcja „Projekty CCTV" na karcie obiektu.
+ * Stoi PRZED trasami z gołym `/:id`, żeby czytelnie było widać, że `by-object`
+ * to stały człon ścieżki, a nie identyfikator projektu.
+ */
+app.get("/by-object/:objectId", async (c) => {
+  const objectId = parseInt(c.req.param("objectId"));
+  if (!Number.isInteger(objectId) || objectId <= 0) {
+    return c.json({ success: false, error: "Nieprawidłowy identyfikator obiektu" }, 400);
+  }
+  const rows = await db
+    .select({ project: schema.monitoringProjects, object: OBJECT_COLUMNS })
+    .from(schema.monitoringProjects)
+    .leftJoin(schema.objects, eq(schema.monitoringProjects.objectId, schema.objects.id))
+    .where(eq(schema.monitoringProjects.objectId, objectId))
+    .orderBy(desc(schema.monitoringProjects.updatedAt));
+  return c.json({
+    success: true,
+    data: { items: rows.map((r) => withCounts(r.project, joinedObject(r.object))) },
+  });
+});
+
+/**
+ * Wyszukiwarka obiektów do pickera w formularzu projektu (wzór
+ * `/contracts/drafts/pick/objects`): własny lekki endpoint pod prefiksem
+ * `/monitoring` znaczy, że projektant z samym kluczem `technical/projekty`
+ * podepnie projekt pod obiekt, nie mając dostępu do całej kartoteki.
+ */
+app.get("/pick/objects", async (c) => {
+  const q = (c.req.query("q") ?? "").trim().toLowerCase();
+  const pattern = `%${q}%`;
+  const rows = await db
+    .select({ ...OBJECT_COLUMNS, contractorName: schema.contractors.name })
+    .from(schema.objects)
+    .leftJoin(schema.contractors, eq(schema.objects.contractorId, schema.contractors.id))
+    .where(
+      q
+        ? or(
+            sql`lower(${schema.objects.name}) like ${pattern}`,
+            sql`lower(coalesce(${schema.objects.address}, '')) like ${pattern}`,
+            sql`lower(coalesce(${schema.objects.city}, '')) like ${pattern}`,
+            sql`lower(coalesce(${schema.contractors.name}, '')) like ${pattern}`
+          )
+        : undefined
+    )
+    .orderBy(asc(sql`lower(${schema.objects.name})`))
+    .limit(PICK_LIMIT);
+  return c.json({ success: true, data: { items: rows } });
 });
 
 // Nowy projekt
@@ -68,28 +173,41 @@ app.post("/", async (c) => {
   if (!name) {
     return c.json({ success: false, error: "Nazwa jest wymagana" }, 400);
   }
+  const objectId = await parseObjectId(body);
+  if (objectId.error) {
+    return c.json({ success: false, error: objectId.error }, 400);
+  }
   const [project] = await db
     .insert(schema.monitoringProjects)
     .values({
       name,
       address: typeof body.address === "string" ? body.address.trim() : "",
       notes: typeof body.notes === "string" ? body.notes : "",
+      objectId: objectId.value ?? null,
     })
     .returning();
-  return c.json({ success: true, data: withCounts(project) }, 201);
+  return c.json({ success: true, data: withCounts(project, await loadObject(project.objectId)) }, 201);
 });
+
+/** Obiekt podpięty pod projekt — dociągany po zapisie, żeby odpowiedź była pełna. */
+async function loadObject(objectId: number | null): Promise<ProjectObject | null> {
+  if (!objectId) return null;
+  const [object] = await db.select(OBJECT_COLUMNS).from(schema.objects).where(eq(schema.objects.id, objectId));
+  return joinedObject(object ?? null);
+}
 
 // Pojedynczy projekt (z pełnym stanem — dla designera)
 app.get("/:id", async (c) => {
   const id = parseInt(c.req.param("id"));
-  const [project] = await db
-    .select()
+  const [row] = await db
+    .select({ project: schema.monitoringProjects, object: OBJECT_COLUMNS })
     .from(schema.monitoringProjects)
+    .leftJoin(schema.objects, eq(schema.monitoringProjects.objectId, schema.objects.id))
     .where(eq(schema.monitoringProjects.id, id));
-  if (!project) {
+  if (!row) {
     return c.json({ success: false, error: "Projekt nie istnieje" }, 404);
   }
-  return c.json({ success: true, data: project });
+  return c.json({ success: true, data: { ...row.project, object: joinedObject(row.object) } });
 });
 
 // Edycja metadanych (nazwa / adres / notatki)
@@ -105,6 +223,11 @@ app.put("/:id", async (c) => {
   if (typeof body.offer === "object" && body.offer !== null) {
     updates.offer = JSON.stringify(body.offer);
   }
+  const objectId = await parseObjectId(body);
+  if (objectId.error) {
+    return c.json({ success: false, error: objectId.error }, 400);
+  }
+  if (objectId.value !== undefined) updates.objectId = objectId.value;
   const [project] = await db
     .update(schema.monitoringProjects)
     .set({ ...updates, updatedAt: new Date().toISOString() })
@@ -113,7 +236,7 @@ app.put("/:id", async (c) => {
   if (!project) {
     return c.json({ success: false, error: "Projekt nie istnieje" }, 404);
   }
-  return c.json({ success: true, data: withCounts(project) });
+  return c.json({ success: true, data: withCounts(project, await loadObject(project.objectId)) });
 });
 
 // Autozapis stanu z designera — body to pełny obiekt stanu (JSON)

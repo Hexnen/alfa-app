@@ -1,8 +1,21 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
+import { createReadStream, statSync } from "node:fs";
+import { Readable } from "node:stream";
 import { db, schema } from "../db/index.js";
 import { eq, like, or, sql, and, ne, asc, desc } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import type { ApiResponse, ContractStatus } from "../types/index.js";
+import { getUser } from "../middleware/auth.js";
+import { ApiError } from "../lib/calendar-labels.js";
+import { contentDisposition } from "../lib/calendar-attachments.js";
+import {
+  PDF_MIME,
+  assertPdfUpload,
+  externalFileName,
+  generatedFilePath,
+  removeContractDir,
+  writeContractDocument,
+} from "../lib/contract-templates/store.js";
 import {
   asRecord,
   compact,
@@ -31,8 +44,10 @@ type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 function parseContractFields(raw: unknown) {
   const b = asRecord(raw);
   // `draftId` nadaje wyłącznie „Przenieś do rejestru” (POST /contracts/drafts/:id/promote)
-  // — ręczna edycja umowy nie może przypiąć sobie cudzego dokumentu.
-  rejectReadonlyFields(b, ["draftId"]);
+  // — ręczna edycja umowy nie może przypiąć sobie cudzego dokumentu. Kolumny
+  // `document_*` ustawia wyłącznie wgranie pliku (POST /contracts/:id/document):
+  // ścieżka na dysku nie ma prawa przyjść z formularza.
+  rejectReadonlyFields(b, ["draftId", "documentName", "documentStoredPath", "documentUploadedAt", "documentUploadedBy"]);
   return {
     objectId: parseFk(b.objectId, "objects", "Obiekt", { nullable: false }),
     contractNumber: parseString(b.contractNumber, { label: "Numer umowy", max: STR.SHORT }),
@@ -164,6 +179,52 @@ function dateParam(raw: string | undefined): string | undefined {
 export function draftFileUrlOf(draftId: number | null, storedPath: string | null | undefined): string | null {
   if (draftId === null || !storedPath) return null;
   return `/api/contracts/drafts/${draftId}/file?inline=1`;
+}
+
+/** Kształt pól dokumentu w JSON umowy (kontrakt z frontem — api.ts, Contract). */
+export interface ContractFileJson {
+  /** Adres podglądu — własny dokument albo plik draftu; null = nie ma czego pokazać. */
+  fileUrl: string | null;
+  /** Czym jest plik pod `fileUrl` — od tego zależy komponent podglądu. */
+  fileKind: "docx" | "pdf" | null;
+  /** Skąd pochodzi: `document` = wgrany do wpisu, `draft` = z dokumentu draftu. */
+  fileSource: "document" | "draft" | null;
+  /**
+   * Sam plik draftu, niezależnie od tego, czy wygrał w podglądzie. Zostaje dla
+   * zgodności (i dla widoku, który chce pokazać JEDNO i DRUGIE: wersję do
+   * podpisu obok podpisanego skanu).
+   */
+  draftFileUrl: string | null;
+}
+
+/**
+ * Który dokument pokazać przy wpisie w rejestrze.
+ *
+ * WŁASNY PLIK WYGRYWA Z PLIKIEM DRAFTU. Podpisany skan umowy, która wyszła
+ * z generatora, to codzienność: draft niesie wtedy wersję do podpisu, a rejestr
+ * — tę z podpisami, i to ona jest dowodem. Draftowy plik zostaje dostępny pod
+ * `draftFileUrl`, więc nic nie znika, zmienia się tylko pierwszeństwo.
+ */
+export function contractFileJson(
+  contract: { id: number; draftId: number | null; documentStoredPath: string | null },
+  draftStoredPath: string | null | undefined
+): ContractFileJson {
+  const draftFileUrl = draftFileUrlOf(contract.draftId, draftStoredPath);
+  if (contract.documentStoredPath) {
+    return {
+      fileUrl: `/api/contracts/${contract.id}/document?inline=1`,
+      fileKind: "pdf",
+      fileSource: "document",
+      draftFileUrl,
+    };
+  }
+  if (draftFileUrl) {
+    // Draft bywa i DOCX-em z generatora, i wgranym PDF-em — rozpoznajemy po
+    // rozszerzeniu ścieżki, bo to ona mówi, co naprawdę leży na dysku.
+    const pdf = (draftStoredPath ?? "").toLowerCase().endsWith(".pdf");
+    return { fileUrl: draftFileUrl, fileKind: pdf ? "pdf" : "docx", fileSource: "draft", draftFileUrl };
+  }
+  return { fileUrl: null, fileKind: null, fileSource: null, draftFileUrl: null };
 }
 
 // Get all contracts
@@ -307,7 +368,7 @@ app.get("/", async (c) => {
       ...c.contract,
       object: c.object,
       contractor: c.contractor,
-      draftFileUrl: draftFileUrlOf(c.contract.draftId, c.draftStoredPath),
+      ...contractFileJson(c.contract, c.draftStoredPath),
     })),
     total,
     page,
@@ -354,7 +415,7 @@ app.get("/:id", async (c) => {
       ...result[0].contract,
       object: result[0].object,
       contractor: result[0].contractor,
-      draftFileUrl: draftFileUrlOf(result[0].contract.draftId, result[0].draftStoredPath),
+      ...contractFileJson(result[0].contract, result[0].draftStoredPath),
     },
   });
 });
@@ -574,10 +635,140 @@ app.delete("/:id", async (c) => {
     );
   }
 
+  // Katalog z własnym dokumentem umowy znika PO commicie — nieudane kasowanie
+  // nie zabiera pliku. Plik draftu zostaje: należy do draftu, nie do tego wpisu.
+  removeContractDir(id);
+
   return c.json<ApiResponse<null>>({
     success: true,
     message: "Contract deleted successfully",
   });
+});
+
+// ---------------------------------------------------------------------------
+// Własny dokument wpisu (PDF) — umowa spoza generatora i podpisane skany
+// ---------------------------------------------------------------------------
+
+/**
+ * Umowa w rejestrze bywa PAPIEREM, który nigdy nie przeszedł przez generator:
+ * skan podpisanego egzemplarza, dokument przysłany przez klienta, umowa sprzed
+ * wdrożenia aplikacji. Dotąd taki wpis nie miał czego pokazać w podglądzie,
+ * a plik żył na dysku sieciowym, poza kartoteką.
+ *
+ * Jeden plik na wpis — to DOKUMENT UMOWY, a nie teczka: aneksy i korespondencja
+ * mają swoje miejsce w załącznikach draftu. Wgranie drugiego podmienia pierwszy
+ * (stary plik kasuje `writeContractDocument`, już po zapisaniu nowego).
+ */
+function contractRow(id: number) {
+  return db.select().from(schema.contracts).where(eq(schema.contracts.id, id)).get();
+}
+
+function contractIdParam(c: Context): number {
+  const id = parseInt(c.req.param("id"));
+  if (!Number.isInteger(id) || id <= 0) throw new ApiError(400, "Nieprawidłowe id umowy");
+  return id;
+}
+
+function documentError(c: Context, error: unknown, what: string) {
+  if (error instanceof ApiError) return c.json({ success: false, error: error.message }, error.status);
+  console.error(`Błąd ${what}:`, error);
+  return c.json({ success: false, error: `Błąd ${what}` }, 500);
+}
+
+app.post("/:id/document", async (c) => {
+  try {
+    const id = contractIdParam(c);
+    const row = contractRow(id);
+    if (!row) throw new ApiError(404, "Umowa nie istnieje");
+
+    const ct = c.req.header("content-type") ?? "";
+    if (!/multipart\/form-data/i.test(ct)) throw new ApiError(400, "Wymagany formularz multipart/form-data");
+    const form = await c.req.formData().catch(() => null);
+    if (!form) throw new ApiError(400, "Nieprawidłowe dane formularza");
+    const entry = form.get("file");
+    if (!(entry instanceof File)) throw new ApiError(400, "Nie wybrano pliku PDF z umową");
+    const file = assertPdfUpload(entry.name, entry.type, Buffer.from(await entry.arrayBuffer()));
+
+    const user = getUser(c);
+    const storedPath = writeContractDocument(id, file.data, row.documentStoredPath);
+    const updated = db
+      .update(schema.contracts)
+      .set({
+        documentName: externalFileName(file.name),
+        documentStoredPath: storedPath,
+        documentUploadedAt: sql`(datetime('now'))`,
+        documentUploadedBy: user.id,
+      })
+      .where(eq(schema.contracts.id, id))
+      .returning()
+      .get();
+
+    db.insert(schema.objectHistory)
+      .values({
+        objectId: row.objectId,
+        action: "contract_updated",
+        description: `Contract ${row.contractNumber} document uploaded (${file.name})`,
+      })
+      .run();
+
+    return c.json({ success: true, data: { ...updated, ...contractFileJson(updated, null) } });
+  } catch (error) {
+    return documentError(c, error, "wgrywania dokumentu umowy");
+  }
+});
+
+app.get("/:id/document", (c) => {
+  try {
+    const id = contractIdParam(c);
+    const row = contractRow(id);
+    if (!row) throw new ApiError(404, "Umowa nie istnieje");
+    const abs = generatedFilePath(row.documentStoredPath);
+    if (!abs) throw new ApiError(404, "Ta umowa nie ma wgranego dokumentu");
+    const inline = c.req.query("inline") === "1";
+    const size = statSync(abs).size;
+    const stream = Readable.toWeb(createReadStream(abs)) as ReadableStream;
+    return new Response(stream, {
+      status: 200,
+      headers: {
+        "Content-Type": PDF_MIME,
+        "Content-Length": String(size),
+        "Cache-Control": "private, no-store",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Disposition": contentDisposition(inline ? "inline" : "attachment", row.documentName ?? `umowa-${id}.pdf`),
+      },
+    });
+  } catch (error) {
+    return documentError(c, error, "pobierania dokumentu umowy");
+  }
+});
+
+app.delete("/:id/document", (c) => {
+  try {
+    const id = contractIdParam(c);
+    const row = contractRow(id);
+    if (!row) throw new ApiError(404, "Umowa nie istnieje");
+    if (!row.documentStoredPath) throw new ApiError(404, "Ta umowa nie ma wgranego dokumentu");
+
+    db.update(schema.contracts)
+      .set({ documentName: null, documentStoredPath: null, documentUploadedAt: null, documentUploadedBy: null })
+      .where(eq(schema.contracts.id, id))
+      .run();
+    // Cały katalog, nie sam plik: na wpis przypada jeden dokument, więc po
+    // odpięciu nie ma tam czego trzymać.
+    removeContractDir(id);
+
+    db.insert(schema.objectHistory)
+      .values({
+        objectId: row.objectId,
+        action: "contract_updated",
+        description: `Contract ${row.contractNumber} document removed`,
+      })
+      .run();
+
+    return c.json({ success: true, data: { id } });
+  } catch (error) {
+    return documentError(c, error, "usuwania dokumentu umowy");
+  }
 });
 
 export default app;

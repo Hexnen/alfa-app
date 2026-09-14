@@ -28,6 +28,7 @@ import {
   ArrowUp,
   ChevronsUpDown,
   Download,
+  FileUp,
   Loader2,
   Paperclip,
   Pencil,
@@ -62,6 +63,8 @@ import { ObjectPicker } from "@/components/interventions/ObjectPicker";
 import { DASH, errMsg } from "@/components/interventions/helpers";
 import {
   CONTRACT_DRAFT_STATUS_LABELS,
+  EXTERNAL_TEMPLATE_KEY,
+  EXTERNAL_TEMPLATE_LABEL,
   contractDraftsApi,
   type ContractDraft,
   type ContractDraftStatus,
@@ -70,8 +73,9 @@ import {
 } from "@/lib/api";
 import { cn, formatDate } from "@/lib/utils";
 import { ContractDraftDialog } from "./ContractDraftDialog";
+import { ExternalContractDraftDialog } from "./ExternalContractDraftDialog";
 import { ContractDraftAttachments } from "./ContractDraftAttachments";
-import { DocxPreview } from "./DocxPreview";
+import { ContractPreview } from "./ContractPreview";
 import { SplitLayout } from "./SplitLayout";
 import { STATUS_VARIANT, draftObjectsFetcher } from "./draftsShared";
 
@@ -215,7 +219,16 @@ export function ContractDraftsPanel({ editable, initialTemplateKey, initialSearc
    */
   const [companyOptions, setCompanyOptions] = useState<{ id: number; name: string }[]>([]);
 
-  const [dialog, setDialog] = useState<{ open: boolean; draft: ContractDraft | null } | null>(null);
+  /**
+   * Które okno otworzyć: „Nowa umowa” składa dokument z wzoru Worda, „Dodaj
+   * PDF” przyjmuje gotowy plik. Przy edycji rodzaj bierze się z draftu — wgrany
+   * PDF nie ma pól formularza, więc dialog szablonowy nie miałby co pokazać.
+   */
+  const [dialog, setDialog] = useState<{
+    open: boolean;
+    draft: ContractDraft | null;
+    kind: "template" | "external";
+  } | null>(null);
   const [attachmentsFor, setAttachmentsFor] = useState<ContractDraft | null>(null);
   const [toDelete, setToDelete] = useState<ContractDraft | null>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
@@ -427,6 +440,9 @@ export function ContractDraftsPanel({ editable, initialTemplateKey, initialSearc
               {t.label}
             </SelectItem>
           ))}
+          {/* Umowy spoza generatora nie mają wzoru, więc w rejestrze szablonów
+              ich nie ma — pozycję dokładamy tu, żeby dało się je odfiltrować. */}
+          <SelectItem value={EXTERNAL_TEMPLATE_KEY}>{EXTERNAL_TEMPLATE_LABEL}</SelectItem>
         </SelectContent>
       </Select>
       <div className="relative min-w-[180px] max-w-xs flex-1">
@@ -445,13 +461,22 @@ export function ContractDraftsPanel({ editable, initialTemplateKey, initialSearc
         </Button>
       )}
       {editable && (
-        <Button
-          className="ml-auto"
-          onClick={() => setDialog({ open: true, draft: null })}
-          data-testid="umowy-drafty-nowa"
-        >
-          <Plus className="mr-2 h-4 w-4" /> Nowa umowa
-        </Button>
+        <div className="ml-auto flex items-center gap-2">
+          {/* Umowa z papieru wchodzi tędy: bez wzoru, bez pól — sam plik. */}
+          <Button
+            variant="outline"
+            onClick={() => setDialog({ open: true, draft: null, kind: "external" })}
+            data-testid="umowy-drafty-dodaj-pdf"
+          >
+            <FileUp className="mr-2 h-4 w-4" /> Dodaj PDF
+          </Button>
+          <Button
+            onClick={() => setDialog({ open: true, draft: null, kind: "template" })}
+            data-testid="umowy-drafty-nowa"
+          >
+            <Plus className="mr-2 h-4 w-4" /> Nowa umowa
+          </Button>
+        </div>
       )}
     </div>
   );
@@ -552,11 +577,11 @@ export function ContractDraftsPanel({ editable, initialTemplateKey, initialSearc
                             href={contractDraftsApi.fileUrl(d.id)}
                             onClick={(e) => e.stopPropagation()}
                             className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
-                            title={d.generatedFileName ?? "Pobierz DOCX"}
+                            title={d.generatedFileName ?? `Pobierz ${d.fileKind.toUpperCase()}`}
                             data-testid="umowy-drafty-pobierz"
                           >
                             <Download className="h-3.5 w-3.5" aria-hidden />
-                            DOCX
+                            {d.fileKind.toUpperCase()}
                           </a>
                         ) : (
                           <span className="text-xs text-muted-foreground">brak pliku</span>
@@ -638,27 +663,31 @@ export function ContractDraftsPanel({ editable, initialTemplateKey, initialSearc
                               variant="ghost"
                               size="icon"
                               className="h-7 w-7"
-                              onClick={() => setDialog({ open: true, draft: d })}
+                              onClick={() => setDialog({ open: true, draft: d, kind: d.source })}
                               title="Edytuj"
                               data-testid="umowy-drafty-edytuj"
                             >
                               <Pencil className="h-4 w-4" />
                             </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-7 w-7"
-                              disabled={busyId === d.id}
-                              onClick={() => void regenerate(d)}
-                              title="Generuj dokument ponownie"
-                              data-testid="umowy-drafty-generuj"
-                            >
-                              {busyId === d.id ? (
-                                <Loader2 className="h-4 w-4 animate-spin" />
-                              ) : (
-                                <RefreshCw className="h-4 w-4" />
-                              )}
-                            </Button>
+                            {/* Wgrany PDF nie ma z czego powstać ponownie —
+                                nowa wersja pliku wchodzi przez „Edytuj”. */}
+                            {d.source === "template" && (
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-7 w-7"
+                                disabled={busyId === d.id}
+                                onClick={() => void regenerate(d)}
+                                title="Generuj dokument ponownie"
+                                data-testid="umowy-drafty-generuj"
+                              >
+                                {busyId === d.id ? (
+                                  <Loader2 className="h-4 w-4 animate-spin" />
+                                ) : (
+                                  <RefreshCw className="h-4 w-4" />
+                                )}
+                              </Button>
+                            )}
                             <Button
                               variant="ghost"
                               size="icon"
@@ -684,12 +713,17 @@ export function ContractDraftsPanel({ editable, initialTemplateKey, initialSearc
   );
 
   const preview = (
-    <DocxPreview
+    <ContractPreview
+      // DOCX z generatora i wgrany PDF mają własne podglądy — wybiera je
+      // rodzaj pliku, a nie panel.
+      kind={selected?.fileUrl ? selected.fileKind : null}
       url={selected?.fileUrl ? contractDraftsApi.fileUrl(selected.id, true) : null}
       previewSrc={
-        selected?.fileUrl ? contractDraftsApi.previewUrl(contractDraftsApi.fileUrl(selected.id, true)) : null
+        selected?.fileUrl && selected.fileKind === "docx"
+          ? contractDraftsApi.previewUrl(contractDraftsApi.fileUrl(selected.id, true))
+          : null
       }
-      fieldLegend
+      fieldLegend={selected?.fileKind === "docx"}
       // Po „Generuj ponownie” pod tym samym adresem leży nowy plik — bez tego
       // podgląd pokazywałby poprzednią treść. `updatedAt` dokładamy, bo wariant
       // z kolorami serwer składa z BIEŻĄCYCH pól: po edycji formularza (jeszcze
@@ -699,11 +733,13 @@ export function ContractDraftsPanel({ editable, initialTemplateKey, initialSearc
       title={selected ? `${selected.contractNumber} — ${selected.objectName}` : null}
       emptyText={
         selected
-          ? "Ta umowa nie ma jeszcze wygenerowanego dokumentu."
+          ? selected.source === "external"
+            ? "Ta umowa nie ma wgranego pliku — dodaj go przez „Edytuj”."
+            : "Ta umowa nie ma jeszcze wygenerowanego dokumentu."
           : "Wybierz umowę z listy, aby zobaczyć podgląd"
       }
       emptyAction={
-        selected && !selected.fileUrl && editable ? (
+        selected && !selected.fileUrl && editable && selected.source === "template" ? (
           <Button
             size="sm"
             disabled={busyId === selected.id}
@@ -774,9 +810,20 @@ export function ContractDraftsPanel({ editable, initialTemplateKey, initialSearc
     <>
       <SplitLayout testid="umowy-drafty-panel" header={header} list={list} preview={preview} />
 
-      {dialog?.open && (
+      {dialog?.open && dialog.kind === "template" && (
         <ContractDraftDialog
           key={dialog.draft?.id ?? "new"}
+          open
+          onClose={() => setDialog(null)}
+          draft={dialog.draft}
+          initialObject={dialog.draft ? null : object}
+          onSaved={() => void load()}
+        />
+      )}
+
+      {dialog?.open && dialog.kind === "external" && (
+        <ExternalContractDraftDialog
+          key={dialog.draft?.id ?? "new-pdf"}
           open
           onClose={() => setDialog(null)}
           draft={dialog.draft}

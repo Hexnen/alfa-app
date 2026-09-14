@@ -545,6 +545,30 @@ export async function deleteContract(id: number) {
   });
 }
 
+/**
+ * Własny dokument wpisu w rejestrze (PDF): skan podpisanej umowy albo umowa,
+ * która nigdy nie przeszła przez generator. Jeden plik na umowę — wgranie
+ * kolejnego podmienia poprzedni.
+ */
+export async function uploadContractDocument(id: number, file: File) {
+  const fd = new FormData();
+  fd.append("file", file, file.name);
+  return requestMultipart<ApiResponse<Contract & ContractFileUrls>>(`/contracts/${id}/document`, fd);
+}
+
+export async function deleteContractDocument(id: number) {
+  return request<ApiResponse<{ id: number }>>(`/contracts/${id}/document`, { method: "DELETE" });
+}
+
+/**
+ * Adres dokumentu umowy. Pobieranie idzie zwykłym `<a href>` — sesja siedzi
+ * w ciasteczku, więc przeglądarka poradzi sobie sama (tak samo jak przy DOCX-ie
+ * draftu).
+ */
+export function contractDocumentUrl(id: number, inline = false): string {
+  return `${API_BASE}/contracts/${id}/document${inline ? "?inline=1" : ""}`;
+}
+
 // History
 export async function getObjectHistory(objectId: number, params?: {
   page?: number;
@@ -806,19 +830,34 @@ export interface Contract {
    * rejestru”. `null` = umowa dodana ręcznie, bez pliku.
    */
   draftId: number | null;
+  /** Nazwa własnego dokumentu wpisu (PDF) albo null — patrz `ContractFileUrls`. */
+  documentName: string | null;
+  documentUploadedAt: string | null;
+  documentUploadedBy: number | null;
   status: "draft" | "active" | "expired" | "terminated";
   createdAt: string;
 }
 
-export interface ContractWithDetails extends Contract {
+/**
+ * Adresy dokumentu umowy policzone przez backend — front nie składa ścieżek
+ * plików sam.
+ *
+ * `fileUrl` to TEN dokument, który ma zobaczyć użytkownik: własny plik wpisu
+ * (podpisany skan) wygrywa z plikiem draftu, bo to on jest dowodem. `fileKind`
+ * mówi, czym on jest (DOCX z generatora czy PDF), a `fileSource` — skąd
+ * pochodzi. `draftFileUrl` zostaje osobno: dokument draftu jest dostępny nawet
+ * wtedy, gdy w podglądzie wygrał wgrany PDF.
+ */
+export interface ContractFileUrls {
+  fileUrl: string | null;
+  fileKind: "docx" | "pdf" | null;
+  fileSource: "document" | "draft" | null;
+  draftFileUrl: string | null;
+}
+
+export interface ContractWithDetails extends Contract, ContractFileUrls {
   object: ObjectRecord | null;
   contractor: Contractor | null;
-  /**
-   * Gotowy adres DOCX-a do podglądu (`…/file?inline=1`) albo `null`, gdy nie ma
-   * czego pokazać: umowa bez draftu, draft skasowany lub dokument jeszcze
-   * niewygenerowany. Liczy go backend — front nie składa ścieżek plików sam.
-   */
-  draftFileUrl: string | null;
 }
 
 export interface ContractInput {
@@ -3710,11 +3749,22 @@ export async function unsignProtocol(id: number) {
 // Projekty monitoringu (designer CCTV na mapie)
 // ---------------------------------------------------------------------------
 
+/** Obiekt z kartoteki podpięty pod projekt — tyle, ile zwraca JOIN w backendzie. */
+export interface MonitoringProjectObject {
+  id: number;
+  name: string;
+  address: string | null;
+  city: string | null;
+}
+
 export interface MonitoringProject {
   id: number;
   name: string;
   address: string;
   notes: string;
+  /** Obiekt z kartoteki; `null` = projekt jeszcze niepodpięty (np. na zapytanie ofertowe). */
+  objectId: number | null;
+  object: MonitoringProjectObject | null;
   cameras: number;
   points: number;
   zones: number;
@@ -3728,10 +3778,29 @@ export interface MonitoringProjectInput {
   name: string;
   address?: string;
   notes?: string;
+  /** `null` odpina projekt od obiektu; pominięcie pola zostawia powiązanie bez zmian. */
+  objectId?: number | null;
 }
 
 export async function getMonitoringProjects() {
   return request<ApiResponse<MonitoringProject[]>>("/monitoring");
+}
+
+/** Projekty JEDNEGO obiektu — sekcja „Projekty CCTV" na karcie obiektu. */
+export async function getMonitoringProjectsByObject(objectId: number) {
+  return request<ApiResponse<{ items: MonitoringProject[] }>>(
+    `/monitoring/by-object/${objectId}`
+  );
+}
+
+/**
+ * Podpowiedzi obiektów do pickera w formularzu projektu — własny endpoint
+ * modułu, więc działa bez uprawnień do kartoteki obiektów.
+ */
+export async function pickMonitoringObjects(q: string) {
+  return request<ApiResponse<{ items: InterventionPickObject[] }>>(
+    `/monitoring/pick/objects${q ? `?q=${encodeURIComponent(q)}` : ""}`
+  );
 }
 
 export async function createMonitoringProject(data: MonitoringProjectInput) {
@@ -9459,6 +9528,17 @@ export const contactsApi = {
 
 export type ContractDraftStatus = "draft" | "sent" | "signed" | "rejected" | "archived";
 
+/** Skąd wziął się dokument draftu — kolumna `contract_drafts.source`. */
+export type ContractDraftSource = "template" | "external";
+
+/**
+ * Klucz szablonu draftów spoza generatora (`EXTERNAL_TEMPLATE_KEY` w
+ * src/lib/contract-templates/registry.ts). W rejestrze wzorów go NIE MA, więc
+ * filtr listy dokłada tę pozycję sam.
+ */
+export const EXTERNAL_TEMPLATE_KEY = "external-pdf";
+export const EXTERNAL_TEMPLATE_LABEL = "Wgrany PDF";
+
 /** Etykiety statusów — jedno źródło dla listy, badge'ów i selecta. */
 export const CONTRACT_DRAFT_STATUS_LABELS: Record<ContractDraftStatus, string> = {
   draft: "Szkic",
@@ -9516,6 +9596,11 @@ export interface ContractTemplate {
   fields: ContractDraftFieldDef[];
   /** Skąd wzięty wzór — oryginalny plik Worda i data wydania. */
   sourceNote: string;
+  /**
+   * Stały kod serii numeracji wzoru (np. `RODO`) albo null, gdy numer bierze
+   * kod ze spółki (`ZDW`). Każda seria ma własny licznik.
+   */
+  numberCode: string | null;
   /** Nazwa otagowanego pliku w `templates/umowy/`. */
   fileName: string;
   /** Rozmiar tego pliku w bajtach (0 = pliku nie ma na dysku serwera). */
@@ -9537,8 +9622,17 @@ export interface ContractDraft {
   contractorName: string | null;
   companyId: number;
   companyName: string;
+  /**
+   * `template` = dokument złożony z wzoru Worda, `external` = wgrany PDF (skan
+   * podpisanej umowy, umowa od klienta). Od tego zależy podgląd, formularz
+   * edycji i to, czy w ogóle jest co generować.
+   */
+  source: ContractDraftSource;
   templateKey: string;
+  /** Nazwa wzoru albo „Wgrany PDF”. */
   templateLabel: string;
+  /** Czym jest plik pod `fileUrl` — DOCX z generatora czy wgrany PDF. */
+  fileKind: "docx" | "pdf";
   contractNumber: string;
   seq: number;
   year: number;
@@ -9605,9 +9699,27 @@ export interface ContractDraftCreateInput {
   status?: ContractDraftStatus;
 }
 
-/** PUT nie przenosi draftu na inny obiekt/szablon i nie zmienia numeru. */
+/**
+ * PUT nie przenosi draftu na inny obiekt/szablon i nie zmienia numeru —
+ * z jednym wyjątkiem: numer WGRANEGO PDF-a wolno poprawić, bo bierze się
+ * z papieru, a nie z licznika (pusty = nadaj kolejny z serii spółki).
+ */
 export interface ContractDraftUpdateInput {
   fields?: Record<string, string>;
+  contractDate?: string;
+  status?: ContractDraftStatus;
+  notes?: string | null;
+  /** Tylko dla `source: "external"`. */
+  contractNumber?: string;
+}
+
+/** Formularz „Dodaj PDF” — umowa, która nie wyszła z generatora. */
+export interface ContractDraftExternalInput {
+  objectId: number;
+  file: File;
+  /** Puste = numer z serii spółki (jak przy umowie ZDW). */
+  contractNumber?: string;
+  /** YYYY-MM-DD; puste = dziś. */
   contractDate?: string;
   status?: ContractDraftStatus;
   notes?: string | null;
@@ -9676,6 +9788,29 @@ export const contractDraftsApi = {
     });
   },
 
+  /**
+   * „Dodaj PDF” — umowa spoza generatora. Multipart, bo plik i pola jadą razem:
+   * wiersz bez dokumentu nie miałby po co powstać, a numer z licznika już by
+   * poszedł.
+   */
+  async createExternal(input: ContractDraftExternalInput) {
+    const fd = new FormData();
+    fd.append("file", input.file, input.file.name);
+    fd.append("objectId", String(input.objectId));
+    if (input.contractNumber) fd.append("contractNumber", input.contractNumber);
+    if (input.contractDate) fd.append("contractDate", input.contractDate);
+    if (input.status) fd.append("status", input.status);
+    if (input.notes) fd.append("notes", input.notes);
+    return requestMultipart<ApiResponse<ContractDraft>>(`${CD_BASE}/external`, fd);
+  },
+
+  /** Podmiana wgranego PDF-a (tylko `source: "external"`). */
+  async replaceFile(id: number, file: File) {
+    const fd = new FormData();
+    fd.append("file", file, file.name);
+    return requestMultipart<ApiResponse<ContractDraft>>(`${CD_BASE}/${id}/file`, fd);
+  },
+
   /** PUT nie regeneruje pliku — draft wraca ze `stale: true`. */
   async update(id: number, input: ContractDraftUpdateInput) {
     return request<ApiResponse<ContractDraft>>(`${CD_BASE}/${id}`, {
@@ -9698,8 +9833,8 @@ export const contractDraftsApi = {
    * 409, gdy draft już tam jest albo numer zajmuje inna umowa.
    */
   async promote(id: number) {
-    // Sam wiersz rejestru (bez dołączonego obiektu i kontrahenta) + adres pliku.
-    return request<ApiResponse<{ contract: Contract & { draftFileUrl: string | null }; draft: ContractDraft }>>(
+    // Sam wiersz rejestru (bez dołączonego obiektu i kontrahenta) + adresy pliku.
+    return request<ApiResponse<{ contract: Contract & ContractFileUrls; draft: ContractDraft }>>(
       `${CD_BASE}/${id}/promote`,
       { method: "POST" }
     );

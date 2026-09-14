@@ -3,14 +3,16 @@
  * (app.request) z podstawionym userem i strażnikiem uprawnień, na KOPII bazy:
  *   npx tsx scripts/test-on-copy.ts scripts/test-contract-drafts.ts
  *
- * Sprawdza: kwotę słownie (odmiana złoty/złote/złotych, grosze), listę szablonów
- * z flagą `available` wg spółki obiektu i metadanymi wzoru (plik, rozmiar,
- * liczba pól, źródło, licznik draftów), pobranie PUSTEGO wzoru (kropki zamiast
- * wartości, zero nawiasów klamrowych) i surowego pliku z `{tagami}`,
- * prefill z kartoteki (abonament, NIP,
+ * Sprawdza: kwotę słownie (odmiana złoty/złote/złotych, grosze), listę OBU
+ * szablonów (ZDW + RODO) z flagą `available` wg spółki obiektu i metadanymi wzoru
+ * (plik, rozmiar, liczba pól, źródło, kod serii, licznik draftów), pobranie
+ * PUSTEGO wzoru (kropki zamiast wartości, zero nawiasów klamrowych) i surowego
+ * pliku z `{tagami}`, prefill z kartoteki (abonament, NIP,
  * miejscownik adresu, osoby kontaktowe, źródła), zapis draftu razem z RENDEREM
  * DOCX (numer, adres i kwota słownie w wygenerowanym pliku, zero nawiasów
- * klamrowych), numerację per spółka i rok wraz z unikalnym indeksem, komunikaty
+ * klamrowych), prefill i zapis umowy RODO (data z najnowszej umowy ZDW obiektu,
+ * własna seria numeracji), numerację per spółka, rok i kod serii wraz
+ * z unikalnym indeksem, komunikaty
  * 400 przy braku spółki i kodu, flagę `stale` po edycji i po ponownej generacji,
  * kropki w miejscu pustych kontaktów, pobieranie pliku, załączniki, uprawnienia
  * i kasowanie obiektu razem z katalogiem draftów.
@@ -43,6 +45,7 @@ function ok(label: string, cond: boolean, extra?: unknown) {
 const PREFIX = "__CDRAFT_TEST__";
 const BASE = "/contracts/drafts";
 const TEMPLATE = "zdw-alfa-group";
+const TEMPLATE_RODO = "rodo-alfa-group";
 /** Placeholder pustej osoby kontaktowej z oryginalnego wzoru: 5 × „…" + kropka. */
 const KROPKI = "\u2026".repeat(5) + ".";
 const YEAR = 2026;
@@ -177,6 +180,7 @@ type TemplateJson = {
   warning: string | null;
   groups: string[];
   sourceNote: string;
+  numberCode: string | null;
   fileName: string;
   fileSize: number;
   fieldCount: number;
@@ -242,6 +246,20 @@ function documentXml(storedPath: string): string {
   return new PizZip(readFileSync(abs)).file("word/document.xml")!.asText();
 }
 
+/**
+ * Widoczna treść dokumentu (sklejone `<w:t>`). Klamry szukamy TUTAJ, a nie
+ * w całym XML-u: wzór RODO ma w atrybutach obrazków identyfikatory GUID
+ * w klamrach (`<a:ext uri="{28A0092B-…}">`), które z tagami nie mają nic wspólnego.
+ */
+function documentTextOf(xml: string): string {
+  return (xml.match(/<w:t(?:\s[^>]*)?>[\s\S]*?<\/w:t>/g) ?? [])
+    .map((t) => t.replace(/^<w:t(?:\s[^>]*)?>/, "").replace(/<\/w:t>$/, ""))
+    .join("")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
+}
+
 function storedPathOf(draftId: number): string {
   return db.select().from(schema.contractDrafts).where(eq(schema.contractDrafts.id, draftId)).get()!.generatedStoredPath!;
 }
@@ -298,6 +316,10 @@ const objB = db.insert(schema.objects).values(objectValues(`${PREFIX} Obiekt B`,
 const objNoCompany = db.insert(schema.objects).values(objectValues(`${PREFIX} Obiekt bez spolki`, null, 100)).returning().get();
 const objNoCode = db.insert(schema.objects).values(objectValues(`${PREFIX} Obiekt bez kodu`, coNoCode.id, 100)).returning().get();
 const objDel = db.insert(schema.objects).values(objectValues(`${PREFIX} Obiekt do kasacji`, coA.id, 300)).returning().get();
+// Osobna spółka pod testy RODO — inaczej drafty ZDW zakładane po drodze
+// przesuwałyby licznik serii TST, na którym stoją asercje numeracji wyżej.
+const coC = db.insert(schema.companies).values(companyValues(`${PREFIX} SPOLKA C`, "TS3")).returning().get();
+const objRodo = db.insert(schema.objects).values(objectValues(`${PREFIX} Obiekt RODO`, coC.id, 900)).returning().get();
 
 // Osoba kontaktowa TYLKO na obiekcie A — obiekt B zostaje bez kontaktów (test kropek).
 db.insert(schema.contacts)
@@ -337,11 +359,40 @@ try {
 
   // ======================================================== 2. SZABLONY
   const tplNoObject = await get<{ items: TemplateJson[] }>(asEditor, "/templates");
-  const tpl0 = tplNoObject.json.data?.items[0];
+  /** Wzór z listy po kluczu — w rejestrze jest ich kilka, kolejność nie jest kontraktem. */
+  const byKey = (res: typeof tplNoObject, key: string) => res.json.data?.items.find((t) => t.key === key);
+  const tpl0 = byKey(tplNoObject, TEMPLATE);
+  const tplRodo = byKey(tplNoObject, TEMPLATE_RODO);
   ok(
     "GET /templates bez objectId → szablon ZDW dostępny, z grupami i polami",
     tplNoObject.status === 200 && tpl0?.key === TEMPLATE && tpl0.available === true && tpl0.warning === null,
     tplNoObject.json
+  );
+  ok(
+    "GET /templates: oba wzory w rejestrze (ZDW + RODO)",
+    (tplNoObject.json.data?.items.length ?? 0) >= 2 && !!tplRodo && tplRodo.companyName === "ALFA",
+    tplNoObject.json.data?.items.map((t) => t.key)
+  );
+  ok(
+    "GET /templates: RODO ma własną serię numeracji, ZDW bierze kod ze spółki",
+    tplRodo?.numberCode === "RODO" && tpl0?.numberCode === null,
+    { rodo: tplRodo?.numberCode, zdw: tpl0?.numberCode }
+  );
+  ok(
+    "GET /templates: metadane wzoru RODO (plik, rozmiar, pola, źródło)",
+    tplRodo?.fileName === "rodo-alfa-group.docx" &&
+      (tplRodo?.fileSize ?? 0) > 1000 &&
+      tplRodo?.fieldCount === 5 &&
+      tplRodo?.fields.map((f) => f.key).sort().join() ===
+        "data_umowy,data_umowy_glownej,powierzajacy_adres,powierzajacy_nazwa,powierzajacy_reprezentacja" &&
+      /Umowa_powierzenia_danych_osobowych\.docx/.test(tplRodo?.sourceNote ?? ""),
+    { fileName: tplRodo?.fileName, fieldCount: tplRodo?.fieldCount, sourceNote: tplRodo?.sourceNote }
+  );
+  ok(
+    "GET /templates: RODO — numer NIE jest polem formularza (nie ma go w treści umowy)",
+    tplRodo?.fields.every((f) => f.key !== "numer") === true &&
+      tplRodo?.fields.find((f) => f.key === "powierzajacy_reprezentacja")?.required === false,
+    tplRodo?.fields.map((f) => f.key)
   );
   ok(
     "GET /templates: grupy DOKŁADNIE jak w kontrakcie",
@@ -399,17 +450,17 @@ try {
   const tplForA = await get<{ items: TemplateJson[] }>(asEditor, `/templates?objectId=${objA.id}`);
   ok(
     "GET /templates?objectId= dla obcej spółki → available=false z polskim ostrzeżeniem",
-    tplForA.json.data?.items[0].available === false &&
-      (tplForA.json.data.items[0].warning ?? "").includes(coA.name) &&
-      (tplForA.json.data.items[0].warning ?? "").includes("ALFA"),
-    tplForA.json.data?.items[0].warning
+    byKey(tplForA, TEMPLATE)?.available === false &&
+      (byKey(tplForA, TEMPLATE)?.warning ?? "").includes(coA.name) &&
+      (byKey(tplForA, TEMPLATE)?.warning ?? "").includes("ALFA"),
+    byKey(tplForA, TEMPLATE)?.warning
   );
   const tplNoCompany = await get<{ items: TemplateJson[] }>(asEditor, `/templates?objectId=${objNoCompany.id}`);
   ok(
-    "GET /templates?objectId= dla obiektu bez spółki → available=false",
-    tplNoCompany.json.data?.items[0].available === false &&
-      /nie ma przypisanej spółki/.test(tplNoCompany.json.data.items[0].warning ?? ""),
-    tplNoCompany.json.data?.items[0].warning
+    "GET /templates?objectId= dla obiektu bez spółki → available=false (oba wzory)",
+    tplNoCompany.json.data?.items.every((t) => t.available === false) === true &&
+      /nie ma przypisanej spółki/.test(byKey(tplNoCompany, TEMPLATE_RODO)?.warning ?? ""),
+    tplNoCompany.json.data?.items.map((t) => t.warning)
   );
   const tplBadObject = await get<unknown>(asEditor, "/templates?objectId=99999999");
   ok("GET /templates?objectId= nieistniejącego obiektu → 404", tplBadObject.status === 404, tplBadObject.json);
@@ -460,7 +511,7 @@ try {
   const d1 = created.json.data!;
   ok(
     "POST / → 201 z numerem 1/TST/2026 nadanym przez serwer",
-    created.status === 201 && d1?.contractNumber === formatContractNumber({ seq: 1, companyCode: "TST", year: YEAR }) && d1.seq === 1 && d1.year === YEAR,
+    created.status === 201 && d1?.contractNumber === formatContractNumber({ seq: 1, numberCode: "TST", year: YEAR }) && d1.seq === 1 && d1.year === YEAR,
     created.json
   );
   ok("POST /: numer w polach nadpisany (formularz nie może go podać)", d1.fields.numer === d1.contractNumber, d1.fields.numer);
@@ -509,8 +560,8 @@ try {
   const tplAfter = await get<{ items: TemplateJson[] }>(asEditor, "/templates");
   ok(
     "GET /templates: draftCount urósł po zapisie draftu",
-    (tplAfter.json.data?.items[0].draftCount ?? -1) > draftCountBefore,
-    { przed: draftCountBefore, po: tplAfter.json.data?.items[0].draftCount }
+    (byKey(tplAfter, TEMPLATE)?.draftCount ?? -1) > draftCountBefore,
+    { przed: draftCountBefore, po: byKey(tplAfter, TEMPLATE)?.draftCount }
   );
 
   // ======================================================== 5. NUMERACJA
@@ -531,6 +582,7 @@ try {
         companyId: coA.id,
         templateKey: TEMPLATE,
         contractNumber: "1-BIS/TST/2026",
+        numberCode: "TST",
         seq: 1,
         year: YEAR,
         contractDate: DATE,
@@ -540,7 +592,7 @@ try {
   } catch {
     duplicateThrew = true;
   }
-  ok("numeracja: UNIQUE (spółka, rok, seq) blokuje duplikat przy surowym INSERT", duplicateThrew);
+  ok("numeracja: UNIQUE (spółka, rok, kod serii, seq) blokuje duplikat przy surowym INSERT", duplicateThrew);
 
   let duplicateNumberThrew = false;
   try {
@@ -551,6 +603,7 @@ try {
         companyId: coA.id,
         templateKey: TEMPLATE,
         contractNumber: "1/TST/2026",
+        numberCode: "TST",
         seq: 99,
         year: YEAR,
         contractDate: DATE,
@@ -780,6 +833,149 @@ try {
     "GET /pick/objects: kształt bez kwot i statusów",
     Object.keys(pick.json.data!.items[0]).sort().join() === "address,city,companyId,companyName,contractorName,id,name",
     Object.keys(pick.json.data!.items[0]).sort()
+  );
+
+  // ======================================================== 10b. DRUGI WZÓR: UMOWA RODO
+  // Umowa powierzenia danych osobowych jest DOKUMENTEM TOWARZYSZĄCYM: odsyła do
+  // daty umowy ZDW tego obiektu i ma WŁASNĄ SERIĘ numeracji, żeby nie zjadać
+  // numerów umowom głównym tej samej spółki.
+  const preRodoPusty = await get<PrefillJson>(asEditor, `/prefill?objectId=${objRodo.id}&template=${TEMPLATE_RODO}`);
+  const pr0 = preRodoPusty.json.data!;
+  ok(
+    "prefill RODO: dane Powierzającego z kartoteki kontrahenta (nazwa, adres, NIP)",
+    preRodoPusty.status === 200 &&
+      pr0.fields.powierzajacy_nazwa === `${PREFIX} Kontrahent` &&
+      pr0.fields.powierzajacy_adres === "ul. Heroldów 7, 01-991 Warszawa, NIP: 999-999-99-90" &&
+      pr0.sources.powierzajacy_adres === "kontrahent",
+    { nazwa: pr0.fields.powierzajacy_nazwa, adres: pr0.fields.powierzajacy_adres }
+  );
+  ok(
+    "prefill RODO: reprezentacja zostaje pusta (kartoteka zna kontakt, nie zarząd)",
+    pr0.fields.powierzajacy_reprezentacja === "",
+    pr0.fields.powierzajacy_reprezentacja
+  );
+  ok(
+    "prefill RODO bez umowy ZDW → pusta data umowy głównej i ostrzeżenie po polsku",
+    pr0.fields.data_umowy_glownej === "" && pr0.warnings.some((w) => /umowy ZDW/.test(w)),
+    pr0.warnings
+  );
+  ok("prefill RODO: podgląd numeru z własnej serii", /^1\/RODO\/\d{4}$/.test(pr0.numberPreview), pr0.numberPreview);
+
+  // Dwie umowy ZDW tego obiektu — prefill ma wziąć datę z NOWSZEJ.
+  const zdwStara = await send<DraftJson>(asEditor, "POST", "/", { objectId: objRodo.id, templateKey: TEMPLATE, contractDate: DATE, fields: {} });
+  const zdwNowa = await send<DraftJson>(asEditor, "POST", "/", { objectId: objRodo.id, templateKey: TEMPLATE, contractDate: "2026-05-10", fields: {} });
+  ok(
+    "numeracja: umowy ZDW nowej spółki w swojej serii (1/TS3/2026, 2/TS3/2026)",
+    zdwStara.json.data?.contractNumber === "1/TS3/2026" && zdwNowa.json.data?.contractNumber === "2/TS3/2026",
+    [zdwStara.json.data?.contractNumber, zdwNowa.json.data?.contractNumber]
+  );
+
+  const preRodo = await get<PrefillJson>(asEditor, `/prefill?objectId=${objRodo.id}&template=${TEMPLATE_RODO}`);
+  const pr = preRodo.json.data!;
+  ok(
+    "prefill RODO: data umowy głównej z NAJNOWSZEGO draftu ZDW obiektu",
+    pr.fields.data_umowy_glownej === "2026-05-10" && pr.sources.data_umowy_glownej === "umowa ZDW obiektu",
+    { data: pr.fields.data_umowy_glownej, src: pr.sources.data_umowy_glownej }
+  );
+  ok("prefill RODO: bez ostrzeżenia o braku umowy ZDW", !pr.warnings.some((w) => /umowy ZDW/.test(w)), pr.warnings);
+
+  const rodo1 = await send<DraftJson>(asEditor, "POST", "/", {
+    objectId: objRodo.id,
+    templateKey: TEMPLATE_RODO,
+    contractDate: DATE,
+    fields: { ...pr.fields, powierzajacy_reprezentacja: "reprezentowaną przez: Jana Kowalskiego – Prezesa Zarządu" },
+  });
+  const r1 = rodo1.json.data!;
+  ok(
+    "POST / RODO → 201 z numerem 1/RODO/2026 (seria niezależna od ZDW)",
+    rodo1.status === 201 && r1?.contractNumber === "1/RODO/2026" && r1.seq === 1 && r1.year === YEAR,
+    rodo1.json
+  );
+  ok(
+    "POST / RODO: number_code w wierszu = RODO",
+    db.select().from(schema.contractDrafts).where(eq(schema.contractDrafts.id, r1.id)).get()?.numberCode === "RODO",
+    null
+  );
+  ok(
+    "POST / RODO: nazwa pliku „Umowa RODO 1-RODO-2026.docx”",
+    r1.generatedFileName === "Umowa RODO 1-RODO-2026.docx" && r1.stale === false && r1.templateLabel.includes("RODO"),
+    { n: r1.generatedFileName, l: r1.templateLabel }
+  );
+
+  const rodoText = documentTextOf(documentXml(storedPathOf(r1.id)));
+  ok(
+    "render RODO: dane Powierzającego w dokumencie",
+    rodoText.includes(`${PREFIX} Kontrahent`) &&
+      rodoText.includes("999-999-99-90") &&
+      rodoText.includes("Jana Kowalskiego – Prezesa Zarządu"),
+    null
+  );
+  ok(
+    "render RODO: data zawarcia (07.01.2026) i data umowy głównej (10.05.2026)",
+    rodoText.includes("07.01.2026") && rodoText.includes("10.05.2026"),
+    null
+  );
+  ok(
+    "render RODO: data zawarcia także w obu załącznikach (3 wystąpienia)",
+    rodoText.split("07.01.2026").length - 1 === 3,
+    rodoText.split("07.01.2026").length - 1
+  );
+  ok("render RODO: ŻADNEJ klamry w treści dokumentu", !/[{}]/.test(rodoText), rodoText.match(/.{0,30}[{}].{0,30}/g)?.slice(0, 3));
+
+  // Pusty wzór RODO — ten sam render, tylko bez wartości.
+  const blankRodo = await asEditor.request(`${BASE}/templates/${TEMPLATE_RODO}/file`);
+  const blankRodoText = documentTextOf(new PizZip(Buffer.from(await blankRodo.arrayBuffer())).file("word/document.xml")!.asText());
+  ok(
+    "GET /templates/rodo/file → 200 i wzór bez klamer w treści",
+    blankRodo.status === 200 && !/[{}]/.test(blankRodoText),
+    blankRodo.status
+  );
+
+  // Podgląd wzoru RODO: kolorowanie liczy RUNY z tagami, a nagłówek POLA — jedno
+  // pole (data) siedzi w kilku miejscach dokumentu, więc te liczby nie muszą być
+  // równe i nie są.
+  const rodoPreview = await asEditor.request(`${BASE}/templates/${TEMPLATE_RODO}/file?preview=1`);
+  const rodoPreviewXml = new PizZip(Buffer.from(await rodoPreview.arrayBuffer())).file("word/document.xml")!.asText();
+  ok(
+    "GET /templates/rodo/file?preview=1: wszystkie pola na żółto, X-Contract-Missing = liczba pól wzoru",
+    rodoPreview.status === 200 &&
+      highlights(rodoPreviewXml, "yellow") >= (tplRodo?.fieldCount ?? 0) &&
+      highlights(rodoPreviewXml, "green") === 0 &&
+      Number(rodoPreview.headers.get("x-contract-missing")) === tplRodo?.fieldCount,
+    { yellow: highlights(rodoPreviewXml, "yellow"), missing: rodoPreview.headers.get("x-contract-missing") }
+  );
+
+  // Druga umowa RODO, skasowanie i trzecia: numer wraca TYLKO w serii RODO.
+  const rodo2 = await send<DraftJson>(asEditor, "POST", "/", { objectId: objRodo.id, templateKey: TEMPLATE_RODO, contractDate: DATE, fields: pr.fields });
+  ok("numeracja RODO: druga umowa → 2/RODO/2026", rodo2.json.data?.contractNumber === "2/RODO/2026", rodo2.json.data?.contractNumber);
+  const delRodo2 = await send<{ id: number }>(asEditor, "DELETE", `/${rodo2.json.data!.id}`);
+  const rodo3 = await send<DraftJson>(asEditor, "POST", "/", { objectId: objRodo.id, templateKey: TEMPLATE_RODO, contractDate: DATE, fields: pr.fields });
+  ok(
+    "numeracja RODO: skasowanie ostatniej zwalnia numer → znowu 2/RODO/2026",
+    delRodo2.status === 200 && rodo3.json.data?.contractNumber === "2/RODO/2026",
+    rodo3.json.data?.contractNumber
+  );
+  const zdwPoRodo = await send<DraftJson>(asEditor, "POST", "/", { objectId: objRodo.id, templateKey: TEMPLATE, contractDate: DATE, fields: {} });
+  ok(
+    "numeracja: umowy RODO nie ruszyły licznika ZDW tej spółki → 3/TS3/2026",
+    zdwPoRodo.json.data?.contractNumber === "3/TS3/2026",
+    zdwPoRodo.json.data?.contractNumber
+  );
+
+  const listRodo = await get<{ items: DraftJson[] }>(asEditor, `/?templateKey=${TEMPLATE_RODO}&q=${encodeURIComponent(PREFIX)}`);
+  ok(
+    "GET /?templateKey=rodo-alfa-group → tylko umowy RODO",
+    (listRodo.json.data?.items.length ?? 0) === 2 && listRodo.json.data!.items.every((i) => i.templateKey === TEMPLATE_RODO),
+    listRodo.json.data?.items.map((i) => i.contractNumber)
+  );
+
+  const promotedRodo = await send<PromoteJson>(asEditor, "POST", `/${r1.id}/promote`);
+  ok(
+    "promote umowy RODO → wiersz w rejestrze z numerem 1/RODO/2026 i bez kwoty",
+    promotedRodo.status === 200 &&
+      promotedRodo.json.data?.contract.contractNumber === "1/RODO/2026" &&
+      promotedRodo.json.data?.contract.value === null,
+    promotedRodo.json.data?.contract
   );
 
   // ============================================ 10a. PRZENIESIENIE DO REJESTRU

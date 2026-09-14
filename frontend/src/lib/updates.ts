@@ -58,6 +58,32 @@ export interface VersionUpdate {
  */
 export const UPDATES_CURRENT: VersionUpdate[] = [
   {
+    version: "1.5.0",
+    date: "2026-09-14",
+    entries: [
+      {
+        text: "Umowę spoza generatora (skan podpisanej, umowa od klienta) dodaje się jako PDF do draftów i przenosi do rejestru, zamiast trzymać ją na dysku sieciowym",
+        type: "feat",
+        module: "kadry",
+      },
+      {
+        text: "Wpis w rejestrze umów ma własny dokument z podpisami, niezależnie od wersji z generatora",
+        type: "feat",
+        module: "kadry",
+      },
+      {
+        text: "Umowa powierzenia danych (RODO) ma osobny szablon i własną serię numerów, więc nie zabiera numerów umowom ZDW",
+        type: "feat",
+        module: "kadry",
+      },
+      {
+        text: "Projekt CCTV można podpiąć pod obiekt z kartoteki, a karta obiektu pokazuje jego projekty",
+        type: "feat",
+        module: "techniczny",
+      },
+    ],
+  },
+  {
     version: "1.2.0–1.4.0",
     date: "2026-09-10",
     title: "Co nowego w aplikacji",
