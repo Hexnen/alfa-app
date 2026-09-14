@@ -1,10 +1,10 @@
-import { useState } from "react";
-import { CalendarOff, ChevronLeft, ChevronRight, PlayCircle, Sun, UserX } from "lucide-react";
+import { useEffect, useState } from "react";
+import { markSeen } from "../lib/seen";
+import { CalendarOff, ChevronLeft, ChevronRight, Sun, UserX } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
 import { EmptyState } from "../ui/empty-state";
 import { JobCard } from "../JobCard";
-import { addDays, formatDayTitle, todayIso } from "../lib/dates";
+import { addDays, formatDayMonth, formatDayTitle, formatWeekday, todayIso } from "../lib/dates";
 import { jobStateOf } from "../lib/jobs";
 import { useJobs } from "../lib/useJobs";
 import { useWeather } from "../lib/useWeather";
@@ -28,6 +28,10 @@ export function Dzis() {
   // Jeden batch pogody na dzień — karty dostają gotowy skrót, nie pytają same.
   const weather = useWeather(jobs);
   const { me } = useTechnikMe();
+
+  // Wejście na zakładkę = „widziałem” — efekt dziecka odpala się PRZED
+  // odświeżeniem liczników w powłoce, więc plakietka „Dziś” gaśnie od razu.
+  useEffect(() => markSeen("seenToday"), []);
 
   const swipeRef = useSwipeDay<HTMLDivElement>(
     () => setDate((d) => addDays(d, -1)),
@@ -66,23 +70,14 @@ export function Dzis() {
         >
           <ChevronRight className="h-5 w-5" />
         </Button>
-        <h2
-          aria-live="polite"
-          className="min-w-0 flex-1 truncate text-base font-semibold first-letter:uppercase sm:text-lg"
-        >
-          {formatDayTitle(date)}
+        {/* Dwie linie: dzień tygodnia nad datą — „poniedziałek, 14 września”
+            w jednej linii nie mieściło się obok trzech przycisków na 390 px. */}
+        <h2 aria-live="polite" className="min-w-0 flex-1 leading-tight">
+          <span className="block truncate text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            {formatWeekday(date)}
+          </span>
+          <span className="block truncate text-base font-semibold sm:text-lg">{formatDayMonth(date)}</span>
         </h2>
-      </div>
-
-      {/* --- PIGUŁKI LICZNIKÓW — kontekst czytany PRZED listą ------------ */}
-      <div className="flex gap-2 overflow-x-auto pb-0.5 no-scrollbar">
-        <Pill label={`Dziś: ${me?.counts.today ?? 0}`} />
-        <Pill
-          icon={PlayCircle}
-          label={`W toku: ${me?.counts.inProgress ?? 0}`}
-          highlight={(me?.counts.inProgress ?? 0) > 0}
-        />
-        <Pill label={`14 dni: ${me?.counts.upcoming ?? 0}`} />
       </div>
 
       {/* --- LISTA ------------------------------------------------------ */}
@@ -120,29 +115,3 @@ export function Dzis() {
   );
 }
 
-/** Pigułka licznika — statyczna, bo w v1 nie ma dokąd z niej wejść. */
-function Pill({
-  label,
-  icon: Icon,
-  highlight,
-}: {
-  label: string;
-  icon?: typeof PlayCircle;
-  highlight?: boolean;
-}) {
-  return (
-    <span
-      className={cn(
-        "inline-flex min-h-11 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border px-3.5 text-sm",
-        // Ton „coś się dzieje” bierzemy z konwencji chipów kalendarza
-        // (border-…/50 + kolor tekstu), żeby pigułka nie znikała w ciemnym motywie.
-        highlight
-          ? "border-amber-500/50 bg-amber-500/10 text-amber-700 dark:text-amber-300"
-          : "border-input bg-card",
-      )}
-    >
-      {Icon && <Icon className="h-4 w-4" aria-hidden />}
-      {label}
-    </span>
-  );
-}

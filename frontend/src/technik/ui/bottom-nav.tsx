@@ -44,11 +44,32 @@ export function BottomNav({ items, className }: { items: NavItem[]; className?: 
                   const active = isNavActive(item, pathname, isActive);
                   return (
                     <>
-                      <Icon
-                        className="h-5 w-5 shrink-0"
-                        strokeWidth={active ? 2.4 : 1.8}
-                        aria-hidden
-                      />
+                      {/* Plakietka z licznikiem siedzi na ikonie, nie obok
+                          etykiety — etykieta ma zostać czytelna na 390 px. */}
+                      <span className="relative">
+                        <Icon
+                          className="h-5 w-5 shrink-0"
+                          strokeWidth={active ? 2.4 : 1.8}
+                          aria-hidden
+                        />
+                        {!!item.badge && (
+                          <span
+                            aria-label={`${item.badge} zleceń${item.badgeAlert ? ", są nowe zmiany" : ""}`}
+                            className={cn(
+                              "absolute -right-3 -top-1.5 min-w-[1.125rem] rounded-full px-1 text-center text-[0.625rem] font-semibold leading-[1.125rem] tabular-nums",
+                              // Żółty = „coś się zmieniło, odkąd tu zaglądałeś” —
+                              // ta sama bursztynowa konwencja, co „w toku” w kalendarzu.
+                              item.badgeAlert
+                                ? "bg-amber-400 text-amber-950"
+                                : active
+                                  ? "bg-primary text-primary-foreground"
+                                  : "bg-muted-foreground text-background",
+                            )}
+                          >
+                            {item.badge > 99 ? "99+" : item.badge}
+                          </span>
+                        )}
+                      </span>
                       <span className="truncate">{item.label}</span>
                     </>
                   );

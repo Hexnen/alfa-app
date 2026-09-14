@@ -72,6 +72,16 @@ export function formatDayTitle(iso: string): string {
   });
 }
 
+/** „poniedziałek” — górna linia paska dnia. */
+export function formatWeekday(iso: string): string {
+  return dateFromIso(iso).toLocaleDateString("pl-PL", { weekday: "long" });
+}
+
+/** „14 września” — dolna linia paska dnia. */
+export function formatDayMonth(iso: string): string {
+  return dateFromIso(iso).toLocaleDateString("pl-PL", { day: "numeric", month: "long" });
+}
+
 /** „pt. 19.09” — nagłówek grupy na liście nadchodzących. */
 export function formatDayShort(iso: string): string {
   const d = dateFromIso(iso);

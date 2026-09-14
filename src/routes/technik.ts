@@ -158,6 +158,32 @@ function myJobIds(technicianId: number, from: string | null, to: string | null, 
     .map((r) => r.id);
 }
 
+/**
+ * Znacznik „ostatnio widziane” z query (ISO z przeglądarki) → format SQLite
+ * `YYYY-MM-DD HH:MM:SS` w UTC, bo tak wygląda `calendar_events.updated_at`.
+ * Śmieć albo brak → null (= technik jeszcze nie zaglądał, nic nie liczymy).
+ */
+function seenSince(raw: string | undefined): string | null {
+  if (!raw) return null;
+  const t = Date.parse(raw);
+  if (!Number.isFinite(t)) return null;
+  return new Date(t).toISOString().slice(0, 19).replace("T", " ");
+}
+
+/**
+ * Ile zleceń technika w oknie [from, to) zmieniło się PO `since` — nowe
+ * przypisanie, przesunięcie, zmiana opisu — z pominięciem zmian, które zrobił
+ * sam technik z panelu (Rozpocznij/Zakończ nie ma go straszyć żółtą plakietką).
+ */
+function changedJobsCount(technicianId: number, userId: number, from: string, to: string, since: string | null): number {
+  if (!since) return 0;
+  const conds = mineConditions(technicianId);
+  conds.push(gt(schema.calendarEvents.endAt, from), lt(schema.calendarEvents.startAt, to));
+  conds.push(gt(schema.calendarEvents.updatedAt, since));
+  conds.push(sql`(${schema.calendarEvents.updatedBy} IS NULL OR ${schema.calendarEvents.updatedBy} <> ${userId})`);
+  return db.select({ id: schema.calendarEvents.id }).from(schema.calendarEvents).where(and(...conds)).all().length;
+}
+
 /** Wydarzenie technika po id — cudze i nieistniejące wyglądają tak samo (404). */
 function myEvent(technicianId: number, id: number): CalendarEventRow {
   const row = db
@@ -420,13 +446,17 @@ app.get("/me", (c) => {
         linked: false,
         technician: null,
         canEdit: canEdit(user, "technik"),
-        counts: { today: 0, inProgress: 0, upcoming: 0 },
+        counts: { today: 0, inProgress: 0, upcoming: 0, changedToday: 0, changedUpcoming: 0 },
       },
     });
   }
   const today = zonedToday();
   const tomorrow = addDays(today, 1);
   const horizon = addDays(today, DEFAULT_HORIZON_DAYS);
+  // „Od kiedy” liczyć zmiany — osobno dla każdej zakładki, bo technik mógł
+  // zajrzeć na Dziś, ale Nadchodzących nie otwierać od tygodnia.
+  const seenToday = seenSince(c.req.query("seenToday"));
+  const seenUpcoming = seenSince(c.req.query("seenUpcoming"));
   const inProgress = db
     .select({ id: schema.calendarEvents.id })
     .from(schema.calendarEvents)
@@ -448,6 +478,8 @@ app.get("/me", (c) => {
         today: myJobIds(tech.id, today, tomorrow).length,
         inProgress,
         upcoming: myJobIds(tech.id, today, horizon).length,
+        changedToday: changedJobsCount(tech.id, user.id, today, tomorrow, seenToday),
+        changedUpcoming: changedJobsCount(tech.id, user.id, today, horizon, seenUpcoming),
       },
     },
   });

@@ -1,4 +1,5 @@
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
+import { markSeen } from "../lib/seen";
 import { CalendarOff, CalendarCheck } from "lucide-react";
 import type { TechnikJob } from "@/lib/api";
 import { EmptyState } from "../ui/empty-state";
@@ -27,6 +28,8 @@ export function Nadchodzace() {
   const today = todayIso();
   const to = addDays(today, RANGE_END_OFFSET);
   const { jobs, loading, error } = useJobs(today, to);
+  // Wejście na zakładkę = „widziałem” — plakietka „Nadchodzące” przestaje być żółta.
+  useEffect(() => markSeen("seenUpcoming"), []);
   // Dwa tygodnie mieszczą się w jednym batchu; backend liczy tylko dni z okna
   // prognozy, dalsze zlecenia wracają po prostu bez pogody.
   const weather = useWeather(jobs);

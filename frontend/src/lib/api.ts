@@ -10065,7 +10065,20 @@ export interface TechnikMe {
     inProgress: number;
     /** Najbliższe 14 dni, RAZEM z dzisiejszymi. */
     upcoming: number;
+    /**
+     * Ile zleceń w oknie zmieniło się od `seenToday` / `seenUpcoming` (nowe
+     * przypisanie, przesunięcie…) cudzą ręką — plakietka na tab barze robi
+     * się od tego żółta. 0, gdy technik jeszcze nie zaglądał.
+     */
+    changedToday: number;
+    changedUpcoming: number;
   };
+}
+
+/** Znaczniki „ostatnio widziane” zakładek (ISO) — trzymane w localStorage panelu. */
+export interface TechnikSeen {
+  seenToday?: string | null;
+  seenUpcoming?: string | null;
 }
 
 /** Skrót protokołu przypiętego do zlecenia. */
@@ -10179,14 +10192,18 @@ export interface TechnikPushConfig {
 
 export const technikApi = {
   /** Kim jestem w kartotece techników + liczniki na pigułki „Dziś”. */
-  async me(): Promise<TechnikMe> {
-    const r = await request<ApiResponse<TechnikMe>>("/technik/me");
+  async me(seen: TechnikSeen = {}): Promise<TechnikMe> {
+    const params = new URLSearchParams();
+    if (seen.seenToday) params.set("seenToday", seen.seenToday);
+    if (seen.seenUpcoming) params.set("seenUpcoming", seen.seenUpcoming);
+    const qs = params.toString();
+    const r = await request<ApiResponse<TechnikMe>>(`/technik/me${qs ? `?${qs}` : ""}`);
     return (
       r.data ?? {
         technician: null,
         linked: false,
         canEdit: false,
-        counts: { today: 0, inProgress: 0, upcoming: 0 },
+        counts: { today: 0, inProgress: 0, upcoming: 0, changedToday: 0, changedUpcoming: 0 },
       }
     );
   },

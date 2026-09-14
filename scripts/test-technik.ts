@@ -22,7 +22,7 @@
  * i wycenami, obiekt, kontrahent, technicy, konta, dziennik), także przy błędzie.
  */
 import { Hono } from "hono";
-import { and, eq, inArray, like, or } from "drizzle-orm";
+import { and, eq, inArray, like, or, sql } from "drizzle-orm";
 import { db, schema } from "../src/db/index.js";
 import technikRoutes from "../src/routes/technik.js";
 import objectsRoutes from "../src/routes/objects.js";
@@ -408,6 +408,26 @@ try {
   ok("me: konto powiązane z technikiem", me.status === 200 && meData?.linked === true, me);
   ok("me: zwraca powiązanego technika", meData?.technician?.id === tech.id, meData?.technician);
   ok("me: liczniki są liczbami", typeof meData?.counts?.today === "number" && typeof meData?.counts?.inProgress === "number", meData?.counts);
+
+  // Żółta plakietka: zmiany od `seenToday`, ale tylko cudzą ręką.
+  const past = new Date(Date.now() - 3600_000).toISOString();
+  const future = new Date(Date.now() + 3600_000).toISOString();
+  const counts = async (q: string) =>
+    ((await T("GET", `/me${q}`)).data as { counts: Record<string, number> }).counts;
+  ok("me: bez znacznika changedToday = 0", (await counts(""))?.changedToday === 0);
+  ok("me: własne zmiany nie liczą się jako nowe", (await counts(`?seenToday=${past}`))?.changedToday === 0);
+  // Fikstury stoją w listopadzie, a okno „dziś” liczy się od prawdziwej daty —
+  // stąd osobne, dzisiejsze zlecenie zmienione „ręką biura” (otherUser).
+  const todayJob = insertEvent({ title: "Serwis dzisiejszy", type: "serwis", technicianIds: [tech.id], day: dayOffset(0), hour: 20 });
+  db.update(schema.calendarEvents)
+    .set({ updatedBy: otherUser.id, updatedAt: sql`(datetime('now'))` })
+    .where(eq(schema.calendarEvents.id, todayJob))
+    .run();
+  const c1 = await counts(`?seenToday=${past}&seenUpcoming=${past}`);
+  ok("me: zmiana cudzą ręką po znaczniku liczy się (dziś)", c1?.changedToday === 1, c1);
+  ok("me: …i w oknie nadchodzących", c1?.changedUpcoming === 1, c1);
+  ok("me: znacznik z przyszłości = nic nowego", (await counts(`?seenToday=${future}`))?.changedToday === 0);
+  ok("me: śmieć w znaczniku = 0, nie 400", (await T("GET", "/me?seenToday=abc")).status === 200);
 
   // =========================================================================
   // 2. Lista zleceń — tylko własne przypisania i tylko prace na obiekcie

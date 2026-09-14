@@ -8,6 +8,10 @@ export interface NavItem {
   end?: boolean;
   /** Dodatkowe trasy podświetlające tę pozycję (np. „/technik/co-nowego” → „Więcej”). */
   match?: RegExp;
+  /** Licznik nad ikoną (0 / undefined = brak plakietki). */
+  badge?: number;
+  /** Żółta plakietka: od ostatniego zajrzenia coś w tej zakładce się zmieniło. */
+  badgeAlert?: boolean;
 }
 
 /**

@@ -252,15 +252,15 @@ export function Zlecenie() {
               {TypeIcon && <TypeIcon className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />}
               {typeMeta?.label ?? job.typeLabel}
             </h1>
-            {/* Data i godzina, a tuż obok pogoda tego dnia — jedna linia,
-                znacznik `shrink-0`, więc data ucina się przed nim. */}
+            {/* Dwie linie: „poniedziałek, 14 września” i pod nią godziny
+                z pogodą. W jednej linii na 390 px data ucinała się w połowie
+                miesiąca. */}
+            <p className="truncate text-xs text-muted-foreground">{formatDayTitle(dayOf(job.startAt))}</p>
             <div className="flex items-center gap-1.5">
               <p className="truncate text-xs tabular-nums text-muted-foreground">
                 {job.allDay
-                  ? formatDayTitle(dayOf(job.startAt))
-                  : `${formatDayTitle(dayOf(job.startAt))}, ${timeOf(job.startAt)}${
-                      timeOf(job.endAt) ? `–${timeOf(job.endAt)}` : ""
-                    }`}
+                  ? "cały dzień"
+                  : `${timeOf(job.startAt)}${timeOf(job.endAt) ? `–${timeOf(job.endAt)}` : ""}`}
               </p>
               <WeatherMark brief={weather} />
             </div>

@@ -9,6 +9,7 @@ import {
 } from "react";
 import { technikApi, type TechnikMe } from "@/lib/api";
 import { useRefreshOnFocus } from "./refresh";
+import { readSeen } from "./seen";
 
 /**
  * `GET /technik/me` POBIERANE RAZ, dla całego panelu.
@@ -35,7 +36,7 @@ export function TechnikMeProvider({ children }: { children: ReactNode }) {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      setMe(await technikApi.me());
+      setMe(await technikApi.me(readSeen()));
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Nie udało się wczytać danych technika.");

@@ -63,7 +63,7 @@ export interface VersionUpdate {
  */
 export const UPDATES_CURRENT: VersionUpdate[] = [
   {
-    version: "1.6.0–1.7.0",
+    version: "1.6.0–1.7.1",
     date: "2026-09-14",
     title: "Panel technika",
     entries: [
@@ -90,6 +90,11 @@ export const UPDATES_CURRENT: VersionUpdate[] = [
       {
         text: "Panel technika: instalacja na ekranie tabletu, powiadomienia o zleceniach, pogoda i dojazd z biura",
         type: "feat",
+        module: "technik",
+      },
+      {
+        text: "Panel technika: liczniki zleceń na dolnym pasku, żółte przy zmianach z biura",
+        type: "tweak",
         module: "technik",
       },
     ],
@@ -200,7 +205,7 @@ export const UPDATES: VersionUpdate[] = [...UPDATES_CURRENT, ...UPDATES_2026];
  */
 export const UPDATES_TECHNIK: VersionUpdate[] = [
   {
-    version: "1.0.0–1.1.0",
+    version: "1.0.0–1.1.1",
     date: "2026-09-14",
     title: "Panel technika",
     entries: [
@@ -251,6 +256,16 @@ export const UPDATES_TECHNIK: VersionUpdate[] = [
       },
       {
         text: "Ekrany zakładek nie mają już powtórzonego tytułu u góry, więcej miejsca na listę",
+        type: "tweak",
+        module: "technik",
+      },
+      {
+        text: "Liczba zleceń na dziś i nadchodzących stoi na dolnym pasku, a plakietka żółknie, gdy biuro coś dodało lub przesunęło od ostatniego zajrzenia",
+        type: "feat",
+        module: "technik",
+      },
+      {
+        text: "Data na ekranie Dziś i w nagłówku zlecenia mieści się w całości, w dwóch liniach zamiast uciętej jednej",
         type: "tweak",
         module: "technik",
       },

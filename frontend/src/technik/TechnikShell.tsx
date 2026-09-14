@@ -1,5 +1,6 @@
-import type { ReactNode } from "react";
+import { useEffect, useMemo, type ReactNode } from "react";
 import { useLocation } from "react-router-dom";
+import { useTechnikMe } from "./lib/me";
 import { CalendarDays, MoreHorizontal, Sun } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useKeyboardVar } from "./lib/keyboard";
@@ -64,9 +65,36 @@ const ROUTE_BACK: [RegExp, string][] = [[/^\/technik\/co-nowego/, "/technik/wiec
  */
 export function TechnikShell({ children }: { children: ReactNode }) {
   const { pathname } = useLocation();
+  const { me, reload } = useTechnikMe();
 
   // Wysokość klawiatury → `--kb` (sticky paski akcji, FAB, toasty).
   useKeyboardVar();
+
+  // Liczniki na tab barze: WSZYSTKIE zlecenia na dziś i wszystkie nadchodzące
+  // (14 dni, z dzisiejszymi — tyle samo, ile pokazuje ekran „Nadchodzące”).
+  // Odświeżane przy każdej zmianie trasy, bo po „Zakończ” technik wraca
+  // na listę i liczby mają się zgadzać z tym, co widzi.
+  useEffect(() => {
+    reload();
+    // `reload` jest stabilne między renderami — zależność to sama trasa.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pathname]);
+
+  const navItems = useMemo<NavItem[]>(
+    () =>
+      NAV_ITEMS.map((item) => {
+        if (item.to === "/technik")
+          return { ...item, badge: me?.counts.today ?? 0, badgeAlert: (me?.counts.changedToday ?? 0) > 0 };
+        if (item.to === "/technik/nadchodzace")
+          return {
+            ...item,
+            badge: me?.counts.upcoming ?? 0,
+            badgeAlert: (me?.counts.changedUpcoming ?? 0) > 0,
+          };
+        return item;
+      }),
+    [me?.counts.today, me?.counts.upcoming, me?.counts.changedToday, me?.counts.changedUpcoming],
+  );
 
   const ownHeader = /^\/technik\/zlecenie\//.test(pathname);
   const nav = !/\/protokol\/?$/.test(pathname);
@@ -91,7 +119,7 @@ export function TechnikShell({ children }: { children: ReactNode }) {
         {children}
       </main>
 
-      {nav && <BottomNav items={NAV_ITEMS} />}
+      {nav && <BottomNav items={navItems} />}
     </div>
   );
 }
