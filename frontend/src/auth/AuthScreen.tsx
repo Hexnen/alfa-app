@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { useAuth } from "./AuthProvider";
 
 export default function AuthScreen() {
@@ -60,6 +61,16 @@ export default function AuthScreen() {
             {busy ? "…" : "Zaloguj się"}
           </button>
         </form>
+
+        {/* Technicy i podwykonawcy mają własny, uproszczony ekran na tablet.
+            Odnośnik stoi POD formularzem, bo to wyjątek, a nie druga równorzędna
+            droga logowania — konta są te same. */}
+        <Link
+          to="/technik"
+          className="mt-4 flex h-10 w-full items-center justify-center rounded-md border border-input bg-background px-3 text-sm font-medium hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          Logowanie dla techników
+        </Link>
 
         <p className="text-[11px] text-muted-foreground text-center mt-4">
           Konta zakłada administrator.

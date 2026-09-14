@@ -292,6 +292,18 @@ export const contracts = sqliteTable("contracts", {
    * (`foreign_keys = ON` w src/db/index.ts).
    */
   draftId: integer("draft_id"),
+  /**
+   * WŁASNY dokument wpisu rejestru (PDF) — podpisany skan, umowa przysłana przez
+   * klienta, aneks. Niezależny od `draftId`: umowa może mieć jedno i drugie,
+   * a wtedy w podglądzie WYGRYWA ten plik (draft niesie wersję do podpisu,
+   * rejestr — tę z podpisami). Migracja 0099; pliki w
+   * `data/attachments/contracts/<id>/`.
+   */
+  documentName: text("document_name"),
+  documentStoredPath: text("document_stored_path"),
+  documentUploadedAt: text("document_uploaded_at"),
+  /** Bez `.references()` w drizzle (FK zakłada migracja) — jak przy `draftId`. */
+  documentUploadedBy: integer("document_uploaded_by"),
   status: text("status", {
     enum: ["draft", "active", "expired", "terminated"],
   })
@@ -810,38 +822,55 @@ export type NewRealization = typeof realizations.$inferInsert;
 
 // Technicy (serwisanci) — słownik wykonawców dla realizacji,
 // odwzorowanie kolumny "serwisanci" z arkusza "Dane".
-export const technicians = sqliteTable("technicians", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  firstName: text("first_name").default("").notNull(),
-  lastName: text("last_name").default("").notNull(),
-  phone: text("phone"),
-  email: text("email"),
-  company: text("company"),
-  nip: text("nip"),
-  type: text("type", { enum: ["internal", "external"] })
-    .default("internal")
-    .notNull(),
-  notes: text("notes"),
-  active: integer("active", { mode: "boolean" }).default(true).notNull(),
-  /**
-   * Ta sama osoba w kartotece kadrowej (NULL = technik spoza listy płac).
-   * Dotąd technik i pracownik kadr byli osobnymi rekordami bez żadnego związku,
-   * choć część osób figuruje w obu (Jaworski, Sajdak).
-   */
-  employeeId: integer("employee_id").references(() => hrEmployees.id, {
-    onDelete: "set null",
-  }),
-  // Cennik przypisany technikowi (NULL = korzysta z cennika głównego).
-  priceListId: integer("price_list_id").references(() => priceLists.id, {
-    onDelete: "set null",
-  }),
-  createdAt: text("created_at")
-    .default(sql`(datetime('now'))`)
-    .notNull(),
-  updatedAt: text("updated_at")
-    .default(sql`(datetime('now'))`)
-    .notNull(),
-});
+export const technicians = sqliteTable(
+  "technicians",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    firstName: text("first_name").default("").notNull(),
+    lastName: text("last_name").default("").notNull(),
+    phone: text("phone"),
+    email: text("email"),
+    company: text("company"),
+    nip: text("nip"),
+    type: text("type", { enum: ["internal", "external"] })
+      .default("internal")
+      .notNull(),
+    notes: text("notes"),
+    active: integer("active", { mode: "boolean" }).default(true).notNull(),
+    /**
+     * Ta sama osoba w kartotece kadrowej (NULL = technik spoza listy płac).
+     * Dotąd technik i pracownik kadr byli osobnymi rekordami bez żadnego związku,
+     * choć część osób figuruje w obu (Jaworski, Sajdak).
+     */
+    employeeId: integer("employee_id").references(() => hrEmployees.id, {
+      onDelete: "set null",
+    }),
+    // Cennik przypisany technikowi (NULL = korzysta z cennika głównego).
+    priceListId: integer("price_list_id").references(() => priceLists.id, {
+      onDelete: "set null",
+    }),
+    /**
+     * Konto w aplikacji (panel /technik). Po TYM polu — i wyłącznie po nim —
+     * rozpoznajemy, czyje są zlecenia na ekranie technika. Heurystyka nazwiskowa
+     * (`findTechnicianForUser`, src/lib/calendar-queries.ts) zostaje tam, gdzie
+     * była: do podpowiedzi asystenta. Do autoryzacji się nie nadaje, bo przy
+     * dwóch osobach o tym samym nazwisku pokazałaby cudzy grafik.
+     * Jeden użytkownik = najwyżej jeden technik (unikalny indeks częściowy).
+     */
+    userId: integer("user_id").references(() => users.id),
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+    updatedAt: text("updated_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+  },
+  (t) => ({
+    userIdUidx: uniqueIndex("technicians_user_id_uidx")
+      .on(t.userId)
+      .where(sql`user_id IS NOT NULL`),
+  })
+);
 
 export type Technician = typeof technicians.$inferSelect;
 export type NewTechnician = typeof technicians.$inferInsert;
@@ -1114,6 +1143,16 @@ export const protocols = sqliteTable("protocols", {
   signerName: text("signer_name"),
   signedAt: text("signed_at"), // ISO, czas serwera
   contentHash: text("content_hash"), // SHA-256 treści protokołu + podpisu
+  /**
+   * Notatka systemowa na wydarzeniu kalendarza ze streszczeniem protokołu
+   * (migracja 0102). Trzymamy ID, żeby przy każdym zapisie z panelu technika
+   * PODMIENIAĆ tę samą notatkę zamiast dopisywać kolejną.
+   *
+   * Klucz obcy stoi w SQL-u migracji, ale NIE w tym miejscu schematu: pętla
+   * protokoły → notatki → wydarzenia → protokoły rozłożyłaby wnioskowanie typów
+   * drizzle (TS7022 na trzech tabelach naraz).
+   */
+  noteId: integer("note_id"),
   status: text("status", { enum: ["draft", "final"] })
     .default("draft")
     .notNull(),
@@ -1252,20 +1291,34 @@ export type NewService = typeof services.$inferInsert;
 // (moduł "Monitoring", designer w frontend/public/monitoring/designer.html).
 // data to pełny stan projektu z designera (JSON: center, zoom, cameras,
 // points, cables, zones, info...) — zapisywany w całości przy autozapisie.
-export const monitoringProjects = sqliteTable("monitoring_projects", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  name: text("name").notNull(), // np. "Aluzyjna 25, Warszawa"
-  address: text("address").default("").notNull(),
-  notes: text("notes").default("").notNull(), // kontekst obiektu / research
-  data: text("data").default("").notNull(), // JSON stanu designera ("" = nowy projekt)
-  offer: text("offer").default("").notNull(), // JSON pól oferty ("" = jeszcze nie wypełniana)
-  createdAt: text("created_at")
-    .default(sql`(datetime('now'))`)
-    .notNull(),
-  updatedAt: text("updated_at")
-    .default(sql`(datetime('now'))`)
-    .notNull(),
-});
+export const monitoringProjects = sqliteTable(
+  "monitoring_projects",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    name: text("name").notNull(), // np. "Aluzyjna 25, Warszawa"
+    address: text("address").default("").notNull(),
+    /**
+     * Obiekt z kartoteki, dla którego powstaje projekt. NULL to normalny stan,
+     * a nie brak danych: plan kamer rysuje się często na zapytanie ofertowe,
+     * zanim obiekt w ogóle trafi do kartoteki. ON DELETE SET NULL — projekt to
+     * własna praca projektanta i ma przeżyć skasowanie obiektu (migracja 0100).
+     */
+    objectId: integer("object_id").references(() => objects.id, { onDelete: "set null" }),
+    notes: text("notes").default("").notNull(), // kontekst obiektu / research
+    data: text("data").default("").notNull(), // JSON stanu designera ("" = nowy projekt)
+    offer: text("offer").default("").notNull(), // JSON pól oferty ("" = jeszcze nie wypełniana)
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+    updatedAt: text("updated_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+  },
+  (t) => ({
+    /** Jedyne zapytanie wstecz: projekty obiektu na jego karcie. */
+    objectIdx: index("monitoring_projects_object_idx").on(t.objectId),
+  })
+);
 
 export type MonitoringProject = typeof monitoringProjects.$inferSelect;
 export type NewMonitoringProject = typeof monitoringProjects.$inferInsert;
@@ -2789,6 +2842,17 @@ export const calendarEvents = sqliteTable(
     // Klucz wzmianki (NoteMention.key), z której powstał kafelek — NULL = podpięty ręcznie.
     // Synchronizacja wzmianek dotyka wyłącznie kafelków z niepustym note_mention.
     noteMention: text("note_mention"),
+    /**
+     * Kiedy technik wcisnął „Rozpocznij”, a kiedy „Zakończ” u klienta (panel
+     * /technik, migracja 0101). ISO z czasem serwera.
+     *
+     * CELOWO BEZ statusu `in_progress`: enum `CALENDAR_EVENT_STATUSES` czytają
+     * filtry listy, ICS, asystent i front, więc nowa wartość znaczyłaby przegląd
+     * wszystkich tych miejsc. „W toku” wylicza się w pełni z danych:
+     * `startedAt != null && status !== "done"`.
+     */
+    startedAt: text("started_at"),
+    finishedAt: text("finished_at"),
     createdBy: integer("created_by").references(() => users.id, {
       onDelete: "set null",
     }),
@@ -3637,6 +3701,10 @@ export type NewInterventionAttachment = typeof interventionAttachments.$inferIns
 export const CONTRACT_DRAFT_STATUSES = ["draft", "sent", "signed", "rejected", "archived"] as const;
 export type ContractDraftStatus = (typeof CONTRACT_DRAFT_STATUSES)[number];
 
+/** Skąd wziął się dokument draftu — patrz kolumna `contract_drafts.source`. */
+export const CONTRACT_DRAFT_SOURCES = ["template", "external"] as const;
+export type ContractDraftSource = (typeof CONTRACT_DRAFT_SOURCES)[number];
+
 /** Etykiety PL — front nie trzyma własnego słownika (kontrakt z api.ts). */
 export const CONTRACT_DRAFT_STATUS_LABELS: Record<ContractDraftStatus, string> = {
   draft: "Szkic",
@@ -3666,10 +3734,27 @@ export const contractDrafts = sqliteTable(
     companyId: integer("company_id")
       .notNull()
       .references(() => companies.id, { onDelete: "restrict" }),
+    /**
+     * Skąd wziął się dokument draftu (migracja 0099):
+     *  - `template` — wygenerowany z otagowanego wzoru Worda (DOCX),
+     *  - `external` — WGRANY PDF (skan podpisanej umowy, umowa od klienta).
+     *
+     * Wariant `external` nie ma szablonu, więc nie ma też pól formularza,
+     * flagi `stale` ani generowania; `template_key` dostaje wtedy stałą
+     * `external-pdf`, której NIE MA w rejestrze szablonów.
+     */
+    source: text("source", { enum: CONTRACT_DRAFT_SOURCES }).default("template").notNull(),
     /** Klucz szablonu z rejestru (src/lib/contract-templates/registry.ts). */
     templateKey: text("template_key").notNull(),
     /** Pełny numer `seq/KOD/rok` — jedyne miejsce formatu: contract-numbering.ts. */
     contractNumber: text("contract_number").notNull().unique(),
+    /**
+     * Kod z numeru (`ZDW`, `RODO`) i zarazem SERIA LICZNIKA. Szablon z własnym
+     * `numberCode` prowadzi osobną numerację, więc umowy towarzyszące nie zjadają
+     * numerów umowom głównym tej samej spółki (migracja 0098, backfill kodem
+     * z istniejących numerów).
+     */
+    numberCode: text("number_code").notNull(),
     seq: integer("seq").notNull(),
     year: integer("year").notNull(),
     /** Data zawarcia ("YYYY-MM-DD"); do DOCX idzie jako DD.MM.RRRR. */
@@ -3702,7 +3787,7 @@ export const contractDrafts = sqliteTable(
     companyYearIdx: index("contract_drafts_company_year_idx").on(t.companyId, t.year),
     statusIdx: index("contract_drafts_status_idx").on(t.status),
     /** Właściwa gwarancja braku dziur i duplikatów w liczniku (wyścig dwóch POST-ów). */
-    seqUidx: uniqueIndex("contract_drafts_company_year_seq_uidx").on(t.companyId, t.year, t.seq),
+    seqUidx: uniqueIndex("contract_drafts_company_year_code_seq_uidx").on(t.companyId, t.year, t.numberCode, t.seq),
   })
 );
 
@@ -3777,3 +3862,48 @@ export const linkPreviews = sqliteTable("link_previews", {
 
 export type LinkPreviewRow = typeof linkPreviews.$inferSelect;
 export type NewLinkPreviewRow = typeof linkPreviews.$inferInsert;
+
+/**
+ * Subskrypcje Web Push — na razie wyłącznie panel technika (`/technik`).
+ *
+ * Jeden wiersz = jedna instalacja przeglądarki/PWA jednego użytkownika.
+ * Tożsamością jest `endpoint` (adres push service), nie para user+urządzenie:
+ * ta sama osoba ma osobne subskrypcje na tablecie i na telefonie, a ponowne
+ * `subscribe()` na tym samym urządzeniu zwraca ten sam endpoint — dlatego zapis
+ * to upsert po `endpoint` (UNIQUE), a nie ślepy INSERT.
+ *
+ * `p256dh` + `auth` to klucze szyfrowania ładunku (Base64URL) wystawione przez
+ * przeglądarkę; bez nich nie da się wysłać nic poza pustym „tickle”.
+ *
+ * Sprzątanie: 404/410 z push service = subskrypcja wygasła → wiersz kasujemy
+ * przy wysyłce (`src/lib/push.ts`). Inne błędy tylko podbijają `failures`.
+ */
+export const pushSubscriptions = sqliteTable(
+  "push_subscriptions",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    userId: integer("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    /** Adres push service danej przeglądarki — klucz tożsamości subskrypcji. */
+    endpoint: text("endpoint").notNull(),
+    p256dh: text("p256dh").notNull(),
+    auth: text("auth").notNull(),
+    /** Do rozpoznania urządzenia w panelu („iPad, Safari”); wyłącznie informacyjne. */
+    userAgent: text("user_agent"),
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+    /** Ostatnia UDANA wysyłka — po niej widać, czy tablet jeszcze żyje. */
+    lastUsedAt: text("last_used_at"),
+    /** Nieudane próby inne niż 404/410 (te kasują wiersz od razu). */
+    failures: integer("failures").default(0).notNull(),
+  },
+  (t) => ({
+    endpointIdx: uniqueIndex("push_subscriptions_endpoint_uidx").on(t.endpoint),
+    userIdx: index("push_subscriptions_user_idx").on(t.userId),
+  })
+);
+
+export type PushSubscriptionRow = typeof pushSubscriptions.$inferSelect;
+export type NewPushSubscriptionRow = typeof pushSubscriptions.$inferInsert;

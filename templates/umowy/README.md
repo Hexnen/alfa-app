@@ -23,7 +23,8 @@ npx tsx scripts/umowy/tag-docx-template.ts \
 ```
 
 Mapa tagów (indeksy akapitów, frazy do podmiany, rozpakowywane hiperłącza) siedzi
-w tym samym skrypcie. `--verify` renderuje szablon próbnymi wartościami i sprawdza,
+w `scripts/umowy/tag-docx-template.ts`, a sam silnik tagowania w
+`scripts/umowy/docx-tagger.ts` (wspólny dla wszystkich wzorów). `--verify` renderuje szablon próbnymi wartościami i sprawdza,
 że nie został ani jeden nawias klamrowy, każdy tag występuje dokładnie raz, XML jest
 parsowalny, a zestaw plików w archiwum zgadza się z oryginałem.
 
@@ -35,6 +36,39 @@ Skrypt robi przy okazji dwie rzeczy pod podgląd w aplikacji:
 * **daje każdemu `{tagowi}` własny `<w:r>`** (z kopią `<w:rPr>` pierwotnego runu),
   bo `w:highlight` jest własnością całego runu — inaczej podświetlenie pola
   objęłoby pół akapitu. `--verify` pilnuje obu rzeczy.
+
+## `rodo-alfa-group.docx`
+
+| | |
+|---|---|
+| Źródło | `obiekty/Aktualne Drafty 05.2023/ALFA G/Umowa_powierzenia_danych_osobowych.docx` |
+| Spółka | ALFA (Alfa Group Sp. z o.o.) — dane rejestrowe Przetwarzającego są wpisane w dokument |
+| Liczba tagów | 5 (w 8 miejscach: daty powtarzają się w załącznikach) |
+
+Umowa powierzenia przetwarzania danych osobowych (art. 28 RODO) — podpisywana
+razem z umową ZDW i odsyłająca do jej daty.
+
+```bash
+PATH=/config/.nvm/versions/node/v22.22.0/bin:$PATH \
+npx tsx scripts/umowy/tag-docx-template.ts --template rodo --verify
+```
+
+Dwie rzeczy, których nie ma w ZDW:
+
+* **blok Powierzającego to PUSTE akapity** (4–12 w oryginale) — nie ma tam frazy
+  do podmiany, więc skrypt tworzy w akapitach 5, 6 i 7 nowe runy z `{tagami}`
+  (nazwa / adres z NIP-em / reprezentacja), kopiując formatowanie ze znacznika
+  akapitu. Reszta pustych akapitów zostaje pusta — to odstępy;
+* **ta sama data w kilku miejscach**: `{data_umowy}` w nagłówku i w obu
+  załącznikach, `{data_umowy_glownej}` w preambule i w § 1.
+
+Miasto zawarcia („w  Warszawie”) i dane Alfa Group zostają wpisane w dokument —
+wzór należy do spółki. Linie podkreśleń w załącznikach zostają bez tagów: to
+miejsce na wpisy odręczne.
+
+Numer umowy nie wchodzi do treści, ale rejestr draftów i tak go nadaje —
+z WŁASNEJ SERII `seq/RODO/rok` (`ContractTemplateDef.numberCode`), żeby umowy
+RODO nie zjadały numerów umowom ZDW.
 
 ## NIE OTWIERAĆ I NIE ZAPISYWAĆ TYCH PLIKÓW W WORDZIE
 
@@ -50,9 +84,13 @@ wyjdzie do klienta z gołym `{abonament}` w treści. Każda zmiana wzoru idzie t
 
 ## Dodanie kolejnego szablonu
 
-1. Otaguj nowy wzór skryptem (własna mapa tagów) i zapisz plik obok.
-2. Dopisz definicję do `src/lib/contract-templates/` (pola, grupy, prefill) i wpisz
-   ją do `CONTRACT_TEMPLATES` w `registry.ts`.
+1. Dopisz mapę tagów (`TemplateTagSpec`) w `scripts/umowy/tag-docx-template.ts`
+   i uruchom skrypt z `--template <klucz> --verify`.
+2. Dopisz definicję do `src/lib/contract-templates/` (pola, grupy, prefill; wspólne
+   formatowanie danych z kartoteki jest w `shared.ts`) i wpisz ją do
+   `CONTRACT_TEMPLATES` w `registry.ts`.
+3. Zdecyduj o numeracji: bez `numberCode` dokument wchodzi w serię spółki,
+   z `numberCode` dostaje własną (kolumna `contract_drafts.number_code`).
 
 Szablon jest przywiązany do spółki: nagłówek, stopka i numer koncesji są częścią
 dokumentu, więc wariant dla innej spółki grupy to **osobny otagowany plik**, a nie

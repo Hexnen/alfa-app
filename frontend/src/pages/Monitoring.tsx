@@ -21,6 +21,7 @@ import {
 import {
   ArrowDown,
   ArrowUp,
+  Building2,
   Cctv,
   ChevronsUpDown,
   ExternalLink,
@@ -32,16 +33,22 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { MonitoringOfferDialog } from "@/components/MonitoringOfferDialog";
 import { usePerms } from "@/auth/permissions";
 import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
+import {
+  ObjectPicker,
+  type ObjectPickerFetcher,
+} from "@/components/interventions/ObjectPicker";
 import {
   getMonitoringProjects,
   createMonitoringProject,
   updateMonitoringProject,
   deleteMonitoringProject,
   offersApi,
+  pickMonitoringObjects,
+  type InterventionPickObject,
   type MonitoringProject,
   type OfferPackage,
 } from "@/lib/api";
@@ -51,8 +58,18 @@ import { cn } from "@/lib/utils";
 // mapa satelitarna z kamerami, otwierana w nowej karcie z ?id= projektu.
 const designerUrl = (id: number) => `/monitoring/designer.html?id=${id}`;
 
+/**
+ * Podpowiedzi obiektów do pickera bierzemy z WŁASNEGO endpointu modułu
+ * (`/monitoring/pick/objects`), a nie z domyślnego źródła Grup interwencyjnych —
+ * dzięki temu projektant z samym kluczem `technical/projekty` podepnie projekt
+ * pod obiekt. Stała modułu, bo `ObjectPicker` trzyma fetcher w zależnościach
+ * efektu z debounce (świeża referencja = odpytywanie backendu w kółko).
+ */
+const pickObjects: ObjectPickerFetcher = async (q) =>
+  (await pickMonitoringObjects(q)).data?.items ?? [];
+
 /** Kolumny, po których da się sortować listę projektów monitoringu. */
-type ProjectSortKey = "id" | "name" | "address" | "cameras" | "created" | "updated";
+type ProjectSortKey = "id" | "name" | "object" | "address" | "cameras" | "created" | "updated";
 
 /**
  * Domyślny kierunek sortowania kolumny — liczniki i daty ludzie czytają od
@@ -62,6 +79,7 @@ type ProjectSortKey = "id" | "name" | "address" | "cameras" | "created" | "updat
 const DEFAULT_DIR: Record<ProjectSortKey, "asc" | "desc"> = {
   id: "desc",
   name: "asc",
+  object: "asc",
   address: "asc",
   cameras: "desc",
   created: "desc",
@@ -109,6 +127,8 @@ export function Monitoring() {
   const [name, setName] = useState("");
   const [address, setAddress] = useState("");
   const [notes, setNotes] = useState("");
+  /** Obiekt z kartoteki wybrany w formularzu; `null` = projekt bez powiązania. */
+  const [linked, setLinked] = useState<InterventionPickObject | null>(null);
   const [saving, setSaving] = useState(false);
   const [offerProject, setOfferProject] = useState<MonitoringProject | null>(
     null
@@ -201,8 +221,10 @@ export function Monitoring() {
     const list = projects.filter((p) => {
       if (
         q &&
-        ![p.name, p.address, p.pinAddress, p.notes].some((v) =>
-          (v ?? "").toLowerCase().includes(q)
+        // Nazwa i adres podpiętego obiektu też wchodzą w wyszukiwarkę — projekt
+        // bywa nazwany inaczej niż kartoteka („Wizja lokalna 09/26”).
+        ![p.name, p.address, p.pinAddress, p.notes, p.object?.name, p.object?.address, p.object?.city].some(
+          (v) => (v ?? "").toLowerCase().includes(q)
         )
       ) {
         return false;
@@ -222,7 +244,8 @@ export function Monitoring() {
     });
 
     const mul = dir === "asc" ? 1 : -1;
-    const text = (p: MonitoringProject) => (sort === "name" ? p.name : addressOf(p));
+    const text = (p: MonitoringProject) =>
+      sort === "name" ? p.name : sort === "object" ? p.object?.name ?? "" : addressOf(p);
     /** Liczba do sortowania; `null` = w tabeli jest kreska, czyli wartość pusta. */
     const number = (p: MonitoringProject): number | null => {
       switch (sort) {
@@ -329,7 +352,34 @@ export function Monitoring() {
     setName(project?.name ?? "");
     setAddress(project?.address ?? "");
     setNotes(project?.notes ?? "");
+    // Picker chce kształtu podpowiedzi, a z listy mamy tylko cztery pola JOIN-a —
+    // reszta (kontrahent) jest w nim opcjonalna i służy wyłącznie do podpisu.
+    setLinked(
+      project?.object
+        ? {
+            id: project.object.id,
+            name: project.object.name,
+            address: project.object.address,
+            city: project.object.city,
+            contractorName: null,
+          }
+        : null
+    );
     setFormOpen(true);
+  };
+
+  /**
+   * Wybór obiektu w formularzu podpowiada nazwę i adres, ale TYLKO gdy pola są
+   * puste — projekt bywa nazwany po swojemu („Etap II — parking”) i nadpisywanie
+   * wpisanej nazwy przy zmianie powiązania byłoby stratą tego, co ktoś wpisał.
+   */
+  const pickObject = (next: InterventionPickObject | null) => {
+    setLinked(next);
+    if (!next) return;
+    if (!name.trim()) setName(next.name);
+    if (!address.trim()) {
+      setAddress([next.address, next.city].filter(Boolean).join(", "));
+    }
   };
 
   const handleSubmit = async () => {
@@ -337,10 +387,11 @@ export function Monitoring() {
     if (!name.trim()) return;
     setSaving(true);
     try {
+      const objectId = linked?.id ?? null;
       if (editing) {
-        await updateMonitoringProject(editing.id, { name, address, notes });
+        await updateMonitoringProject(editing.id, { name, address, notes, objectId });
       } else {
-        const res = await createMonitoringProject({ name, address, notes });
+        const res = await createMonitoringProject({ name, address, notes, objectId });
         if (res.data) window.open(designerUrl(res.data.id), "_blank");
       }
       setFormOpen(false);
@@ -472,6 +523,11 @@ export function Monitoring() {
                     <SortHeader label="Nr oferty" sortKey="id" align="right" />
                     <SortHeader label="Nazwa" sortKey="name" />
                     <SortHeader
+                      label="Obiekt"
+                      sortKey="object"
+                      title="Obiekt z kartoteki, pod który podpięty jest projekt; niepodpięte idą na koniec"
+                    />
+                    <SortHeader
                       label="Adres"
                       sortKey="address"
                       title="Adres z pinezki w designerze, a bez niej wpisany ręcznie; projekty bez adresu idą na koniec"
@@ -498,6 +554,20 @@ export function Monitoring() {
                           <Cctv className="h-4 w-4" />
                           {p.name}
                         </a>
+                      </td>
+                      <td className="py-3 px-2">
+                        {p.object ? (
+                          <Link
+                            to={`/objects/${p.object.id}`}
+                            className="inline-flex items-center gap-1.5 text-primary hover:underline"
+                            data-testid="projekty-obiekt-link"
+                          >
+                            <Building2 className="h-3.5 w-3.5" aria-hidden />
+                            {p.object.name}
+                          </Link>
+                        ) : (
+                          <span className="text-muted-foreground">-</span>
+                        )}
                       </td>
                       <td className="py-3 px-2">{addressOf(p) || "-"}</td>
                       <td className="py-3 px-2 text-right tabular-nums">
@@ -597,6 +667,19 @@ export function Monitoring() {
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="np. Aluzyjna 25, Warszawa"
+              />
+            </div>
+            {/* Podpięcie pod kartotekę: projekt pokazuje się wtedy na karcie
+                obiektu, a wycena wie, czego dotyczy. Puste = projekt luźny
+                (np. na zapytanie ofertowe, zanim obiekt w ogóle powstanie). */}
+            <div className="space-y-2">
+              <Label>Obiekt</Label>
+              <ObjectPicker
+                value={linked}
+                onChange={pickObject}
+                fetcher={pickObjects}
+                testid="projekty-obiekt"
+                placeholder="Szukaj obiektu z kartoteki (opcjonalnie)…"
               />
             </div>
             <div className="space-y-2">

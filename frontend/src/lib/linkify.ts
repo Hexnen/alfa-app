@@ -13,7 +13,14 @@ export type InlineToken =
   | { kind: "text"; value: string }
   | { kind: "url"; href: string; display: string }
   | { kind: "email"; href: string; display: string }
-  | { kind: "phone"; href: string; display: string };
+  | { kind: "phone"; href: string; display: string }
+  /**
+   * Adres WEWNĄTRZ aplikacji (ścieżka SPA, np. `/technical/protokoly?protocol=12`).
+   * Powstaje WYŁĄCZNIE ze składni Outlooka „tekst <ścieżka>”, żeby zwykły ukośnik
+   * w zdaniu („12/2026”, „a/b”) nie robił się linkiem. RichText renderuje go
+   * jako `<Link>` react-routera — bez przeładowania strony i bez karty podglądu.
+   */
+  | { kind: "internal"; href: string; display: string };
 
 /**
  * Jeden przebieg po tekście: adres (ze schematem albo `www.`), e-mail, telefon.
@@ -73,7 +80,25 @@ export function telHref(raw: string): string {
  * `jan@x.pl <mailto:jan@x.pl>`. Bez tego wzorca jeden link z maila rozpadał się
  * na DWA klikalne fragmenty i dwie karty podglądu.
  */
-const ANGLE_URL = /<((?:https?:\/\/|www\.|mailto:)[^\s<>]+)>/g;
+const ANGLE_URL = /<((?:https?:\/\/|www\.|mailto:|\/)[^\s<>]+)>/g;
+
+/**
+ * Ścieżka wewnątrz aplikacji albo pełny adres do WŁASNEGO origin (tak wyglądały
+ * starsze notatki, zanim zaczęliśmy zapisywać same ścieżki) → ścieżka SPA.
+ * Wszystko inne zwraca null i idzie zwykłą drogą (link zewnętrzny).
+ *
+ * `//host/...` to adres protokołowy, a nie ścieżka — celowo odrzucany.
+ */
+export function internalHrefOf(raw: string): string | null {
+  const v = raw.trim();
+  if (v.startsWith("//")) return null;
+  if (v.startsWith("/")) return v;
+  if (typeof window !== "undefined" && /^https?:\/\//i.test(v)) {
+    const origin = window.location?.origin ?? "";
+    if (origin && v.toLowerCase().startsWith(origin.toLowerCase())) return v.slice(origin.length) || "/";
+  }
+  return null;
+}
 
 /**
  * Czy fragment stojący tuż przed `<adresem>` sam jest adresem (URL, gołą domeną
@@ -147,6 +172,21 @@ export function linkifyText(text: string): InlineToken[] {
     const inner = m[1];
     let plain = text.slice(last, m.index);
     last = m.index + m[0].length;
+
+    // Adres wewnętrzny („Otwórz protokół </technical/protokoly?protocol=12>”):
+    // etykietą zostaje CAŁY tekst z tej linii przed nawiasem, a ścieżki nie
+    // pokazujemy wcale — w notatce ma stać zdanie, nie surowy URL. Relaksacja
+    // reguły „etykieta musi wyglądać jak adres” dotyczy tylko tego przypadku,
+    // bo takie wpisy generuje sama aplikacja.
+    const internal = internalHrefOf(inner);
+    if (internal) {
+      const lineStart = plain.lastIndexOf("\n") + 1;
+      const label = plain.slice(lineStart).trim();
+      if (label) plain = plain.slice(0, lineStart);
+      scanPlain(plain);
+      out.push({ kind: "internal", href: internal, display: label || internal });
+      continue;
+    }
 
     // Etykieta Outlooka tuż przed nawiasami — wciągamy ją tylko, gdy sama jest
     // adresem; wtedy to ona zostaje napisem linku.

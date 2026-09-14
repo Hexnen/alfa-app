@@ -29,7 +29,9 @@ export type RichInline =
   | { kind: "text"; value: string; bold?: boolean; italic?: boolean }
   | { kind: "url"; href: string; display: string }
   | { kind: "email"; href: string; display: string }
-  | { kind: "phone"; href: string; display: string };
+  | { kind: "phone"; href: string; display: string }
+  /** Ścieżka wewnątrz aplikacji (patrz linkify.ts) — RichText renderuje ją jako `<Link>`. */
+  | { kind: "internal"; href: string; display: string };
 
 /** Jedna linia tekstu: opcjonalna etykieta („Zakres:") + reszta jako tokeny. */
 export interface RichLine {

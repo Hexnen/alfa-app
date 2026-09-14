@@ -74,6 +74,7 @@ import {
 } from "lucide-react";
 import { ObjectInterventionSection } from "@/components/interventions/ObjectInterventionSection";
 import { ObjectContractDraftsSection } from "@/components/contracts/ObjectContractDraftsSection";
+import { ObjectMonitoringProjectsSection } from "@/components/monitoring/ObjectMonitoringProjectsSection";
 import { SalesEntitySections } from "@/components/sales/SalesEntitySections";
 import { CalendarEventDialog, type CalendarDialogMode } from "@/components/CalendarEventDialog";
 import { BillingBadge, ProtocolBadge, QuoteBadge, RealizationBadge } from "@/components/CalendarEventBadges";
@@ -1077,6 +1078,22 @@ export function ObjectDetails() {
             companyName: object.company?.name ?? null,
           }}
           editable={canEdit("contracts")}
+        />
+      )}
+
+      {/* --- Projekty CCTV ---
+          Za kluczem `technical/projekty`, tak jak zakładka Techniczny → Projekty:
+          kto go nie ma, nie widzi ani tabeli, ani zapytania, które ją zasila. */}
+      {canView("technical/projekty") && (
+        <ObjectMonitoringProjectsSection
+          object={{
+            id: object.id,
+            name: object.name,
+            address: object.address ?? null,
+            city: object.city ?? null,
+            contractorName: object.contractor?.name ?? null,
+          }}
+          editable={canEdit("technical/projekty")}
         />
       )}
 

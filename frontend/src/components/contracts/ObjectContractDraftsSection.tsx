@@ -7,7 +7,7 @@
  * `pages/ObjectDetails.tsx` tylko dla użytkowników z tym kluczem.
  */
 import { useCallback, useEffect, useState } from "react";
-import { AlertTriangle, Download, FileSignature, Paperclip, Pencil, Plus } from "lucide-react";
+import { AlertTriangle, Download, FileSignature, FileUp, Paperclip, Pencil, Plus } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ChartCard, EmptyState } from "@/components/analytics";
@@ -15,6 +15,7 @@ import { contractDraftsApi, type ContractDraft, type InterventionPickObject } fr
 import { formatDate } from "@/lib/utils";
 import { DASH, errMsg } from "@/components/interventions/helpers";
 import { ContractDraftDialog } from "./ContractDraftDialog";
+import { ExternalContractDraftDialog } from "./ExternalContractDraftDialog";
 import { ContractDraftAttachments } from "./ContractDraftAttachments";
 import { STATUS_VARIANT } from "./draftsShared";
 
@@ -30,7 +31,12 @@ export function ObjectContractDraftsSection({ object, editable }: Props) {
   const [rows, setRows] = useState<ContractDraft[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [dialog, setDialog] = useState<{ open: boolean; draft: ContractDraft | null } | null>(null);
+  /** Rodzaj okna: dokument z wzoru Worda albo wgrany PDF (patrz ContractDraftsPanel). */
+  const [dialog, setDialog] = useState<{
+    open: boolean;
+    draft: ContractDraft | null;
+    kind: "template" | "external";
+  } | null>(null);
   const [attachmentsFor, setAttachmentsFor] = useState<ContractDraft | null>(null);
 
   const objectId = object.id;
@@ -57,17 +63,27 @@ export function ObjectContractDraftsSection({ object, editable }: Props) {
     <div className="space-y-3" data-testid="object-umowy-drafty">
       <ChartCard
         title="Umowy (drafty)"
-        description="Umowy wygenerowane z szablonu dla tego obiektu. Plik DOCX zachowuje nagłówek i stopkę spółki."
+        description="Umowy tego obiektu: wygenerowane z szablonu (DOCX z nagłówkiem i stopką spółki) oraz wgrane w PDF — skany podpisanych egzemplarzy i dokumenty od klienta."
         controls={
           editable ? (
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => setDialog({ open: true, draft: null })}
-              data-testid="object-umowy-drafty-nowa"
-            >
-              <Plus className="mr-1 h-4 w-4" /> Nowa umowa
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setDialog({ open: true, draft: null, kind: "external" })}
+                data-testid="object-umowy-drafty-dodaj-pdf"
+              >
+                <FileUp className="mr-1 h-4 w-4" /> Dodaj PDF
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setDialog({ open: true, draft: null, kind: "template" })}
+                data-testid="object-umowy-drafty-nowa"
+              >
+                <Plus className="mr-1 h-4 w-4" /> Nowa umowa
+              </Button>
+            </div>
           ) : undefined
         }
       >
@@ -117,11 +133,11 @@ export function ObjectContractDraftsSection({ object, editable }: Props) {
                           <a
                             href={contractDraftsApi.fileUrl(d.id)}
                             className="inline-flex items-center gap-1 text-primary hover:underline"
-                            title={d.generatedFileName ?? "Pobierz DOCX"}
+                            title={d.generatedFileName ?? `Pobierz ${d.fileKind.toUpperCase()}`}
                             data-testid="object-umowy-drafty-pobierz"
                           >
                             <Download className="h-3.5 w-3.5" aria-hidden />
-                            DOCX
+                            {d.fileKind.toUpperCase()}
                           </a>
                         ) : (
                           <span className="text-xs text-muted-foreground">{DASH}</span>
@@ -153,7 +169,7 @@ export function ObjectContractDraftsSection({ object, editable }: Props) {
                           <Button
                             variant="ghost"
                             size="icon"
-                            onClick={() => setDialog({ open: true, draft: d })}
+                            onClick={() => setDialog({ open: true, draft: d, kind: d.source })}
                             title="Edytuj"
                             data-testid="object-umowy-drafty-edytuj"
                           >
@@ -170,9 +186,20 @@ export function ObjectContractDraftsSection({ object, editable }: Props) {
         )}
       </ChartCard>
 
-      {dialog?.open && (
+      {dialog?.open && dialog.kind === "template" && (
         <ContractDraftDialog
           key={dialog.draft?.id ?? "new"}
+          open
+          onClose={() => setDialog(null)}
+          draft={dialog.draft}
+          fixedObject={object}
+          onSaved={() => void load()}
+        />
+      )}
+
+      {dialog?.open && dialog.kind === "external" && (
+        <ExternalContractDraftDialog
+          key={dialog.draft?.id ?? "new-pdf"}
           open
           onClose={() => setDialog(null)}
           draft={dialog.draft}

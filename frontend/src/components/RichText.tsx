@@ -17,6 +17,7 @@
  * przerysowanie notatki nie generuje ruchu.
  */
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { ChevronDown, ChevronRight, Globe } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { type LinkPreview } from "@/lib/api";
@@ -193,6 +194,21 @@ function Inline({ nodes }: { nodes: RichInline[] }) {
           if (node.bold) return <strong key={i} className="font-semibold">{node.value}</strong>;
           if (node.italic) return <em key={i}>{node.value}</em>;
           return <span key={i}>{node.value}</span>;
+        }
+        // Adres wewnątrz aplikacji → nawigacja SPA (bez przeładowania i bez
+        // gubienia stanu listy pod spodem). `href` jest tu ścieżką, nie URL-em.
+        if (node.kind === "internal") {
+          return (
+            <Link
+              key={i}
+              to={node.href}
+              data-testid="rich-link"
+              className={LINK_CLASS}
+              onClick={(e) => e.stopPropagation()}
+            >
+              {node.display}
+            </Link>
+          );
         }
         const external = node.kind === "url";
         return (

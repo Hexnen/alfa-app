@@ -4,7 +4,8 @@
  * Rejestr `contracts` opisuje UMOWĘ JAKO FAKT handlowy (numer, kwota, okres);
  * ten moduł robi coś innego — składa DOKUMENT z oryginalnego wzoru Worda,
  * wstępnie wypełniony z kartoteki (obiekt → kontrahent → spółka → kontakty),
- * nadaje mu numer z licznika spółki i pilnuje plików: wygenerowanego DOCX-a
+ * nadaje mu numer z licznika (seria per spółka, rok i kod wzoru — patrz
+ * src/lib/contract-numbering.ts) i pilnuje plików: wygenerowanego DOCX-a
  * i załączników (skan podpisanej umowy).
  *
  * KOLEJNOŚĆ REJESTRACJI TRAS MA ZNACZENIE (Hono dopasowuje po kolei):
@@ -23,13 +24,14 @@
 import { Hono, type Context } from "hono";
 import { createReadStream, existsSync, readFileSync, statSync } from "node:fs";
 import { Readable } from "node:stream";
-import { and, asc, desc, eq, inArray, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, ne, or, sql } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
 import type {
   CalendarAttachmentKind,
   Company,
   ContractDraft,
   ContractDraftAttachment,
+  ContractDraftSource,
   ContractDraftStatus,
 } from "../db/schema.js";
 import { CONTRACT_DRAFT_STATUSES, CONTRACT_DRAFT_STATUS_LABELS } from "../db/schema.js";
@@ -46,6 +48,9 @@ import {
 } from "../lib/calendar-attachments.js";
 import {
   CONTRACT_TEMPLATES,
+  EXTERNAL_NUMBER_CODE,
+  EXTERNAL_TEMPLATE_KEY,
+  EXTERNAL_TEMPLATE_LABEL,
   getTemplate,
   templateJson,
   type ContractTemplateDef,
@@ -61,15 +66,19 @@ import {
 } from "../lib/contract-templates/render.js";
 import {
   DOCX_MIME,
+  PDF_MIME,
+  assertPdfUpload,
   draftScope,
+  externalFileName,
   generatedFileName,
   generatedFilePath,
   removeDraftDir,
+  writeExternalPdf,
   writeGeneratedDocx,
 } from "../lib/contract-templates/store.js";
 import { nextContractNumberSync } from "../lib/contract-numbering.js";
 // Rejestr umów: te same reguły numeru i adresu podglądu, co w /api/contracts.
-import { draftFileUrlOf, numberTaken } from "./contracts.js";
+import { contractFileJson, numberTaken } from "./contracts.js";
 import { kwotaSlownie } from "../lib/kwota-slownie.js";
 import { zonedToday } from "../lib/tz.js";
 
@@ -108,8 +117,17 @@ export interface ContractDraftJson {
   contractorName: string | null;
   companyId: number;
   companyName: string;
+  /**
+   * `template` = dokument złożony z otagowanego wzoru Worda, `external` =
+   * wgrany PDF. Front rozgałęzia po tym podgląd (DOCX vs PDF), formularz
+   * edycji i dostępne akcje — dla wgranego PDF-a nie ma czego generować.
+   */
+  source: ContractDraftSource;
   templateKey: string;
+  /** Nazwa wzoru albo „Wgrany PDF” dla draftu spoza generatora. */
   templateLabel: string;
+  /** Czym jest plik pod `fileUrl` — od tego zależy komponent podglądu. */
+  fileKind: "docx" | "pdf";
   contractNumber: string;
   seq: number;
   year: number;
@@ -202,6 +220,38 @@ async function readFiles(c: Context): Promise<IncomingFile[]> {
     files.push({ name: entry.name, mime: entry.type, data: Buffer.from(await entry.arrayBuffer()) });
   }
   return files;
+}
+
+/** Pola formularza multipart razem z plikiem `file` (wgrany PDF umowy). */
+interface PdfUpload {
+  file: IncomingFile;
+  form: FormData;
+}
+
+/**
+ * Jeden PDF z multipartu (pole `file`) razem z resztą formularza.
+ *
+ * PDF-a sprawdzamy TRZY RAZY: po rozszerzeniu, po MIME i po magicznych bajtach.
+ * Dwa pierwsze ustawia klient (przeglądarka potrafi podać `application/octet-stream`
+ * dla pliku z pendrive'a), więc same w sobie niczego nie gwarantują; dopiero
+ * nagłówek `%PDF-` mówi, że w podglądzie w ogóle będzie co pokazać.
+ */
+async function readPdfUpload(c: Context): Promise<PdfUpload> {
+  const ct = c.req.header("content-type") ?? "";
+  if (!/multipart\/form-data/i.test(ct)) throw new ApiError(400, "Wymagany formularz multipart/form-data");
+  const form = await c.req.formData().catch(() => null);
+  if (!form) throw new ApiError(400, "Nieprawidłowe dane formularza");
+  const entry = form.get("file");
+  if (!(entry instanceof File)) throw new ApiError(400, "Nie wybrano pliku PDF z umową");
+
+  const file = assertPdfUpload(entry.name, entry.type, Buffer.from(await entry.arrayBuffer()));
+  return { file, form };
+}
+
+/** Wartość pola tekstowego z formularza multipart (pliki ignorujemy). */
+function formStr(form: FormData, key: string): string {
+  const v = form.get(key);
+  return typeof v === "string" ? v.trim() : "";
 }
 
 function parseStatus(raw: unknown): ContractDraftStatus {
@@ -389,6 +439,7 @@ function serializeDrafts(rows: DraftQueryRow[]): ContractDraftJson[] {
     const d = r.draft;
     const fields = parseFieldsJson(d.fields);
     const template = getTemplate(d.templateKey);
+    const external = d.source === "external";
     return {
       id: d.id,
       objectId: d.objectId,
@@ -399,10 +450,12 @@ function serializeDrafts(rows: DraftQueryRow[]): ContractDraftJson[] {
       contractorName: r.contractorName,
       companyId: d.companyId,
       companyName: r.companyName,
+      source: d.source,
       templateKey: d.templateKey,
       // Szablon skasowany z rejestru nie może ukryć istniejącego dokumentu —
       // wtedy w etykiecie zostaje sam klucz.
-      templateLabel: template?.label ?? d.templateKey,
+      templateLabel: external ? EXTERNAL_TEMPLATE_LABEL : (template?.label ?? d.templateKey),
+      fileKind: external ? "pdf" : "docx",
       contractNumber: d.contractNumber,
       seq: d.seq,
       year: d.year,
@@ -414,7 +467,9 @@ function serializeDrafts(rows: DraftQueryRow[]): ContractDraftJson[] {
       generatedFileName: d.generatedFileName,
       generatedAt: d.generatedAt,
       fileUrl: d.generatedStoredPath ? `${API_PREFIX}/${d.id}/file` : null,
-      stale: d.generatedStoredPath !== null && d.generatedHash !== contractFieldsHash(fields),
+      // Wgrany PDF nie ma pól, z których powstał — nie ma więc jak się
+      // zdezaktualizować; „nieaktualny” dotyczy wyłącznie dokumentów z generatora.
+      stale: !external && d.generatedStoredPath !== null && d.generatedHash !== contractFieldsHash(fields),
       registryContractId: registry.get(d.id) ?? null,
       attachments: atts.get(d.id) ?? [],
       createdBy: d.createdBy,
@@ -580,17 +635,18 @@ app.get("/prefill", (c) => {
     let numberPreview = "";
     if (result.companyId !== null) {
       const company = db.select().from(schema.companies).where(eq(schema.companies.id, result.companyId)).get();
-      if (company?.contractCode) {
+      // Wzór z własną serią (RODO) nie potrzebuje kodu spółki; wzór bez niego
+      // bez kodu w kartotece nie ma czego pokazać i zapis i tak skończy się 400.
+      const numberCode = def.numberCode ?? company?.contractCode ?? "";
+      if (company && numberCode) {
         const contractDate = fields.data_umowy || zonedToday();
-        numberPreview = nextContractNumberSync(
-          db,
-          company.id,
-          company.contractCode,
-          Number(contractDate.slice(0, 4))
-        ).contractNumber;
+        numberPreview = nextContractNumberSync(db, company.id, numberCode, Number(contractDate.slice(0, 4))).contractNumber;
       }
     }
-    fields.numer = numberPreview;
+    // Pole `numer` dostają tylko wzory, które drukują numer w treści (ZDW).
+    // Wzór bez niego (RODO) dostałby klucz, którego zapis nie zna — POST
+    // odrzuca nieznane pola formularza.
+    if (def.fields.some((f) => f.key === "numer")) fields.numer = numberPreview;
 
     return c.json({
       success: true,
@@ -677,17 +733,30 @@ app.get("/", (c) => {
 // Zapis
 // ---------------------------------------------------------------------------
 
-/** Spółka obiektu wraz z kodem numeracji albo 400 z podpowiedzią po polsku. */
-function requireNumberingCompany(companyId: number | null): Company & { contractCode: string } {
+/**
+ * Spółka obiektu i kod serii numeracji albo 400 z podpowiedzią po polsku.
+ *
+ * Kod jest ALBO WZORU, ALBO SPÓŁKI. Wzór z własną serią (RODO) nie potrzebuje
+ * kodu z kartoteki — jego numer i tak nie wchodzi do treści dokumentu, więc
+ * blokowanie zapisu do czasu uzupełnienia „Danych do umów” byłoby wymaganiem
+ * bez pokrycia. Wzór bez własnego kodu (ZDW) wypisuje numer w nagłówku umowy,
+ * więc kod spółki jest obowiązkowy.
+ *
+ * Wgrany PDF idzie tym samym torem: z numerem wpisanym ręcznie ma własny kod
+ * (`EXT`, seria techniczna), a bez numeru bierze serię spółki — i wtedy kodu
+ * w kartotece wymaga tak samo, jak umowa ZDW.
+ */
+function requireNumberingCompany(companyId: number | null, ownCode: string | undefined): { company: Company; numberCode: string } {
   if (companyId === null) {
     throw new ApiError(400, "Obiekt nie ma przypisanej spółki — uzupełnij ją w kartotece obiektu.");
   }
   const company = db.select().from(schema.companies).where(eq(schema.companies.id, companyId)).get();
   if (!company) throw new ApiError(400, "Spółka obiektu nie istnieje w słowniku");
+  if (ownCode) return { company, numberCode: ownCode };
   if (!company.contractCode) {
     throw new ApiError(400, `Spółka ${company.name} nie ma kodu do numeracji umów — uzupełnij kod do numeracji umów w Spółki → Dane do umów.`);
   }
-  return company as Company & { contractCode: string };
+  return { company, numberCode: company.contractCode };
 }
 
 /**
@@ -724,7 +793,7 @@ app.post("/", async (c) => {
     const def = getTemplate(str(body.templateKey));
     if (!def) throw new ApiError(400, "Nieznany szablon umowy");
 
-    const company = requireNumberingCompany(object.companyId);
+    const { company, numberCode } = requireNumberingCompany(object.companyId, def.numberCode);
 
     const fields = completeFields(def, parseFields(def, body.fields));
     const contractDate = parseDate(body.contractDate, "Data zawarcia") ?? parseDate(fields.data_umowy, "Data zawarcia") ?? zonedToday();
@@ -736,7 +805,7 @@ app.post("/", async (c) => {
     const year = Number(contractDate.slice(0, 4));
 
     const created = db.transaction((tx) => {
-      const { seq, contractNumber } = nextContractNumberSync(tx, company.id, company.contractCode, year);
+      const { seq, contractNumber } = nextContractNumberSync(tx, company.id, numberCode, year);
       // Numer NADAJE SERWER — wartość z formularza (podgląd) zawsze przegrywa.
       fields.numer = contractNumber;
       return tx
@@ -747,6 +816,7 @@ app.post("/", async (c) => {
           companyId: company.id,
           templateKey: def.key,
           contractNumber,
+          numberCode,
           seq,
           year,
           contractDate,
@@ -783,6 +853,146 @@ app.post("/", async (c) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Umowa spoza generatora — wgrany PDF
+// ---------------------------------------------------------------------------
+
+const NUMBER_MAX_LEN = 120;
+
+/**
+ * Czy numer jest wolny — i po stronie draftów, i po stronie rejestru umów.
+ * Zwraca gotowe zdanie z powodem albo `null`. Numer identyfikuje dokument
+ * w segregatorze, więc dwa różne pliki z tym samym numerem to zawsze pomyłka;
+ * ręcznie przepisany numer z papieru jest jedynym miejscem, gdzie człowiek
+ * może ją popełnić, więc mówimy wprost, gdzie leży duplikat.
+ */
+function numberConflict(tx: Parameters<Parameters<typeof db.transaction>[0]>[0], contractNumber: string, exceptDraftId?: number): string | null {
+  const conds = [eq(schema.contractDrafts.contractNumber, contractNumber)];
+  if (exceptDraftId !== undefined) conds.push(ne(schema.contractDrafts.id, exceptDraftId));
+  const dup = tx
+    .select({ id: schema.contractDrafts.id })
+    .from(schema.contractDrafts)
+    .where(and(...conds))
+    .get();
+  if (dup) return `Umowa o numerze „${contractNumber}” jest już wśród draftów. Podaj inny numer.`;
+  if (numberTaken(tx, contractNumber)) {
+    return `W rejestrze jest już umowa o numerze „${contractNumber}”. Zmień numer w rejestrze albo podaj inny.`;
+  }
+  return null;
+}
+
+/**
+ * Zapisuje wgrany PDF i uzupełnia kolumny `generated_*` — te same, w których
+ * siedzi dokument z generatora. `generated_hash` zostaje pusty: nie ma pól, z
+ * których plik miałby powstać, więc nie ma też czego porównywać (`stale`).
+ *
+ * Wołane PO commicie wiersza — patrz nagłówek pliku.
+ */
+function storeExternalPdf(draft: ContractDraft, file: IncomingFile, userId: number): void {
+  const storedPath = writeExternalPdf(draft.id, file.data, draft.generatedStoredPath);
+  db.update(schema.contractDrafts)
+    .set({
+      generatedFileName: externalFileName(file.name),
+      generatedStoredPath: storedPath,
+      generatedAt: sql`(datetime('now'))`,
+      generatedHash: null,
+      generatedBy: userId,
+      updatedAt: sql`(datetime('now'))`,
+    })
+    .where(eq(schema.contractDrafts.id, draft.id))
+    .run();
+}
+
+/**
+ * „Dodaj PDF” — umowa, która NIE wyszła z generatora: podpisany skan, umowa
+ * przysłana przez klienta, stary dokument z segregatora.
+ *
+ * Spółkę i kontrahenta bierzemy z obiektu, dokładnie jak przy umowie z wzoru —
+ * bez nich numer nie miałby serii, a dokument właściciela. Nie ma za to
+ * sprawdzania „czy wzór pasuje do spółki”: wzoru tu nie ma.
+ *
+ * NUMER JEST OPCJONALNY. Wpisany ręcznie = ten z papieru, więc trafia do bazy
+ * bez zmian, a `seq` idzie z technicznej serii EXT tylko po to, żeby spełnić
+ * unikalny indeks. Pusty = dokument dostaje kolejny numer z serii spółki,
+ * tak jak umowa ZDW.
+ */
+app.post("/external", async (c) => {
+  try {
+    const user = getUser(c);
+    const { file, form } = await readPdfUpload(c);
+
+    const objectId = Number(formStr(form, "objectId"));
+    if (!Number.isInteger(objectId) || objectId <= 0) throw new ApiError(400, "Nie wskazano obiektu");
+    const object = db.select().from(schema.objects).where(eq(schema.objects.id, objectId)).get();
+    if (!object) throw new ApiError(400, "Nie ma takiego obiektu");
+
+    const manualNumber = formStr(form, "contractNumber");
+    if (manualNumber.length > NUMBER_MAX_LEN) throw new ApiError(400, `Numer umowy: maks. ${NUMBER_MAX_LEN} znaków`);
+    const contractDate = parseDate(formStr(form, "contractDate"), "Data zawarcia") ?? zonedToday();
+    const statusRaw = formStr(form, "status");
+    const status = statusRaw ? parseStatus(statusRaw) : ("draft" as const);
+    const notes = textOrNull(formStr(form, "notes"), "Notatki");
+    const year = Number(contractDate.slice(0, 4));
+
+    const { company, numberCode } = requireNumberingCompany(
+      object.companyId,
+      manualNumber ? EXTERNAL_NUMBER_CODE : undefined
+    );
+
+    const outcome = db.transaction((tx) => {
+      if (manualNumber) {
+        const conflict = numberConflict(tx, manualNumber);
+        if (conflict) return { kind: "conflict" as const, conflict };
+      }
+      const next = nextContractNumberSync(tx, company.id, numberCode, year);
+      const row = tx
+        .insert(schema.contractDrafts)
+        .values({
+          objectId,
+          contractorId: object.contractorId,
+          companyId: company.id,
+          source: "external",
+          templateKey: EXTERNAL_TEMPLATE_KEY,
+          contractNumber: manualNumber || next.contractNumber,
+          numberCode,
+          seq: next.seq,
+          year,
+          contractDate,
+          status,
+          fields: "{}",
+          notes,
+          createdBy: user.id,
+        })
+        .returning()
+        .get();
+      return { kind: "ok" as const, draft: row };
+    });
+    if (outcome.kind === "conflict") throw new ApiError(409, outcome.conflict);
+
+    // Zapis pliku POZA transakcją; błąd kasuje wiersz, żeby nie zostawić numeru
+    // przypisanego umowie bez dokumentu (jak przy generowaniu DOCX-a).
+    try {
+      storeExternalPdf(outcome.draft, file, user.id);
+    } catch (error) {
+      db.delete(schema.contractDrafts).where(eq(schema.contractDrafts.id, outcome.draft.id)).run();
+      removeDraftDir(outcome.draft.id);
+      throw error;
+    }
+
+    logActivity(db, {
+      entityType: ENTITY,
+      entityId: outcome.draft.id,
+      objectId,
+      user,
+      action: "created",
+      summary: `Wgrano umowę ${outcome.draft.contractNumber} jako plik PDF`,
+    });
+    return c.json({ success: true, data: loadDraft(outcome.draft.id) }, 201);
+  } catch (error) {
+    return handleError(c, error, "wgrywania umowy w PDF");
+  }
+});
+
 app.get("/:id", (c) => {
   try {
     const id = idParam(c, "id");
@@ -794,6 +1004,110 @@ app.get("/:id", (c) => {
   }
 });
 
+/**
+ * Podmiana wgranego PDF-a (np. przyszedł skan z brakującym podpisem).
+ * Dla draftu z generatora bez sensu — tam plik składa „Generuj ponownie”.
+ */
+app.post("/:id/file", async (c) => {
+  try {
+    const id = idParam(c, "id");
+    const row = draftRow(id);
+    if (!row) throw new ApiError(404, "Draft umowy nie istnieje");
+    if (row.source !== "external") {
+      throw new ApiError(400, "Ten draft powstał z szablonu — plik odświeża „Generuj ponownie”, nie wgrywanie.");
+    }
+    const { file } = await readPdfUpload(c);
+    const user = getUser(c);
+    storeExternalPdf(row, file, user.id);
+    logActivity(db, {
+      entityType: ENTITY,
+      entityId: id,
+      objectId: row.objectId,
+      user,
+      action: "updated",
+      field: "generated",
+      summary: `Podmieniono plik PDF umowy ${row.contractNumber}`,
+    });
+    return c.json({ success: true, data: loadDraft(id) });
+  } catch (error) {
+    return handleError(c, error, "podmiany pliku umowy");
+  }
+});
+
+/**
+ * Zapis draftu, który jest WGRANYM PDF-em: data zawarcia, numer, status,
+ * notatki. Pól umowy nie ma (dokument przyszedł gotowy), więc nie ma też
+ * renderu ani flagi „nieaktualny”.
+ *
+ * NUMER. Wpisany ręcznie wchodzi bez zmian (seria techniczna EXT), pusty —
+ * i tylko wtedy, gdy dotąd był ręczny — zamienia się na kolejny z serii spółki.
+ * Czyszczenie numeru już wziętego z serii nic nie robi: wydawałoby nowy numer
+ * przy każdym zapisie formularza, a stary zostawałoby dziurą w numeracji.
+ */
+async function updateExternalDraft(c: Context, before: ContractDraft, body: Record<string, unknown>) {
+  const contractDate = parseDate(body.contractDate, "Data zawarcia") ?? before.contractDate;
+  const status = body.status === undefined ? before.status : parseStatus(body.status);
+  const notes = body.notes === undefined ? before.notes : textOrNull(body.notes, "Notatki");
+  const year = Number(contractDate.slice(0, 4));
+
+  type NumberPlan = { manual: string | null; numberCode: string } | null;
+  let plan: NumberPlan = null;
+  if (body.contractNumber !== undefined) {
+    const manual = str(body.contractNumber);
+    if (manual.length > NUMBER_MAX_LEN) throw new ApiError(400, `Numer umowy: maks. ${NUMBER_MAX_LEN} znaków`);
+    if (manual) {
+      if (manual !== before.contractNumber) {
+        requireNumberingCompany(before.companyId, EXTERNAL_NUMBER_CODE);
+        plan = { manual, numberCode: EXTERNAL_NUMBER_CODE };
+      }
+    } else if (before.numberCode === EXTERNAL_NUMBER_CODE) {
+      const { numberCode } = requireNumberingCompany(before.companyId, undefined);
+      plan = { manual: null, numberCode };
+    }
+  }
+
+  const outcome = db.transaction((tx) => {
+    let numberPatch: Partial<typeof schema.contractDrafts.$inferInsert> = {};
+    if (plan) {
+      if (plan.manual) {
+        const conflict = numberConflict(tx, plan.manual, before.id);
+        if (conflict) return { kind: "conflict" as const, conflict };
+      }
+      const next = nextContractNumberSync(tx, before.companyId, plan.numberCode, year);
+      numberPatch = {
+        contractNumber: plan.manual ?? next.contractNumber,
+        numberCode: plan.numberCode,
+        seq: next.seq,
+        year,
+      };
+    }
+    const after = tx
+      .update(schema.contractDrafts)
+      .set({ contractDate, status, notes, ...numberPatch, updatedAt: sql`(datetime('now'))` })
+      .where(eq(schema.contractDrafts.id, before.id))
+      .returning()
+      .get();
+    return { kind: "ok" as const, after };
+  });
+  if (outcome.kind === "conflict") throw new ApiError(409, outcome.conflict);
+
+  logFieldDiffs(db, {
+    entityType: ENTITY,
+    entityId: before.id,
+    objectId: before.objectId,
+    user: getUser(c),
+    before,
+    after: outcome.after,
+    fields: [
+      { key: "contractNumber", label: "numer umowy" },
+      { key: "contractDate", label: "datę zawarcia" },
+      { key: "status", label: "status", format: (v) => CONTRACT_DRAFT_STATUS_LABELS[v as ContractDraftStatus] ?? String(v) },
+      { key: "notes", label: "notatki" },
+    ],
+  });
+  return c.json({ success: true, data: loadDraft(before.id) });
+}
+
 app.put("/:id", async (c) => {
   try {
     const id = idParam(c, "id");
@@ -803,11 +1117,19 @@ app.put("/:id", async (c) => {
 
     // Obiekt, szablon i numer są ZAMROŻONE: zmiana obiektu osierociłaby numer
     // nadany przez spółkę tamtego obiektu, a zmiana szablonu — pola już zapisane.
-    for (const forbidden of ["objectId", "templateKey", "contractNumber", "seq", "year"]) {
+    // Wyjątkiem jest NUMER wgranego PDF-a: bierze się z papieru, a nie z licznika,
+    // więc literówkę w przepisanym numerze trzeba dać poprawić.
+    const external = before.source === "external";
+    const frozen = external
+      ? ["objectId", "templateKey", "seq", "year"]
+      : ["objectId", "templateKey", "contractNumber", "seq", "year"];
+    for (const forbidden of frozen) {
       if (body[forbidden] !== undefined) {
         throw new ApiError(400, `Pola „${forbidden}” nie da się zmienić po zapisaniu draftu — załóż nowy.`);
       }
     }
+
+    if (external) return await updateExternalDraft(c, before, body);
 
     const def = getTemplate(before.templateKey);
     if (!def) throw new ApiError(400, `Szablon „${before.templateKey}” nie istnieje już w rejestrze`);
@@ -879,6 +1201,9 @@ app.post("/:id/generate", (c) => {
     const id = idParam(c, "id");
     const row = draftRow(id);
     if (!row) throw new ApiError(404, "Draft umowy nie istnieje");
+    if (row.source === "external") {
+      throw new ApiError(400, "Ten draft to wgrany PDF — nie ma czego generować. Podmień plik, jeśli przyszła nowa wersja.");
+    }
     const def = getTemplate(row.templateKey);
     if (!def) throw new ApiError(400, `Szablon „${row.templateKey}” nie istnieje już w rejestrze`);
 
@@ -991,7 +1316,9 @@ app.post("/:id/promote", (c) => {
       data: {
         contract: {
           ...outcome.contract,
-          draftFileUrl: draftFileUrlOf(id, row.generatedStoredPath),
+          // Świeży wpis nie ma jeszcze własnego dokumentu, więc podgląd wskaże
+          // plik draftu — DOCX z generatora albo wgrany PDF.
+          ...contractFileJson(outcome.contract, row.generatedStoredPath),
         },
         draft: loadDraft(id),
       },
@@ -1017,10 +1344,13 @@ app.get("/:id/file", (c) => {
     const abs = generatedFilePath(row.generatedStoredPath);
     if (!abs) throw new ApiError(404, "Dokument nie został jeszcze wygenerowany");
 
+    const external = row.source === "external";
     const inline = c.req.query("inline") === "1";
-    const fileName = row.generatedFileName ?? `umowa-${id}.docx`;
+    const fileName = row.generatedFileName ?? `umowa-${id}.${external ? "pdf" : "docx"}`;
 
-    if (c.req.query("preview") === "1") {
+    // Wgrany PDF nie ma wariantu z kolorowaniem pól — pól nie ma. `preview=1`
+    // dostaje po prostu ten sam plik, żeby front nie musiał znać wyjątku.
+    if (!external && c.req.query("preview") === "1") {
       const def = getTemplate(row.templateKey);
       if (!def) throw new ApiError(400, "Nieznany szablon umowy tego draftu");
       const fields = parseFieldsJson(row.fields);
@@ -1047,7 +1377,7 @@ app.get("/:id/file", (c) => {
     return new Response(stream, {
       status: 200,
       headers: {
-        "Content-Type": DOCX_MIME,
+        "Content-Type": external ? PDF_MIME : DOCX_MIME,
         "Content-Length": String(size),
         "Cache-Control": "private, no-store",
         "X-Content-Type-Options": "nosniff",

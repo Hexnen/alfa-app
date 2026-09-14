@@ -1,11 +1,9 @@
 import { Hono } from "hono";
-import { createHash } from "crypto";
 import { db, schema } from "../db/index.js";
 import { eq, like, asc, desc, notInArray, and } from "drizzle-orm";
 import type { ApiResponse } from "../types/index.js";
 import type { CalendarEvent, Protocol, Realization } from "../db/schema.js";
 import { getUser } from "../middleware/auth.js";
-import { AUTOFILL_SHORT_LABELS, autofillAfterProtocolSigned } from "../lib/realization-autofill.js";
 import {
   buildProtocolPrefill,
   isProtocolPrefillField,
@@ -16,7 +14,14 @@ import {
   type ProtocolPrefillField,
 } from "../lib/protocol-prefill.js";
 import { logActivity } from "../lib/activity-log.js";
-import { refreshQuoteFromProtocolSync } from "./quotes.js";
+import {
+  afterProtocolSigned,
+  checkSignaturePng,
+  protocolConflictMessage,
+  signProtocolSync,
+  updateProtocolSync,
+  withParsedItems,
+} from "../lib/protocols.js";
 
 const app = new Hono();
 
@@ -100,15 +105,9 @@ export function createProtocolForRealizationSync(
     .get();
 }
 
-function withParsedItems(p: Protocol & { site?: string | null }) {
-  let items: ProtocolItem[] = [];
-  try {
-    items = JSON.parse(p.items);
-  } catch {
-    items = [];
-  }
-  return { ...p, items };
-}
+// Parsowanie pozycji, edycja i podpis mieszkają w src/lib/protocols.ts (dzieli je
+// z panelem technika); tutaj re-eksport dla dotychczasowych importów.
+export { withParsedItems } from "../lib/protocols.js";
 
 // Lista protokołów (opcjonalnie filtrowana po roku/miesiącu daty wykonania)
 app.get("/", async (c) => {
@@ -405,116 +404,23 @@ app.post("/:id/prefill", async (c) => {
   });
 });
 
-// Edycja protokołu
+// Edycja protokołu — walidacja i zapis w src/lib/protocols.ts (dzielone z /technik).
 app.put("/:id", async (c) => {
   const id = parseInt(c.req.param("id"));
   const body = await c.req.json<Record<string, unknown>>();
-  const str = (v: unknown) => (typeof v === "string" ? v : "");
-  const num = (v: unknown) => {
-    const n = typeof v === "string" ? parseFloat(v.replace(",", ".")) : Number(v);
-    return Number.isFinite(n) ? n : 0;
-  };
-
-  const workDate = str(body.workDate);
-  if (workDate && !/^\d{4}-\d{2}-\d{2}$/.test(workDate)) {
-    return c.json<ApiResponse<null>>(
-      { success: false, error: "Nieprawidłowa data wykonania" },
-      400
-    );
-  }
-
-  const items = Array.isArray(body.items)
-    ? body.items
-        .filter(
-          (i): i is Record<string, unknown> => typeof i === "object" && i !== null
-        )
-        .map((i) => ({
-          name: str(i.name),
-          serial: str(i.serial),
-          unit: str(i.unit),
-          qty: str(i.qty),
-        }))
-    : undefined;
-
-  // Optimistic-concurrency: gdy klient poda expectedUpdatedAt, zapis przechodzi
-  // tylko jeśli wiersz nie zmienił się od odczytu (inaczej 409).
-  const expectedUpdatedAt =
-    typeof body.expectedUpdatedAt === "string" ? body.expectedUpdatedAt : null;
-
   // Odczyt + zapis w jednej synchronicznej transakcji — brak przeplotu między
   // SELECT a UPDATE, a równoległe edycje serializują się (bez zgubionych zmian).
-  const outcome = db.transaction((tx) => {
-    const rows = tx
-      .select()
-      .from(schema.protocols)
-      .where(eq(schema.protocols.id, id))
-      .limit(1)
-      .all();
-    if (rows.length === 0) return { status: 404 as const };
-    const existing = rows[0];
+  const outcome = db.transaction((tx) => updateProtocolSync(tx, id, body));
 
-    // Podpisanego protokołu nie wolno edytować — zmieniłoby to treść pod
-    // istniejącym contentHash (dowód integralności przestałby pasować).
-    if (existing.signaturePng || existing.contentHash) {
-      return { status: 409 as const, signed: true };
-    }
-    if (expectedUpdatedAt !== null && existing.updatedAt !== expectedUpdatedAt) {
-      return { status: 409 as const };
-    }
-
-    const workType = ["serwis", "montaz", "wizja", "inne"].includes(
-      body.workType as string
-    )
-      ? (body.workType as "serwis" | "montaz" | "wizja" | "inne")
-      : existing.workType;
-
-    const updated = tx
-      .update(schema.protocols)
-      .set({
-        workDate: workDate || existing.workDate,
-        workType,
-        actualHours: num(body.actualHours),
-        actualKm: num(body.actualKm),
-        contractor: str(body.contractor),
-        salesperson: str(body.salesperson),
-        clientName: str(body.clientName),
-        clientNip: str(body.clientNip),
-        clientCity: str(body.clientCity),
-        installationAddress: str(body.installationAddress),
-        contact: str(body.contact),
-        activities: str(body.activities),
-        ...(items !== undefined ? { items: JSON.stringify(items) } : {}),
-        status: body.status === "final" ? "final" : "draft",
-        updatedAt: new Date().toISOString(),
-      })
-      .where(
-        expectedUpdatedAt !== null
-          ? and(
-              eq(schema.protocols.id, id),
-              eq(schema.protocols.updatedAt, expectedUpdatedAt)
-            )
-          : eq(schema.protocols.id, id)
-      )
-      .returning()
-      .all();
-    if (updated.length === 0) return { status: 409 as const };
-    return { status: 200 as const, data: updated[0] };
-  });
-
+  if (outcome.status === 400) {
+    return c.json<ApiResponse<null>>({ success: false, error: outcome.error }, 400);
+  }
   if (outcome.status === 404) {
-    return c.json<ApiResponse<null>>(
-      { success: false, error: "Nie znaleziono protokołu" },
-      404
-    );
+    return c.json<ApiResponse<null>>({ success: false, error: "Nie znaleziono protokołu" }, 404);
   }
   if (outcome.status === 409) {
     return c.json<ApiResponse<null>>(
-      {
-        success: false,
-        error: outcome.signed
-          ? "Protokół jest podpisany — usuń podpis przed edycją."
-          : "Protokół został w międzyczasie zmieniony. Odśwież i spróbuj ponownie.",
-      },
+      { success: false, error: protocolConflictMessage(outcome.signed) },
       409
     );
   }
@@ -526,155 +432,38 @@ app.put("/:id", async (c) => {
   });
 });
 
-// Podpisanie protokołu — zapisuje PNG podpisu, imię i nazwisko, czas serwera
-// oraz SHA-256 z treści protokołu + podpisu (dowód integralności).
+// Podpisanie protokołu — PNG podpisu, imię i nazwisko, czas serwera oraz SHA-256
+// z treści protokołu + podpisu (dowód integralności). Logika w src/lib/protocols.ts.
 app.post("/:id/sign", async (c) => {
   const id = parseInt(c.req.param("id"));
   const body = await c.req.json<Record<string, unknown>>();
-  const signaturePng =
-    typeof body.signaturePng === "string" ? body.signaturePng : "";
-  const signerName =
-    typeof body.signerName === "string" ? body.signerName.trim() : "";
+  const signaturePng = typeof body.signaturePng === "string" ? body.signaturePng : "";
+  const signerName = typeof body.signerName === "string" ? body.signerName.trim() : "";
   const expectedUpdatedAt =
     typeof body.expectedUpdatedAt === "string" ? body.expectedUpdatedAt : null;
 
-  if (!signaturePng.startsWith("data:image/png;base64,")) {
-    return c.json<ApiResponse<null>>(
-      { success: false, error: "Brak poprawnego podpisu (PNG)" },
-      400
-    );
-  }
-  if (signaturePng.length > 500_000) {
-    return c.json<ApiResponse<null>>(
-      { success: false, error: "Podpis jest zbyt duży" },
-      400
-    );
+  const check = checkSignaturePng(signaturePng);
+  if (!check.ok) {
+    return c.json<ApiResponse<null>>({ success: false, error: check.error }, 400);
   }
 
-  // Odczyt treści, wyliczenie contentHash i zapis w jednej synchronicznej
-  // transakcji — hash liczony jest z treści aktualnie zapisanej w bazie, więc
-  // równoległa edycja nie może rozjechać podpisu z treścią protokołu.
-  const outcome = db.transaction((tx) => {
-    const rows = tx
-      .select()
-      .from(schema.protocols)
-      .where(eq(schema.protocols.id, id))
-      .limit(1)
-      .all();
-    if (rows.length === 0) return { status: 404 as const };
-    const p = rows[0];
-    if (expectedUpdatedAt !== null && p.updatedAt !== expectedUpdatedAt) {
-      return { status: 409 as const };
-    }
-
-    const signedAt = new Date().toISOString();
-    const contentHash = createHash("sha256")
-      .update(
-        JSON.stringify({
-          number: p.number,
-          workDate: p.workDate,
-          workType: p.workType,
-          actualHours: p.actualHours,
-          actualKm: p.actualKm,
-          contractor: p.contractor,
-          clientName: p.clientName,
-          clientNip: p.clientNip,
-          installationAddress: p.installationAddress,
-          activities: p.activities,
-          items: p.items,
-          signerName,
-          signedAt,
-        })
-      )
-      .update(signaturePng)
-      .digest("hex");
-
-    const updated = tx
-      .update(schema.protocols)
-      .set({
-        signaturePng,
-        signerName,
-        signedAt,
-        contentHash,
-        status: "final",
-        updatedAt: signedAt,
-      })
-      .where(
-        expectedUpdatedAt !== null
-          ? and(
-              eq(schema.protocols.id, id),
-              eq(schema.protocols.updatedAt, expectedUpdatedAt)
-            )
-          : eq(schema.protocols.id, id)
-      )
-      .returning()
-      .all();
-    if (updated.length === 0) return { status: 409 as const };
-    return { status: 200 as const, data: updated[0] };
-  });
+  const outcome = db.transaction((tx) =>
+    signProtocolSync(tx, id, { signaturePng, signerName, expectedUpdatedAt })
+  );
 
   if (outcome.status === 404) {
-    return c.json<ApiResponse<null>>(
-      { success: false, error: "Nie znaleziono protokołu" },
-      404
-    );
+    return c.json<ApiResponse<null>>({ success: false, error: "Nie znaleziono protokołu" }, 404);
   }
   if (outcome.status === 409) {
-    return c.json<ApiResponse<null>>(
-      {
-        success: false,
-        error:
-          "Protokół został w międzyczasie zmieniony. Odśwież i spróbuj ponownie.",
-      },
-      409
-    );
+    return c.json<ApiResponse<null>>({ success: false, error: protocolConflictMessage() }, 409);
   }
 
-  // Po podpisie znane są realne godziny i materiały — automat dolicza wtedy pola
-  // realizacji, które są jeszcze puste (patrz src/lib/realization-autofill.ts).
-  // Sugestie sprzeczne z ręcznie wpisanymi wartościami są POMIJANE, a każdy błąd
-  // kalkulacji (brak sieci, brak adresu obiektu) jest połykany — podpis już jest
-  // zapisany i nie wolno go wywrócić.
-  let autofill: { applied: string[]; warnings: string[]; message: string } | null = null;
-  const realizationId = outcome.data.realizationId;
-  if (realizationId != null) {
-    const res = await autofillAfterProtocolSigned(realizationId, getUser(c));
-    if (res && res.applied.length > 0) {
-      autofill = {
-        applied: res.applied,
-        warnings: res.warnings,
-        message: `Uzupełniono automatycznie: ${res.applied
-          .map((f) => AUTOFILL_SHORT_LABELS[f])
-          .join(", ")}`,
-      };
-    }
-  }
-
-  // Podpisany protokół jest źródłem prawdy dla wyceny: przeliczamy jej pozycje z materiałów,
-  // godzin i km protokołu — ale tylko wtedy, gdy wycena istnieje i nikt jej jeszcze nie ruszał.
-  // Jak wyżej: każdy błąd połykamy, podpis jest już zapisany.
-  let quote: { number: string; items: number; warnings: string[]; message: string } | null = null;
-  if (realizationId != null) {
-    try {
-      const res = db.transaction((tx) => refreshQuoteFromProtocolSync(tx, realizationId, getUser(c)));
-      if (res.status === "updated" && res.number && res.items) {
-        quote = {
-          number: res.number,
-          items: res.items.length,
-          warnings: res.warnings,
-          message: `wyceniono ${res.items.length} ${res.items.length === 1 ? "pozycję" : "pozycji"} w wycenie ${res.number}`,
-        };
-      }
-    } catch (err) {
-      console.error("Przeliczenie wyceny z protokołu nie powiodło się:", err);
-    }
-  }
-
-  const parts = [autofill?.message, quote?.message].filter(Boolean);
+  // Automat realizacji i przeliczenie wyceny — PO commicie (patrz komentarz w module).
+  const effects = await afterProtocolSigned(outcome.data.realizationId, getUser(c));
   return c.json({
     success: true,
-    data: { ...withParsedItems(outcome.data), autofill, quote },
-    message: parts.length > 0 ? `Protokół podpisany — ${parts.join("; ")}` : "Protokół podpisany",
+    data: { ...withParsedItems(outcome.data), autofill: effects.autofill, quote: effects.quote },
+    message: effects.message,
   });
 });
 

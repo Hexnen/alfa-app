@@ -1,0 +1,27 @@
+-- ---------------------------------------------------------------------------
+-- PROJEKT CCTV PODPIĘTY POD OBIEKT (monitoring_projects.object_id)
+--
+-- Projekty z designera żyły dotąd w zupełnym oderwaniu od kartoteki: nazwa
+-- i adres wpisywane ręcznie, a jedynym powiązaniem z obiektem była zbieżność
+-- literek („Aluzyjna 25, Warszawa”). Dopóki projektów było kilka, wystarczało;
+-- przy kilkudziesięciu nikt już nie wiedział, czy dla obiektu z kartoteki ktoś
+-- rysował plan kamer, czy trzeba go robić od zera.
+--
+-- ON DELETE SET NULL, a nie CASCADE: projekt to WŁASNA praca projektanta
+-- (rozmieszczenie kamer, zasięgi, trasy kabli), która przeżywa obiekt.
+-- Skasowana kartoteka ma odpiąć projekt, a nie skasować mu plan — inaczej
+-- usunięcie pomyłkowo założonego obiektu zabierałoby ze sobą kilka godzin
+-- pracy na mapie.
+--
+-- NULL = projekt niepodpięty i to stan normalny, nie brak danych: wycena
+-- powstaje nierzadko zanim obiekt w ogóle trafi do kartoteki (projekt na
+-- zapytanie ofertowe). Dlatego kolumna jest nullowalna bez wartości domyślnej.
+--
+-- Indeks po `object_id` obsługuje jedyne zapytanie wstecz: sekcja „Projekty
+-- CCTV” na karcie obiektu (GET /monitoring/by-object/:objectId).
+--
+-- Migracja pisana RĘCZNIE (jak 0089–0092, 0098, 0099) — drizzle-kit generate
+-- przy tej bazie potrafi zaproponować przebudowę niezwiązanych tabel.
+-- ---------------------------------------------------------------------------
+ALTER TABLE `monitoring_projects` ADD `object_id` integer REFERENCES objects(id) ON DELETE SET NULL;--> statement-breakpoint
+CREATE INDEX `monitoring_projects_object_idx` ON `monitoring_projects` (`object_id`);

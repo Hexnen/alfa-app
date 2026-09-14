@@ -57,13 +57,23 @@ Przejdź do **kroku 3**.
 
 ### 3. Odczytaj bieżącą wersję
 
-Przeczytaj `frontend/src/lib/version.ts` i wyciągnij wersję z:
+Przeczytaj `frontend/src/lib/version.ts` i wyciągnij wersje z:
 ```ts
 export const APP_VERSION = 'X.Y.Z'
+export const TECHNIK_VERSION = 'X.Y.Z'
 ```
 
 Format: standardowy SemVer (`X.Y.Z`), bez zer wiodących. Segmenty nie mają
 limitu cyfr (`1.101.899` jest poprawne).
+
+**Ustal też, czy commit dotyka panelu technika** (`/technik`) — to osobno
+wersjonowana aplikacja na tablet, patrz „Panel technika” niżej. Dotyka, gdy
+w commicie są zmiany w:
+- `frontend/src/technik/**`
+- `src/routes/technik.ts`
+- `src/lib/protocols.ts` (gdy zmiana wynika z pracy nad panelem, a nie
+  z porządków w protokołach biurowych)
+- sekcja `technikApi` / typy `Technik*` w `frontend/src/lib/api.ts`
 
 ### 4. Zapytaj o rodzaj podbicia
 
@@ -74,6 +84,9 @@ Pokaż bieżącą wersję i zapytaj:
 
 Domyślna rekomendacja: patch.
 
+Wybór jest JEDEN na commit — gdy commit dotyka panelu technika, ten sam rodzaj
+podbicia (patch/minor) dostaje też `TECHNIK_VERSION`. Nie pytaj dwa razy.
+
 ### 5. Zaktualizuj pliki z wersją
 
 Dwa miejsca, zawsze razem:
@@ -82,6 +95,11 @@ Dwa miejsca, zawsze razem:
 
 (`frontend/package.json` zostaje na `0.0.0` — to prywatny pakiet builda, nie
 wersja aplikacji.)
+
+**Dodatkowo, gdy commit dotyka panelu technika** (krok 3): podbij w tym samym
+pliku `export const TECHNIK_VERSION = 'X.Y.Z'` — o ten sam rodzaj (patch/minor),
+licząc od WŁASNEJ wersji panelu, nie od `APP_VERSION`. Te dwa numery rozjeżdżają
+się celowo i nigdy się nie wyrównuje ich ręcznie.
 
 ### 6. Napisz wpis do changelogu
 
@@ -104,8 +122,8 @@ Jak pisać:
    bebechach
 3. Przypisz typ do każdego wpisu: `feat`, `fix`, `tweak`, `style`
 4. Przypisz **moduł** do każdego wpisu — pole `module` jest WYMAGANE, wartość
-   z listy `ogolne | analityka | kadry | cma | handlowy | techniczny | ofi`
-   (patrz „Przypisanie modułu” niżej)
+   z listy `ogolne | analityka | kadry | cma | handlowy | techniczny | ofi |
+   technik` (patrz „Przypisanie modułu” niżej)
 5. **Zawsze pokaż propozycję użytkownikowi** przez AskUserQuestion z opcjami:
    - **zatwierdź** — dopisz na początek `UPDATES_CURRENT`
    - **popraw** — użytkownik podaje korekty, potem dopisz
@@ -133,6 +151,9 @@ kilku modułów, rozbij ją na osobne wpisy albo daj `ogolne`):
   kalendarz handlowy
 - `analityka` — sekcja Analityka (kontrahenci, obiekty, handlowcy)
 - `ofi` — sekcja OFI
+- `technik` — panel technika (`/technik`): ekran technika i podwykonawcy na
+  tablecie. Używany w `UPDATES_TECHNIK` oraz w jednym krótkim wpisie
+  `UPDATES_CURRENT` (patrz „Panel technika” niżej)
 - `ogolne` — logowanie i konta, menu boczne i nawigacja, panel administratora,
   poczta systemowa, asystent AI, wydajność, wygląd całej aplikacji i zmiany
   przekrojowe dotykające wielu sekcji
@@ -150,6 +171,39 @@ Kształt karty:
     { text: 'Lista leadów nie gubi już filtrów po powrocie z karty', type: 'fix', module: 'handlowy' },
   ],
 },
+```
+
+**Panel technika — drugi changelog.** Panel `/technik` ma własny numer wersji
+(`TECHNIK_VERSION`) i własną listę zmian `UPDATES_TECHNIK` w tym samym pliku,
+bo wydaje się niezależnie od CRM-a i czyta go ktoś inny: technik w aucie, nie
+biuro. Widać ją w zakładce „Panel technika” na `/co-nowego` (`?panel=technik`)
+oraz w samym panelu (`/technik/co-nowego`). Reguła jest jedna, bez wyjątków:
+
+1. **`APP_VERSION` i `UPDATES_CURRENT` podbijasz i uzupełniasz zawsze**, tak jak
+   dotąd — również przy commicie dotykającym wyłącznie panelu. Dzięki temu każda
+   wersja aplikacji ma swoją kartę i badge „Aktualna” na coś wskazuje.
+2. Gdy commit dotyka panelu (krok 3), **dodatkowo** podbijasz `TECHNIK_VERSION`
+   i dopisujesz kartę/wpisy do `UPDATES_TECHNIK` — kształt karty ten sam, moduł
+   zawsze `technik`, ta sama zasada „ten sam dzień = dopisz do pierwszej karty
+   i rozszerz zakres wersji półpauzą”.
+3. **Treść nie dubluje się.** Szczegóły idą TYLKO do `UPDATES_TECHNIK`, językiem
+   pracownika w terenie („bez dzwonienia do biura po adres”, „protokół
+   podpisany na miejscu”), bez nazw zakładek CRM-a. Do `UPDATES_CURRENT` trafia
+   **jeden krótki wpis** zaczynający się od „Panel technika: …”, z modułem
+   `technik` — biuro ma wiedzieć, że panel dostał aktualizację, a nie czytać jej
+   całą drugi raz.
+4. Ton i dawkowanie lekkości liczy się **osobno dla każdej karty** — jedna karta
+   panelu ma najwyżej jeden lżejszy wpis, niezależnie od karty aplikacji.
+
+Przykład commita dotykającego tylko panelu (wersje `1.4.0` / `1.0.0`, patch):
+```ts
+// version.ts:  APP_VERSION = '1.4.1',  TECHNIK_VERSION = '1.0.1'
+
+// UPDATES_CURRENT — jeden wpis:
+{ text: 'Panel technika: lista zleceń odświeża się po powrocie z protokołu', type: 'fix', module: 'technik' },
+
+// UPDATES_TECHNIK — szczegóły, językiem technika:
+{ text: 'Po podpisaniu protokołu lista zleceń pokazuje aktualny stan, bez ręcznego odświeżania', type: 'fix', module: 'technik' },
 ```
 
 **Zasady wpisów:**
@@ -234,7 +288,10 @@ Ustal, co faktycznie zrobiono, na podstawie:
 - **Zmienionych plików** — co doszło, zmieniło się, zniknęło w diffie
 - **Kontekstu rozmowy** — czego chciał użytkownik, jaki problem został rozwiązany
 - **Zakresu** — który moduł aplikacji dotknięty (kadry, cma, technical,
-  handlowy, zlecenia, magazyn, kalendarz, oferty, umowy, admin, shared…)
+  handlowy, zlecenia, magazyn, kalendarz, oferty, umowy, admin, shared…).
+  Gdy commit dotyka panelu technika, zakresem jest `technik`
+  (np. `feat(technik): protokół z podpisem na tablecie`); gdy przy okazji
+  zmienia się coś jeszcze, wybierz zakres tego, co w commicie jest główne.
 
 Tytuł po polsku, zwięzły, odpowiadający na „po co”, nie tylko „co”:
 - Dobrze: `feat(magazyn): import towarów ze sklepów dostawców`
@@ -275,7 +332,8 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 
 Dostępne typy: `feat`, `fix`, `refactor`, `docs`, `style`, `chore`
 Zakres: moduł aplikacji (`kadry`, `cma`, `technical`, `handlowy`, `zlecenia`,
-`magazyn`, `kalendarz`, `oferty`, `umowy`, `obiekty`, `admin`, `shared`…)
+`magazyn`, `kalendarz`, `oferty`, `umowy`, `obiekty`, `admin`, `technik`,
+`shared`…)
 
 ### 9. Sprawdź
 

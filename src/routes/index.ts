@@ -34,6 +34,7 @@ import adminAssistantRoutes from "./admin-assistant.js";
 import adminCalendarRoutes from "./admin-calendar.js";
 import adminCompanyRoutes from "./admin-company.js";
 import adminMailRoutes from "./admin-mail.js";
+import adminTechnikRoutes from "./admin-technik.js";
 import assistantRoutes from "./assistant.js";
 import calendarRoutes, { calendarPublicRoutes } from "./calendar.js";
 import activityRoutes from "./activity.js";
@@ -41,7 +42,8 @@ import analyticsRoutes from "./analytics.js";
 import leadsRoutes from "./leads.js";
 import contactsRoutes from "./contacts.js";
 import linksRoutes from "./links.js";
-import { requireAuth, requireAssistantAccess, tabPermissionGuard, getUser } from "../middleware/auth.js";
+import technikRoutes from "./technik.js";
+import { requireAuth, requireAssistantAccess, tabPermissionGuard, technikRoleGuard, getUser } from "../middleware/auth.js";
 import { canView } from "../lib/auth/permissions.js";
 import { db, schema } from "../db/index.js";
 import { sql, eq, type SQL } from "drizzle-orm";
@@ -166,6 +168,12 @@ api.route("/plugin", pluginRoutes);
 // --- Wszystkie pozostałe trasy API — chronione sesją ---
 api.use("*", requireAuth);
 
+// --- KONTO TECHNIKA: zamknięte w /technik ---
+// Zaraz po requireAuth i PRZED /admin, /assistant oraz strażnikiem zakładek:
+// tamten przepuszcza trasy spoza API_TAB_MAP (/stats, /links, /company-lookup),
+// więc bez tego strażnika podwykonawca dostałby całe to podbrzusze API.
+api.use("*", technikRoleGuard);
+
 // --- ADMIN — panel zarządzania użytkownikami + konfiguracja asystenta (własny requireAdmin) ---
 // Zamontowane przed strażnikiem zakładek (który i tak nie obejmuje /admin).
 // /admin/assistant PRZED /admin — Hono dopasowuje po kolejności rejestracji.
@@ -173,6 +181,7 @@ api.route("/admin/assistant", adminAssistantRoutes);
 api.route("/admin/calendar", adminCalendarRoutes);
 api.route("/admin/company", adminCompanyRoutes);
 api.route("/admin/mail", adminMailRoutes);
+api.route("/admin/technik", adminTechnikRoutes);
 api.route("/admin", adminRoutes);
 
 // --- ASYSTENT AI (kalendarz) — dostęp wg ustawienia assistant.access (admin lub edytorzy kalendarza);
@@ -187,6 +196,12 @@ api.route("/assistant", assistantRoutes);
 
 // --- Strażnik uprawnień do zakładek (view/edit) dla tras modułowych ---
 api.use("*", tabPermissionGuard);
+
+// --- PANEL TECHNIKA (klucz `technik`) — własne, wąskie API na tablet.
+// POD strażnikiem zakładek: to on odcina konta bez klucza i pilnuje trybu
+// tylko-do-odczytu (view). Router nie używa calendar-scope (patrz komentarz
+// w src/routes/technik.ts) — widoczność liczy się z przypisań technika.
+api.route("/technik", technikRoutes);
 
 // --- KALENDARZ (technical/kalendarz) + globalny dziennik aktywności ---
 // /activity nie jest w API_TAB_MAP — historia obiektu czytelna dla każdego zalogowanego.

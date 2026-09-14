@@ -1,0 +1,46 @@
+{
+  "id": "/technik",
+  "name": "Alfa — Panel technika",
+  "short_name": "Technik",
+  "description": "Zlecenia, protokoły i podpis klienta — panel technika Alfa Group.",
+  "lang": "pl",
+  "dir": "ltr",
+  "start_url": "/technik",
+  "scope": "/technik",
+  "display": "standalone",
+  "orientation": "any",
+  "theme_color": "#002158",
+  "background_color": "#ffffff",
+  "icons": [
+    {
+      "src": "/technik-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/technik-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/technik-icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Dziś",
+      "url": "/technik",
+      "icons": [{ "src": "/technik-icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    },
+    {
+      "name": "Nadchodzące",
+      "url": "/technik/nadchodzace",
+      "icons": [{ "src": "/technik-icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    }
+  ]
+}
