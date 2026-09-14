@@ -94,6 +94,9 @@ function bodyLimitFor(path: string, method: string): number {
   }
   if (/^\/monitoring\/snapshots\/\d+$/.test(path) && method === "PUT") return BODY_LIMIT_DESIGNER;
   if (/^\/calendar\/events\/\d+\/notes$/.test(path) && method === "POST") return BODY_LIMIT_NOTE_ATTACHMENTS;
+  // Panel technika: zdjęcia z tabletu jako notatka zlecenia — ta sama tabela
+  // załączników i ten sam limit co w kalendarzu (src/routes/technik.ts).
+  if (/^\/technik\/jobs\/\d+\/notes$/.test(path) && method === "POST") return BODY_LIMIT_NOTE_ATTACHMENTS;
   // Mail .msg przeciągnięty z Outlooka na siatkę kalendarza.
   if (path === "/calendar/msg/parse" && method === "POST") return BODY_LIMIT_OUTLOOK_MSG;
   // Manuale: multipart przy zakładaniu (POST /manuals) i przy dokładaniu plików.

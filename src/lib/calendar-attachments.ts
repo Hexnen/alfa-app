@@ -123,6 +123,32 @@ export function attachmentsByNote(dbx: DbOrTx, noteIds: number[]): Map<number, N
   return out;
 }
 
+/**
+ * Wspólne pola multipartu notatki: `text` (opcjonalne) + wiele `files`. Używają
+ * tego OBA routery przyjmujące notatki z plikami — kalendarz biurowy
+ * (src/routes/calendar.ts) i panel technika (src/routes/technik.ts) — żeby
+ * zdjęcie z tabletu przechodziło dokładnie tę samą drogę co upload z biura.
+ * Pola specyficzne dla routera (mail, copyToObject) czyta wołający sam.
+ *
+ * Pliki lądują w pamięci — sufit ciała żądania pilnuje `bodyLimitFor`
+ * w src/routes/index.ts, sufit pojedynczego pliku `validateUploads`.
+ */
+export async function parseNoteForm(form: FormData): Promise<{ text: string; files: IncomingFile[] }> {
+  const textField = form.get("text");
+  const files: IncomingFile[] = [];
+  for (const entry of form.getAll("files")) {
+    if (!(entry instanceof File)) continue;
+    files.push({ name: entry.name, mime: entry.type, data: Buffer.from(await entry.arrayBuffer()) });
+  }
+  return { text: typeof textField === "string" ? textField : "", files };
+}
+
+/** Multipart nie zna typów — checkbox przychodzi jako "1"/"true". */
+export function formFlag(form: FormData, name: string): boolean {
+  const v = form.get(name);
+  return typeof v === "string" && (v === "1" || v.toLowerCase() === "true");
+}
+
 /** Nazwa pliku bez ścieżki (przeglądarki potrafią wysłać pełną ścieżkę), skrócona do rozsądnej długości. */
 function baseName(name: string): string {
   const cleaned = name.replace(/[\\/]+/g, "/").split("/").pop()?.replace(/[\u0000-\u001f]/g, "").trim() || "plik";

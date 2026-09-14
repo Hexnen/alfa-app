@@ -22,6 +22,8 @@
  * i wycenami, obiekt, kontrahent, technicy, konta, dziennik), także przy błędzie.
  */
 import { Hono } from "hono";
+import { existsSync } from "node:fs";
+import sharp from "sharp";
 import { and, eq, inArray, like, or, sql } from "drizzle-orm";
 import { db, schema } from "../src/db/index.js";
 import technikRoutes from "../src/routes/technik.js";
@@ -30,6 +32,7 @@ import calendarRoutes from "../src/routes/calendar.js";
 import adminRoutes from "../src/routes/admin.js";
 import adminTechnikRoutes from "../src/routes/admin-technik.js";
 import { TECHNIK_ACTIVITIES_KEY } from "../src/lib/technik-config.js";
+import { removeEventAttachmentDir, resolveStoredPath } from "../src/lib/calendar-attachments.js";
 import { createEvent, deleteEvent, moveEvent, parseInput } from "../src/lib/calendar-mutations.js";
 import { flushPush, setPushTransport, type PushPayload } from "../src/lib/push.js";
 import { deleteSetting, getSetting, setSetting } from "../src/lib/settings.js";
@@ -80,6 +83,9 @@ function cleanup(): number {
     .map((r) => r.id);
 
   if (eventIds.length) {
+    // Zdjęcia z notatek leżą na dysku (<DATA_DIR>/attachments/<eventId>) — same
+    // z kasowaniem wierszy nie znikną, a test nie ma zostawiać śmieci.
+    for (const id of eventIds) removeEventAttachmentDir(id);
     db.delete(schema.calendarEventNotes).where(inArray(schema.calendarEventNotes.eventId, eventIds)).run();
     db.delete(schema.calendarEventAssignees).where(inArray(schema.calendarEventAssignees.eventId, eventIds)).run();
     db.delete(schema.activityLog)
@@ -162,8 +168,8 @@ function makeTechnician(suffix: string, userId: number | null, active = true) {
     .get();
 }
 
-/** Klient panelu technika: kontekst jak po requireAuth + oba prawdziwe strażniki. */
-function clientFor(user: User) {
+/** Aplikacja panelu technika: kontekst jak po requireAuth + oba prawdziwe strażniki. */
+function panelAppFor(user: User) {
   const app = new Hono();
   app.use("*", async (c, next) => {
     c.set("user", user);
@@ -172,12 +178,23 @@ function clientFor(user: User) {
   app.use("*", technikRoleGuard);
   app.use("*", tabPermissionGuard);
   app.route("/api/technik", technikRoutes);
+  return app;
+}
+
+/**
+ * Klient panelu — JSON albo multipart (`FormData`, np. zdjęcie z tabletu).
+ * Odpowiedzi binarne (plik załącznika) czyta się przez `panelAppFor` wprost.
+ */
+function clientFor(user: User) {
+  const app = panelAppFor(user);
   return async (method: string, path: string, body?: unknown) => {
     const res = await app.request(`/api/technik${path}`, {
       method,
-      ...(body !== undefined
-        ? { body: JSON.stringify(body), headers: { "Content-Type": "application/json" } }
-        : {}),
+      ...(body instanceof FormData
+        ? { body }
+        : body !== undefined
+          ? { body: JSON.stringify(body), headers: { "Content-Type": "application/json" } }
+          : {}),
     });
     const json = (await res.json().catch(() => null)) as
       | { success?: boolean; data?: unknown; error?: string; message?: string }
@@ -249,6 +266,8 @@ const E = clientFor(editUser);
 const K = clientFor(noKeyUser);
 const A = adminTechnikFor(adminUser);
 const TA = adminTechnikFor(techUser);
+/** Surowa aplikacja technika — do odpowiedzi, które nie są JSON-em (pliki załączników). */
+const TRaw = panelAppFor(techUser);
 
 /**
  * Słownik czynności żyje w `app_settings` — wspólnej tabeli, nie w wierszach
@@ -989,6 +1008,137 @@ try {
       subsOf(techUser.id).length === 0,
     removedMine
   );
+
+  // =========================================================================
+  // 17. ZDJĘCIA W NOTATKACH — multipart z tabletu i własne trasy plików
+  //
+  // Panel serwuje załączniki sam, bo rola `technik` nie ma wstępu do
+  // /api/calendar/*. Pilnujemy: zapisu (WebP, url panelu), odczytu, granicy
+  // cudzych zleceń (404, nie 403), limitu plików i trybu tylko-do-odczytu.
+  // =========================================================================
+  const photoJob = insertEvent({ title: "Zdjecia", type: "serwis", technicianIds: [tech.id], hour: 20 });
+  // Małe PNG-i generowane w teście — żadnych plików binarnych w repo.
+  const png = async (r: number) =>
+    sharp({ create: { width: 40, height: 30, channels: 3, background: { r, g: 10, b: 10 } } })
+      .png()
+      .toBuffer();
+  const photoForm = (text: string | null, files: { name: string; type: string; data: Buffer }[]) => {
+    const fd = new FormData();
+    if (text !== null) fd.set("text", text);
+    for (const f of files) fd.append("files", new File([new Uint8Array(f.data)], f.name, { type: f.type }));
+    return fd;
+  };
+
+  const upload = await T(
+    "POST",
+    `/jobs/${photoJob}/notes`,
+    photoForm("Kamera przy bramie", [
+      { name: "kamera 1.png", type: "image/png", data: await png(200) },
+      { name: "kamera 2.png", type: "image/png", data: await png(30) },
+    ])
+  );
+  const uploaded = upload.data as
+    | { id: number; text: string; mine?: boolean; attachments?: { id: number; kind: string; mime: string; url: string; fileName: string }[] }
+    | undefined;
+  const atts = uploaded?.attachments ?? [];
+  ok(
+    "notatka multipart: 201, 2 załączniki jako WebP",
+    upload.status === 201 &&
+      atts.length === 2 &&
+      atts.every((a) => a.kind === "image" && a.mime === "image/webp"),
+    upload
+  );
+  ok(
+    "notatka multipart: url wskazuje na trasę panelu, nie kalendarza",
+    atts.every((a) => a.url === `/api/technik/attachments/${a.id}`),
+    atts.map((a) => a.url)
+  );
+  ok("notatka multipart: tekst zapisany obok zdjęć", uploaded?.text === "Kamera przy bramie", uploaded?.text);
+
+  const detailPhotos = await T("GET", `/jobs/${photoJob}`);
+  const detailNotes = (detailPhotos.data as { notes?: Array<{ id: number; mine?: boolean; attachments?: unknown[] }> })?.notes ?? [];
+  ok(
+    "GET /jobs/:id: notatka wraca z załącznikami i flagą „moja”",
+    detailNotes[0]?.attachments?.length === 2 && detailNotes[0]?.mine === true,
+    detailNotes[0]
+  );
+
+  // Notatka bez tekstu, za to ze zdjęciem — zdjęcie samo jest treścią wpisu.
+  const photoOnly = await T("POST", `/jobs/${photoJob}/notes`, photoForm("", [{ name: "tablica.png", type: "image/png", data: await png(90) }]));
+  ok(
+    "notatka z samym zdjęciem (pusty tekst) → 201",
+    photoOnly.status === 201 && (photoOnly.data as { text?: string })?.text === "",
+    photoOnly
+  );
+  const noText = await T("POST", `/jobs/${photoJob}/notes`, photoForm("   ", []));
+  ok("multipart bez tekstu i bez plików → 400", noText.status === 400, noText);
+
+  const fileRes = await TRaw.request(`/api/technik/attachments/${atts[0]?.id}`);
+  const fileBody = Buffer.from(await fileRes.arrayBuffer());
+  ok(
+    "GET załącznika: 200, image/webp, inline",
+    fileRes.status === 200 &&
+      fileRes.headers.get("content-type") === "image/webp" &&
+      /^inline;/.test(fileRes.headers.get("content-disposition") ?? "") &&
+      fileBody.subarray(8, 12).toString() === "WEBP",
+    { status: fileRes.status, headers: Object.fromEntries(fileRes.headers) }
+  );
+  const dlRes = await TRaw.request(`/api/technik/attachments/${atts[0]?.id}?download=1`);
+  ok(
+    "GET ?download=1 → Content-Disposition: attachment",
+    dlRes.status === 200 && /^attachment;/.test(dlRes.headers.get("content-disposition") ?? ""),
+    dlRes.headers.get("content-disposition")
+  );
+  ok("GET nieistniejącego załącznika → 404", (await T("GET", "/attachments/99999999")).status === 404);
+
+  // Cudze zdjęcie: inny technik, inne zlecenie — ma nie istnieć, nie „być zabronione”.
+  const otherUpload = await O("POST", `/jobs/${otherJob}/notes`, photoForm("Cudze", [{ name: "cudze.png", type: "image/png", data: await png(120) }]));
+  const otherAtt = ((otherUpload.data as { attachments?: { id: number }[] })?.attachments ?? [])[0];
+  ok("cudza notatka ze zdjęciem: 201 u właściciela", otherUpload.status === 201 && !!otherAtt, otherUpload);
+  ok("GET cudzego załącznika → 404", (await T("GET", `/attachments/${otherAtt?.id}`)).status === 404);
+  ok("DELETE cudzego załącznika → 404", (await T("DELETE", `/attachments/${otherAtt?.id}`)).status === 404);
+
+  // Rola `technik` nie może obejść panelu i wejść po plik przez kalendarz.
+  ok(
+    "technik: /api/calendar/attachments/:id → 403",
+    (await outsideTech(`/api/calendar/attachments/${atts[0]?.id}`)).status === 403
+  );
+
+  const limitForm = photoForm(
+    "za dużo",
+    await Promise.all(Array.from({ length: 16 }, async (_, i) => ({ name: `p${i}.png`, type: "image/png", data: await png(i * 5) })))
+  );
+  const overLimit = await T("POST", `/jobs/${photoJob}/notes`, limitForm);
+  ok("16 plików → 400 „Maksymalnie 15 plików”", overLimit.status === 400 && overLimit.error === "Maksymalnie 15 plików", overLimit);
+
+  // Tryb tylko-do-odczytu obejmuje także zdjęcia.
+  const viewPhoto = await V("POST", `/jobs/${job}/notes`, photoForm("z podglądu", [{ name: "v.png", type: "image/png", data: await png(60) }]));
+  ok("user z „view”: POST zdjęcia → 403", viewPhoto.status === 403, viewPhoto);
+
+  // Usunięcie własnego: wiersz i plik z dysku znikają.
+  const storedPath = db
+    .select()
+    .from(schema.calendarNoteAttachments)
+    .where(eq(schema.calendarNoteAttachments.id, atts[1]?.id ?? 0))
+    .get()?.storedPath;
+  const absBefore = storedPath ? resolveStoredPath(storedPath) : null;
+  const del = await T("DELETE", `/attachments/${atts[1]?.id}`);
+  const rowAfter = db
+    .select()
+    .from(schema.calendarNoteAttachments)
+    .where(eq(schema.calendarNoteAttachments.id, atts[1]?.id ?? 0))
+    .get();
+  ok(
+    "DELETE własnego załącznika → 200, wiersz i plik znikają",
+    del.status === 200 && !rowAfter && !!absBefore && !existsSync(absBefore),
+    { del, rowAfter, absBefore }
+  );
+  ok("DELETE już usuniętego → 404", (await T("DELETE", `/attachments/${atts[1]?.id}`)).status === 404);
+  // Cudza (biurowa) notatka w MOIM zleceniu: plik widzę, ale go nie skasuję.
+  const officeUpload = await E("POST", `/jobs/${job}/notes`, photoForm("Z biura", [{ name: "biuro.png", type: "image/png", data: await png(150) }]));
+  const officeAtt = ((officeUpload.data as { attachments?: { id: number }[] })?.attachments ?? [])[0];
+  ok("DELETE załącznika z cudzej notatki (moje zlecenie) → 403", (await T("DELETE", `/attachments/${officeAtt?.id}`)).status === 403);
+  ok("GET załącznika z cudzej notatki (moje zlecenie) → 200", (await TRaw.request(`/api/technik/attachments/${officeAtt?.id}`)).status === 200);
 } catch (err) {
   console.error("BŁĄD:", err);
   failures++;

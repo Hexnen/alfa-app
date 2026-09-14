@@ -63,7 +63,7 @@ export interface VersionUpdate {
  */
 export const UPDATES_CURRENT: VersionUpdate[] = [
   {
-    version: "1.6.0–1.7.1",
+    version: "1.6.0–1.8.0",
     date: "2026-09-14",
     title: "Panel technika",
     entries: [
@@ -95,6 +95,11 @@ export const UPDATES_CURRENT: VersionUpdate[] = [
       {
         text: "Panel technika: liczniki zleceń na dolnym pasku, żółte przy zmianach z biura",
         type: "tweak",
+        module: "technik",
+      },
+      {
+        text: "Panel technika: zdjęcia z aparatu jako notatki zlecenia (widoczne też w kalendarzu) i protokół w czterech krokach",
+        type: "feat",
         module: "technik",
       },
     ],
@@ -205,7 +210,7 @@ export const UPDATES: VersionUpdate[] = [...UPDATES_CURRENT, ...UPDATES_2026];
  */
 export const UPDATES_TECHNIK: VersionUpdate[] = [
   {
-    version: "1.0.0–1.1.1",
+    version: "1.0.0–1.2.0",
     date: "2026-09-14",
     title: "Panel technika",
     entries: [
@@ -266,6 +271,26 @@ export const UPDATES_TECHNIK: VersionUpdate[] = [
       },
       {
         text: "Data na ekranie Dziś i w nagłówku zlecenia mieści się w całości, w dwóch liniach zamiast uciętej jednej",
+        type: "tweak",
+        module: "technik",
+      },
+      {
+        text: "Zdjęcie z aparatu dodaje się do zlecenia jako notatka, kilka naraz, bez wysyłania ich potem mailem do biura",
+        type: "feat",
+        module: "technik",
+      },
+      {
+        text: "Protokół wypełnia się w czterech krokach: dane, czynności, urządzenia, odbiór — z podsumowaniem i listą braków przed podpisem",
+        type: "feat",
+        module: "technik",
+      },
+      {
+        text: "Godziny, kilometry, typ pracy i data wybiera się dotknięciem z wartości ze zlecenia, zamiast wpisywać je z klawiatury",
+        type: "tweak",
+        module: "technik",
+      },
+      {
+        text: "Protokół zapisuje się sam w trakcie wypełniania, a stan zapisu widać na dole z godziną",
         type: "tweak",
         module: "technik",
       },

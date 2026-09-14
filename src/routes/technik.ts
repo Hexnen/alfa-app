@@ -23,6 +23,8 @@
  * ile klient płaci ani ile firma zarabia.
  */
 import { Hono, type Context } from "hono";
+import { createReadStream, statSync } from "node:fs";
+import { Readable } from "node:stream";
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, ne, sql } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
 import type { CalendarEvent as CalendarEventRow, Protocol, User } from "../db/schema.js";
@@ -31,6 +33,7 @@ import { canEdit } from "../lib/auth/permissions.js";
 import { ApiError, PROTOCOL_TYPES, TYPE_LABELS } from "../lib/calendar-labels.js";
 import {
   addNote,
+  canManageNote,
   getEventRow,
   getNoteRow,
   parseNoteText,
@@ -38,6 +41,16 @@ import {
   DATE_RE,
   type MutationCtx,
 } from "../lib/calendar-mutations.js";
+import {
+  attachmentFilePath,
+  attachmentsByNote,
+  contentDisposition,
+  parseNoteForm,
+  removeStoredFiles,
+  storeUploads,
+  type IncomingFile,
+  type NoteAttachmentJson,
+} from "../lib/calendar-attachments.js";
 import { clientIdOf, publishCalendarChange } from "../lib/calendar-live.js";
 import { ensureRealizationForEvent } from "../lib/calendar-realizations.js";
 import { createProtocolForRealizationSync } from "./protocols.js";
@@ -376,20 +389,37 @@ function jobsByIds(ids: number[], technicianId: number): JobJson[] {
   return toJobs(rows, technicianId);
 }
 
-/** Notatka w kształcie dla panelu — bez załączników (ich nie ma jak pobrać spoza /calendar). */
+/**
+ * Notatka w kształcie dla panelu. Załączniki są te same, co w kalendarzu
+ * (tabela `calendar_note_attachments`), ale `url` MUSI wskazywać na trasę
+ * panelu: rola `technik` nie ma wstępu do `/api/calendar/*`, więc adres
+ * z `attachmentOfRow` dałby jej 403 na własnym zdjęciu.
+ */
 interface JobNote {
   id: number;
   text: string;
   userLabel: string | null;
   source: string;
   createdAt: string;
+  /** `true` = notatkę napisał ten, kto pyta (front pokazuje mu „Usuń”). */
+  mine: boolean;
+  attachments: NoteAttachmentJson[];
 }
 
-function jobNotes(eventId: number): JobNote[] {
-  return db
+/** Prefiks, pod którym panel serwuje pliki załączników (router pod /api/technik). */
+const TECHNIK_ATTACHMENT_URL_PREFIX = "/api/technik/attachments";
+
+/** Ten sam JSON załącznika, ale z adresem trasy panelu zamiast kalendarza. */
+function withPanelUrls(list: NoteAttachmentJson[]): NoteAttachmentJson[] {
+  return list.map((a) => ({ ...a, url: `${TECHNIK_ATTACHMENT_URL_PREFIX}/${a.id}` }));
+}
+
+function jobNotes(eventId: number, userId: number): JobNote[] {
+  const rows = db
     .select({
       id: schema.calendarEventNotes.id,
       text: schema.calendarEventNotes.text,
+      userId: schema.calendarEventNotes.userId,
       userLabel: schema.calendarEventNotes.userLabel,
       source: schema.calendarEventNotes.source,
       createdAt: schema.calendarEventNotes.createdAt,
@@ -399,6 +429,13 @@ function jobNotes(eventId: number): JobNote[] {
     .orderBy(desc(schema.calendarEventNotes.createdAt), desc(schema.calendarEventNotes.id))
     .limit(200)
     .all();
+  // Jedno zapytanie na wszystkie notatki (bez N+1) — tak samo jak w kalendarzu.
+  const byNote = attachmentsByNote(db, rows.map((r) => r.id));
+  return rows.map(({ userId: author, ...n }) => ({
+    ...n,
+    mine: author === userId,
+    attachments: withPanelUrls(byNote.get(n.id) ?? []),
+  }));
 }
 
 /** „2026-09-14” + n dni (kalendarzowo, bez stref — daty są lokalne). */
@@ -570,13 +607,14 @@ app.get("/jobs", (c) => {
 
 app.get("/jobs/:id", (c) => {
   try {
-    const tech = linkedTechnician(getUser(c));
+    const user = getUser(c);
+    const tech = linkedTechnician(user);
     if (!tech) throw new ApiError(404, "Nie znaleziono zlecenia");
     const id = Number(c.req.param("id"));
     if (!Number.isInteger(id)) throw new ApiError(400, "Nieprawidłowe id");
     const ev = myEvent(tech.id, id);
     const [job] = toJobs([ev], tech.id);
-    return c.json({ success: true, data: { ...job, notes: jobNotes(ev.id) } });
+    return c.json({ success: true, data: { ...job, notes: jobNotes(ev.id, user.id) } });
   } catch (error) {
     return handleError(c, error, "pobierania zlecenia");
   }
@@ -796,15 +834,42 @@ app.post("/jobs/:id/finish", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
-// POST /jobs/:id/notes — wpis do dziennika zlecenia
+// POST /jobs/:id/notes — wpis do dziennika zlecenia (tekst i/lub zdjęcia)
+//
+// Dwa ciała, jedna trasa: JSON `{text}` jak dotąd oraz `multipart/form-data`
+// z polami `text` (wtedy opcjonalne) i `files` — tablet wysyła tak zdjęcia
+// z aparatu. Pliki idą tą samą drogą co upload z biura (storeUploads: obrazki
+// → WebP, max 2560 px, 15 × 5 MB), a limit CIAŁA żądania dokłada
+// `bodyLimitFor` w src/routes/index.ts.
 // ---------------------------------------------------------------------------
+
+/** `text` + `files` z ciała żądania — multipart albo JSON (wtedy bez plików). */
+async function readJobNoteBody(c: Context): Promise<{ text: string; files: IncomingFile[] }> {
+  if (!/multipart\/form-data/i.test(c.req.header("content-type") ?? "")) {
+    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    return { text: parseNoteText(body.text), files: [] };
+  }
+  const form = await c.req.formData().catch(() => null);
+  if (!form) throw new ApiError(400, "Nieprawidłowe dane formularza");
+  const { text, files } = await parseNoteForm(form);
+  // Zdjęcie samo w sobie jest treścią — pusty tekst przechodzi tylko z plikami.
+  return { text: parseNoteText(text, files.length > 0), files };
+}
 
 app.post("/jobs/:id/notes", async (c) => {
   try {
     const { ev, ctx } = mutationTarget(c, c.req.param("id"));
-    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
-    const text = parseNoteText(body.text);
-    const note = db.transaction((tx) => addNote(tx, { eventId: ev.id, text, ctx }));
+    const { text, files } = await readJobNoteBody(c);
+    // Zlecenie sprawdzone wyżej (mutationTarget), więc obrazki mielimy dopiero
+    // teraz; przy błędzie wstawiania wiersza sprzątamy je z dysku.
+    const attachments = files.length ? await storeUploads(ev.id, files) : [];
+    let note;
+    try {
+      note = db.transaction((tx) => addNote(tx, { eventId: ev.id, text, ctx, attachments }));
+    } catch (error) {
+      removeStoredFiles(attachments);
+      throw error;
+    }
     publish(c, "notes", [ev.id]);
     return c.json(
       {
@@ -815,12 +880,84 @@ app.post("/jobs/:id/notes", async (c) => {
           userLabel: note.userLabel,
           source: note.source,
           createdAt: note.createdAt,
+          mine: true,
+          attachments: withPanelUrls(note.attachments),
         },
       },
       201
     );
   } catch (error) {
     return handleError(c, error, "dodawania notatki");
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Załączniki notatek: GET /attachments/:id (inline, ?download=1) i DELETE
+//
+// Rola `technik` nie ma wstępu do `/api/calendar/*`, więc panel serwuje pliki
+// sam. Widoczność liczy się tak jak reszta routera: załącznik → notatka →
+// wydarzenie, a wydarzenie musi być zleceniem TEGO technika (myEvent, czyli
+// przypisanie w `calendar_event_assignees`). Cudze = 404, nigdy 403 — po kodzie
+// odpowiedzi nie da się wtedy zgadywać, co w firmie istnieje.
+// ---------------------------------------------------------------------------
+
+/** Załącznik z notatki MOJEGO zlecenia albo 404. */
+function myAttachment(c: Context, rawId: string) {
+  const user = getUser(c);
+  const tech = linkedTechnician(user);
+  if (!tech) throw new ApiError(404, "Załącznik nie istnieje");
+  const attId = Number(rawId);
+  if (!Number.isInteger(attId)) throw new ApiError(400, "Nieprawidłowe id");
+  const att = db
+    .select()
+    .from(schema.calendarNoteAttachments)
+    .where(eq(schema.calendarNoteAttachments.id, attId))
+    .get();
+  if (!att) throw new ApiError(404, "Załącznik nie istnieje");
+  const note = getNoteRow(db, att.noteId);
+  if (!note || note.deletedAt) throw new ApiError(404, "Załącznik nie istnieje");
+  return { user, att, note, ev: myEvent(tech.id, note.eventId) };
+}
+
+app.get("/attachments/:attachmentId", (c) => {
+  try {
+    const { att } = myAttachment(c, c.req.param("attachmentId"));
+    const abs = attachmentFilePath(att.storedPath);
+    if (!abs) throw new ApiError(404, "Plik załącznika nie istnieje na dysku");
+    const download = c.req.query("download") === "1";
+    const stream = Readable.toWeb(createReadStream(abs)) as ReadableStream;
+    return new Response(stream, {
+      status: 200,
+      headers: {
+        "Content-Type": att.mime,
+        "Content-Length": String(statSync(abs).size),
+        "Cache-Control": "private, max-age=86400",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Disposition": contentDisposition(download ? "attachment" : "inline", att.fileName),
+      },
+    });
+  } catch (error) {
+    return handleError(c, error, "pobierania załącznika");
+  }
+});
+
+app.delete("/attachments/:attachmentId", (c) => {
+  try {
+    const { user, att, note, ev } = myAttachment(c, c.req.param("attachmentId"));
+    assertCanWrite(user);
+    // Te same zasady co w kalendarzu: kasuje autor notatki (albo admin, gdy
+    // panel ma konto biurowe). Cudzej notatki technik nie ruszy.
+    if (!canManageNote(note, user)) {
+      throw new ApiError(403, "Tylko autor notatki może usunąć załącznik");
+    }
+    db.delete(schema.calendarNoteAttachments).where(eq(schema.calendarNoteAttachments.id, att.id)).run();
+    // Plik znika dopiero po skasowaniu wiersza — odwrotna kolejność zostawiłaby
+    // w bazie załącznik bez pliku, czyli zepsutą miniaturę w notatce.
+    removeStoredFiles([att]);
+    publish(c, "notes", [ev.id]);
+    return c.json({ success: true, data: { id: att.id, noteId: att.noteId } });
+  } catch (error) {
+    return handleError(c, error, "usuwania załącznika");
   }
 });
 

@@ -58,6 +58,18 @@ export function clockOf(iso: string | null | undefined): string {
     : `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
+/**
+ * Znacznik czasu → `Date` w strefie urządzenia. Te same trzy formaty co
+ * w `clockOf`: lokalny ISO kalendarza (bez strefy — `Date` czyta go jako
+ * lokalny, i dobrze), `datetime('now')` z SQLite (UTC bez „Z”) i pełny ISO.
+ * `null` = nie ma czego parsować.
+ */
+export function parseStamp(iso: string | null | undefined): Date | null {
+  if (!iso) return null;
+  const d = new Date(SQLITE_UTC_RE.test(iso) ? `${iso.replace(" ", "T")}Z` : iso);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
 function dateFromIso(iso: string): Date {
   const [y, m, d] = iso.split("-").map(Number);
   return new Date(y, (m ?? 1) - 1, d ?? 1, 12, 0, 0);

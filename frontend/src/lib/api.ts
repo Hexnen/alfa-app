@@ -10123,8 +10123,10 @@ export interface TechnikJob {
 }
 
 /**
- * Notatka zlecenia — wiersz `calendar_event_notes` bez załączników (spoza
- * `/calendar` nie ma ich jak pobrać).
+ * Notatka zlecenia — wiersz `calendar_event_notes`. Załączniki są te same, co
+ * w kalendarzu, ale ich `url` wskazuje na trasę panelu
+ * (`/api/technik/attachments/:id`): rola `technik` nie ma wstępu do
+ * `/api/calendar/*`.
  */
 export interface TechnikJobNote {
   id: number;
@@ -10134,6 +10136,10 @@ export interface TechnikJobNote {
   /** `system` = wpis automatu („Rozpoczęto o 10:12”), reszta = ręczna notatka. */
   source: string;
   createdAt: string;
+  /** `true` = notatka zalogowanego (tylko przy takich panel pokazuje „Usuń”). */
+  mine?: boolean;
+  /** Zdjęcia i pliki przy notatce; starszy backend nie odsyła tego pola. */
+  attachments?: CalendarNoteAttachment[];
 }
 
 /**
@@ -10284,6 +10290,31 @@ export const technikApi = {
       body: JSON.stringify({ text }),
     });
     return r.data as TechnikJobNote;
+  },
+
+  /**
+   * Notatka ze zdjęciami — multipart (`text` + wiele pól `files`), ta sama
+   * trasa co zwykła notatka. Tekst może być pusty, gdy lecą pliki: zdjęcie
+   * z obiektu samo w sobie jest treścią wpisu. Serwer przyjmuje max 15 plików
+   * po 5 MB (po kompresji w przeglądarce, patrz technik/lib/image.ts).
+   */
+  async addNoteWithFiles(
+    id: number,
+    payload: { text?: string; files: File[] }
+  ): Promise<TechnikJobNote> {
+    const fd = new FormData();
+    fd.append("text", payload.text ?? "");
+    for (const f of payload.files) fd.append("files", f, f.name);
+    const r = await requestMultipart<ApiResponse<TechnikJobNote>>(`/technik/jobs/${id}/notes`, fd);
+    return r.data as TechnikJobNote;
+  },
+
+  /** Usuwa załącznik notatki zlecenia; tylko autor notatki i tylko w trybie edycji. */
+  async deleteAttachment(attachmentId: number): Promise<void> {
+    await request<ApiResponse<{ id: number; noteId: number }>>(
+      `/technik/attachments/${attachmentId}`,
+      { method: "DELETE" }
+    );
   },
 
   /**

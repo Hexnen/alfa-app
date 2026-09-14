@@ -1,21 +1,31 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   AlertTriangle,
   Building2,
+  Camera,
   ChevronLeft,
   CircleCheckBig,
   FileText,
   MessageSquare,
   Navigation,
+  Paperclip,
   Phone,
   Play,
   Plus,
   Send,
   StickyNote,
   Users,
+  X,
 } from "lucide-react";
-import { technikApi, type TechnikJobDistance, type TechnikProtocolConflict } from "@/lib/api";
+import {
+  technikApi,
+  CALENDAR_ATTACHMENT_MAX_FILES,
+  type CalendarNoteAttachment,
+  type TechnikJobDistance,
+  type TechnikJobNote,
+  type TechnikProtocolConflict,
+} from "@/lib/api";
 import { Button } from "@/components/ui/button";
 // Znacznik pogody wprost z kalendarza — ta sama ikona WMO i ta sama paleta.
 import { WeatherMark } from "@/components/CalendarWeather";
@@ -25,6 +35,9 @@ import { cn } from "@/lib/utils";
 import { Section } from "../ui/section";
 import { EmptyState } from "../ui/empty-state";
 import { ActionTimeDialog } from "../ui/action-time";
+import { ConfirmDialog } from "../ui/confirm";
+import { Lightbox } from "../ui/lightbox";
+import { shrinkImage } from "../lib/image";
 import { useToast } from "../ui/toast";
 import { useJob } from "../lib/useJob";
 import { useJobWeather } from "../lib/useWeather";
@@ -65,6 +78,29 @@ export function Zlecenie() {
   const [noteBusy, setNoteBusy] = useState(false);
   /** Które działanie pyta o godzinę („Teraz” / „Inna godzina”). */
   const [askTime, setAskTime] = useState<"start" | "finish" | null>(null);
+
+  // --- Zdjęcia do notatki ---------------------------------------------
+  // Wybrane, jeszcze niewysłane zdjęcia (z aparatu albo z galerii). Trzymamy
+  // przy nich `previewUrl`, bo miniatura ma być widoczna PRZED wysyłką —
+  // technik musi zobaczyć, że trafił w kamerę, a nie w swój but.
+  const [picked, setPicked] = useState<PickedPhoto[]>([]);
+  /** Tekstowy postęp wysyłki („Przygotowuję 2 z 3…”) — kręciołek nic tu nie mówi. */
+  const [progress, setProgress] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  /** Otwarty podgląd: notatka + indeks zdjęcia w jej galerii. */
+  const [lightbox, setLightbox] = useState<{ noteId: number; index: number } | null>(null);
+  /** Załącznik czekający na potwierdzenie usunięcia. */
+  const [toDelete, setToDelete] = useState<CalendarNoteAttachment | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+
+  // Adresy blob żyją tylko na czas wyboru: pojedyncze zwalniamy przy usunięciu
+  // i po wysłaniu, a wyjście z ekranu sprząta resztę (seria zdjęć zostałaby
+  // inaczej w pamięci tabletu). Ref, bo efekt ma się wykonać TYLKO przy odmontowaniu.
+  const pickedRef = useRef<PickedPhoto[]>([]);
+  useEffect(() => {
+    pickedRef.current = picked;
+  }, [picked]);
+  useEffect(() => () => revokeAll(pickedRef.current), []);
 
   // Pogoda dnia zlecenia — ten sam batch co na listach, tu dla jednego id.
   const weather = useJobWeather(job);
@@ -203,19 +239,76 @@ export function Zlecenie() {
     }
   };
 
+  /** Zdjęcia z `<input type="file">` — dokładane do już wybranych, do limitu serwera. */
+  const pickPhotos = (list: FileList | null) => {
+    if (!list || list.length === 0) return;
+    const room = CALENDAR_ATTACHMENT_MAX_FILES - picked.length;
+    if (room <= 0) {
+      toastError(`Do jednej notatki można dodać najwyżej ${CALENDAR_ATTACHMENT_MAX_FILES} zdjęć.`);
+      return;
+    }
+    const files = Array.from(list).slice(0, room);
+    if (list.length > room) {
+      toastError(`Dodano ${files.length} z ${list.length} — limit to ${CALENDAR_ATTACHMENT_MAX_FILES} zdjęć na notatkę.`);
+    }
+    setPicked((prev) => [
+      ...prev,
+      ...files.map((file) => ({ key: `${file.name}-${file.lastModified}-${Math.random()}`, file, previewUrl: URL.createObjectURL(file) })),
+    ]);
+  };
+
+  const removePicked = (key: string) => {
+    setPicked((prev) => {
+      const gone = prev.find((p) => p.key === key);
+      if (gone) URL.revokeObjectURL(gone.previewUrl);
+      return prev.filter((p) => p.key !== key);
+    });
+  };
+
   const addNote = async () => {
     const content = noteText.trim();
-    if (!content || noteBusy) return;
+    if ((!content && picked.length === 0) || noteBusy) return;
     setNoteBusy(true);
     try {
-      await technikApi.addNote(job.id, content);
+      if (picked.length === 0) {
+        await technikApi.addNote(job.id, content);
+      } else {
+        // Kompresja idzie plik po pliku — na tablecie to sekunda na zdjęcie,
+        // więc technik ma widzieć, na którym stoimy.
+        const files: File[] = [];
+        for (const [i, p] of picked.entries()) {
+          setProgress(`Przygotowuję ${i + 1} z ${picked.length}…`);
+          files.push(await shrinkImage(p.file));
+        }
+        setProgress(`Wysyłam ${photoCount(files.length)}…`);
+        await technikApi.addNoteWithFiles(job.id, { text: content, files });
+      }
+      revokeAll(picked);
+      setPicked([]);
       setNoteText("");
-      toast({ message: "Notatka dodana", kind: "success" });
+      toast({ message: picked.length ? "Zdjęcia dodane do notatek" : "Notatka dodana", kind: "success" });
       reload();
     } catch (e) {
       toastError(e instanceof Error ? e.message : "Nie udało się zapisać notatki.");
     } finally {
+      setProgress(null);
       setNoteBusy(false);
+    }
+  };
+
+  /** Usunięcie zdjęcia z notatki — po potwierdzeniu, bo pliku nie da się cofnąć. */
+  const deleteAttachment = async (att: CalendarNoteAttachment) => {
+    setDeleteBusy(true);
+    try {
+      await technikApi.deleteAttachment(att.id);
+      setLightbox(null);
+      setToDelete(null);
+      toast({ message: "Zdjęcie usunięte", kind: "success" });
+      reload();
+    } catch (e) {
+      toastError(e instanceof Error ? e.message : "Nie udało się usunąć zdjęcia.");
+    } finally {
+      setDeleteBusy(false);
     }
   };
 
@@ -365,6 +458,11 @@ export function Zlecenie() {
                 // to ślad systemu, a nie ustalenie z klientem, i nie ma
                 // konkurować wzrokowo z tym, co technik dopisał ręcznie.
                 const system = n.source === "system";
+                const images = imagesOf(n);
+                const files = (n.attachments ?? []).filter((a) => a.kind !== "image");
+                // Kasować zdjęcia może tylko autor notatki i tylko w trybie edycji —
+                // te same zasady, co w kalendarzu biura.
+                const canDeleteFiles = canEdit && n.mine === true;
                 return (
                   <li
                     key={n.id}
@@ -373,14 +471,63 @@ export function Zlecenie() {
                       system ? "border-dashed bg-transparent" : "bg-muted/30",
                     )}
                   >
-                    <p
-                      className={cn(
-                        "whitespace-pre-wrap text-sm leading-snug",
-                        system && "italic text-muted-foreground",
-                      )}
-                    >
-                      {n.text}
-                    </p>
+                    {n.text && (
+                      <p
+                        className={cn(
+                          "whitespace-pre-wrap text-sm leading-snug",
+                          system && "italic text-muted-foreground",
+                        )}
+                      >
+                        {n.text}
+                      </p>
+                    )}
+                    {images.length > 0 && (
+                      <ul className={cn("grid grid-cols-3 gap-1.5", n.text && "mt-2")}>
+                        {images.map((a, i) => (
+                          <li key={a.id} className="relative">
+                            <button
+                              type="button"
+                              onClick={() => setLightbox({ noteId: n.id, index: i })}
+                              className="block w-full overflow-hidden rounded-lg border bg-muted/40"
+                              aria-label={`Podgląd: ${a.fileName}`}
+                              data-testid="technik-note-photo"
+                            >
+                              <img
+                                src={a.url}
+                                alt={a.fileName}
+                                loading="lazy"
+                                className="aspect-square w-full object-cover"
+                              />
+                            </button>
+                            {canDeleteFiles && (
+                              <button
+                                type="button"
+                                onClick={() => setToDelete(a)}
+                                aria-label={`Usuń zdjęcie ${a.fileName}`}
+                                className="absolute right-1 top-1 flex h-9 w-9 items-center justify-center rounded-full bg-background/90 text-muted-foreground shadow ring-1 ring-border"
+                              >
+                                <X className="h-4 w-4" />
+                              </button>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    {files.length > 0 && (
+                      <ul className={cn("space-y-1", n.text || images.length ? "mt-2" : "")}>
+                        {files.map((a) => (
+                          <li key={a.id}>
+                            <a
+                              href={`${a.url}?download=1`}
+                              className="flex min-h-11 items-center gap-2 rounded-lg border bg-background px-2.5 text-sm"
+                            >
+                              <Paperclip className="h-4 w-4 shrink-0 text-muted-foreground" />
+                              <span className="truncate">{a.fileName}</span>
+                            </a>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
                     <p className="mt-1 text-xs text-muted-foreground">
                       {n.userLabel ? `${n.userLabel} · ` : ""}
                       {clockOf(n.createdAt)}
@@ -397,19 +544,75 @@ export function Zlecenie() {
                 value={noteText}
                 onChange={setNoteText}
                 clearLabel="Wyczyść notatkę"
-                placeholder="Dopisz notatkę…"
+                placeholder={picked.length ? "Podpis do zdjęć (opcjonalnie)…" : "Dopisz notatkę…"}
                 rows={2}
                 className="min-h-[72px] text-base"
                 enterKeyHint="enter"
               />
-              <Button
-                className="h-11 w-full"
-                disabled={!noteText.trim() || noteBusy}
-                onClick={() => void addNote()}
-              >
-                <Send className="mr-2 h-4 w-4" />
-                {noteBusy ? "Zapisywanie…" : "Dodaj notatkę"}
-              </Button>
+
+              {/* Miniatury wybranych zdjęć — jeszcze przed wysłaniem. */}
+              {picked.length > 0 && (
+                <ul className="grid grid-cols-3 gap-1.5">
+                  {picked.map((p) => (
+                    <li key={p.key} className="relative">
+                      <img
+                        src={p.previewUrl}
+                        alt={p.file.name}
+                        className="aspect-square w-full rounded-lg border object-cover"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => removePicked(p.key)}
+                        disabled={noteBusy}
+                        aria-label={`Usuń z wyboru: ${p.file.name}`}
+                        className="absolute right-1 top-1 flex h-9 w-9 items-center justify-center rounded-full bg-background/90 text-muted-foreground shadow ring-1 ring-border disabled:opacity-50"
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              {/* Aparat obok wysyłki: na tablecie „Zdjęcie” otwiera aparat
+                  (capture), a przytrzymanie daje wybór z galerii. */}
+              <div className="flex gap-2">
+                <Button
+                  variant="outline"
+                  className="h-11 shrink-0"
+                  disabled={noteBusy}
+                  onClick={() => fileInputRef.current?.click()}
+                  data-testid="technik-note-photo-button"
+                >
+                  <Camera className="mr-2 h-4 w-4" />
+                  Zdjęcie
+                </Button>
+                <Button
+                  className="h-11 flex-1"
+                  disabled={(!noteText.trim() && picked.length === 0) || noteBusy}
+                  onClick={() => void addNote()}
+                >
+                  <Send className="mr-2 h-4 w-4" />
+                  {noteBusy
+                    ? progress ?? "Zapisywanie…"
+                    : picked.length
+                      ? `Wyślij (${picked.length})`
+                      : "Dodaj notatkę"}
+                </Button>
+              </div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                capture="environment"
+                multiple
+                className="hidden"
+                onChange={(e) => {
+                  pickPhotos(e.target.files);
+                  // Bez tego drugie zdjęcie tego samego pliku nie wywoła `change`.
+                  e.target.value = "";
+                }}
+              />
             </div>
           )}
         </Section>
@@ -506,8 +709,52 @@ export function Zlecenie() {
           else if (action === "start") void start(at);
         }}
       />
+
+      {/* Podgląd zdjęcia na cały ekran — galeria jednej notatki. */}
+      <Lightbox
+        items={lightbox ? imagesOf(job.notes.find((n) => n.id === lightbox.noteId)) : []}
+        index={lightbox?.index ?? null}
+        onIndexChange={(index) => setLightbox((l) => (l ? { ...l, index } : l))}
+        onClose={() => setLightbox(null)}
+      />
+
+      {/* Usunięcie zdjęcia jest nieodwracalne — pytamy, jak przy podpisie. */}
+      <ConfirmDialog
+        open={toDelete !== null}
+        onOpenChange={(o) => !o && !deleteBusy && setToDelete(null)}
+        title="Usunąć zdjęcie?"
+        description="Zniknie z notatki także w kalendarzu biura. Tego nie da się cofnąć."
+        confirmLabel={deleteBusy ? "Usuwam…" : "Usuń"}
+        onConfirm={() => {
+          if (toDelete) void deleteAttachment(toDelete);
+        }}
+      />
     </>
   );
+}
+
+/** Zdjęcie wybrane w panelu, jeszcze niewysłane (miniatura żyje na blobie). */
+interface PickedPhoto {
+  key: string;
+  file: File;
+  previewUrl: string;
+}
+
+function revokeAll(items: PickedPhoto[]): void {
+  for (const p of items) URL.revokeObjectURL(p.previewUrl);
+}
+
+/** Obrazki notatki (pliki inne niż zdjęcia lecą osobną listą chipów). */
+function imagesOf(note: TechnikJobNote | undefined): CalendarNoteAttachment[] {
+  return (note?.attachments ?? []).filter((a) => a.kind === "image");
+}
+
+/** „1 zdjęcie” / „3 zdjęcia” / „7 zdjęć” — komunikat postępu ma brzmieć po polsku. */
+function photoCount(n: number): string {
+  if (n === 1) return "1 zdjęcie";
+  const last = n % 10;
+  const teens = n % 100 >= 12 && n % 100 <= 14;
+  return `${n} ${!teens && last >= 2 && last <= 4 ? "zdjęcia" : "zdjęć"}`;
 }
 
 /** „23,4” — jedno miejsce po przecinku, z polskim przecinkiem. */

@@ -9,7 +9,19 @@ export interface SegmentedOption<T extends string = string> {
   /** Krótka etykieta na wąskim ekranie (pełna zostaje dla czytnika ekranu). */
   shortLabel?: string;
   disabled?: boolean;
+  /**
+   * Znacznik stanu w rogu segmentu: `ok` = krok uzupełniony, `warn` = są braki.
+   * Kropka nie zabiera szerokości (leży absolutnie), a znaczenie niesie też
+   * `aria-label` — kolor nigdy nie jest tu jedynym nośnikiem.
+   */
+  mark?: "ok" | "warn";
+  "data-testid"?: string;
 }
+
+const MARK_LABEL: Record<"ok" | "warn", string> = {
+  ok: "uzupełnione",
+  warn: "są braki",
+};
 
 /**
  * SEGMENTY — wybór jednego z co najwyżej sześciu. Przyciski mają 44 px i
@@ -26,6 +38,7 @@ export function SegmentedControl<T extends string>({
   className,
   size = "default",
   full = true,
+  dense = false,
 }: {
   /** Etykieta grupy dla czytnika ekranu (np. „Zakres dni”). */
   label: string;
@@ -36,6 +49,8 @@ export function SegmentedControl<T extends string>({
   /** `sm` = 36 px — tylko tam, gdzie na pewno jest mysz. */
   size?: "default" | "sm";
   full?: boolean;
+  /** Ciaśniejsze odstępy i mniejszy tekst — dla czterech segmentów na 390 px. */
+  dense?: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
 
@@ -76,12 +91,18 @@ export function SegmentedControl<T extends string>({
             type="button"
             role="radio"
             aria-checked={active}
-            aria-label={o.shortLabel ? o.label : undefined}
+            aria-label={
+              o.shortLabel || o.mark
+                ? [o.label, o.mark ? MARK_LABEL[o.mark] : null].filter(Boolean).join(" — ")
+                : undefined
+            }
             disabled={o.disabled}
             tabIndex={active ? 0 : -1}
+            data-testid={o["data-testid"]}
             onClick={() => onChange(o.value)}
             className={cn(
-              "inline-flex flex-1 select-none items-center justify-center gap-1.5 rounded-lg px-3 text-sm font-medium",
+              "relative inline-flex flex-1 select-none items-center justify-center gap-1.5 rounded-lg font-medium",
+              dense ? "px-2 text-[13px]" : "px-3 text-sm",
               "transition-colors active:scale-[0.98] disabled:pointer-events-none disabled:opacity-40",
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
               size === "default" ? "min-h-11" : "min-h-9",
@@ -90,6 +111,17 @@ export function SegmentedControl<T extends string>({
                 : "text-muted-foreground hover:text-foreground",
             )}
           >
+            {o.mark && (
+              <span
+                aria-hidden
+                className={cn(
+                  // Wyśrodkowana nad etykietą: w rogu segmentu kropka klei się
+                  // wzrokowo do sąsiedniego kroku i myli, którego dotyczy.
+                  "absolute left-1/2 top-1 h-1.5 w-1.5 -translate-x-1/2 rounded-full",
+                  o.mark === "ok" ? "bg-emerald-500" : "bg-amber-500",
+                )}
+              />
+            )}
             {Icon && <Icon className="size-4 shrink-0" aria-hidden />}
             <span className="truncate">
               {o.shortLabel ? (

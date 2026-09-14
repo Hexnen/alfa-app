@@ -77,6 +77,8 @@ import {
   ATTACHMENT_MAX_FILES,
   attachmentFilePath,
   contentDisposition,
+  formFlag,
+  parseNoteForm,
   removeStoredFiles,
   storeUploads,
   uploadRejectReason,
@@ -509,23 +511,15 @@ async function readNoteBody(c: Context): Promise<{
   }
   const form = await c.req.formData().catch(() => null);
   if (!form) throw new ApiError(400, "Nieprawidłowe dane formularza");
-  const textField = form.get("text");
-  const files: IncomingFile[] = [];
-  for (const entry of form.getAll("files")) {
-    if (!(entry instanceof File)) continue;
-    files.push({ name: entry.name, mime: entry.type, data: Buffer.from(await entry.arrayBuffer()) });
-  }
-  // Multipart nie zna typów — checkbox przychodzi jako "1"/"true".
-  const flag = (name: string) => {
-    const v = form.get(name);
-    return typeof v === "string" && (v === "1" || v.toLowerCase() === "true");
-  };
+  // `text` + `files` czyta wspólny parser (ten sam, z którego korzysta panel
+  // technika); tu zostają już tylko pola kalendarza.
+  const { text, files } = await parseNoteForm(form);
   return {
-    text: typeof textField === "string" ? textField : "",
+    text,
     files,
-    copyToObject: flag("copyToObject"),
+    copyToObject: formFlag(form, "copyToObject"),
     mail: parseMailField(form.get("mail")),
-    extractMsgAttachments: flag("extractMsgAttachments"),
+    extractMsgAttachments: formFlag(form, "extractMsgAttachments"),
   };
 }
 
