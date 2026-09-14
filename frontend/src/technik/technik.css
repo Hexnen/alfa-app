@@ -1,0 +1,105 @@
+/*
+ * PANEL TECHNIKA — reguły bazowe i utilities zakresowane pod `.technik-root`.
+ *
+ * Port `medici/frontend/src/styles/globals.css` (Tailwind 4) na alfowy
+ * Tailwind 3.4. Wszystko siedzi pod `.technik-root`, bo ten sam arkusz CSS
+ * ląduje w jednym buildzie razem z CRM-em — gdyby reguły były globalne,
+ * 16-pikselowe inputy i `touch-action` rozjechałyby biurowe ekrany.
+ *
+ * Tokeny kolorów zostają alfowe (`hsl(var(--background))` itd.) — nie
+ * kopiujemy palety oklch z Medici.
+ */
+
+.technik-root {
+  /* `dvh`, bo pasek adresu Safari zmienia wysokość widoku w trakcie scrolla. */
+  min-height: 100dvh;
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  font-size: 16px;
+  line-height: 1.5;
+  /* Bez 300 ms opóźnienia i bez szarego błysku na dotyk. */
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-text-size-adjust: 100%;
+  /* Pole, do którego wjeżdża focus, ma zostać nad klawiaturą i paskiem akcji. */
+  scroll-padding-bottom: 40dvh;
+  overscroll-behavior-y: none;
+}
+
+/* Pola tekstowe ≥16 px poniżej `lg` — iOS inaczej zoomuje całą stronę przy
+   wejściu w input, a technik traci z oczu pasek akcji. */
+@media (max-width: 1023.98px) {
+  .technik-root input,
+  .technik-root select,
+  .technik-root textarea {
+    font-size: 16px;
+  }
+}
+
+/* Przyciski i chipy nie zaznaczają się przy przytrzymaniu (rękawica, mokry palec). */
+.technik-root button,
+.technik-root [role="button"],
+.technik-root label,
+.technik-root summary {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+/* Godziny, kilometry i ilości zawsze tabelarycznie — nie „skaczą” przy zmianie. */
+.technik-root time,
+.technik-root .tabular,
+.technik-root [data-numeric] {
+  font-variant-numeric: tabular-nums;
+}
+
+.technik-root :focus-visible {
+  outline: 2px solid hsl(var(--ring));
+  outline-offset: 2px;
+}
+
+/* --- Utilities (odpowiedniki `@layer utilities` z Medici) ----------------- */
+
+.technik-root .pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+.technik-root .pt-safe {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+.technik-root .mb-safe {
+  margin-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* Sticky pasek akcji unoszony nad klawiaturę: Safari nie zna
+   `interactive-widget`, więc wysokość liczy `lib/keyboard.ts` → `--kb`. */
+.technik-root .bottom-kb {
+  bottom: calc(var(--kb, 0px) + env(safe-area-inset-bottom, 0px));
+}
+.technik-root .pb-kb {
+  padding-bottom: calc(var(--kb, 0px) + env(safe-area-inset-bottom, 0px));
+}
+
+/* Wariant dla ekranów, na których pod paskiem akcji stoi jeszcze tab bar
+   (56 px) — np. szczegóły zlecenia. Bez tego „Rozpocznij” leżałby na „Dziś”. */
+.technik-root .bottom-kb-nav {
+  bottom: calc(3.5rem + var(--kb, 0px) + env(safe-area-inset-bottom, 0px));
+}
+
+.technik-root .no-scrollbar {
+  scrollbar-width: none;
+}
+.technik-root .no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* Kto wyłączył animacje, ten ich nie dostaje. */
+@media (prefers-reduced-motion: reduce) {
+  .technik-root *,
+  .technik-root *::before,
+  .technik-root *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

@@ -12,7 +12,7 @@ import { verifyPassword, burnPasswordCheck } from "../lib/auth/passwords.js";
 import { clientIp, createRateLimiter } from "../lib/rate-limit.js";
 import { db } from "../db/index.js";
 import type { User } from "../db/schema.js";
-import { findSalespersonForUser } from "../lib/calendar-queries.js";
+import { findSalespersonForUser, findTechnicianByUserId } from "../lib/calendar-queries.js";
 
 const auth = new Hono();
 
@@ -75,18 +75,25 @@ auth.post("/register", (c) => {
 });
 
 /**
- * Publiczny user + `salespersonId` (po `salespeople.user_id`). To pole włącza
- * w module handlowym filtr „Moje”; brak powiązania = null → front pokazuje
- * „Wszyscy” i chowa przełącznik.
+ * Publiczny user + jego POWIĄZANIA z kartotekami: `salespersonId`
+ * (`salespeople.user_id`) i `technicianId` (`technicians.user_id`).
+ * Pierwsze włącza w module handlowym filtr „Moje”, drugie mówi panelowi
+ * /technik, czyje zlecenia pokazać; brak powiązania = null (front pokazuje
+ * „Wszyscy” / komunikat „konto nie jest powiązane z technikiem”).
  *
  * MUSI iść przez OBA wejścia do sesji — `/login` i `/me`. Gdy `/login` zwracał
  * samo `publicUser()`, `AuthProvider` sadzał do stanu użytkownika bez
  * `salespersonId` i przełącznik „Moje/Wszyscy” pojawiał się dopiero po
  * przeładowaniu strony (czyli po pierwszym `/me`).
  */
-function withSalespersonId(user: User) {
+function withLinks(user: User) {
   const salesperson = findSalespersonForUser(user, db);
-  return { ...publicUser(user), salespersonId: salesperson?.id ?? null };
+  const technician = findTechnicianByUserId(user.id, db);
+  return {
+    ...publicUser(user, technician?.id ?? null),
+    salespersonId: salesperson?.id ?? null,
+    technicianId: technician?.id ?? null,
+  };
 }
 
 // --- POST /login ---
@@ -120,7 +127,7 @@ auth.post("/login", async (c) => {
   }
   const { token, expiresAt } = createSession(user.id);
   setSessionCookie(c, token, expiresAt);
-  return c.json({ user: withSalespersonId(user) });
+  return c.json({ user: withLinks(user) });
 });
 
 // --- POST /logout ---
@@ -135,7 +142,7 @@ auth.post("/logout", (c) => {
 auth.get("/me", (c) => {
   const user = getSessionUser(getCookie(c, SESSION_COOKIE));
   if (!user) return c.json({ user: null }, 200);
-  return c.json({ user: withSalespersonId(user) });
+  return c.json({ user: withLinks(user) });
 });
 
 export default auth;

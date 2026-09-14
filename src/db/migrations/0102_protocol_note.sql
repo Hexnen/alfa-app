@@ -1,0 +1,20 @@
+-- ---------------------------------------------------------------------------
+-- PROTOKÓŁ → NOTATKA SYSTEMOWA NA WYDARZENIU
+--
+-- Technik wypełnia protokół u klienta, a biuro patrzy na kalendarz — dotąd
+-- treść protokołu (czynności, urządzenia, podpis) nie była stamtąd widoczna:
+-- kafelek pokazywał jedynie, ŻE protokół istnieje. Panel dopisuje więc do
+-- wydarzenia notatkę systemową ze streszczeniem protokołu i linkiem do niego.
+--
+-- `protocols.note_id` — DETERMINISTYCZNE wskazanie tej jednej notatki. Bez
+-- kolumny trzeba by ją odnajdywać po `source='system'` i prefiksie tekstu
+-- („Protokół P/…”), co psuje się przy pierwszej zmianie formatu tekstu i przy
+-- protokole numerowanym ręcznie. Kolumna daje jedną notatkę na protokół,
+-- aktualizowaną przy każdym zapisie i przy podpisie — zamiast mnożenia wpisów.
+--
+-- ON DELETE SET NULL: skasowanie notatki (soft delete robi to inaczej, ale
+-- twarde czyszczenie w skryptach testowych już nie) nie może wywalić protokołu.
+-- Migracja pisana RĘCZNIE (jak 0089–0092, 0098–0101) — drizzle-kit generate
+-- przy tej bazie potrafi zaproponować przebudowę niezwiązanych tabel.
+-- ---------------------------------------------------------------------------
+ALTER TABLE `protocols` ADD `note_id` integer REFERENCES calendar_event_notes(id) ON DELETE SET NULL;

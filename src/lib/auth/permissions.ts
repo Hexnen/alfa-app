@@ -92,6 +92,15 @@ export const TABS: TabDef[] = [
   { key: "technical/kalendarz", label: "Kalendarz", group: "Techniczny" },
   // OFI
   { key: "ofi", label: "OFI", group: "OFI" },
+  /*
+   * Panel technika (/technik) — osobna, bardzo prosta aplikacja na tablet:
+   * technik albo podwykonawca widzi WYŁĄCZNIE swoje zlecenia i wypełnia protokół
+   * z podpisem u klienta. Klucz uprawnień, a nie osobna kolumna w `users`, bo
+   * dzięki temu wpina się bez ani jednej linijki kodu w macierz admina,
+   * `tabPermissionGuard`, `AccessGuard` i filtr menu.
+   * `view` = podgląd zleceń, `edit` = Rozpocznij/Zakończ, notatki i protokół.
+   */
+  { key: "technik", label: "Panel technika", group: "Technik" },
 ];
 
 const TAB_KEYS = new Set(TABS.map((t) => t.key));
@@ -144,6 +153,10 @@ export function isAdmin(user: Pick<User, "role">): boolean {
 /** Efektywny poziom dostępu użytkownika do danej zakładki. */
 export function levelFor(user: Pick<User, "role" | "permissions">, tabKey: string): PermLevel {
   if (isAdmin(user)) return "edit";
+  // Rola „technik" to konto JEDNEGO ekranu: pełna praca w /technik i nic poza tym.
+  // Zapisana mapa uprawnień jest tu celowo ignorowana — konto podwykonawcy nie ma
+  // dostać kartoteki klientów przez omyłkowe kliknięcie w macierzy admina.
+  if (user.role === "technik") return tabKey === "technik" ? "edit" : "none";
   const map = parsePermissions(user.permissions);
   return map[tabKey] ?? "none";
 }

@@ -100,6 +100,29 @@ export function findTechnicianForUser(user: { displayName?: string | null }, dbx
 }
 
 /**
+ * Technik zalogowanego użytkownika — WYŁĄCZNIE po `technicians.user_id`
+ * (migracja 0101), dokładnie tak jak `findSalespersonForUser` dla handlowców.
+ *
+ * To jest funkcja AUTORYZACYJNA: po niej panel /technik rozstrzyga, czyje
+ * zlecenia pokazać. Heurystyka nazwiskowa z `findTechnicianForUser` zostaje
+ * wyłącznie do podpowiedzi asystenta — dwie osoby o tym samym nazwisku
+ * zamieniłyby się grafikami, a podwykonawca zobaczyłby cudzego klienta.
+ */
+export function findTechnicianByUserId(userId: number, dbx: DbOrTx = db): TechnicianBrief | null {
+  const t = dbx
+    .select({
+      id: schema.technicians.id,
+      firstName: schema.technicians.firstName,
+      lastName: schema.technicians.lastName,
+      active: schema.technicians.active,
+    })
+    .from(schema.technicians)
+    .where(eq(schema.technicians.userId, userId))
+    .get();
+  return t ? { id: t.id, name: techName(t), active: t.active } : null;
+}
+
+/**
  * Wszyscy technicy (aktywni najpierw, potem po nazwisku) w kształcie dla promptu
  * i narzędzi asystenta. Nazwa historyczna: lista zawiera też nieaktywnych (flaga `active`),
  * bo model musi umieć powiedzieć „ten technik jest nieaktywny” zamiast „nie znam”.

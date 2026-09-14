@@ -34,6 +34,27 @@ export function hasAssistantAccess(user: Pick<User, "role" | "permissions">): bo
   return resolveField("access").value === "calendar_editors" && canEdit(user, "technical/kalendarz");
 }
 
+/**
+ * Rola `technik` poza `/api/technik/*` → 403.
+ *
+ * PO CO OSOBNY STRAŻNIK. `tabPermissionGuard` przepuszcza wszystko, czego nie ma
+ * w `API_TAB_MAP` (/stats, /company/office, /links, /company-lookup…), więc sam
+ * klucz uprawnień nie wystarcza do zamknięcia konta podwykonawcy w jednym module.
+ * Montować BEZPOŚREDNIO po `requireAuth`, przed `/admin`, `/assistant` i strażnikiem
+ * zakładek (src/routes/index.ts) — inaczej technik dostałby panel admina, który ma
+ * własny `requireAdmin`, ale też własne trasy spoza mapy zakładek.
+ *
+ * `/auth/*` jest poza tym strażnikiem z natury: montuje się PRZED `requireAuth`,
+ * więc technik normalnie loguje się i wylogowuje.
+ */
+export async function technikRoleGuard(c: Context, next: Next) {
+  const user = c.get("user") as User | undefined;
+  if (!user || user.role !== "technik") return next();
+  const path = c.req.path.replace(/^\/api/, "");
+  if (path === "/technik" || path.startsWith("/technik/")) return next();
+  return c.json({ success: false, error: "Konto technika ma dostęp wyłącznie do panelu technika" }, 403);
+}
+
 /** Wymaga dostępu do asystenta (po requireAuth); GET /assistant/status jest poza tym strażnikiem. */
 export async function requireAssistantAccess(c: Context, next: Next) {
   const user = c.get("user") as User | undefined;
@@ -208,6 +229,10 @@ const API_TAB_MAP: { prefix: string; tabs: string[]; writeTabs?: string[] }[] = 
       "handlowy/aktywnosci",
     ],
   },
+  // Panel technika. Dla roli `technik` poziom bierze się z `levelFor` (zawsze
+  // „edit"), dla roli `user` — z klucza nadanego w macierzy admina, więc ten wpis
+  // załatwia jednocześnie odcięcie osób bez klucza i tryb tylko-do-odczytu (view).
+  { prefix: "/technik", tabs: ["technik"] },
 ];
 
 const READ_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);

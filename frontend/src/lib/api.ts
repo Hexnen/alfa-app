@@ -5374,12 +5374,25 @@ export const warehouseApi = {
 };
 
 // --- ADMIN: zarządzanie użytkownikami ---
+
+/**
+ * Rola konta. `technik` to nie „user z dodatkiem”, tylko konto zamknięte
+ * w panelu `/technik` (podwykonawcy) — backend odcina mu resztę API.
+ */
+export type AdminUserRole = "user" | "admin" | "technik";
+
 export interface AdminUser {
   id: number;
   email: string;
   displayName: string;
-  role: "user" | "admin";
+  role: AdminUserRole;
   permissions: Record<string, "view" | "edit">;
+  /**
+   * Technik z kartoteki powiązany z tym kontem (`technicians.user_id`), albo
+   * `null`. Poza `version` — powiązanie to kolumna w kartotece techników, nie
+   * pole konta, więc nie podlega optimistic lockowi.
+   */
+  technicianId: number | null;
   version: number;
   createdAt?: string;
 }
@@ -5390,18 +5403,36 @@ export interface AdminTabDef {
   group: string;
 }
 
+/** Technik do selecta „Powiązany technik” — wąski wycinek kartoteki. */
+export interface AdminTechnicianLite {
+  id: number;
+  firstName: string;
+  lastName: string;
+  company: string | null;
+  /** `internal` = pracownik, `external` = podwykonawca. */
+  type: "internal" | "external";
+  active: boolean;
+  /** Konto, do którego technik jest już podpięty (`null` = wolny). */
+  userId: number | null;
+}
+
 export const getAdminTabs = () =>
   request<ApiResponse<AdminTabDef[]>>("/admin/tabs");
 
 export const getAdminUsers = () =>
   request<ApiResponse<AdminUser[]>>("/admin/users");
 
+export const getAdminTechniciansLite = () =>
+  request<ApiResponse<AdminTechnicianLite[]>>("/admin/technicians-lite");
+
 export interface AdminCreateUserInput {
   email: string;
   password: string;
   displayName?: string;
-  role?: "user" | "admin";
+  role?: AdminUserRole;
   permissions?: Record<string, "view" | "edit">;
+  /** `null` = bez powiązania; pominięcie pola = backend niczego nie rusza. */
+  technicianId?: number | null;
 }
 
 export const createAdminUser = (data: AdminCreateUserInput) =>
@@ -5412,8 +5443,10 @@ export const createAdminUser = (data: AdminCreateUserInput) =>
 
 export interface AdminUpdateUserInput {
   displayName?: string;
-  role?: "user" | "admin";
+  role?: AdminUserRole;
   permissions?: Record<string, "view" | "edit">;
+  /** `null` = zdejmij powiązanie; pominięcie pola = zostaw jak było. */
+  technicianId?: number | null;
   /** Wersja wczytana przez klienta — backend odrzuci zapis (409), jeśli w
    *  międzyczasie ktoś inny zmienił tego użytkownika (optimistic concurrency). */
   expectedVersion?: number;
@@ -7114,6 +7147,35 @@ export const adminCalendarApi = {
       { method: "POST", body: JSON.stringify(body) }
     );
     return r.data as AdminCalendarBackfillResult;
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Administracja → Panel technika (/api/admin/technik/*)
+// Słownik czynności podpowiadanych technikowi w protokole (app_settings,
+// klucz `technik.activities`). Technicy czytają go przez GET /technik/activities.
+// ---------------------------------------------------------------------------
+
+export interface AdminTechnikActivities {
+  values: { activities: string[] };
+  /** Skąd pochodzi wartość: wpis w bazie czy słownik domyślny. */
+  sources?: { activities?: AssistantSettingSource };
+  defaults?: { activities: string[] };
+  meta?: { maxItems?: number; maxLength?: number };
+}
+
+export const adminTechnikApi = {
+  async activities() {
+    const r = await request<ApiResponse<AdminTechnikActivities>>("/admin/technik/activities");
+    return r.data as AdminTechnikActivities;
+  },
+  /** `null` = przywróć słownik domyślny; pusta tablica = „nie podpowiadaj nic”. */
+  async updateActivities(activities: string[] | null) {
+    const r = await request<ApiResponse<AdminTechnikActivities>>("/admin/technik/activities", {
+      method: "PUT",
+      body: JSON.stringify({ activities }),
+    });
+    return r.data as AdminTechnikActivities;
   },
 };
 
@@ -9959,5 +10021,290 @@ export const linksApi = {
     const params = new URLSearchParams({ lat: String(lat), lng: String(lng) });
     if (objectId) params.set("objectId", String(objectId));
     return request<ApiResponse<LinkDistances>>(`/links/distances?${params.toString()}`);
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Panel technika (/technik) — router `src/routes/technik.ts`
+// ---------------------------------------------------------------------------
+// Osobny, WĄSKI kontrakt: technik (także podwykonawca) widzi wyłącznie własne
+// zlecenia z działu technicznego i nie dostaje kwot, billingu ani wycen.
+// Dlatego `TechnikJob` jest własnym typem, a nie okrojonym `CalendarEvent` —
+// gdyby dziedziczył, każde nowe pole kalendarza wyciekałoby tu samo z siebie.
+
+/** Technik z kartoteki powiązany z zalogowanym kontem (`technicians.user_id`). */
+export interface TechnikTechnician {
+  id: number;
+  firstName: string;
+  lastName: string;
+  /**
+   * Wartości z bazy (`technicians.type`): `internal` = pracownik na miejscu,
+   * `external` = podwykonawca. Polskie etykiety robi UI — w danych zostaje
+   * enum bazy, żeby porównanie nie zależało od tłumaczenia.
+   */
+  type: "internal" | "external";
+  /** Firma podwykonawcy; `null` dla technika wewnętrznego. */
+  company: string | null;
+  phone: string | null;
+}
+
+export interface TechnikMe {
+  technician: TechnikTechnician | null;
+  /** `false` = konto bez wpisu w kartotece Technicy; lista jest wtedy pusta. */
+  linked: boolean;
+  /**
+   * Prawo zapisu policzone przez BACKEND (`canEdit(user, "technik")`) — to samo,
+   * którym broni się każda mutacja. Front bierze je jako źródło prawdy, żeby
+   * nie pokazywać przycisków, które i tak skończą się 403.
+   */
+  canEdit: boolean;
+  counts: {
+    /** Zlecenia na dziś. */
+    today: number;
+    /** Rozpoczęte i jeszcze niezakończone. */
+    inProgress: number;
+    /** Najbliższe 14 dni, RAZEM z dzisiejszymi. */
+    upcoming: number;
+  };
+}
+
+/** Skrót protokołu przypiętego do zlecenia. */
+export interface TechnikJobProtocol {
+  id: number;
+  number: string;
+  signed: boolean;
+}
+
+/** Wiersz listy zleceń — dokładnie tyle, ile pokazuje karta na agendzie. */
+export interface TechnikJob {
+  id: number;
+  /** Typ wydarzenia kalendarza (serwis, montaz, demontaz, konserwacja, wizja). */
+  type: string;
+  /** Etykieta typu po polsku — liczona przez backend, front jej nie tłumaczy. */
+  typeLabel: string;
+  title: string;
+  /** Lokalny ISO bez strefy: „YYYY-MM-DDTHH:MM” (całodniowe: „YYYY-MM-DD”). */
+  startAt: string;
+  /** Dla całodniowych koniec jest EXCLUSIVE (konwencja FullCalendar). */
+  endAt: string | null;
+  allDay: boolean;
+  /** Status wydarzenia: planned | confirmed | done | cancelled. */
+  status: string;
+  /** Znacznik „Rozpocznij” (null = jeszcze nie ruszyło). */
+  startedAt: string | null;
+  /** Znacznik „Zakończ”. */
+  finishedAt: string | null;
+  objectId: number | null;
+  objectName: string | null;
+  /** Adres obiektu („ulica, miasto”) albo `location` wydarzenia — jeden string. */
+  address: string | null;
+  /** Gotowy link do Map Google, jeśli obiekt go ma. */
+  mapsUrl: string | null;
+  contactPerson: string | null;
+  contactPhone: string | null;
+  description: string | null;
+  notesCount: number;
+  protocol: TechnikJobProtocol | null;
+  /** Imiona i nazwiska pozostałych techników z tego zlecenia. */
+  coTechnicians: string[];
+}
+
+/**
+ * Notatka zlecenia — wiersz `calendar_event_notes` bez załączników (spoza
+ * `/calendar` nie ma ich jak pobrać).
+ */
+export interface TechnikJobNote {
+  id: number;
+  text: string;
+  /** Podpis autora; `null` dla wpisów automatu. */
+  userLabel: string | null;
+  /** `system` = wpis automatu („Rozpoczęto o 10:12”), reszta = ręczna notatka. */
+  source: string;
+  createdAt: string;
+}
+
+/**
+ * Szczegóły zlecenia = `JobJson` + notatki. Backend NIE zagnieżdża obiektu ani
+ * kontaktu — adres, `mapsUrl` i dane kontaktowe są płaskie, złożone już po
+ * stronie serwera z obiektu i kontrahenta.
+ */
+export interface TechnikJobDetails extends TechnikJob {
+  notes: TechnikJobNote[];
+}
+
+/** Protokół panelu = protokół biurowy + id zlecenia, z którego się wszedł. */
+export interface TechnikProtocol extends Protocol {
+  jobId?: number;
+}
+
+/**
+ * Błąd 409 z `POST /technik/jobs/:id/protocol`. Backend odsyła w `data.protocol`
+ * istniejący protokół, gdy ten po prostu już jest — wtedy UI nie pokazuje
+ * błędu, tylko go otwiera. `protocol: null` = realizacja zablokowana (optout)
+ * i wtedy zostaje komunikat.
+ */
+export interface TechnikProtocolConflict extends Error {
+  status: number;
+  protocol?: TechnikJobProtocol | null;
+}
+
+/**
+ * Odległość biuro → obiekt zlecenia dla pola „Kilometry” w protokole.
+ * `km` to JEDNA strona, `suggestedKm` to wartość do wpisania (uwzględnia
+ * firmowe ustawienie „w obie strony”). `km: null` + `reason` = nie da się
+ * policzyć (brak obiektu, brak adresu, tryb ręczny, martwy geokoder).
+ */
+export interface TechnikJobDistance {
+  km: number | null;
+  roundTripKm?: number;
+  suggestedKm?: number;
+  roundTrip?: boolean;
+  method?: string;
+  from?: string;
+  to?: string;
+  reason?: string;
+}
+
+export const technikApi = {
+  /** Kim jestem w kartotece techników + liczniki na pigułki „Dziś”. */
+  async me(): Promise<TechnikMe> {
+    const r = await request<ApiResponse<TechnikMe>>("/technik/me");
+    return (
+      r.data ?? {
+        technician: null,
+        linked: false,
+        canEdit: false,
+        counts: { today: 0, inProgress: 0, upcoming: 0 },
+      }
+    );
+  },
+
+  /**
+   * Moje zlecenia w oknie dat. Konwencja jak w API kalendarza: `endAt > from`
+   * i `startAt < to`, czyli **`to` jest WYŁĄCZNE**. Jeden dzień to
+   * `from = dzień`, `to = dzień + 1` — wydarzenie całodniowe ma wtedy
+   * `endAt` równe jutru i też się łapie.
+   */
+  async jobs(from: string, to: string): Promise<TechnikJob[]> {
+    const params = new URLSearchParams({ from, to });
+    const r = await request<ApiResponse<TechnikJob[]>>(`/technik/jobs?${params.toString()}`);
+    return Array.isArray(r.data) ? r.data : [];
+  },
+
+  /**
+   * Słownik czynności do chipów nad polem „Wykonane czynności”. Pusta lista
+   * (albo błąd) = rząd chipów się nie renderuje, protokół działa jak dotąd.
+   */
+  async activities(): Promise<string[]> {
+    const r = await request<ApiResponse<string[]>>("/technik/activities");
+    return Array.isArray(r.data) ? r.data : [];
+  },
+
+  /** Odległość biuro → obiekt zlecenia (do podpowiedzi kilometrów w protokole). */
+  async jobDistance(id: number): Promise<TechnikJobDistance> {
+    const r = await request<ApiResponse<TechnikJobDistance>>(`/technik/jobs/${id}/distance`);
+    return (r.data as TechnikJobDistance) ?? { km: null };
+  },
+
+  /** Szczegóły jednego zlecenia; cudze → 404. */
+  async job(id: number): Promise<TechnikJobDetails> {
+    const r = await request<ApiResponse<TechnikJobDetails>>(`/technik/jobs/${id}`);
+    return r.data as TechnikJobDetails;
+  },
+
+  /**
+   * „Rozpocznij” — idempotentne, zwraca zlecenie po zmianie. `at` to lokalna
+   * chwila `RRRR-MM-DDTGG:MM` (opcja „Inna godzina”); brak = teraz.
+   */
+  async start(id: number, at?: string): Promise<TechnikJob> {
+    const r = await request<ApiResponse<TechnikJob>>(`/technik/jobs/${id}/start`, {
+      method: "POST",
+      body: JSON.stringify(at ? { at } : {}),
+    });
+    return r.data as TechnikJob;
+  },
+
+  /** „Zakończ” — ustawia `finishedAt` i status `done`; notatka i godzina opcjonalne. */
+  async finish(id: number, opts: { note?: string; at?: string } = {}): Promise<TechnikJob> {
+    const r = await request<ApiResponse<TechnikJob>>(`/technik/jobs/${id}/finish`, {
+      method: "POST",
+      body: JSON.stringify({
+        ...(opts.note ? { note: opts.note } : {}),
+        ...(opts.at ? { at: opts.at } : {}),
+      }),
+    });
+    return r.data as TechnikJob;
+  },
+
+  /** Dopisanie notatki do zlecenia (`{text}` → 201 z gotowym wierszem). */
+  async addNote(id: number, text: string): Promise<TechnikJobNote> {
+    const r = await request<ApiResponse<TechnikJobNote>>(`/technik/jobs/${id}/notes`, {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    });
+    return r.data as TechnikJobNote;
+  },
+
+  /**
+   * Utworzenie protokołu dla zlecenia. Odpowiedź (i 201, i 409) niesie
+   * `data.protocol`: przy 409 z protokołem znaczy to „już jest” i UI go
+   * otwiera, przy 409 z `protocol: null` realizacja jest zablokowana i zostaje
+   * komunikat z `error`.
+   *
+   * Nie idzie przez `request()`, bo ten gubi ciało odpowiedzi błędu, a właśnie
+   * w nim siedzi protokół potrzebny do nawigacji.
+   */
+  async createProtocol(jobId: number): Promise<TechnikJobProtocol> {
+    const res = await fetch(`${API_BASE}/technik/jobs/${jobId}/protocol`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", [CLIENT_ID_HEADER]: CLIENT_ID },
+      body: JSON.stringify({}),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success) {
+      throw Object.assign(new Error(data.error || `Request failed (${res.status})`), {
+        status: res.status,
+        protocol: (data.data?.protocol ?? null) as TechnikJobProtocol | null,
+      }) as TechnikProtocolConflict;
+    }
+    return data.data.protocol as TechnikJobProtocol;
+  },
+
+  /** Protokół w kształcie biurowym (`Protocol`), ale bez kwot i wyceny. */
+  async protocol(id: number): Promise<TechnikProtocol> {
+    const r = await request<ApiResponse<TechnikProtocol>>(`/technik/protocols/${id}`);
+    return r.data as TechnikProtocol;
+  },
+
+  /**
+   * Zapis protokołu. `expectedUpdatedAt` to optymistyczna kontrola
+   * współbieżności — biuro mogło zapisać ten sam protokół z desktopa (409).
+   */
+  async updateProtocol(
+    id: number,
+    data: ProtocolInput,
+    expectedUpdatedAt: string,
+  ): Promise<TechnikProtocol> {
+    const r = await request<ApiResponse<TechnikProtocol>>(`/technik/protocols/${id}`, {
+      method: "PUT",
+      body: JSON.stringify({ ...data, expectedUpdatedAt }),
+    });
+    return r.data as TechnikProtocol;
+  },
+
+  /**
+   * Podpis klienta — po nim protokół jest `final` i niezmienny.
+   * `expectedUpdatedAt` idzie tu tak samo jak przy PUT: podpis to też zapis,
+   * a biuro mogło w międzyczasie ruszyć ten protokół z desktopa.
+   */
+  async signProtocol(
+    id: number,
+    data: { signaturePng: string; signerName: string; expectedUpdatedAt?: string },
+  ): Promise<TechnikProtocol> {
+    const r = await request<ApiResponse<TechnikProtocol>>(`/technik/protocols/${id}/sign`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+    return r.data as TechnikProtocol;
   },
 };

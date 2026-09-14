@@ -5,12 +5,15 @@ import { UserPlus, Trash2, KeyRound, Save } from "lucide-react";
 import {
   getAdminUsers,
   getAdminTabs,
+  getAdminTechniciansLite,
   createAdminUser,
   updateAdminUser,
   deleteAdminUser,
   setAdminUserPassword,
   type AdminUser,
+  type AdminUserRole,
   type AdminTabDef,
+  type AdminTechnicianLite,
 } from "@/lib/api";
 import { TABS as FALLBACK_TABS } from "@/auth/permissions";
 import { useAuth } from "@/auth/AuthProvider";
@@ -24,6 +27,19 @@ const LEVELS: { value: Level; label: string }[] = [
   { value: "edit", label: "Edycja" },
 ];
 
+/**
+ * Klucz panelu technika. Nie pokazujemy go w macierzy razem z zakładkami CRM-a,
+ * bo to nie jest kolejna zakładka menu, tylko osobna aplikacja na tablet —
+ * włącza się ją przełącznikiem w „Ustawieniach użytkownika”.
+ */
+const TECHNIK_KEY = "technik";
+
+const ROLE_OPTIONS: { value: AdminUserRole; label: string }[] = [
+  { value: "user", label: "Użytkownik" },
+  { value: "technik", label: "Technik (tylko panel technika)" },
+  { value: "admin", label: "Administrator (pełny dostęp)" },
+];
+
 function levelOf(perms: PermMap, key: string): Level {
   return perms[key] ?? "none";
 }
@@ -32,15 +48,19 @@ function levelOf(perms: PermMap, key: string): Level {
 function LevelToggle({
   value,
   disabled,
+  levels = LEVELS,
   onChange,
 }: {
   value: Level;
   disabled?: boolean;
+  /** Zawężony zestaw poziomów (panel technika nie ma tu stanu „Brak” — od tego
+   *  jest przełącznik obok). */
+  levels?: { value: Level; label: string }[];
   onChange: (l: Level) => void;
 }) {
   return (
     <div className="inline-flex rounded-md border p-0.5">
-      {LEVELS.map((l) => (
+      {levels.map((l) => (
         <button
           key={l.value}
           type="button"
@@ -143,10 +163,183 @@ function PermissionMatrix({
 const inputCls =
   "w-full rounded-md border bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
+/** „Jan Kowalski — podwykonawca (Alfa Serwis)” / „Jan Kowalski — wewnętrzny”. */
+function technicianLabel(t: AdminTechnicianLite): string {
+  const name = `${t.firstName} ${t.lastName}`.trim() || `Technik #${t.id}`;
+  const kind =
+    t.type === "internal"
+      ? "wewnętrzny"
+      : t.company
+        ? `podwykonawca (${t.company})`
+        : "podwykonawca";
+  return `${name} — ${kind}${t.active ? "" : " · nieaktywny"}`;
+}
+
+/** Prosty przełącznik dwustanowy (repo nie ma komponentu Switch). */
+function Toggle({
+  checked,
+  disabled,
+  label,
+  testid,
+  onChange,
+}: {
+  checked: boolean;
+  disabled?: boolean;
+  label: string;
+  testid?: string;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      disabled={disabled}
+      data-testid={testid}
+      onClick={() => onChange(!checked)}
+      className={cn(
+        "relative h-6 w-11 shrink-0 rounded-full transition-colors disabled:opacity-50",
+        checked ? "bg-primary" : "bg-muted-foreground/30",
+      )}
+    >
+      <span
+        className={cn(
+          "absolute top-0.5 h-5 w-5 rounded-full bg-background shadow transition-all",
+          checked ? "left-[22px]" : "left-0.5",
+        )}
+      />
+    </button>
+  );
+}
+
+/**
+ * „Ustawienia użytkownika” — to, czego nie da się wyrazić macierzą zakładek:
+ * kto jest kim w terenie (powiązanie z kartoteką Technicy) i czy konto biurowe
+ * dostaje dodatkowo panel technika. Powiązanie jest osobno od uprawnień,
+ * bo bez niego panel się otworzy, tylko nie będzie miał czyich zleceń pokazać.
+ */
+function UserSettings({
+  role,
+  technicians,
+  technicianId,
+  onTechnicianId,
+  perms,
+  onPerms,
+  disabled,
+  currentUserId,
+}: {
+  role: AdminUserRole;
+  technicians: AdminTechnicianLite[];
+  technicianId: number | null;
+  onTechnicianId: (id: number | null) => void;
+  perms: PermMap;
+  onPerms: (next: PermMap) => void;
+  disabled?: boolean;
+  /** Konto, które właśnie edytujemy — jego własne powiązanie nie jest „zajęte”. */
+  currentUserId?: number;
+}) {
+  const technikLevel = perms[TECHNIK_KEY];
+
+  const setTechnikEnabled = (on: boolean) => {
+    const next = { ...perms };
+    if (on) next[TECHNIK_KEY] = "edit";
+    else delete next[TECHNIK_KEY];
+    onPerms(next);
+  };
+
+  return (
+    <div className="rounded-lg border">
+      <div className="border-b bg-muted/40 px-3 py-2 text-sm font-semibold">
+        Ustawienia użytkownika
+      </div>
+      <div className="grid gap-4 p-3 sm:grid-cols-2">
+        <div className="space-y-1.5">
+          <label className="block text-sm">
+            <span className="text-muted-foreground">Powiązany technik</span>
+            <select
+              className={inputCls}
+              value={technicianId == null ? "" : String(technicianId)}
+              disabled={disabled}
+              data-testid="admin-user-technik-link"
+              onChange={(e) =>
+                onTechnicianId(e.target.value === "" ? null : Number(e.target.value))
+              }
+            >
+              <option value="">(brak powiązania)</option>
+              {technicians.map((t) => {
+                // Jeden technik = jedno konto (UNIQUE w bazie); zajętych nie
+                // pokazujemy jako wybieralnych, żeby nie zbierać 409 z backendu.
+                const taken = t.userId != null && t.userId !== currentUserId;
+                return (
+                  <option key={t.id} value={t.id} disabled={taken}>
+                    {technicianLabel(t)}
+                    {taken ? " · zajęty" : ""}
+                  </option>
+                );
+              })}
+            </select>
+          </label>
+          <p className="text-xs text-muted-foreground">
+            Bez powiązania panel technika pokaże „brak przypisania” i pustą listę
+            zleceń — technik widzi tylko to, do czego przypisał go kalendarz.
+          </p>
+        </div>
+
+        <div className="space-y-1.5">
+          <span className="block text-sm text-muted-foreground">
+            Dostęp do panelu technika
+          </span>
+          {role === "user" ? (
+            <>
+              <div className="flex items-center gap-3 pt-1">
+                <Toggle
+                  checked={Boolean(technikLevel)}
+                  disabled={disabled}
+                  label="Dostęp do panelu technika"
+                  testid="admin-user-technik-access"
+                  onChange={setTechnikEnabled}
+                />
+                <span className="text-sm">
+                  {technikLevel ? "Włączony" : "Wyłączony"}
+                </span>
+                {technikLevel && (
+                  <LevelToggle
+                    value={technikLevel}
+                    disabled={disabled}
+                    levels={LEVELS.filter((l) => l.value !== "none")}
+                    onChange={(l) =>
+                      onPerms({ ...perms, [TECHNIK_KEY]: l === "edit" ? "edit" : "view" })
+                    }
+                  />
+                )}
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Podgląd = tylko lista zleceń. Edycja = Rozpocznij/Zakończ, notatki
+                i protokół z podpisem.
+              </p>
+            </>
+          ) : role === "technik" ? (
+            <p className="rounded-md border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
+              Rola technik — panel włączony na stałe, konto nie ma dostępu do
+              reszty CRM.
+            </p>
+          ) : (
+            <p className="rounded-md border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
+              Administrator ma pełny dostęp — panel technika włącznie.
+            </p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function AdminUsers() {
   const { user: me } = useAuth();
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [tabs, setTabs] = useState<AdminTabDef[]>(FALLBACK_TABS);
+  const [technicians, setTechnicians] = useState<AdminTechnicianLite[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -154,9 +347,16 @@ export function AdminUsers() {
   const [busy, setBusy] = useState(false);
 
   const reload = async () => {
-    const [u, t] = await Promise.all([getAdminUsers(), getAdminTabs()]);
+    // Techników wczytujemy razem z kontami, bo po zapisie powiązania zmienia się
+    // też ich lista (kto jest już zajęty).
+    const [u, t, tech] = await Promise.all([
+      getAdminUsers(),
+      getAdminTabs(),
+      getAdminTechniciansLite(),
+    ]);
     setUsers(u.data ?? []);
     if (t.data?.length) setTabs(t.data);
+    setTechnicians(tech.data ?? []);
   };
 
   useEffect(() => {
@@ -229,6 +429,11 @@ export function AdminUsers() {
                   ADMIN
                 </span>
               )}
+              {u.role === "technik" && (
+                <span className="ml-2 shrink-0 rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700 dark:text-amber-400">
+                  TECHNIK
+                </span>
+              )}
             </button>
           ))}
         </div>
@@ -238,6 +443,7 @@ export function AdminUsers() {
           {creating ? (
             <CreateUserPanel
               tabs={tabs}
+              technicians={technicians}
               busy={busy}
               onCancel={() => setCreating(false)}
               onCreate={async (payload) => {
@@ -261,6 +467,7 @@ export function AdminUsers() {
               key={selected.id}
               user={selected}
               tabs={tabs}
+              technicians={technicians}
               isSelf={me?.id === selected.id}
               busy={busy}
               onSave={async (patch) => {
@@ -326,26 +533,31 @@ export function AdminUsers() {
 
 function CreateUserPanel({
   tabs,
+  technicians,
   busy,
   onCreate,
   onCancel,
 }: {
   tabs: AdminTabDef[];
+  technicians: AdminTechnicianLite[];
   busy: boolean;
   onCreate: (p: {
     email: string;
     password: string;
     displayName?: string;
-    role: "user" | "admin";
+    role: AdminUserRole;
     permissions: PermMap;
+    technicianId: number | null;
   }) => void;
   onCancel: () => void;
 }) {
   const [email, setEmail] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [password, setPassword] = useState("");
-  const [role, setRole] = useState<"user" | "admin">("user");
+  const [role, setRole] = useState<AdminUserRole>("user");
   const [perms, setPerms] = useState<PermMap>({});
+  const [technicianId, setTechnicianId] = useState<number | null>(null);
+  const matrixTabs = useMemo(() => tabs.filter((t) => t.key !== TECHNIK_KEY), [tabs]);
 
   return (
     <div className="rounded-lg border p-4 space-y-4">
@@ -385,20 +597,37 @@ function CreateUserPanel({
           <select
             className={inputCls}
             value={role}
-            onChange={(e) => setRole(e.target.value as "user" | "admin")}
+            data-testid="admin-user-rola-new"
+            onChange={(e) => setRole(e.target.value as AdminUserRole)}
           >
-            <option value="user">Użytkownik</option>
-            <option value="admin">Administrator (pełny dostęp)</option>
+            {ROLE_OPTIONS.map((r) => (
+              <option key={r.value} value={r.value}>
+                {r.label}
+              </option>
+            ))}
           </select>
         </label>
       </div>
+
+      <UserSettings
+        role={role}
+        technicians={technicians}
+        technicianId={technicianId}
+        onTechnicianId={setTechnicianId}
+        perms={perms}
+        onPerms={setPerms}
+      />
 
       {role === "admin" ? (
         <p className="rounded-md border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
           Administrator ma pełny dostęp do wszystkich zakładek — macierz uprawnień nieaktywna.
         </p>
+      ) : role === "technik" ? (
+        <p className="rounded-md border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
+          Konto technika nie wchodzi do CRM-a — macierz zakładek nie ma tu zastosowania.
+        </p>
       ) : (
-        <PermissionMatrix tabs={tabs} perms={perms} onChange={setPerms} />
+        <PermissionMatrix tabs={matrixTabs} perms={perms} onChange={setPerms} />
       )}
 
       <div className="flex justify-end gap-2">
@@ -413,7 +642,10 @@ function CreateUserPanel({
               password,
               displayName: displayName.trim() || undefined,
               role,
-              permissions: role === "admin" ? {} : perms,
+              // Admin i technik mają dostęp z roli, więc macierz nie ma czego
+              // nieść — wysyłamy pustą, żeby nie zostawiać martwych kluczy.
+              permissions: role === "user" ? perms : {},
+              technicianId,
             })
           }
         >
@@ -427,6 +659,7 @@ function CreateUserPanel({
 function EditUserPanel({
   user,
   tabs,
+  technicians,
   isSelf,
   busy,
   onSave,
@@ -435,16 +668,24 @@ function EditUserPanel({
 }: {
   user: AdminUser;
   tabs: AdminTabDef[];
+  technicians: AdminTechnicianLite[];
   isSelf: boolean;
   busy: boolean;
-  onSave: (p: { displayName: string; role: "user" | "admin"; permissions: PermMap }) => void;
+  onSave: (p: {
+    displayName: string;
+    role: AdminUserRole;
+    permissions: PermMap;
+    technicianId: number | null;
+  }) => void;
   onResetPassword: (pw: string) => void;
   onDelete: () => void;
 }) {
   const [displayName, setDisplayName] = useState(user.displayName);
-  const [role, setRole] = useState<"user" | "admin">(user.role);
+  const [role, setRole] = useState<AdminUserRole>(user.role);
   const [perms, setPerms] = useState<PermMap>(user.permissions ?? {});
+  const [technicianId, setTechnicianId] = useState<number | null>(user.technicianId ?? null);
   const [newPw, setNewPw] = useState("");
+  const matrixTabs = useMemo(() => tabs.filter((t) => t.key !== TECHNIK_KEY), [tabs]);
 
   return (
     <div className="rounded-lg border p-4 space-y-4">
@@ -475,29 +716,52 @@ function EditUserPanel({
           <select
             className={inputCls}
             value={role}
-            onChange={(e) => setRole(e.target.value as "user" | "admin")}
+            data-testid="admin-user-rola"
+            onChange={(e) => setRole(e.target.value as AdminUserRole)}
             disabled={isSelf}
             title={isSelf ? "Nie możesz zmienić własnej roli" : undefined}
           >
-            <option value="user">Użytkownik</option>
-            <option value="admin">Administrator (pełny dostęp)</option>
+            {ROLE_OPTIONS.map((r) => (
+              <option key={r.value} value={r.value}>
+                {r.label}
+              </option>
+            ))}
           </select>
         </label>
       </div>
+
+      <UserSettings
+        role={role}
+        technicians={technicians}
+        technicianId={technicianId}
+        onTechnicianId={setTechnicianId}
+        perms={perms}
+        onPerms={setPerms}
+        currentUserId={user.id}
+      />
 
       {role === "admin" ? (
         <p className="rounded-md border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
           Administrator ma pełny dostęp do wszystkich zakładek — macierz uprawnień nieaktywna.
         </p>
+      ) : role === "technik" ? (
+        <p className="rounded-md border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
+          Konto technika nie wchodzi do CRM-a — macierz zakładek nie ma tu zastosowania.
+        </p>
       ) : (
-        <PermissionMatrix tabs={tabs} perms={perms} onChange={setPerms} />
+        <PermissionMatrix tabs={matrixTabs} perms={perms} onChange={setPerms} />
       )}
 
       <div className="flex justify-end">
         <Button
           disabled={busy}
           onClick={() =>
-            onSave({ displayName: displayName.trim(), role, permissions: role === "admin" ? {} : perms })
+            onSave({
+              displayName: displayName.trim(),
+              role,
+              permissions: role === "user" ? perms : {},
+              technicianId,
+            })
           }
         >
           <Save className="h-4 w-4 mr-1" /> Zapisz

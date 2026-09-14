@@ -708,6 +708,20 @@
       "when": 1789300008000,
       "tag": "0100_monitoring_projects_object",
       "breakpoints": true
+    },
+    {
+      "idx": 101,
+      "version": "6",
+      "when": 1789300009000,
+      "tag": "0101_technik",
+      "breakpoints": true
+    },
+    {
+      "idx": 102,
+      "version": "6",
+      "when": 1789300010000,
+      "tag": "0102_protocol_note",
+      "breakpoints": true
     }
   ]
 }

@@ -14,6 +14,7 @@ import {
   FolderKanban,
   Handshake,
   CalendarCog,
+  HardHat,
   Mail,
   ChevronDown,
   Menu,
@@ -129,6 +130,15 @@ const topLevel: NavItem[] = [
         isActive: (p) => p.startsWith("/orders/formularz"),
       },
     ],
+  },
+  // Panel technika to osobna aplikacja na tablet (własny shell, bez sidebara),
+  // ale wciąż trasa tej samej SPA — zwykły <Link>, nie nowa karta. Pozycję
+  // widzą tylko konta z kluczem `technik` (filtruje `canSee`).
+  {
+    name: "Panel technika",
+    href: "/technik",
+    icon: HardHat,
+    desc: "Zlecenia w terenie: start, zakończenie i protokół z podpisem",
   },
 ];
 
@@ -309,6 +319,12 @@ const adminSection: NavItem = {
       href: "/admin/poczta",
       icon: Mail,
       desc: "Serwer SMTP, nadawca i adresaci maili ze zleceń",
+    },
+    {
+      name: "Panel technika",
+      href: "/admin/technik",
+      icon: HardHat,
+      desc: "Słownik czynności podpowiadanych technikowi w protokole",
     },
     {
       name: "Asystent AI",

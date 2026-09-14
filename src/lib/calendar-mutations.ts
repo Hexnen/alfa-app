@@ -575,6 +575,9 @@ function logEventDiff(tx: Tx, before: CalendarEventRow, after: CalendarEventRow,
       { key: "billing", label: "rozliczenie", format: (v) => (v == null ? "—" : (BILLING_LABELS[v as CalendarBilling] ?? String(v))) },
       { key: "protocolId", label: "protokół", format: (v) => protocolNumberById(tx, (v as number | null) ?? null) },
       { key: "quoteId", label: "wycenę", format: (v) => quoteNumberById(tx, (v as number | null) ?? null) },
+      // Znaczniki z panelu technika — w dzienniku widać, o której ekipa weszła i wyszła.
+      { key: "startedAt", label: "rozpoczęcie prac", format: (v) => fmtDate(v as string | null) },
+      { key: "finishedAt", label: "zakończenie prac", format: (v) => fmtDate(v as string | null) },
       { key: "leadId", label: "szansę", format: (v) => leadTitleById(tx, (v as number | null) ?? null) },
       { key: "contactId", label: "osobę kontaktową", format: (v) => contactNameById(tx, (v as number | null) ?? null) },
     ],
@@ -1021,6 +1024,61 @@ export function moveEvent(tx: Tx, id: number, body: Record<string, unknown>, ctx
   const after = tx
     .update(schema.calendarEvents)
     .set({ startAt, endAt, allDay, updatedBy: ctx.user.id, updatedAt: sql`(datetime('now'))` })
+    .where(eq(schema.calendarEvents.id, id))
+    .returning()
+    .get();
+  logEventDiff(tx, row, after, ctx);
+  onEventUpdated(tx, after, ctx, row);
+  touchLead(tx, after.leadId);
+  return after;
+}
+
+/** Co ustawia `setEventProgress` — każde pole opcjonalne, pomijane zostaje bez zmian. */
+export interface EventProgressInput {
+  status?: CalendarEventStatus;
+  /** Znacznik „Rozpocznij” (ISO); `null` czyści. */
+  startedAt?: string | null;
+  /** Znacznik „Zakończ” (ISO); `null` czyści. */
+  finishedAt?: string | null;
+}
+
+/**
+ * Postęp prac z panelu technika: Rozpocznij / Zakończ.
+ *
+ * Celowany UPDATE zamiast pełnego `updateEvent` — technik nie przysyła całego
+ * wydarzenia (nie zna ani rozliczenia, ani przypisań), a pełna ścieżka
+ * wymagałaby od niego kompletnego `ParsedInput` i przy okazji pozwoliłaby
+ * nadpisać pola, których nie ma prawa dotykać.
+ *
+ * Reszta jak w `moveEvent`: `logEventDiff` (wpis do dziennika), `onEventUpdated`
+ * (to STĄD bierze się realizacja i protokół przy statusie „wykonane” — surowy
+ * UPDATE zostawiłby zlecenie bez dokumentów) i `touchLead`. Sygnał dla otwartych
+ * kart (`publishCalendarChange`) woła się PO commicie, czyli w trasie.
+ */
+export function setEventProgress(
+  tx: Tx,
+  id: number,
+  input: EventProgressInput,
+  ctx: MutationCtx
+): CalendarEventRow {
+  const row = getEventRow(tx, id);
+  if (!row) throw new ApiError(404, "Wydarzenie nie istnieje");
+  if (row.deletedAt) throw new ApiError(409, "Wydarzenie jest usunięte");
+
+  const patch: Partial<CalendarEventRow> = {};
+  if (input.status !== undefined) {
+    if (!CALENDAR_EVENT_STATUSES.includes(input.status)) {
+      throw new ApiError(400, `Status: dozwolone ${CALENDAR_EVENT_STATUSES.join(", ")}`);
+    }
+    patch.status = input.status;
+  }
+  if (input.startedAt !== undefined) patch.startedAt = input.startedAt;
+  if (input.finishedAt !== undefined) patch.finishedAt = input.finishedAt;
+  if (Object.keys(patch).length === 0) return row;
+
+  const after = tx
+    .update(schema.calendarEvents)
+    .set({ ...patch, updatedBy: ctx.user.id, updatedAt: sql`(datetime('now'))` })
     .where(eq(schema.calendarEvents.id, id))
     .returning()
     .get();

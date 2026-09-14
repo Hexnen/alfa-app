@@ -72,6 +72,9 @@ export const TABS: TabDef[] = [
   { key: "technical/projekty", label: "Projekty", group: "Techniczny" },
   { key: "technical/szablony", label: "Szablony", group: "Techniczny" },
   { key: "ofi", label: "OFI", group: "OFI" },
+  // Lustro wpisu z src/lib/auth/permissions.ts — panel technika (/technik):
+  // podgląd własnych zleceń (view) i praca w terenie z protokołem (edit).
+  { key: "technik", label: "Panel technika", group: "Technik" },
 ];
 
 const TAB_KEY_SET = new Set(TABS.map((t) => t.key));
@@ -102,6 +105,8 @@ export function tabKeyForPath(pathname: string): string | null {
 export function levelFor(user: AuthUser | null, tabKey: string): PermLevel {
   if (!user) return "none";
   if (user.role === "admin") return "edit";
+  // Lustro backendu: rola „technik" ma /technik i nic poza tym.
+  if (user.role === "technik") return tabKey === "technik" ? "edit" : "none";
   const v = user.permissions?.[tabKey];
   return v === "edit" ? "edit" : v === "view" ? "view" : "none";
 }

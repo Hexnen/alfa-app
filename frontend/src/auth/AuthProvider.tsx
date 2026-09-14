@@ -13,6 +13,13 @@ export interface AuthUser {
    * w sekcji Handlowy chowa się, a widoki startują na „Wszyscy".
    */
   salespersonId?: number | null;
+  /**
+   * Technik z kartoteki przypięty do tego konta (`technicians.user_id`).
+   * `null`/brak = konto bez powiązania — panel `/technik` pokaże pustą listę
+   * i podpowie, żeby administrator dopiął technika (autoryzacja zleceń idzie
+   * po tym polu, nigdy po zgodności nazwiska).
+   */
+  technicianId?: number | null;
 }
 
 interface AuthCtx {

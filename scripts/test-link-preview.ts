@@ -195,6 +195,24 @@ console.log("\n=== A. Wykrywanie adresów w tekście ===");
 }
 
 {
+  // Notatka systemowa protokołu: „tekst <ścieżka>” → link SPA z etykietą,
+  // bez pokazywania ścieżki i bez karty podglądu (to nie jest adres w sieci).
+  const text = "Protokół P/2026/09/012 — NIEPODPISANY\nOtwórz protokół </technical/protokoly?protocol=12>";
+  const t = linkifyText(text).filter((x) => x.kind === "internal");
+  ok(
+    "ścieżka wewnętrzna w <> → link SPA z etykietą",
+    t.length === 1 && t[0].href === "/technical/protokoly?protocol=12" && t[0].display === "Otwórz protokół",
+    t
+  );
+  ok("…i żadnej karty podglądu dla ścieżki", uniqueUrls(text).length === 0, uniqueUrls(text));
+}
+
+{
+  const t = linkifyText("Faktura 12/2026 i sprawa a/b — bez linków").filter((x) => x.kind === "internal");
+  ok("goły ukośnik w zdaniu NIE robi linku wewnętrznego", t.length === 0, t);
+}
+
+{
   const text = "jan.kowalski@example.pl <mailto:jan.kowalski@example.pl>";
   const t = linkifyText(text).filter((x) => x.kind === "email");
   ok(

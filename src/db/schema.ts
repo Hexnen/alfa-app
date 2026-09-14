@@ -822,38 +822,55 @@ export type NewRealization = typeof realizations.$inferInsert;
 
 // Technicy (serwisanci) — słownik wykonawców dla realizacji,
 // odwzorowanie kolumny "serwisanci" z arkusza "Dane".
-export const technicians = sqliteTable("technicians", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  firstName: text("first_name").default("").notNull(),
-  lastName: text("last_name").default("").notNull(),
-  phone: text("phone"),
-  email: text("email"),
-  company: text("company"),
-  nip: text("nip"),
-  type: text("type", { enum: ["internal", "external"] })
-    .default("internal")
-    .notNull(),
-  notes: text("notes"),
-  active: integer("active", { mode: "boolean" }).default(true).notNull(),
-  /**
-   * Ta sama osoba w kartotece kadrowej (NULL = technik spoza listy płac).
-   * Dotąd technik i pracownik kadr byli osobnymi rekordami bez żadnego związku,
-   * choć część osób figuruje w obu (Jaworski, Sajdak).
-   */
-  employeeId: integer("employee_id").references(() => hrEmployees.id, {
-    onDelete: "set null",
-  }),
-  // Cennik przypisany technikowi (NULL = korzysta z cennika głównego).
-  priceListId: integer("price_list_id").references(() => priceLists.id, {
-    onDelete: "set null",
-  }),
-  createdAt: text("created_at")
-    .default(sql`(datetime('now'))`)
-    .notNull(),
-  updatedAt: text("updated_at")
-    .default(sql`(datetime('now'))`)
-    .notNull(),
-});
+export const technicians = sqliteTable(
+  "technicians",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    firstName: text("first_name").default("").notNull(),
+    lastName: text("last_name").default("").notNull(),
+    phone: text("phone"),
+    email: text("email"),
+    company: text("company"),
+    nip: text("nip"),
+    type: text("type", { enum: ["internal", "external"] })
+      .default("internal")
+      .notNull(),
+    notes: text("notes"),
+    active: integer("active", { mode: "boolean" }).default(true).notNull(),
+    /**
+     * Ta sama osoba w kartotece kadrowej (NULL = technik spoza listy płac).
+     * Dotąd technik i pracownik kadr byli osobnymi rekordami bez żadnego związku,
+     * choć część osób figuruje w obu (Jaworski, Sajdak).
+     */
+    employeeId: integer("employee_id").references(() => hrEmployees.id, {
+      onDelete: "set null",
+    }),
+    // Cennik przypisany technikowi (NULL = korzysta z cennika głównego).
+    priceListId: integer("price_list_id").references(() => priceLists.id, {
+      onDelete: "set null",
+    }),
+    /**
+     * Konto w aplikacji (panel /technik). Po TYM polu — i wyłącznie po nim —
+     * rozpoznajemy, czyje są zlecenia na ekranie technika. Heurystyka nazwiskowa
+     * (`findTechnicianForUser`, src/lib/calendar-queries.ts) zostaje tam, gdzie
+     * była: do podpowiedzi asystenta. Do autoryzacji się nie nadaje, bo przy
+     * dwóch osobach o tym samym nazwisku pokazałaby cudzy grafik.
+     * Jeden użytkownik = najwyżej jeden technik (unikalny indeks częściowy).
+     */
+    userId: integer("user_id").references(() => users.id),
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+    updatedAt: text("updated_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+  },
+  (t) => ({
+    userIdUidx: uniqueIndex("technicians_user_id_uidx")
+      .on(t.userId)
+      .where(sql`user_id IS NOT NULL`),
+  })
+);
 
 export type Technician = typeof technicians.$inferSelect;
 export type NewTechnician = typeof technicians.$inferInsert;
@@ -1126,6 +1143,16 @@ export const protocols = sqliteTable("protocols", {
   signerName: text("signer_name"),
   signedAt: text("signed_at"), // ISO, czas serwera
   contentHash: text("content_hash"), // SHA-256 treści protokołu + podpisu
+  /**
+   * Notatka systemowa na wydarzeniu kalendarza ze streszczeniem protokołu
+   * (migracja 0102). Trzymamy ID, żeby przy każdym zapisie z panelu technika
+   * PODMIENIAĆ tę samą notatkę zamiast dopisywać kolejną.
+   *
+   * Klucz obcy stoi w SQL-u migracji, ale NIE w tym miejscu schematu: pętla
+   * protokoły → notatki → wydarzenia → protokoły rozłożyłaby wnioskowanie typów
+   * drizzle (TS7022 na trzech tabelach naraz).
+   */
+  noteId: integer("note_id"),
   status: text("status", { enum: ["draft", "final"] })
     .default("draft")
     .notNull(),
@@ -2815,6 +2842,17 @@ export const calendarEvents = sqliteTable(
     // Klucz wzmianki (NoteMention.key), z której powstał kafelek — NULL = podpięty ręcznie.
     // Synchronizacja wzmianek dotyka wyłącznie kafelków z niepustym note_mention.
     noteMention: text("note_mention"),
+    /**
+     * Kiedy technik wcisnął „Rozpocznij”, a kiedy „Zakończ” u klienta (panel
+     * /technik, migracja 0101). ISO z czasem serwera.
+     *
+     * CELOWO BEZ statusu `in_progress`: enum `CALENDAR_EVENT_STATUSES` czytają
+     * filtry listy, ICS, asystent i front, więc nowa wartość znaczyłaby przegląd
+     * wszystkich tych miejsc. „W toku” wylicza się w pełni z danych:
+     * `startedAt != null && status !== "done"`.
+     */
+    startedAt: text("started_at"),
+    finishedAt: text("finished_at"),
     createdBy: integer("created_by").references(() => users.id, {
       onDelete: "set null",
     }),

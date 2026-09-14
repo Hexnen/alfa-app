@@ -46,9 +46,11 @@ import { AdminAssistant } from "./pages/AdminAssistant";
 import { AdminCalendar } from "./pages/AdminCalendar";
 import { AdminCompany } from "./pages/AdminCompany";
 import { AdminMail } from "./pages/AdminMail";
+import { AdminTechnik } from "./pages/AdminTechnik";
 import { PublicOrderForm } from "./pages/PublicOrderForm";
 import { PublicOffer } from "./pages/PublicOffer";
 import { PluginImportBridge } from "./components/PluginImportBridge";
+import { TechnikApp } from "./technik/TechnikApp";
 import { useAuth } from "./auth/AuthProvider";
 import { usePerms, tabKeyForPath } from "./auth/permissions";
 import AuthScreen from "./auth/AuthScreen";
@@ -61,6 +63,10 @@ function App() {
         <Route path="/formularz/zlecenie" element={<PublicOrderForm />} />
         {/* Public, unauthenticated client-facing offer (link + print/PDF) */}
         <Route path="/oferta/:token" element={<PublicOffer />} />
+        {/* Panel technika — osobna aplikacja na tablet, poza `AuthedApp` i poza
+            `Layout`. Ma własny ekran logowania i własną powłokę; `AuthProvider`
+            opakowuje całe `App`, więc konto jest to samo co w CRM. */}
+        <Route path="/technik/*" element={<TechnikApp />} />
         {/* Everything else goes through the authenticated app shell */}
         <Route path="/*" element={<AuthedApp />} />
       </Routes>
@@ -79,6 +85,9 @@ function AuthedApp() {
     );
   }
   if (!user) return <AuthScreen />;
+  // Rola `technik` widzi wyłącznie panel technika — także wtedy, gdy ktoś
+  // wpisze adres CRM-a z ręki albo wróci na zapamiętaną zakładkę.
+  if (user.role === "technik") return <Navigate to="/technik" replace />;
 
   return (
     <Layout>
@@ -155,6 +164,7 @@ function AuthedApp() {
           <Route path="/admin/kalendarz" element={<AdminCalendar />} />
           <Route path="/admin/firma" element={<AdminCompany />} />
           <Route path="/admin/poczta" element={<AdminMail />} />
+          <Route path="/admin/technik" element={<AdminTechnik />} />
         </Routes>
       </Layout>
   );

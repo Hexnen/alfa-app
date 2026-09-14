@@ -1,0 +1,53 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import { technikApi, type TechnikJob } from "@/lib/api";
+import { useRefreshOnFocus } from "./refresh";
+
+/**
+ * DANE PANELU BEZ REACT QUERY.
+ *
+ * Alfa nie ma React Query, a panel technika to trzy ekrany i cztery zapytania —
+ * własny cache byłby tu większy od problemu. Wystarczy `useState` + świadome
+ * odświeżenie: po powrocie do karty i po każdej akcji (`reload()`).
+ *
+ * `seq` chroni przed wyścigiem: przy szybkim przerzucaniu dni odpowiedź na
+ * starsze zapytanie potrafi przyjść później niż na nowsze i podmieniłaby
+ * listę na dzień, którego technik już nie ogląda.
+ */
+export interface JobsState {
+  jobs: TechnikJob[];
+  loading: boolean;
+  error: string | null;
+  reload: () => void;
+}
+
+export function useJobs(from: string, to: string): JobsState {
+  const [jobs, setJobs] = useState<TechnikJob[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const seq = useRef(0);
+
+  const load = useCallback(async () => {
+    const my = ++seq.current;
+    setLoading(true);
+    try {
+      const data = await technikApi.jobs(from, to);
+      if (my !== seq.current) return;
+      setJobs(data);
+      setError(null);
+    } catch (e) {
+      if (my !== seq.current) return;
+      setError(e instanceof Error ? e.message : "Nie udało się wczytać zleceń.");
+    } finally {
+      if (my === seq.current) setLoading(false);
+    }
+  }, [from, to]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  useRefreshOnFocus(() => void load());
+
+  return { jobs, loading, error, reload: () => void load() };
+}
+
