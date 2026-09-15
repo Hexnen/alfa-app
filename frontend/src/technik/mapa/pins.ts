@@ -108,6 +108,7 @@ const TYPE_FALLBACK: Record<string, string> = {
   biuro: "#64748b",
   przygotowanie: "#f59e0b",
   konserwacja: "#14b8a6",
+  nagranie: "#c026d3",
   urlop: "#f43f5e",
   notatka: "#d97706",
   spotkanie: "#6366f1",
@@ -170,6 +171,8 @@ const TYPE_ICON_PATHS: Record<string, string> = {
   konserwacja: `<path d="M21 7.5V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h3.5"/><path d="M16 2v4"/><path d="M8 2v4"/><path d="M3 10h5"/><circle cx="16" cy="16" r="6"/><path d="M16 14v2l1 1"/>`,
   // ClipboardList
   przygotowanie: `<rect width="8" height="4" x="8" y="2" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M12 11h4"/><path d="M12 16h4"/><path d="M8 11h.01"/><path d="M8 16h.01"/>`,
+  // Video
+  nagranie: `<path d="m16 13 5.223 3.482a.5.5 0 0 0 .777-.416V7.87a.5.5 0 0 0-.752-.432L16 10.5"/><rect x="2" y="6" width="14" height="12" rx="2"/>`,
   // Building2 (biuro)
   biuro: `<path d="M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z"/><path d="M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2"/><path d="M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2"/><path d="M10 6h4"/><path d="M10 10h4"/><path d="M10 14h4"/><path d="M10 18h4"/>`,
   // MapPin — typy spoza kalendarza technicznego

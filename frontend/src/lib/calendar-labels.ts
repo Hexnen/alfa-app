@@ -34,6 +34,7 @@ import {
   Users,
   UserMinus,
   UserPlus,
+  Video,
   Wrench,
   type LucideIcon,
 } from "lucide-react";
@@ -51,7 +52,7 @@ import type {
   RealizationKind,
   RealizationWorkType,
 } from "@/lib/api";
-import type { RichTip, TipPill, TipRow, TipTone } from "@/components/ui/tooltip";
+import type { RichTip, TipPill, TipRow, TipTone, TooltipSide } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
 /**
@@ -81,6 +82,7 @@ export const EVENT_TYPE_ORDER: CalendarEventType[] = [
   "wizja",
   "demontaz",
   "konserwacja",
+  "nagranie",
   "przygotowanie",
   "biuro",
   "spotkanie",
@@ -106,6 +108,7 @@ export const DEPARTMENT_TYPE_ORDER: Record<CalendarDepartment, CalendarEventType
     "wizja",
     "demontaz",
     "konserwacja",
+    "nagranie",
     "przygotowanie",
     "biuro",
     "urlop",
@@ -173,6 +176,15 @@ export const EVENT_TYPE_META: Record<CalendarEventType, EventTypeMeta> = {
     chip: "border-teal-500/50 text-teal-700 dark:text-teal-300",
     chipActive: "bg-teal-500 border-teal-500 text-white",
     cssVar: "--cal-konserwacja",
+  },
+  // Wyjazd po nagrania z monitoringu. Fuksja jest w kalendarzu technicznym wolna —
+  // najbliższy odcień (wizja) to fiolet, a te dwa typy stoją obok siebie w filtrach.
+  nagranie: {
+    label: "Nagranie",
+    icon: Video,
+    chip: "border-fuchsia-600/50 text-fuchsia-700 dark:text-fuchsia-300",
+    chipActive: "bg-fuchsia-600 border-fuchsia-600 text-white",
+    cssVar: "--cal-nagranie",
   },
   urlop: {
     label: "Urlop",
@@ -388,6 +400,7 @@ export const EVENT_TYPE_UI: Record<CalendarEventType, { bar: string; soft: strin
   biuro: { bar: "bg-slate-500", soft: "bg-slate-500/15 text-slate-700 dark:text-slate-300", dot: "bg-slate-500" },
   przygotowanie: { bar: "bg-amber-500", soft: "bg-amber-500/15 text-amber-700 dark:text-amber-300", dot: "bg-amber-500" },
   konserwacja: { bar: "bg-teal-500", soft: "bg-teal-500/15 text-teal-700 dark:text-teal-300", dot: "bg-teal-500" },
+  nagranie: { bar: "bg-fuchsia-600", soft: "bg-fuchsia-600/15 text-fuchsia-700 dark:text-fuchsia-300", dot: "bg-fuchsia-600" },
   urlop: { bar: "bg-rose-500", soft: "bg-rose-500/15 text-rose-700 dark:text-rose-300", dot: "bg-rose-500" },
   notatka: { bar: "bg-amber-600", soft: "bg-amber-600/15 text-amber-800 dark:text-amber-300", dot: "bg-amber-600" },
   spotkanie: { bar: "bg-indigo-500", soft: "bg-indigo-500/15 text-indigo-700 dark:text-indigo-300", dot: "bg-indigo-500" },
@@ -1439,6 +1452,14 @@ const PROTOCOL_TONE: Record<ProtocolBadgeKind, TipTone> = {
 export const EVENT_TIP_HINT = "Kliknij, by otworzyć · prawy przycisk: więcej";
 
 /**
+ * Dymek wydarzenia ląduje z boku (z prawej, a przy prawej krawędzi ekranu
+ * z lewej), potem na dole, a na górze dopiero w ostateczności: kafelek w siatce
+ * jest wąski i wysoki, więc bok nie zasłania sąsiednich godzin, a szeroki wiersz
+ * listy / karta tablicy nie ma miejsca po bokach i sama spada na dół.
+ */
+export const EVENT_TIP_SIDES: TooltipSide[] = ["right", "left", "bottom", "top"];
+
+/**
  * To samo, co `eventTooltipText`, ale rozbite na pola — nagłówek z kropką typu,
  * linia „Typ · Obiekt”, termin, technicy, pigułki stanu i ostrzeżenia.
  * Renderuje to `RichTip` z `@/components/ui/tooltip`.
@@ -1534,6 +1555,8 @@ export function eventTipData(
     pills,
     warnings,
     hint: opts.hint === null ? undefined : (opts.hint ?? EVENT_TIP_HINT),
+    side: "right",
+    fallback: EVENT_TIP_SIDES,
   };
 }
 

@@ -20,6 +20,7 @@
   --cal-biuro: 215 16% 47%;          /* slate-500 */
   --cal-przygotowanie: 38 92% 50%;   /* amber-500 */
   --cal-konserwacja: 173 80% 40%;    /* teal-500 */
+  --cal-nagranie: 293 69% 49%;       /* fuchsia-600 */
   --cal-urlop: 350 89% 60%;          /* rose-500 */
   --cal-notatka: 32 95% 44%;         /* amber-600 */
 
@@ -62,6 +63,7 @@
   --cal-biuro: 215 18% 64%;
   --cal-przygotowanie: 38 92% 58%;
   --cal-konserwacja: 173 70% 50%;
+  --cal-nagranie: 292 91% 73%;
   --cal-urlop: 350 89% 70%;
   --cal-notatka: 38 92% 58%;
 
@@ -302,6 +304,8 @@
 .alfa-calendar .cal-type-przygotowanie { --ev: var(--cal-przygotowanie); }
 .alfa-calendar .fc .cal-type-konserwacja,
 .alfa-calendar .cal-type-konserwacja { --ev: var(--cal-konserwacja); }
+.alfa-calendar .fc .cal-type-nagranie,
+.alfa-calendar .cal-type-nagranie { --ev: var(--cal-nagranie); }
 .alfa-calendar .fc .cal-type-urlop,
 .alfa-calendar .cal-type-urlop { --ev: var(--cal-urlop); }
 .alfa-calendar .fc .cal-type-notatka,
@@ -835,9 +839,11 @@
 
 /* ---- Kompaktowa siatka na małych ekranach ---- */
 @media (max-width: 767px) {
+  /* Numer dnia jest na telefonie linkiem do widoku Dnia (`navLinks`) — większy
+     padding daje mu sensowny cel dotyku obok wolnego miejsca w komórce. */
   .alfa-calendar .fc .fc-daygrid-day-number {
-    font-size: 0.75rem;
-    padding: 3px 5px;
+    font-size: 0.78rem;
+    padding: 5px 8px;
   }
   .alfa-calendar .fc .fc-day-today .fc-daygrid-day-number {
     min-width: 1.4rem;
@@ -847,8 +853,10 @@
   .alfa-calendar .fc .fc-event {
     font-size: 0.68rem;
   }
+  /* Miejsce na 4 paski + numer dnia + wolny margines u dołu: to ten margines
+     przyjmuje tapnięcie w dzień (`dateClick`), więc nie może zniknąć. */
   .alfa-calendar .fc .fc-dayGridMonth-view .fc-daygrid-day-frame {
-    min-height: 4rem;
+    min-height: 5rem;
   }
   .alfa-calendar .fc .fc-col-header-cell-cushion {
     padding: 5px 2px;
@@ -902,11 +910,49 @@
     clip-path: inset(50%);
     white-space: nowrap;
   }
-  /* „+N” pod paskami — licznik reszty dnia, prowadzi do widoku Dnia. */
+  /* „+N” pod paskami — licznik reszty dnia, prowadzi do widoku Dnia.
+     Sama pigułka ma ~14 px wysokości, czyli za mało na palec. Powiększa ją
+     przezroczysty `::before`: wygląd zostaje, rośnie tylko obszar kliku.
+     W GÓRĘ jest tylko margines nad pigułką — wyżej leżą 9-pikselowe paski
+     wydarzeń i zabieranie im dotyku byłoby zamianą jednego problemu na drugi.
+     Zapas idzie więc W DÓŁ, w wolne pole komórki: tapnięcie w nie i tak otwiera
+     ten sam widok Dnia co „+N” (`handleDateClick` w CalendarPage), więc nic nie
+     ginie. Pole bierze się z `padding-bottom` na `.fc-daygrid-day-bottom`, czyli
+     komórka rośnie tylko tam, gdzie „+N” faktycznie jest. Pasków to nie wypycha:
+     mobilne `dayMaxEvents` to stała liczba (4), a nie wynik pomiaru wysokości. */
+  .alfa-calendar .fc .fc-dayGridMonth-view .fc-daygrid-day-bottom {
+    padding-bottom: 10px;
+  }
   .alfa-calendar .fc .fc-dayGridMonth-view .fc-daygrid-more-link {
+    position: relative;
     margin: 3px 0 0 2px;
-    padding: 0 5px;
+    padding: 2px 6px;
+    /* FullCalendar tnie tu `overflow: hidden` (chroni długie „+N więcej” przed
+       wyjściem poza komórkę) — na telefonie treścią jest samo „+N”, a obcięcie
+       zjadałoby powiększony cel dotyku razem z pseudo-elementem. */
+    overflow: visible;
     font-size: 0.62rem;
+  }
+  .alfa-calendar .fc .fc-dayGridMonth-view .fc-daygrid-more-link::before {
+    content: "";
+    position: absolute;
+    inset: -3px -8px -14px;
+  }
+
+  /* ---- Swipe zamiast gestu „wstecz” ----
+     Poziomy ruch po siatce zmienia okres (`onTouchStart`/`onTouchEnd`
+     w CalendarPage). Chrome czyta ten sam ruch w prawo jako gest „wstecz”
+     i wychodzi z aplikacji, bo nic po drodze nie przewija się w poziomie.
+     `touch-action` zostawia przeglądarce tylko pion i zoom — siatka i tak nie
+     przewija się w poziomie — a `overscroll-behavior-x` urywa łańcuch
+     przewijania na kalendarzu. Przeciąganie kafelków zostaje: FullCalendar
+     startuje je długim przytrzymaniem we własnych handlerach, a `touch-action`
+     nie dotyka zdarzeń dotyku, tylko natywnych gestów przeglądarki.
+     Celujemy w `.fc`, a nie w `.alfa-calendar`, bo tym drugim opakowany jest
+     też planer trasy — mapa musi zostać przy pełnej swobodzie gestów. */
+  .alfa-calendar .fc {
+    touch-action: pan-y pinch-zoom;
+    overscroll-behavior-x: contain;
   }
 
   /* ---- Siatka godzinowa: węższa rynna, wyższe sloty (tap ≥ 40 px) ---- */
@@ -930,17 +976,27 @@
   /* „+N” w siatce godzinowej (`eventMaxStack`): FullCalendar nadaje mu inline
      tylko `top`/`bottom`, więc domyślnie rozciąga się na całą wysokość i pełną
      szerokość ukrytych wydarzeń — czyli leży NA kafelku i zamazuje tytuł.
-     Ścieśniamy go do pigułki w prawym górnym rogu (miejsce po znacznikach,
-     które przy wąskim kafelku i tak są schowane). */
+     Samo ścieśnienie do pigułki w rogu tego nie rozwiązuje: ukryta grupa zaczyna
+     się i kończy dokładnie tam, gdzie widoczny kafelek, więc róg — górny czy
+     dolny, sprawdzone oba — i tak wypada na tekście (pomiary: górny 6687 px²
+     zasłoniętego tytułu, dolny 773 px² na tym samym zestawie dni).
+     Dlatego kolumna, w której „+N” w ogóle jest, oddaje mu własny pionowy pas:
+     `.fc-timegrid-col-events` zwęża się o szerokość pigułki, a pigułka wchodzi
+     w zwolnione miejsce ujemnym `right`. Kafelki są pozycjonowane procentowo
+     względem tego kontenera, więc zwężają się razem z nim; kolumny bez „+N”
+     zostają pełnej szerokości. */
+  .alfa-calendar .fc .fc-timegrid-col:has(.fc-timegrid-more-link) .fc-timegrid-col-events {
+    margin-right: 1.3rem;
+  }
   .alfa-calendar .fc .fc-timegrid-more-link {
     left: auto;
-    right: 2px;
+    right: -1.22rem;
     bottom: auto !important;
     width: auto;
-    min-width: 0;
-    max-width: calc(100% - 4px);
+    min-width: 1.2rem;
+    max-width: none;
     height: auto;
-    padding: 1px 5px;
+    padding: 1px 2px;
     border: 1px solid hsl(var(--primary) / 0.45);
     border-radius: 999px;
     background: hsl(var(--background));
@@ -948,7 +1004,16 @@
     font-size: 0.62rem;
     font-weight: 700;
     line-height: 1.35;
+    text-align: center;
     z-index: 5;
+  }
+  /* Cel dotyku: pigułka ma ~17 px, więc dobiera brakujące piksele przezroczystym
+     `::before`. Rośnie wyłącznie w pionie — w bok zostaje w swoim pasie, żeby
+     nie podbierać tapnięć kafelkowi obok. */
+  .alfa-calendar .fc .fc-timegrid-more-link::before {
+    content: "";
+    position: absolute;
+    inset: -8px 0;
   }
   .alfa-calendar .fc .fc-timegrid-more-link .fc-timegrid-more-link-inner {
     padding: 0;
@@ -968,13 +1033,22 @@
   .alfa-calendar .fc .fc-popover-header {
     padding: 8px 6px 8px 10px;
   }
+  /* Krzyżyk zamknięcia to w FullCalendarze sama ikona (~17 px) — na palec za
+     mało. Robimy z niego kwadrat 36 × 36, a ujemne marginesy oddają nagłówkowi
+     jego własny padding, więc pasek tytułu rośnie o kilka pikseli, nie o 20. */
   .alfa-calendar .fc .fc-popover-close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 36px;
+    min-height: 36px;
+    margin: -6px -4px -6px 0;
+    padding: 0;
     opacity: 1;
-    padding: 4px 6px;
     font-size: 1.05rem;
   }
   .alfa-calendar .fc .fc-popover-body {
-    max-height: 60vh;
+    max-height: 50vh;
     overflow-y: auto;
     overscroll-behavior: contain;
   }

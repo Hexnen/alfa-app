@@ -54,14 +54,16 @@ export function ContextMenu({
   const [pos, setPos] = useState({ left: x, top: y });
 
   // Dosuń menu do krawędzi viewportu, żeby nie wychodziło poza ekran.
+  // Rozmiar bierzemy z `offsetWidth/Height`, nie z `getBoundingClientRect()`:
+  // `.alfa-pop` wjeżdża animacją `scale(0.97)`, a prostokąt liczy tę skalę, więc
+  // menu wychodziło o te brakujące ~3% za krawędź i ucinało podpowiedzi po prawej.
   useLayoutEffect(() => {
     if (!open) return;
     const el = ref.current;
     if (!el) return;
     const pad = 8;
-    const { width, height } = el.getBoundingClientRect();
-    const left = Math.max(pad, Math.min(x, window.innerWidth - width - pad));
-    const top = Math.max(pad, Math.min(y, window.innerHeight - height - pad));
+    const left = Math.max(pad, Math.min(x, window.innerWidth - el.offsetWidth - pad));
+    const top = Math.max(pad, Math.min(y, window.innerHeight - el.offsetHeight - pad));
     setPos({ left, top });
   }, [open, x, y, items.length]);
 

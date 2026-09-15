@@ -29,6 +29,7 @@ export const TYPE_LABELS: Record<CalendarEventType, string> = {
   biuro: "Biuro",
   przygotowanie: "Przygotowanie",
   konserwacja: "Konserwacja",
+  nagranie: "Nagranie",
   urlop: "Urlop",
   notatka: "Notatka",
   // Dział handlowy

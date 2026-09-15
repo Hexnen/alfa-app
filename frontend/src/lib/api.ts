@@ -5505,6 +5505,8 @@ export type CalendarEventType =
   | "biuro"
   | "przygotowanie"
   | "konserwacja"
+  /** Wyjazd po nagrania z monitoringu (zgranie materiału / przegląd CCTV na obiekcie). */
+  | "nagranie"
   | "urlop"
   /** Kafelek wskazujący na istniejącą notatkę (ręcznie albo ze wzmianki daty w treści). */
   | "notatka"

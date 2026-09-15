@@ -103,6 +103,8 @@ export interface RichTip {
   hint?: string;
   shortcut?: string;
   side?: TooltipSide;
+  /** Jawna kolejność prób stron (patrz `TooltipOptions.fallback`). */
+  fallback?: TooltipSide[];
 }
 
 export interface TooltipOptions {
@@ -110,6 +112,13 @@ export interface TooltipOptions {
   shortcut?: ReactNode;
   /** Preferowana strona (z automatycznym odbiciem przy krawędzi). Domyślnie „top”. */
   side?: TooltipSide;
+  /**
+   * Jawna kolejność prób stron przy odbijaniu od krawędzi — wygrywa pierwsza,
+   * na której dymek się mieści. Strona preferowana i tak idzie pierwsza, a strony
+   * pominięte w liście dokładane są na koniec (żeby dymek zawsze gdzieś wylądował).
+   * Bez tego pola obowiązuje domyślna kolejność `[side, przeciwna, top, bottom, right, left]`.
+   */
+  fallback?: TooltipSide[];
   /** Własne opóźnienie w ms (domyślnie 400). */
   delay?: number;
 }
@@ -129,6 +138,7 @@ interface TipState {
   rich: RichTip | null;
   shortcut?: ReactNode;
   side: TooltipSide;
+  fallback?: TooltipSide[];
   anchor: Element;
 }
 
@@ -239,6 +249,7 @@ function scheduleTooltip(
     rich,
     shortcut: opts.shortcut ?? rich?.shortcut,
     side: opts.side ?? rich?.side ?? "top",
+    fallback: opts.fallback ?? rich?.fallback,
     anchor,
   };
   const delay = immediate || Date.now() - lastClosedAt < GRACE_MS ? 0 : (opts.delay ?? OPEN_DELAY);
@@ -333,18 +344,27 @@ export type TipAttrs = Record<string, string>;
  */
 export function tipAttrs(spec: string | RichTip, opts: TooltipOptions = {}): TipAttrs {
   if (typeof spec === "string") {
+    // Jawna kolejność odbić nie mieści się w atrybutach tekstowych — wtedy JSON.
+    if (opts.fallback?.length) {
+      const shortcut = opts.shortcut != null && opts.shortcut !== "" ? String(opts.shortcut) : undefined;
+      return {
+        "data-tip-json": JSON.stringify({ text: spec, shortcut, side: opts.side, fallback: opts.fallback }),
+      };
+    }
     const attrs: TipAttrs = { "data-tip": spec };
     if (opts.shortcut != null && opts.shortcut !== "") attrs["data-tip-shortcut"] = String(opts.shortcut);
     if (opts.side) attrs["data-tip-side"] = opts.side;
     return attrs;
   }
+  const fallback = spec.fallback ?? opts.fallback;
   const simple =
     !spec.rows?.length &&
     !spec.pills?.length &&
     !spec.warnings?.length &&
     !spec.meta &&
     !spec.hint &&
-    !spec.accentClass;
+    !spec.accentClass &&
+    !fallback?.length;
   if (simple && spec.text) {
     const attrs: TipAttrs = { "data-tip": spec.text };
     if (spec.title) attrs["data-tip-title"] = spec.title;
@@ -353,7 +373,7 @@ export function tipAttrs(spec: string | RichTip, opts: TooltipOptions = {}): Tip
     if (spec.side ?? opts.side) attrs["data-tip-side"] = (spec.side ?? opts.side) as string;
     return attrs;
   }
-  return { "data-tip-json": JSON.stringify({ ...spec, side: spec.side ?? opts.side }) };
+  return { "data-tip-json": JSON.stringify({ ...spec, side: spec.side ?? opts.side, fallback }) };
 }
 
 /** Wersja imperatywna `tipAttrs` — czyści stare atrybuty i natywny `title`. */
@@ -600,7 +620,7 @@ function RichTipBody({ data }: { data: RichTip }) {
  * Umieszcza dymek po stronie, po której naprawdę się mieści — dzięki temu nigdy
  * nie nachodzi na element (przycinana jest tylko oś poprzeczna).
  */
-function place(el: HTMLElement, anchor: Element, preferred: TooltipSide) {
+function place(el: HTMLElement, anchor: Element, preferred: TooltipSide, fallback?: TooltipSide[]) {
   const r = anchor.getBoundingClientRect();
   const { width: w, height: h } = el.getBoundingClientRect();
   const vw = window.innerWidth;
@@ -611,8 +631,19 @@ function place(el: HTMLElement, anchor: Element, preferred: TooltipSide) {
     left: "right",
     right: "left",
   };
+  // Jawna kolejność (`fallback`) wchodzi zaraz po stronie preferowanej; domyślnie
+  // pierwszą próbą jest strona przeciwna. Reszta stron zawsze zamyka listę, żeby
+  // dymek miał gdzie wylądować nawet przy niepełnej liście.
+  const wanted = (fallback ?? []).filter((s) => s in opposite);
   const order: TooltipSide[] = [];
-  for (const s of [preferred, opposite[preferred], "top", "bottom", "right", "left"] as TooltipSide[]) {
+  for (const s of [
+    preferred,
+    ...(wanted.length ? wanted : [opposite[preferred]]),
+    "top",
+    "bottom",
+    "right",
+    "left",
+  ] as TooltipSide[]) {
     if (!order.includes(s)) order.push(s);
   }
   const space: Record<TooltipSide, number> = {
@@ -654,7 +685,7 @@ function TooltipLayer() {
       hideTooltip();
       return;
     }
-    place(el, state.anchor, state.side);
+    place(el, state.anchor, state.side, state.fallback);
   }, [state]);
 
   useEffect(() => {

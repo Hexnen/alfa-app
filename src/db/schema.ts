@@ -2724,6 +2724,12 @@ export const CALENDAR_EVENT_TYPES = [
   "zadanie",
   "prezentacja",
   "termin",
+  // Wyjazd po nagrania z monitoringu — zgranie materiału albo przegląd CCTV NA OBIEKCIE.
+  // Typ WYJAZDOWY działu technicznego: zachowuje się jak `wizja` (obiekt, technicy,
+  // rozliczenie, seria), ale NIE zakłada realizacji ani protokołu (patrz PROTOCOL_TYPES
+  // w src/lib/calendar-labels.ts i DEFAULT_REALIZATION_TYPES w src/lib/calendar-config.ts).
+  // Dopisany NA KOŃCU — kolejność tej listy jest kontraktem UI.
+  "nagranie",
 ] as const;
 export type CalendarEventType = (typeof CALENDAR_EVENT_TYPES)[number];
 
@@ -2733,7 +2739,7 @@ export type CalendarEventType = (typeof CALENDAR_EVENT_TYPES)[number];
  * nowym wydarzeniem, bo zmiana działu jest zabroniona (src/lib/calendar-mutations.ts).
  */
 export const DEPARTMENT_EVENT_TYPES: Record<CalendarDepartment, readonly CalendarEventType[]> = {
-  technical: ["serwis", "montaz", "wizja", "demontaz", "biuro", "przygotowanie", "konserwacja", "urlop", "notatka"],
+  technical: ["serwis", "montaz", "wizja", "demontaz", "biuro", "przygotowanie", "konserwacja", "nagranie", "urlop", "notatka"],
   handlowy: ["spotkanie", "telefon", "email", "zadanie", "prezentacja", "wizja", "termin", "urlop", "notatka"],
 };
 

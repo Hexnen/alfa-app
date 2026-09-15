@@ -42,7 +42,12 @@ export interface PromptContext {
   rules?: Partial<PromptRules>;
 }
 
-const OUTBOUND_TYPES = ["serwis", "montaz", "wizja", "demontaz", "konserwacja"];
+/**
+ * Typy WYJAZDOWE — praca na obiekcie, więc propozycja wymaga obiektu i godzin.
+ * To NIE jest lista realizacji (tę ustala admin, patrz reguła 11c): `nagranie`
+ * jest wyjazdem, ale realizacji ani protokołu domyślnie nie zakłada.
+ */
+const OUTBOUND_TYPES = ["serwis", "montaz", "wizja", "demontaz", "konserwacja", "nagranie"];
 
 /** Maks. długość instrukcji administratora w prompcie (limit zapisu egzekwuje assistantConfig). */
 const CUSTOM_INSTRUCTIONS_MAX = 2000;
@@ -148,7 +153,7 @@ export function assembleSystemPrompt(ctx: PromptContext): string {
   );
   if (search) {
     rules.push(
-      "13. Konkretne wydarzenie bez daty („urlop Dominika”, „serwis w Magazynie w zeszłym tygodniu”) → `search_events` (query = tytuł/obiekt/miejsce, technicianId/technicianName) — JEDEN krok; nie przeczesuj `list_events`, nie zgaduj dat, `find_object` niepotrzebny. `type` TYLKO gdy użytkownik nazwał typ (serwis, montaż, wizja, demontaż, konserwacja, urlop); „wizyta/byliśmy/pojechał” to NIE typ. Pierwsze szukanie BEZ `type` i `status`; wynik z `relaxed` = filtr zdjęty — użyj go, nie szukaj ponownie."
+      "13. Konkretne wydarzenie bez daty („urlop Dominika”, „serwis w Magazynie w zeszłym tygodniu”) → `search_events` (query = tytuł/obiekt/miejsce, technicianId/technicianName) — JEDEN krok; nie przeczesuj `list_events`, nie zgaduj dat, `find_object` niepotrzebny. `type` TYLKO gdy użytkownik nazwał typ (serwis, montaż, wizja, demontaż, konserwacja, nagranie, urlop); „wizyta/byliśmy/pojechał” to NIE typ. Pierwsze szukanie BEZ `type` i `status`; wynik z `relaxed` = filtr zdjęty — użyj go, nie szukaj ponownie."
     );
   }
   if (showEvents) {

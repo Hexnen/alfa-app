@@ -63,9 +63,29 @@ export interface VersionUpdate {
  */
 export const UPDATES_CURRENT: VersionUpdate[] = [
   {
-    version: "1.11.0–1.12.0",
+    version: "1.11.0–1.13.0",
     date: "2026-09-15",
     entries: [
+      {
+        text: "Kalendarz na telefonie: pasek narzędzi zajmuje piątą część ekranu zamiast prawie połowy, widok wybiera się z listy, a datę z kalendarzyka po tapnięciu w tytuł",
+        type: "feat",
+        module: "techniczny",
+      },
+      {
+        text: "Nakładające się wydarzenia w tygodniu i dniu są czytelne („+N” zamiast wąskich pasków), miesiąc pokazuje kolorowe paski z listą dnia po tapnięciu, a przytrzymanie kafelka otwiera menu z „Przenieś…”, bez przeciągania",
+        type: "feat",
+        module: "techniczny",
+      },
+      {
+        text: "Nowy rodzaj wydarzenia „Nagranie”; wybór typu to dziewięć kafelków w trzech rzędach",
+        type: "feat",
+        module: "techniczny",
+      },
+      {
+        text: "Dymek z informacją o wydarzeniu pojawia się obok kafelka albo pod nim, zamiast zasłaniać to, co wyżej",
+        type: "tweak",
+        module: "techniczny",
+      },
       {
         text: "Wydarzenie, które technik właśnie realizuje, świeci w kalendarzu złotą pulsującą poświatą, aż do zakończenia",
         type: "feat",
@@ -271,9 +291,10 @@ export const UPDATES: VersionUpdate[] = [...UPDATES_CURRENT, ...UPDATES_2026];
  */
 export const UPDATES_TECHNIK: VersionUpdate[] = [
   {
-    version: "1.5.0–1.6.0",
+    version: "1.5.0–1.6.1",
     date: "2026-09-15",
     entries: [
+      { text: "Usprawnienia pod maską", type: "tweak", module: "technik" },
       {
         text: "Zmiany z biura (termin, opis, notatka, odwołanie, przypisanie) pojawiają się na liście i w zleceniu od razu, bez odświeżania",
         type: "feat",

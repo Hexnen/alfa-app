@@ -3617,10 +3617,17 @@ export function CalendarEventDialog({
           <span className="text-xs text-muted-foreground">typu kafelka notatki nie da się zmienić</span>
         </div>
       ) : (
+        /*
+         * 3 kolumny WSZĘDZIE — w doku, w modalu i na telefonie: dział techniczny ma
+         * 9 typów do wyboru (bez kafelka notatki, którego i tak nie da się nadać
+         * w edycji), więc siatka wychodzi równo 3×3 zamiast czterech rzędów po dwa.
+         * Kafelek jest PIONOWY (ikona nad etykietą, `text-xs`), bo w poziomie przy
+         * szerokości kolumny ~110–140 px „Przygotowanie” urywało się wielokropkiem.
+         */
         <div
           role="radiogroup"
           aria-label="Typ wydarzenia"
-          className={cn("grid gap-1.5", docked ? "grid-cols-2" : "grid-cols-2 sm:grid-cols-4")}
+          className="grid grid-cols-3 gap-1.5"
         >
           {cfg.typeOrder.filter((t) => !isEdit || !isNoteEvent(t)).map((t) => {
             const m = EVENT_TYPE_META[t];
@@ -3635,12 +3642,12 @@ export function CalendarEventDialog({
                 onClick={() => changeType(t)}
                 data-testid={`type-chip-${t}`}
                 className={cn(
-                  "flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none",
+                  "flex min-h-[3.25rem] flex-col items-center justify-center gap-1 rounded-md border px-1 py-1.5 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none",
                   active ? m.chipActive : cn(m.chip, "bg-background hover:bg-muted")
                 )}
               >
                 <I className="h-4 w-4 shrink-0" />
-                <span className="truncate">{m.label}</span>
+                <span className="w-full truncate text-center leading-tight">{m.label}</span>
               </button>
             );
           })}

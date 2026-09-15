@@ -27,7 +27,7 @@ import {
 } from "../src/lib/calendar-mutations.js";
 import { loadEvent } from "../src/lib/calendar-queries.js";
 import { runBackfill } from "../src/lib/calendar-realizations.js";
-import { CALENDAR_FIELDS } from "../src/lib/calendar-config.js";
+import { CALENDAR_FIELDS, DEFAULT_REALIZATION_TYPES, REALIZATION_ALLOWED_TYPES } from "../src/lib/calendar-config.js";
 import { deleteSetting, setSetting } from "../src/lib/settings.js";
 import { ApiError } from "../src/lib/calendar-labels.js";
 
@@ -245,11 +245,21 @@ try {
   const rT2 = eventRow(evT).realizationId;
   ok("biuro → serwis: powstaje NOWA realizacja", rT2 != null && rT2 !== rT, { rT, rT2 });
 
-  // 7. urlop / biuro / przygotowanie — nigdy
+  // 7. urlop / biuro / przygotowanie / nagranie — nigdy
+  //    (nagranie jest wyjazdem na obiekt, ale domyślnie NIE jest objęte realizacją —
+  //     patrz DEFAULT_REALIZATION_TYPES; admin może je dołożyć, bo nie jest zakazane)
   const evU = create({ type: "urlop", title: `${PREFIX} Urlop`, startAt: "2027-03-22", endAt: "2027-03-23", allDay: true, technicianIds: [t1.id] });
   const evB = create(base({ type: "biuro", title: `${PREFIX} Biuro` , startAt: "2027-03-23T08:00", endAt: "2027-03-23T10:00" }));
   const evP = create(base({ type: "przygotowanie", title: `${PREFIX} Przygotowanie`, startAt: "2027-03-24T08:00", endAt: "2027-03-24T10:00" }));
   ok("urlop/biuro/przygotowanie: brak realizacji", eventRow(evU).realizationId === null && eventRow(evB).realizationId === null && eventRow(evP).realizationId === null, [eventRow(evU).realizationId, eventRow(evB).realizationId, eventRow(evP).realizationId]);
+  const evNag = create(base({ type: "nagranie", title: `${PREFIX} Nagranie`, startAt: "2027-03-24T12:00", endAt: "2027-03-24T14:00" }));
+  ok("nagranie: typ przyjęty w dziale technicznym", eventRow(evNag).type === "nagranie", eventRow(evNag).type);
+  ok("nagranie: brak realizacji i protokołu", eventRow(evNag).realizationId === null && eventRow(evNag).protocolId === null, eventRow(evNag));
+  ok(
+    "nagranie: admin MOŻE je objąć realizacją (nie jest typem zakazanym)",
+    REALIZATION_ALLOWED_TYPES.includes("nagranie") && !DEFAULT_REALIZATION_TYPES.includes("nagranie"),
+    { allowed: REALIZATION_ALLOWED_TYPES.includes("nagranie"), default: DEFAULT_REALIZATION_TYPES.includes("nagranie") }
+  );
 
   // 8. usunięcie + przywrócenie wydarzenia
   const evD = create(base({ title: `${PREFIX} Usuwany`, startAt: "2027-03-25T08:00", endAt: "2027-03-25T10:00" }));

@@ -201,13 +201,15 @@ type FcViewName = "dayGridMonth" | "timeGridWeek" | "timeGridDay" | "listWeek";
  */
 type ViewName = FcViewName | "board" | "route";
 
-const VIEWS: { key: ViewName; label: string; shortLabel: string; keys: string[] }[] = [
-  { key: "dayGridMonth", label: "Miesiąc", shortLabel: "Mies.", keys: ["m"] },
-  { key: "timeGridWeek", label: "Tydzień", shortLabel: "Tydz.", keys: ["w"] },
-  { key: "timeGridDay", label: "Dzień", shortLabel: "Dzień", keys: ["d"] },
-  { key: "listWeek", label: "Lista", shortLabel: "Lista", keys: ["l", "a"] },
-  { key: "board", label: "Tablica", shortLabel: "Tabl.", keys: ["b"] },
-  { key: "route", label: "Trasa", shortLabel: "Trasa", keys: ["r"] },
+// Skrócone etykiety zniknęły razem z segmented control na telefonie — wybór widoku
+// jest tam `<select>`-em, który mieści pełne nazwy.
+const VIEWS: { key: ViewName; label: string; keys: string[] }[] = [
+  { key: "dayGridMonth", label: "Miesiąc", keys: ["m"] },
+  { key: "timeGridWeek", label: "Tydzień", keys: ["w"] },
+  { key: "timeGridDay", label: "Dzień", keys: ["d"] },
+  { key: "listWeek", label: "Lista", keys: ["l", "a"] },
+  { key: "board", label: "Tablica", keys: ["b"] },
+  { key: "route", label: "Trasa", keys: ["r"] },
 ];
 
 /**
@@ -227,6 +229,10 @@ const VIEWS: { key: ViewName; label: string; shortLabel: string; keys: string[] 
 const MOBILE_VIEW_OPTIONS: CalendarOptions["views"] = {
   timeGridWeek: { eventMaxStack: 1, displayEventEnd: false },
   timeGridDay: { eventMaxStack: 3, displayEventEnd: false },
+  // Tapnięcie w komórkę Miesiąca otwiera dzień (`dateClick`), więc zaznaczanie
+  // musi zejść z drogi: bez tego jedno tapnięcie robiło dwie rzeczy naraz
+  // (przejście do dnia + formularz nowego wydarzenia z zaznaczenia).
+  dayGridMonth: { selectable: false },
 };
 
 /** Widoki dostępne w tej konfiguracji — „Trasa” tylko przy `features.routePlanner`. */
@@ -3163,7 +3169,7 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
               )}
               {!mobile && (
                 <>
-              {isBoard && !mobile && (
+              {isBoard && (
                 <SegmentedControl
                   label="Grupowanie tablicy"
                   value={boardGroup}
@@ -3181,7 +3187,7 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
                 onChange={(k) => changeView(k as ViewName)}
                 options={orderedViews.map((v) => ({
                   key: v.key,
-                  label: mobile ? v.shortLabel : v.label,
+                  label: v.label,
                   hint: v.key === view ? `Bieżący widok: ${v.label}` : `Przełącz na widok: ${v.label}`,
                   shortcut: v.keys[0].toUpperCase(),
                 }))}
@@ -3212,20 +3218,9 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
                   technicians={assignees}
                 />
               )}
-              <Button
-                variant={activeFilterCount ? "secondary" : "outline"}
-                size="icon"
-                className="relative h-10 w-10 md:hidden"
-                onClick={() => setFiltersOpen(true)}
-                aria-label={`Filtry${activeFilterCount ? ` (${activeFilterCount} aktywne)` : ""}`}
-              >
-                <Filter className="h-4 w-4" />
-                {activeFilterCount > 0 && (
-                  <span className="absolute -right-1 -top-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-bold text-primary-foreground">
-                    {activeFilterCount}
-                  </span>
-                )}
-              </Button>
+              {/* Przycisk filtrów na telefonie stoi w gałęzi `mobile` wyżej
+                  (`filters-open-mobile`) — tutaj, w gałęzi desktopowej, jego
+                  odpowiednik z `md:hidden` nigdy by się nie pokazał. */}
               <div className="relative hidden md:block">
                 <Button
                   variant="ghost"
@@ -3470,6 +3465,10 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
                 views={mobile ? MOBILE_VIEW_OPTIONS : undefined}
                 moreLinkClick={handleMoreLinkClick}
                 dateClick={handleDateClick}
+                // Numer dnia (i nagłówek kolumny) jako link do widoku Dnia — pewny
+                // cel dotyku obok tapnięcia w wolne miejsce komórki.
+                navLinks={mobile}
+                navLinkDayClick={mobile ? openDay : undefined}
                 editable={editable}
                 eventStartEditable={editable}
                 eventDurationEditable={editable}
