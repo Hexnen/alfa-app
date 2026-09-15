@@ -92,7 +92,7 @@ import {
 import { distanceForObject, isGeoError } from "../lib/geo.js";
 import { getCompanyConfig } from "../lib/company-config.js";
 import { parseLocal } from "../lib/calendar-recurrence.js";
-import { zonedToday } from "../lib/tz.js";
+import { zonedNow, zonedToday } from "../lib/tz.js";
 import { loadWeatherEvents, weatherBriefs, type WeatherBrief } from "../lib/weather.js";
 
 const app = new Hono();
@@ -799,6 +799,103 @@ app.get("/jobs", (c) => {
     return c.json({ success: true, data: jobsByIds(myJobIds(tech.id, from, to), tech.id, user.id) });
   } catch (error) {
     return handleError(c, error, "pobierania zleceń");
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /jobs/history — wszystko, co już za technikiem
+//
+// OSOBNA TRASA, NIE PARAMETR `/jobs`. Lista dnia i tygodnia pyta o OKNO DAT
+// i oddaje płaską tablicę; historia nie ma górnej granicy (technik przewija
+// wstecz, dopóki chce) i musi paginować, więc jej odpowiedź to `{ items,
+// nextCursor }`. Wciśnięcie obu kształtów w jedną trasę kończyłoby się `data`
+// raz tablicą, raz obiektem — a to czyta cały front.
+//
+// KOLEJNOŚĆ REJESTRACJI: przed `/jobs/:id` (Hono dopasowuje w kolejności
+// rejestracji, `:id` złapałby „history” → Number("history") = NaN → 400).
+// Tak samo jak `/jobs/weather` wyżej.
+//
+// CO ZNACZY „PRZESZŁE”. Dwie niezależne przesłanki, złączone LUB:
+//   1. termin minął — `end_at` (lokalny ISO kalendarza) jest wcześniejszy niż
+//      TERAZ w strefie aplikacji (`zonedNow`); porównanie jest tekstowe, tak
+//      samo jak w `rangeConds`. Całodniowe mają `end_at` WYŁĄCZNY i bez
+//      godziny, więc „2026-09-15" < „2026-09-15T12:30" — dzień, który się
+//      skończył wczoraj, wchodzi, a trwający dziś (end = jutro) nie.
+//   2. zlecenie jest zamknięte — status `done` albo `cancelled` — nawet gdy
+//      termin dopiero przed nami. Zakończone przed czasem i odwołane jutro to
+//      dla technika sprawy załatwione, a nie robota do zrobienia.
+// ODWOŁANE SĄ TU WIDOCZNE (jedyne miejsce poza ekranem zlecenia): historia
+// odpowiada na „co się z tym stało”, a odwołanie jest właśnie odpowiedzią.
+//
+// PAGINACJA KURSOREM, nie offsetem: między stroną 1 a 2 któreś zlecenie może
+// zmienić termin i przy `LIMIT/OFFSET` wpis przeskoczyłby stronę albo pokazał
+// się dwa razy. Kursor to `start_at|id` ostatniego oddanego wiersza, czyli
+// dokładnie klucz sortowania (malejąco, `id` rozstrzyga remisy godzin).
+// ---------------------------------------------------------------------------
+
+/** Ile zleceń na stronę historii (i ile maksymalnie wolno poprosić). */
+const HISTORY_PAGE_SIZE = 50;
+const HISTORY_MAX_LIMIT = 100;
+
+/** Kursor „ostatni oddany wiersz”: `start_at|id`. Śmieć → `null` (pierwsza strona). */
+function parseHistoryCursor(raw: string | undefined): { startAt: string; id: number } | null {
+  if (!raw) return null;
+  const at = raw.lastIndexOf("|");
+  if (at <= 0) return null;
+  const startAt = raw.slice(0, at);
+  const id = Number(raw.slice(at + 1));
+  if (!Number.isInteger(id) || id <= 0) return null;
+  // Tyle wystarczy: `start_at` to zawsze „YYYY-MM-DD” albo „YYYY-MM-DDTHH:MM”.
+  if (!/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2})?$/.test(startAt)) return null;
+  return { startAt, id };
+}
+
+app.get("/jobs/history", (c) => {
+  try {
+    const user = getUser(c);
+    const tech = linkedTechnician(user);
+    // Konto bez powiązania: pusta historia, nie błąd — jak reszta routera.
+    if (!tech) return c.json({ success: true, data: { items: [], nextCursor: null } });
+
+    const rawLimit = Number(c.req.query("limit"));
+    const limit = Number.isInteger(rawLimit) && rawLimit > 0
+      ? Math.min(rawLimit, HISTORY_MAX_LIMIT)
+      : HISTORY_PAGE_SIZE;
+    const cursor = parseHistoryCursor(c.req.query("cursor"));
+    const now = zonedNow();
+
+    const conds = [
+      ...mineConditions(tech.id, { includeCancelled: true }),
+      or(
+        lt(schema.calendarEvents.endAt, now),
+        inArray(schema.calendarEvents.status, ["done", "cancelled"])
+      )!,
+      ...(cursor
+        ? [
+            or(
+              lt(schema.calendarEvents.startAt, cursor.startAt),
+              and(eq(schema.calendarEvents.startAt, cursor.startAt), lt(schema.calendarEvents.id, cursor.id))
+            )!,
+          ]
+        : []),
+    ];
+
+    // O jeden wiersz więcej, niż oddamy — sama obecność (n+1)-go mówi, że jest
+    // następna strona, bez drugiego zapytania z COUNT(*) po całej historii.
+    const rows = db
+      .select()
+      .from(schema.calendarEvents)
+      .where(and(...conds))
+      .orderBy(desc(schema.calendarEvents.startAt), desc(schema.calendarEvents.id))
+      .limit(limit + 1)
+      .all();
+
+    const page = rows.slice(0, limit);
+    const last = page[page.length - 1];
+    const nextCursor = rows.length > limit && last ? `${last.startAt}|${last.id}` : null;
+    return c.json({ success: true, data: { items: toJobs(page, tech.id, user.id), nextCursor } });
+  } catch (error) {
+    return handleError(c, error, "pobierania historii zleceń");
   }
 });
 

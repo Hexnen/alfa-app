@@ -27,7 +27,7 @@ const NAV_ITEMS: NavItem[] = [
     to: "/technik/wiecej",
     label: "Więcej",
     icon: MoreHorizontal,
-    match: /^\/technik\/(wiecej|co-nowego)(\/|$)/,
+    match: /^\/technik\/(wiecej|co-nowego|historia)(\/|$)/,
   },
 ];
 
@@ -38,14 +38,20 @@ const NAV_ITEMS: NavItem[] = [
  * stoi już podświetlona w dolnym tab barze, a powtórzona u góry zjadała
  * 48 px ekranu, żeby powiedzieć to samo drugi raz.
  */
-const ROUTE_TITLES: [RegExp, string][] = [[/^\/technik\/co-nowego/, "Co nowego"]];
+const ROUTE_TITLES: [RegExp, string][] = [
+  [/^\/technik\/co-nowego/, "Co nowego"],
+  [/^\/technik\/historia/, "Historia"],
+];
 
 /**
  * Cel strzałki „wstecz” — konkretna ścieżka, a nie `history.back()`: do
  * zlecenia wchodzi się i z „Dziś”, i z „Nadchodzących”, a po zakończeniu
  * cofnięcie historii wracałoby w miejsce, którego technik już nie pamięta.
  */
-const ROUTE_BACK: [RegExp, string][] = [[/^\/technik\/co-nowego/, "/technik/wiecej"]];
+const ROUTE_BACK: [RegExp, string][] = [
+  [/^\/technik\/co-nowego/, "/technik/wiecej"],
+  [/^\/technik\/historia/, "/technik/wiecej"],
+];
 
 /**
  * POWŁOKA PANELU.

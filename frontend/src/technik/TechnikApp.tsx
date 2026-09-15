@@ -33,6 +33,10 @@ const Mapa = lazy(() => import("./pages/Mapa").then((m) => ({ default: m.Mapa })
 const Protokol = lazy(() =>
   import("./pages/Protokol").then((m) => ({ default: m.Protokol })),
 );
+// Historia wchodzi się z „Więcej” i ciągnie własne strony zleceń — to ekran
+// „raz na jakiś czas”, więc nie ma powodu, żeby siedział w chunku otwieranym
+// rano pod bramą.
+const Historia = lazy(() => import("./pages/Historia").then((m) => ({ default: m.Historia })));
 const CoNowegoTechnik = lazy(() =>
   import("./pages/CoNowegoTechnik").then((m) => ({ default: m.CoNowegoTechnik })),
 );
@@ -147,6 +151,7 @@ function TechnikRoutes() {
             <Route path="nadchodzace" element={<Nadchodzace />} />
             <Route path="mapa" element={<Mapa />} />
             <Route path="wiecej" element={<Wiecej />} />
+            <Route path="historia" element={<Historia />} />
             <Route path="co-nowego" element={<CoNowegoTechnik />} />
             <Route path="zlecenie/:id" element={<Zlecenie />} />
             <Route path="zlecenie/:id/protokol" element={<Protokol />} />

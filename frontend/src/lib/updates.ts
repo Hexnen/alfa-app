@@ -63,9 +63,14 @@ export interface VersionUpdate {
  */
 export const UPDATES_CURRENT: VersionUpdate[] = [
   {
-    version: "1.11.0–1.14.0",
+    version: "1.11.0–1.15.0",
     date: "2026-09-15",
     entries: [
+      {
+        text: "Panel technika: nowa Historia w „Więcej” ze wszystkimi przeszłymi zleceniami technika",
+        type: "feat",
+        module: "technik",
+      },
       {
         text: "Panel technika: na tablet trafiają wszystkie typy wydarzeń przypisane technikowi, nie tylko te z protokołem",
         type: "feat",
@@ -296,9 +301,19 @@ export const UPDATES: VersionUpdate[] = [...UPDATES_CURRENT, ...UPDATES_2026];
  */
 export const UPDATES_TECHNIK: VersionUpdate[] = [
   {
-    version: "1.5.0–1.7.0",
+    version: "1.5.0–1.8.0",
     date: "2026-09-15",
     entries: [
+      {
+        text: "W „Więcej” jest Historia: wszystkie Twoje przeszłe zlecenia miesiąc po miesiącu, z szukaniem po obiekcie i filtrem protokołu, zamiast przewijania kalendarza wstecz dzień po dniu",
+        type: "feat",
+        module: "technik",
+      },
+      {
+        text: "Z Historii wchodzisz w każde zakończone zlecenie, także odwołane, z protokołem i notatkami",
+        type: "feat",
+        module: "technik",
+      },
       {
         text: "Na liście widzisz wszystko, co masz w grafiku: nagrania, biuro, przygotowanie i urlop, a nie tylko roboty z protokołem",
         type: "feat",

@@ -136,6 +136,20 @@ export function formatDayShort(iso: string): string {
   return `${weekday} ${day}.${month}`;
 }
 
+/** „pt.” — krótka nazwa dnia tygodnia (lewa kolumna wiersza historii). */
+export function formatWeekdayShort(iso: string): string {
+  return dateFromIso(iso).toLocaleDateString("pl-PL", { weekday: "short" });
+}
+
+/**
+ * „wrzesień 2026” — nagłówek miesiąca na liście historii. Rok jest zawsze,
+ * także w bieżącym: historia przewija się wstecz przez lata i „wrzesień” bez
+ * roku nie mówi, o który wrzesień chodzi.
+ */
+export function formatMonthTitle(month: string): string {
+  return dateFromIso(`${month}-01`).toLocaleDateString("pl-PL", { month: "long", year: "numeric" });
+}
+
 /**
  * Nagłówek grupy dni: „Dziś” / „Jutro” / „pt. 19.09”. Dwa pierwsze dni mają
  * nazwy, bo o nich myśli się słowami, a nie datą.

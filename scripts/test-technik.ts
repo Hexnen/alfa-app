@@ -13,6 +13,9 @@
  *     (router świadomie nie używa calendar-scope, patrz src/routes/technik.ts),
  *   • typ bez protokołu: szczegóły 200 z `canProtocol: false`, a próba założenia
  *     papieru → 409; urlop dodatkowo bez „Rozpocznij”/„Zakończ” (`canProgress`),
+ *   • historia (`/jobs/history`): przeszłe + zakończone + odwołane, bez
+ *     przyszłych zaplanowanych, bez cudzych, notatki i działu handlowego;
+ *     paginacja kursorem `start_at|id` daje ten sam zbiór co jedno zapytanie,
  *   • „Rozpocznij" jest idempotentne i podbija planned → confirmed,
  *   • „Zakończ" idzie wspólną ścieżką mutacji: wydarzenie dostaje realizację
  *     (dowód, że zadziałało `onEventUpdated`, a nie surowy UPDATE),
@@ -515,6 +518,86 @@ try {
   ok("JobJson: obiekt, adres i kontakt z kartoteki", first?.objectName === `${PREFIX} Obiekt` && first?.address === "Testowa 1, Poznań" && first?.contactPerson === "Pani Basia", first);
   ok("JobJson: bez kwot i rozliczenia", first != null && !("billing" in first) && !("amountHours" in first), Object.keys(first ?? {}));
   ok("JobJson: pozostali technicy na zleceniu", Array.isArray(first?.coTechnicians) && (first?.coTechnicians as string[]).length === 2, first?.coTechnicians);
+
+  // =========================================================================
+  // 2b. Historia — co już za technikiem (GET /jobs/history)
+  //
+  // Dwie przesłanki „przeszłego” złączone LUB: minął termin ALBO zlecenie jest
+  // zamknięte (done/cancelled). Stałe fikstury stoją w LISTOPADZIE 2026, czyli
+  // w przyszłości względem dnia uruchomienia testu — dlatego zlecenia z datą
+  // wstecz zakładamy tu osobno, przez `dayOffset`.
+  // =========================================================================
+  const histOld = insertEvent({ title: "Historia dawna", type: "serwis", technicianIds: [tech.id], day: dayOffset(-120), hour: 9 });
+  const histMid = insertEvent({ title: "Historia srednia", type: "montaz", technicianIds: [tech.id], day: dayOffset(-40), hour: 10 });
+  const histRecent = insertEvent({ title: "Historia swieza", type: "serwis", technicianIds: [tech.id], day: dayOffset(-3), hour: 11 });
+  // Zakończone PRZED terminem: dla technika sprawa załatwiona, choć data przed nami.
+  const histFutureDone = insertEvent({ title: "Historia zakonczona z przodu", type: "serwis", status: "done", technicianIds: [tech.id], day: dayOffset(20), hour: 9 });
+  // Odwołane z przyszłości — historia mówi, co się ze zleceniem stało.
+  const histFutureCancelled = insertEvent({ title: "Historia odwolana z przodu", type: "serwis", status: "cancelled", technicianIds: [tech.id], day: dayOffset(21), hour: 9 });
+  const histOtherPast = insertEvent({ title: "Historia cudza", type: "serwis", technicianIds: [otherTech.id], day: dayOffset(-10), hour: 9 });
+  const histNotePast = insertEvent({ title: "Historia kafelek notatki", type: "notatka", technicianIds: [tech.id], day: dayOffset(-11), hour: 9 });
+  const histSalesPast = insertEvent({ title: "Historia handlowa", type: "spotkanie", department: "handlowy", technicianIds: [tech.id], day: dayOffset(-12), hour: 9 });
+  const histDeletedPast = insertEvent({ title: "Historia usunieta", type: "serwis", technicianIds: [tech.id], day: dayOffset(-13), deleted: true, hour: 9 });
+
+  const histPage = (r: { data?: unknown }) => (r.data as { items?: { id: number }[]; nextCursor?: string | null }) ?? {};
+  const histAll = await T("GET", "/jobs/history?limit=100");
+  const histData = histPage(histAll);
+  const histIds = (histData.items ?? []).map((j) => j.id);
+  ok("historia: 200 z kształtem { items, nextCursor }", histAll.status === 200 && Array.isArray(histData.items) && "nextCursor" in histData, histAll);
+  ok(
+    "historia: zawiera zlecenia z przeszłości",
+    [histOld, histMid, histRecent].every((id) => histIds.includes(id)),
+    histIds
+  );
+  ok("historia: zawiera zakończone (mimo terminu w przyszłości)", histIds.includes(histFutureDone), histIds);
+  ok("historia: zawiera odwołane", histIds.includes(histFutureCancelled) && histIds.includes(cancelledJob), histIds);
+  ok("historia: NIE zawiera przyszłych zaplanowanych", ![job, jobStart, jobFinish, jobProtocol].some((id) => histIds.includes(id)), histIds);
+  ok("historia: NIE zawiera cudzych", !histIds.includes(histOtherPast), histIds);
+  ok("historia: NIE zawiera kafelka notatki", !histIds.includes(histNotePast), histIds);
+  ok("historia: NIE zawiera działu handlowego", !histIds.includes(histSalesPast), histIds);
+  ok("historia: NIE zawiera usuniętych", !histIds.includes(histDeletedPast), histIds);
+  // Ten sam kształt co lista dnia — front ma jeden typ `TechnikJob` na oba ekrany.
+  const histRow = (histData.items as Record<string, unknown>[] | undefined)?.find((j) => j.id === histRecent);
+  ok(
+    "historia: JobJson jak na liście (typ, obiekt, flagi)",
+    histRow?.typeLabel === "Serwis" && histRow?.objectName === `${PREFIX} Obiekt` && histRow?.canProtocol === true,
+    histRow
+  );
+  // Najnowsze pierwsze — po `start_at` malejąco.
+  const orderOk = (histData.items ?? [])
+    .map((j) => (j as unknown as { startAt: string }).startAt)
+    .every((v, i, arr) => i === 0 || arr[i - 1] >= v);
+  ok("historia: sortowana od najnowszych", orderOk, (histData.items ?? []).slice(0, 5));
+
+  // --- Paginacja kursorem ---------------------------------------------------
+  const p1 = histPage(await T("GET", "/jobs/history?limit=1"));
+  ok("historia: limit=1 oddaje jedno zlecenie i kursor", (p1.items ?? []).length === 1 && typeof p1.nextCursor === "string", p1);
+  const p2 = histPage(await T("GET", `/jobs/history?limit=1&cursor=${encodeURIComponent(p1.nextCursor ?? "")}`));
+  ok("historia: kursor przesuwa na następne zlecenie", (p2.items ?? []).length === 1 && p2.items?.[0]?.id !== p1.items?.[0]?.id, p2);
+  ok(
+    "historia: strony kursorem zgadzają się z pełną listą",
+    p1.items?.[0]?.id === histIds[0] && p2.items?.[0]?.id === histIds[1],
+    { p1: p1.items?.[0]?.id, p2: p2.items?.[0]?.id, full: histIds.slice(0, 2) }
+  );
+  // Zebranie CAŁEJ historii stronami po 2 musi dać ten sam zbiór, co jedno duże zapytanie.
+  const walked: number[] = [];
+  let walkCursor: string | null | undefined = null;
+  for (let i = 0; i < 50; i++) {
+    const page: { items?: { id: number }[]; nextCursor?: string | null } = histPage(
+      await T("GET", `/jobs/history?limit=2${walkCursor ? `&cursor=${encodeURIComponent(walkCursor)}` : ""}`)
+    );
+    walked.push(...(page.items ?? []).map((j) => j.id));
+    walkCursor = page.nextCursor;
+    if (!walkCursor) break;
+  }
+  ok("historia: przejście stronami po 2 daje tę samą listę", JSON.stringify(walked) === JSON.stringify(histIds), { walked: walked.length, full: histIds.length });
+  ok("historia: ostatnia strona bez kursora", walkCursor == null, walkCursor);
+  ok("historia: śmieć w kursorze = pierwsza strona, nie 400", histPage(await T("GET", "/jobs/history?cursor=abc")).items?.[0]?.id === histIds[0]);
+  ok("historia: limit ponad maksimum nie wywraca trasy", (await T("GET", "/jobs/history?limit=9999")).status === 200);
+  ok("historia: konto bez powiązania → pusta lista", (histPage(await N("GET", "/jobs/history")).items ?? []).length === 0);
+  // Cudza historia widziana z konta drugiego technika — rozłączne zbiory.
+  const otherHistIds = (histPage(await O("GET", "/jobs/history?limit=100")).items ?? []).map((j) => j.id);
+  ok("historia: drugi technik widzi SWOJE zlecenie, nie moje", otherHistIds.includes(histOtherPast) && !otherHistIds.includes(histRecent), otherHistIds);
 
   // =========================================================================
   // 3. Szczegóły zlecenia — cudze 404

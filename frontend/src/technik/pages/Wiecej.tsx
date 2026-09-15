@@ -6,6 +6,7 @@ import {
   ChevronRight,
   Download,
   HardHat,
+  History,
   LogOut,
   Moon,
   Phone,
@@ -74,6 +75,13 @@ export function Wiecej() {
 
   return (
     <div className="space-y-5">
+      <Group title="Zlecenia">
+        {/* Historia stoi NAD kontem, bo to jedyna pozycja w tej szufladzie,
+            po którą technik sięga w robocie („kiedy ja tam ostatnio byłem”),
+            a nie raz na kwartał przy ustawieniach. */}
+        <LinkRow icon={History} label="Historia" to="/technik/historia" />
+      </Group>
+
       <Group title="Konto">
         <Row icon={User} label="Użytkownik" value={user?.displayName || user?.email || "—"} />
         <Row

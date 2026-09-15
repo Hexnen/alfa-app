@@ -115,6 +115,13 @@ html.technik-html body {
   top: env(safe-area-inset-top, 0px);
 }
 
+/* To samo, ale na ekranie Z górnym paskiem (`TopBar`: 48 px + bezpieczny
+   obszar): nagłówek przyklejony do `top-safe` chowałby się pod paskiem, bo ten
+   stoi wyżej w stosie (z-30). Używa tego lista historii. */
+.technik-root .top-under-bar {
+  top: calc(3rem + env(safe-area-inset-top, 0px));
+}
+
 /* Sticky pasek akcji unoszony nad klawiaturę: Safari nie zna
    `interactive-widget`, więc wysokość liczy `lib/keyboard.ts` → `--kb`. */
 .technik-root .bottom-kb {

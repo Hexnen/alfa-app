@@ -10196,6 +10196,16 @@ export interface TechnikJob {
 }
 
 /**
+ * Strona historii zleceń. `nextCursor` to nieprzejrzysty znacznik ostatniego
+ * oddanego wiersza — front go nie parsuje, tylko oddaje z powrotem;
+ * `null` znaczy „dalej już nic nie ma”.
+ */
+export interface TechnikJobsPage {
+  items: TechnikJob[];
+  nextCursor: string | null;
+}
+
+/**
  * Notatka zlecenia — wiersz `calendar_event_notes`. Załączniki są te same, co
  * w kalendarzu, ale ich `url` wskazuje na trasę panelu
  * (`/api/technik/attachments/:id`): rola `technik` nie ma wstępu do
@@ -10308,6 +10318,27 @@ export const technikApi = {
     const params = new URLSearchParams({ from, to });
     const r = await request<ApiResponse<TechnikJob[]>>(`/technik/jobs?${params.toString()}`);
     return Array.isArray(r.data) ? r.data : [];
+  },
+
+  /**
+   * HISTORIA — zlecenia, które technik ma już za sobą, od najnowszego.
+   *
+   * „Za sobą” liczy backend (termin minął ALBO status `done`/`cancelled`),
+   * bo to on zna strefę czasową aplikacji; tablet potrafi mieć zegar
+   * przesunięty o kwadrans. Odwołane są tu widoczne — historia mówi, co się
+   * ze zleceniem stało, a odwołanie jest właśnie odpowiedzią.
+   *
+   * Strona po 50; `nextCursor` z odpowiedzi wraca jako `cursor` następnego
+   * zapytania, `null` = koniec listy.
+   */
+  async history(cursor?: string | null, limit?: number): Promise<TechnikJobsPage> {
+    const params = new URLSearchParams();
+    if (cursor) params.set("cursor", cursor);
+    if (limit) params.set("limit", String(limit));
+    const qs = params.toString();
+    const r = await request<ApiResponse<TechnikJobsPage>>(`/technik/jobs/history${qs ? `?${qs}` : ""}`);
+    const data = r.data as TechnikJobsPage | undefined;
+    return { items: Array.isArray(data?.items) ? data.items : [], nextCursor: data?.nextCursor ?? null };
   },
 
   /**
