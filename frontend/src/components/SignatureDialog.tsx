@@ -105,14 +105,18 @@ export function SignatureDialog({
     <DialogPrimitive.Root open={open} onOpenChange={(o) => !o && onClose()}>
       <DialogPrimitive.Portal>
         <DialogPrimitive.Content
-          className="fixed inset-0 z-[100] flex flex-col overscroll-none bg-white outline-none"
+          className="fixed inset-0 z-[100] flex flex-col overscroll-none bg-card text-card-foreground outline-none"
           onOpenAutoFocus={(e) => e.preventDefault()}
         >
           <DialogPrimitive.Title className="sr-only">
             Podpis zleceniodawcy
           </DialogPrimitive.Title>
 
-          <div className="flex items-center gap-3 border-b px-4 py-2.5">
+          {/* `pt-safe` z technik.css tu nie zadziała: dialog leci przez portal
+              do <body>, czyli poza `.technik-root`. Stąd `env()` wprost — na
+              desktopie wynosi 0, więc zostaje samo `py-2.5` i zmiana jest dla
+              biura niewidoczna. */}
+          <div className="flex items-center gap-3 border-b px-4 py-2.5 pt-[max(0.625rem,env(safe-area-inset-top,0px))]">
             <div className="min-w-0 flex-1">
               <div className="text-sm font-semibold">Podpis zleceniodawcy</div>
               <div className="text-xs text-muted-foreground">
@@ -122,6 +126,7 @@ export function SignatureDialog({
             <Button
               variant="ghost"
               size="icon"
+              className="h-11 w-11 shrink-0"
               onClick={onClose}
               title="Zamknij"
             >
@@ -134,34 +139,38 @@ export function SignatureDialog({
               placeholder="Imię i nazwisko podpisującego"
               value={signerName}
               onChange={(e) => setSignerName(e.target.value)}
-              className="h-10 text-base"
+              className="h-12 text-base"
             />
           </div>
 
-          <div className="relative m-3 flex-1 overflow-hidden rounded-lg border-2 border-dashed border-muted-foreground/40 bg-slate-50">
+          {/* Płótno zostaje JASNE także w motywie ciemnym — podpis to czarny
+              tusz i na ciemnym tle byłby nie do odczytania. Dlatego kolory
+              ramki i podpowiedzi są tu jawne, a nie z tokenów: w `.dark`
+              `--muted-foreground` jest jasnoszary i na białym płótnie znikał. */}
+          <div className="relative m-3 flex-1 overflow-hidden rounded-lg border-2 border-dashed border-slate-400 bg-slate-50">
             <canvas
               ref={canvasRef}
               className="absolute inset-0 h-full w-full"
               style={{ touchAction: "none", overscrollBehavior: "none" }}
             />
-            <div className="pointer-events-none absolute inset-x-8 bottom-10 border-b border-muted-foreground/40" />
+            <div className="pointer-events-none absolute inset-x-8 bottom-10 border-b border-slate-400" />
             {isEmpty && (
-              <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-sm text-muted-foreground/60">
+              <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-sm text-slate-500">
                 Miejsce na podpis
               </div>
             )}
           </div>
 
           <div className="flex items-center gap-2 border-t px-4 py-2.5 pb-[max(0.625rem,env(safe-area-inset-bottom))]">
-            <Button variant="outline" onClick={clear} disabled={isEmpty}>
+            <Button variant="outline" size="lg" className="h-11 px-4" onClick={clear} disabled={isEmpty}>
               <Eraser className="h-4 w-4 mr-2" />
               Wyczyść
             </Button>
             <div className="flex-1" />
-            <Button variant="outline" onClick={onClose}>
+            <Button variant="outline" size="lg" className="h-11 px-4" onClick={onClose}>
               Anuluj
             </Button>
-            <Button onClick={save} disabled={isEmpty || saving}>
+            <Button size="lg" className="h-11 px-4" onClick={save} disabled={isEmpty || saving}>
               <Check className="h-4 w-4 mr-2" />
               {saving ? "Zapisywanie…" : "Zapisz podpis"}
             </Button>

@@ -472,7 +472,7 @@ try {
     .run();
   const c1 = await counts(`?seenToday=${past}&seenUpcoming=${past}`);
   ok("me: zmiana cudzą ręką po znaczniku liczy się (dziś)", c1?.changedToday === 1, c1);
-  ok("me: …i w oknie nadchodzących", c1?.changedUpcoming === 1, c1);
+  ok("me: …ale nie w oknie nadchodzących (liczy od jutra)", c1?.changedUpcoming === 0, c1);
   ok("me: znacznik z przyszłości = nic nowego", (await counts(`?seenToday=${future}`))?.changedToday === 0);
   ok("me: śmieć w znaczniku = 0, nie 400", (await T("GET", "/me?seenToday=abc")).status === 200);
 
@@ -1414,16 +1414,21 @@ try {
   const ownDay = await T("GET", `/jobs?from=${dayOffset(2)}&to=${midnightDay}`);
   ok("N10 lista: …ale w swoim dniu jest", ids(ownDay).includes(midnightJob), ids(ownDay));
 
-  // --- W4: licznik „Nadchodzące" pokrywa się z listą (dziś + 15 wyłącznie) -
+  // --- W4: licznik „Nadchodzące" = tylko PRZYSZŁE dni (jutro … +15 wyłącznie);
+  //     14. dzień wchodzi, dzisiejsze zlecenia liczy plakietka „Dziś" ----------
   const edgeJob = insertEvent({ title: "Na granicy okna", type: "serwis", technicianIds: [tech.id], hour: 9, day: dayOffset(14) });
-  const upcomingList = await T("GET", `/jobs?from=${dayOffset(0)}&to=${dayOffset(15)}`);
+  const todayOnly = insertEvent({ title: "Dzisiejsze nie liczy się w nadchodzących", type: "serwis", technicianIds: [tech.id], hour: 21, day: dayOffset(0) });
+  const upcomingList = await T("GET", `/jobs?from=${dayOffset(1)}&to=${dayOffset(15)}`);
   const meUpcoming = (await T("GET", "/me")).data as { counts: Record<string, number>; now?: string };
   ok(
-    "W4 /me: licznik upcoming = długość listy z tego samego okna",
+    "W4 /me: licznik upcoming = lista od jutra, 14. dzień w środku",
     meUpcoming.counts.upcoming === ids(upcomingList).length &&
-      ids(upcomingList).includes(edgeJob),
+      ids(upcomingList).includes(edgeJob) &&
+      !ids(upcomingList).includes(todayOnly),
     { licznik: meUpcoming.counts.upcoming, lista: ids(upcomingList).length }
   );
+  const todayList = await T("GET", `/jobs?from=${dayOffset(0)}&to=${dayOffset(1)}`);
+  ok("W4 /me: dzisiejsze zlecenie liczy plakietka „Dziś”", meUpcoming.counts.today === ids(todayList).length && ids(todayList).includes(todayOnly), meUpcoming.counts.today);
 
   // --- N12: /me oddaje czas serwera --------------------------------------
   ok(

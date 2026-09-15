@@ -63,7 +63,7 @@ export interface VersionUpdate {
  */
 export const UPDATES_CURRENT: VersionUpdate[] = [
   {
-    version: "1.11.0",
+    version: "1.11.0–1.12.0",
     date: "2026-09-15",
     entries: [
       {
@@ -75,6 +75,21 @@ export const UPDATES_CURRENT: VersionUpdate[] = [
         text: "Panel technika: zmiany z kalendarza pojawiają się na tablecie od razu, bez odświeżania",
         type: "feat",
         module: "technik",
+      },
+      {
+        text: "Aplikacja ładuje tylko tę część, której używasz: pierwsze otwarcie i każda sekcja startują szybciej, a panel technika ściąga pięć razy mniej",
+        type: "tweak",
+        module: "ogolne",
+      },
+      {
+        text: "Szary tekst pomocniczy jest ciemniejszy i czytelniejszy w całej aplikacji",
+        type: "fix",
+        module: "ogolne",
+      },
+      {
+        text: "Kalendarz dociera zmiany zrobione w chwili, gdy połączenie na żywo było zerwane, bez odświeżania strony",
+        type: "fix",
+        module: "techniczny",
       },
     ],
   },
@@ -256,7 +271,7 @@ export const UPDATES: VersionUpdate[] = [...UPDATES_CURRENT, ...UPDATES_2026];
  */
 export const UPDATES_TECHNIK: VersionUpdate[] = [
   {
-    version: "1.5.0",
+    version: "1.5.0–1.6.0",
     date: "2026-09-15",
     entries: [
       {
@@ -271,6 +286,31 @@ export const UPDATES_TECHNIK: VersionUpdate[] = [
       },
       {
         text: "Dojazd z biura liczy się raz na zlecenie, więc protokół ma kilometry od razu, bez czekania",
+        type: "tweak",
+        module: "technik",
+      },
+      {
+        text: "Motyw ciemny: Jasny / Ciemny / Systemowy w zakładce Więcej",
+        type: "feat",
+        module: "technik",
+      },
+      {
+        text: "Panel ładuje się kilka razy szybciej na słabym zasięgu",
+        type: "feat",
+        module: "technik",
+      },
+      {
+        text: "Podpis, okno „Inna godzina” i lista kontaktów działają poprawnie na telefonie w poziomie i w ciemnym motywie, a pola protokołu nie chowają się pod klawiaturą",
+        type: "fix",
+        module: "technik",
+      },
+      {
+        text: "Większe cele dotyku na mapie i suwakach, adresy i numery telefonów bez ucinania, powiększanie palcami odblokowane",
+        type: "tweak",
+        module: "technik",
+      },
+      {
+        text: "Plakietka „Nadchodzące” liczy tylko przyszłe dni, a wpisy „Rozpoczęto / Zakończono” w dzienniku mówią, który technik je zrobił",
         type: "tweak",
         module: "technik",
       },

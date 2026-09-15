@@ -67,8 +67,12 @@ export function Field({
   children: ReactNode;
   className?: string;
 }) {
+  // `space-y-2`, nie `1.5`: chip („Dziś”) i pole pod nim to dwa sąsiednie cele
+  // dotyku, a 6 px między nimi jest poniżej progu z PLAN pkt 2. Uwaga na
+  // przyszłość: `space-y-*` zeruje dzieciom `margin-bottom`, więc `mb-*`
+  // dokładane wewnątrz tego kontenera nic nie robi.
   return (
-    <div className={cn("space-y-1.5", className)}>
+    <div className={cn("space-y-2", className)}>
       <div className="flex min-h-5 items-center justify-between gap-2">
         <Label htmlFor={htmlFor} className="text-sm font-medium">
           {label}

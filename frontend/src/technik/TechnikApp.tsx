@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { Suspense, lazy, useEffect, useRef } from "react";
 import { Link, Navigate, Route, Routes } from "react-router-dom";
 import { RefreshCw, ShieldOff, WifiOff } from "lucide-react";
 import { useAuth } from "@/auth/AuthProvider";
@@ -10,14 +10,41 @@ import { useTechnikPwaHead, useTechnikServiceWorker } from "./lib/pwa";
 import { TechnikAuthScreen } from "./TechnikAuthScreen";
 import { TechnikShell } from "./TechnikShell";
 import { ToastProvider, useToast } from "./ui/toast";
+// Codzienne ekrany — technik otwiera je zaraz po wejściu do panelu, więc
+// zostają w głównym chunku. Doładowywanie ich w locie dałoby tylko migotanie
+// na LTE, a nic nie oszczędziło.
 import { Dzis } from "./pages/Dzis";
 import { Nadchodzace } from "./pages/Nadchodzace";
-import { Mapa } from "./pages/Mapa";
 import { Wiecej } from "./pages/Wiecej";
 import { Zlecenie } from "./pages/Zlecenie";
-import { Protokol } from "./pages/Protokol";
-import { CoNowegoTechnik } from "./pages/CoNowegoTechnik";
 import "./technik.css";
+
+/*
+ * Ciężkie ekrany wchodzą dopiero wtedy, gdy technik ich naprawdę potrzebuje:
+ * — protokół ciągnie `SignatureDialog` razem z `signature_pad` (podpis palcem),
+ * — mapa ciągnie loader Leafletu i obrys Polski,
+ * — „Co nowego” to sama lista wydań, oglądana raz na wydanie.
+ *
+ * Providery (`TechnikMeProvider`, emiter live, toasty) zostają w chunku
+ * głównym — gdyby wjeżdżały razem z ekranem, każde wejście w protokół
+ * odmontowywałoby stan panelu.
+ */
+const Mapa = lazy(() => import("./pages/Mapa").then((m) => ({ default: m.Mapa })));
+const Protokol = lazy(() =>
+  import("./pages/Protokol").then((m) => ({ default: m.Protokol })),
+);
+const CoNowegoTechnik = lazy(() =>
+  import("./pages/CoNowegoTechnik").then((m) => ({ default: m.CoNowegoTechnik })),
+);
+
+/** Krótki stan ładowania doładowywanego ekranu — ten sam język co reszta panelu. */
+function TechnikRouteFallback() {
+  return (
+    <div className="flex min-h-[50dvh] items-center justify-center text-sm text-muted-foreground">
+      Ładowanie…
+    </div>
+  );
+}
 
 /**
  * PANEL TECHNIKA — osobna aplikacja pod `/technik`, poza `AuthedApp`.
@@ -114,17 +141,19 @@ function TechnikRoutes() {
     <ToastProvider>
       <TechnikUpdateWatcher />
       <TechnikShell>
-        <Routes>
-          <Route path="/" element={<Dzis />} />
-          <Route path="nadchodzace" element={<Nadchodzace />} />
-          <Route path="mapa" element={<Mapa />} />
-          <Route path="wiecej" element={<Wiecej />} />
-          <Route path="co-nowego" element={<CoNowegoTechnik />} />
-          <Route path="zlecenie/:id" element={<Zlecenie />} />
-          <Route path="zlecenie/:id/protokol" element={<Protokol />} />
-          {/* Literówka w adresie nie ma wyrzucać technika z panelu. */}
-          <Route path="*" element={<Navigate to="/technik" replace />} />
-        </Routes>
+        <Suspense fallback={<TechnikRouteFallback />}>
+          <Routes>
+            <Route path="/" element={<Dzis />} />
+            <Route path="nadchodzace" element={<Nadchodzace />} />
+            <Route path="mapa" element={<Mapa />} />
+            <Route path="wiecej" element={<Wiecej />} />
+            <Route path="co-nowego" element={<CoNowegoTechnik />} />
+            <Route path="zlecenie/:id" element={<Zlecenie />} />
+            <Route path="zlecenie/:id/protokol" element={<Protokol />} />
+            {/* Literówka w adresie nie ma wyrzucać technika z panelu. */}
+            <Route path="*" element={<Navigate to="/technik" replace />} />
+          </Routes>
+        </Suspense>
       </TechnikShell>
     </ToastProvider>
   );

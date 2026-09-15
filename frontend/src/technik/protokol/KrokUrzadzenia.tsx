@@ -153,7 +153,7 @@ function DeviceRow({
 
   return (
     <li className="rounded-lg border bg-background p-2">
-      <div className="flex items-center gap-1.5">
+      <div className="flex items-center gap-2.5">
         <span className="w-4 shrink-0 text-center text-xs font-medium tabular-nums text-muted-foreground">
           {idx + 1}
         </span>
@@ -182,7 +182,7 @@ function DeviceRow({
         )}
       </div>
 
-      <div className="mt-1.5 flex items-center gap-1.5 pl-[1.375rem]">
+      <div className="mt-2 flex items-center gap-2 pl-[1.625rem]">
         <ClearableInput
           aria-label={`Numer seryjny urządzenia ${idx + 1}`}
           value={item.serial}

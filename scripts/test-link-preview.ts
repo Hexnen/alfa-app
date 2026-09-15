@@ -452,7 +452,61 @@ if (!dnsWorks) {
     ok("…zoom z adresu", p.map?.zoom === 17, p.map);
     ok("…etykieta z /place/ (zdekodowana)", p.map?.label === "Pałac Kultury", p.map);
     ok("…og:image pominięty dla map", p.image === null, p.image);
-    ok("…dwa przeskoki, zero dodatkowych wyjść", m.seen.length === 2, m.seen);
+    // Adres po przekierowaniu niesie już punkt i nazwę, więc strony nie
+    // pobieramy — jedno wyjście w sieć, nie dwa.
+    ok("…jedno wyjście: strona po przekierowaniu już nie jest pobierana", m.seen.length === 1, m.seen);
+    ok("…finalUrl to adres po przekierowaniu", p.finalUrl.includes("/maps/place/"), p.finalUrl);
+  }
+
+  {
+    // Zgłoszenie z produkcji (goo.gl/maps/kZPscEzzzFYKxgKm9): łańcuch ma PIĘĆ
+    // skoków, a trzeci to `consent.google.com`. Przy limicie 3 przekierowań
+    // kończyło się „Za dużo przekierowań”, choć punkt siedzi w adresie już po
+    // pierwszym skoku — i tam właśnie przerywamy śledzenie.
+    const chain: Record<string, string> = {
+      "https://goo.gl/maps/kZPscEzzzFYKxgKm9":
+        "https://maps.google.com/?q=50.490482,21.409454&entry=gps&g_ep=CAESChk",
+      "https://maps.google.com/?q=50.490482,21.409454&entry=gps&g_ep=CAESChk":
+        "https://maps.google.com/maps?q=50.490482,21.409454&hl=pl",
+      "https://maps.google.com/maps?q=50.490482,21.409454&hl=pl":
+        "https://consent.google.com/m?continue=https://maps.google.com/maps%3Fq%3D50.490482,21.409454",
+      "https://consent.google.com/m?continue=https://maps.google.com/maps%3Fq%3D50.490482,21.409454":
+        "https://maps.google.com/maps?q=50.490482,21.409454&hl=pl&consent=1",
+    };
+    const m = mockFetch((url) => {
+      const next = chain[url];
+      if (next) {
+        return new Response(null, {
+          status: url.startsWith("https://consent.google.com") ? 303 : 302,
+          headers: { location: next },
+        });
+      }
+      return new Response("<head><title>Mapy Google</title></head>", {
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+    });
+    // Reverse zamockowany na „brak sieci” — etykieta jest tu bez znaczenia,
+    // liczy się punkt; bez tego test wyszedłby do Nominatim.
+    const { setGeoFetch } = await import("../src/lib/geo.js");
+    setGeoFetch((async () => {
+      throw new Error("brak sieci");
+    }) as typeof fetch);
+    const p = await fetchPreview("https://goo.gl/maps/kZPscEzzzFYKxgKm9");
+    setGeoFetch(null);
+    m.restore();
+    ok("goo.gl/maps z łańcuchem 5 skoków → status ok", p.status === "ok", p);
+    ok(
+      "…punkt z adresu po PIERWSZYM przekierowaniu",
+      p.map?.lat === 50.490482 && p.map?.lng === 21.409454,
+      p.map
+    );
+    ok("…jedno wyjście w sieć (dalszych skoków nie ma po co robić)", m.seen.length === 1, m.seen);
+    ok(
+      "…fetch nie poszedł do consent.google.com",
+      !m.seen.some((u) => u.includes("consent.google.com")),
+      m.seen
+    );
   }
 
   {

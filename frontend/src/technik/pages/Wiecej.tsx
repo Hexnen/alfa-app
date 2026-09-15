@@ -7,10 +7,13 @@ import {
   Download,
   HardHat,
   LogOut,
+  Moon,
   Phone,
   RefreshCw,
   Share,
   Sparkles,
+  Sun,
+  SunMoon,
   User,
 } from "lucide-react";
 import { useAuth } from "@/auth/AuthProvider";
@@ -24,8 +27,10 @@ import {
   usePushNotifications,
   useTechnikUpdateState,
 } from "../lib/pwa";
+import { SegmentedControl } from "../ui/segmented";
 import { Switch } from "../ui/switch";
 import { useToast } from "../ui/toast";
+import { useTechnikTheme, type TechnikTheme } from "../lib/theme";
 
 /**
  * WIĘCEJ — szuflada, do której wchodzi się raz na tydzień.
@@ -96,6 +101,8 @@ export function Wiecej() {
       )}
 
       <TabletGroup />
+
+      <WygladGroup />
 
       <Group title="Aplikacja">
         <LinkRow
@@ -236,6 +243,46 @@ function TabletGroup() {
             {pushNote && <p className="px-3 py-2.5 text-sm text-muted-foreground">{pushNote}</p>}
           </>
         )}
+      </div>
+    </section>
+  );
+}
+
+/**
+ * WYGLĄD — jasny / ciemny / systemowy.
+ *
+ * Panel bywa otwierany o 6 rano pod bramą i o 22 w aucie; biały ekran w nocy
+ * to jedyna rzecz, przez którą technik odkłada tablet. Wybór trzyma
+ * `localStorage` (`technik.theme`), klasę `dark` zakłada i zdejmuje
+ * `TechnikShell` — CRM po wyjściu z panelu zostaje jasny.
+ */
+const THEME_OPTIONS: { value: TechnikTheme; label: string; icon: typeof Sun }[] = [
+  { value: "light", label: "Jasny", icon: Sun },
+  { value: "dark", label: "Ciemny", icon: Moon },
+  { value: "system", label: "Systemowy", icon: SunMoon },
+];
+
+function WygladGroup() {
+  const [theme, setTheme] = useTechnikTheme();
+
+  return (
+    <section>
+      <h2 className="px-1 pb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        Wygląd
+      </h2>
+      <div className="overflow-hidden rounded-xl border bg-card p-3">
+        <SegmentedControl<TechnikTheme>
+          label="Motyw panelu"
+          value={theme}
+          onChange={setTheme}
+          dense
+          options={THEME_OPTIONS.map((o) => ({
+            value: o.value,
+            label: o.label,
+            icon: o.icon,
+            "data-testid": `technik-motyw-${o.value}`,
+          }))}
+        />
       </div>
     </section>
   );

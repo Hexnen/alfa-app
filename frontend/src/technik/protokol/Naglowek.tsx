@@ -89,6 +89,9 @@ export function Naglowek({
         value={step}
         onChange={onStep}
         dense
+        // `mt-1`: bez tego pasek kroków stał 6 px pod strzałką „Wróć do
+        // zlecenia” — poniżej 8 px z PLAN pkt 2.
+        className="mt-1"
         options={STEP_KEYS.map((key, i) => ({
           value: key,
           label: `${i + 1}. ${STEP_LABELS[key]}`,

@@ -77,7 +77,7 @@ export function PasekAkcji({
           aria-live="polite"
           data-testid="zlecenie-pasek-stan"
           className={cn(
-            "min-w-0 flex-1 truncate text-xs leading-tight tabular-nums",
+            "min-w-0 flex-1 text-xs leading-tight tabular-nums line-clamp-2",
             state === "running" ? "text-amber-700 dark:text-amber-400" : "text-muted-foreground",
           )}
         >

@@ -5,10 +5,34 @@
     <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
     <link rel="icon" type="image/png" sizes="192x192" href="/favicon-192.png" />
     <link rel="apple-touch-icon" href="/favicon-192.png" />
-    <meta
-      name="viewport"
-      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover"
-    />
+    <!-- BEZ `maximum-scale`: na iOS działa jak `user-scalable=no` i technik
+         w rękawicach nie powiększy numeru seryjnego ani zdjęcia z notatki.
+         Przed zoomem przy wejściu w pole chroni reguła 16 px z technik.css. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+
+    <!-- Pasek systemowy w kolorze tła; wartość podmienia `technik/lib/theme.ts`
+         przy zmianie motywu panelu. -->
+    <meta name="theme-color" content="#ffffff" />
+    <script>
+      // Motyw PRZED pierwszym malowaniem — inaczej panel mrugnąłby na biało.
+      // Klasa `dark` jest globalna (tailwind `darkMode: ["class"]`), a wybór
+      // motywu ma dotyczyć TYLKO panelu technika, więc skrypt patrzy na adres:
+      // w CRM-ie nie zakłada niczego.
+      (function () {
+        try {
+          if (!/^\/technik(\/|$)/.test(location.pathname)) return;
+          var t = localStorage.getItem("technik.theme") || "system";
+          var dark =
+            t === "dark" ||
+            (t === "system" && matchMedia("(prefers-color-scheme: dark)").matches);
+          document.documentElement.classList.toggle("dark", dark);
+          var m = document.querySelector('meta[name="theme-color"]');
+          if (m) m.setAttribute("content", dark ? "#020817" : "#ffffff");
+        } catch (e) {
+          /* prywatne okno bez localStorage — zostaje jasny */
+        }
+      })();
+    </script>
     <!-- Alfa Group brand fonts (used by the public ZDW form) — loaded in <head>
          so they're available before first paint and don't swap on refresh. -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />

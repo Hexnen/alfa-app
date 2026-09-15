@@ -143,7 +143,8 @@ export function Protokol() {
   useLiveChanges(
     useCallback(
       (change) => {
-        if (hits(change, jobId)) setOfficeChanged(true);
+        // Resync po wznowieniu strumienia to nie „biuro zmieniło” — bez paska.
+        if (!change.resync && hits(change, jobId)) setOfficeChanged(true);
       },
       [jobId],
     ),

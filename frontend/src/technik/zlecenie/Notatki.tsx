@@ -224,7 +224,7 @@ export function Notatki({
               {/* Miniatury wybranych zdjęć — jeszcze przed wysłaniem: technik ma
                   zobaczyć, że trafił w kamerę, a nie w swój but. */}
               {picked.length > 0 && (
-                <ul className="grid grid-cols-3 gap-1.5 sm:grid-cols-5">
+                <ul className="grid grid-cols-3 gap-2 sm:grid-cols-5">
                   {picked.map((p) => (
                     <li key={p.key} className="relative">
                       <img
@@ -372,7 +372,7 @@ function Wpis({
       )}
 
       {images.length > 0 && (
-        <ul className={cn("grid grid-cols-3 gap-1.5 sm:grid-cols-5", body && "mt-2")}>
+        <ul className={cn("grid grid-cols-3 gap-2 sm:grid-cols-5", body && "mt-2")}>
           {images.map((a, i) => (
             <li key={a.id} className="relative">
               <button

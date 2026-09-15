@@ -6368,7 +6368,16 @@ export interface CalendarLiveChange {
  */
 export function subscribeCalendarLive(
   onChange: (change: CalendarLiveChange) => void,
-  opts?: { department?: CalendarDepartment; onError?: (e: Event) => void }
+  opts?: {
+    department?: CalendarDepartment;
+    onError?: (e: Event) => void;
+    /**
+     * Wołane po WZNOWIENIU strumienia (drugie i kolejne `ready`): sygnały
+     * z przerwy (restart backendu, uśpiona karta) przepadają, bo broker nie ma
+     * powtórki — odbiorca ma wtedy sam dociągnąć stan.
+     */
+    onReconnect?: () => void;
+  }
 ): () => void {
   // Brak EventSource (stary webview, test w node) = po prostu bez odświeżania na żywo.
   if (typeof window === "undefined" || typeof window.EventSource === "undefined") return () => {};
@@ -6382,8 +6391,15 @@ export function subscribeCalendarLive(
     }
   };
   es.addEventListener("calendar", onMessage as EventListener);
+  let everReady = false;
+  const onReady = () => {
+    if (everReady) opts?.onReconnect?.();
+    everReady = true;
+  };
+  es.addEventListener("ready", onReady);
   if (opts?.onError) es.addEventListener("error", opts.onError);
   return () => {
+    es.removeEventListener("ready", onReady);
     es.removeEventListener("calendar", onMessage as EventListener);
     if (opts?.onError) es.removeEventListener("error", opts.onError);
     es.close();
@@ -10088,7 +10104,7 @@ export interface TechnikMe {
     today: number;
     /** Rozpoczęte i jeszcze niezakończone. */
     inProgress: number;
-    /** Najbliższe 14 dni, RAZEM z dzisiejszymi. */
+    /** Najbliższe 14 dni OD JUTRA — dzisiejsze liczy `today`. */
     upcoming: number;
     /**
      * Ile zleceń w oknie zmieniło się od `seenToday` / `seenUpcoming` (nowe

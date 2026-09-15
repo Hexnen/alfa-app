@@ -27,7 +27,8 @@ import type {
   EventInput,
   EventMountArg,
 } from "@fullcalendar/core";
-import type { EventReceiveArg, EventResizeDoneArg } from "@fullcalendar/interaction";
+import type { CalendarOptions, MoreLinkArg } from "@fullcalendar/core";
+import type { DateClickArg, EventReceiveArg, EventResizeDoneArg } from "@fullcalendar/interaction";
 import {
   Activity,
   AlertCircle,
@@ -60,7 +61,9 @@ import {
   ListChecks,
   Loader2,
   Mail,
+  MoreHorizontal,
   MousePointerClick,
+  MoveRight,
   Pencil,
   Plus,
   RefreshCw,
@@ -206,6 +209,25 @@ const VIEWS: { key: ViewName; label: string; shortLabel: string; keys: string[] 
   { key: "board", label: "Tablica", shortLabel: "Tabl.", keys: ["b"] },
   { key: "route", label: "Trasa", shortLabel: "Trasa", keys: ["r"] },
 ];
+
+/**
+ * Opcje widoków dla wąskich ekranów (`views` FullCalendara).
+ *
+ * Kolumna dnia ma na telefonie ~70 px (Tydzień) albo ~350 px (Dzień). Przy
+ * `slotEventOverlap={false}` każde nachodzące wydarzenie zabiera z tego równą
+ * część — dziewięć równoległych to paski po 7 px, czyli kolorowe kreski bez
+ * treści. `eventMaxStack` ogranicza liczbę kolumn: reszta zwija się w „+N”,
+ * a widoczne kafelki mają szerokość, w której mieści się godzina i tytuł.
+ * Górna granica dnia jest wyższa, bo cała szerokość ekranu idzie na jedną kolumnę.
+ *
+ * `displayEventEnd: false` — w siatce wystarczy godzina początku (koniec widać
+ * po wysokości kafelka); w Liście godzina końca zostaje, bo tam nie ma innego
+ * nośnika długości wydarzenia.
+ */
+const MOBILE_VIEW_OPTIONS: CalendarOptions["views"] = {
+  timeGridWeek: { eventMaxStack: 1, displayEventEnd: false },
+  timeGridDay: { eventMaxStack: 3, displayEventEnd: false },
+};
 
 /** Widoki dostępne w tej konfiguracji — „Trasa” tylko przy `features.routePlanner`. */
 const viewsFor = (cfg: CalendarConfig) =>
@@ -642,7 +664,16 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
   const calendarRef = useRef<FullCalendar>(null);
   /** Kontener siatki — po zmianie danych odświeżamy w nim dymki kafelków. */
   const gridRef = useRef<HTMLDivElement>(null);
-  const mobile = useMemo(isMobile, []);
+  // Wariant mobilny musi nadążać za obrotem ekranu (i za zmianą szerokości okna
+  // na desktopie) — stąd nasłuch `matchMedia`, a nie jednorazowy odczyt przy montowaniu.
+  const [mobile, setMobile] = useState(isMobile);
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 767px)");
+    const on = () => setMobile(mq.matches);
+    mq.addEventListener("change", on);
+    on();
+    return () => mq.removeEventListener("change", on);
+  }, []);
   const [view, setView] = useState<ViewName>(
     () => readStoredView(cfg) ?? (mobile ? "listWeek" : "dayGridMonth")
   );
@@ -939,7 +970,10 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
         if (change.actorClientId != null && change.actorClientId === CLIENT_ID) return;
         refreshSoon(true);
       },
-      { department: cfg.department }
+      // Po wznowieniu strumienia dociągamy stan — zmiana zrobiona w przerwie
+      // (np. technik wcisnął „Rozpocznij” w trakcie restartu backendu) inaczej
+      // pokazywałaby się dopiero po odświeżeniu kalendarza.
+      { department: cfg.department, onReconnect: () => refreshSoon(false) }
     );
 
     // Zapasowe odświeżenie po powrocie do karty: uśpiona karta bywa odcinana od
@@ -1517,6 +1551,8 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
   const [ctxMenu, setCtxMenu] = useState<CtxMenuState | null>(null);
   const closeCtxMenu = useCallback(() => setCtxMenu(null), []);
   const [deleteTarget, setDeleteTarget] = useState<CalendarEvent | null>(null);
+  /** Wydarzenie w oknie „Przenieś…” — zmiana terminu bez przeciągania (dotyk). */
+  const [moveTarget, setMoveTarget] = useState<CalendarEvent | null>(null);
 
   /**
    * Najświeższe wydarzenia po id. FullCalendar recyklinguje elementy DOM (eventDidMount
@@ -1539,11 +1575,23 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
   };
   const eventDblRef = useRef<(ev: CalendarEvent) => void>(() => {});
   eventDblRef.current = (ev) => openEvent(ev, "edit");
+  /**
+   * Długie przytrzymanie na kafelku = prawy przycisk myszy. Na dotyku `contextmenu`
+   * bywa w ogóle nieodpalane (iOS Safari), a dwuklik to zoom — bez tego całe menu
+   * (status, „Przenieś…”, duplikat, usuń) jest na telefonie niedostępne.
+   */
+  const eventLongPressRef = useRef<(ev: CalendarEvent, x: number, y: number) => void>(() => {});
+  eventLongPressRef.current = (ev, x, y) => setCtxMenu({ kind: "event", x, y, ev });
+  /** Ustawiane na czas długiego przytrzymania — tłumi klik otwierający panel. */
+  const longPressRef = useRef(false);
   type ElWithHandlers = HTMLElement & {
     _alfaCtx?: (e: MouseEvent) => void;
     _alfaDbl?: (e: MouseEvent) => void;
     _alfaOver?: () => void;
     _alfaOut?: () => void;
+    _alfaTouchStart?: (e: TouchEvent) => void;
+    _alfaTouchMove?: (e: TouchEvent) => void;
+    _alfaTouchEnd?: () => void;
   };
   /**
    * Dojazd per obiekt pod dymki w siatce. Dymki są atrybutami DOM (budowane synchronicznie),
@@ -1701,14 +1749,56 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
         syncObjectHighlight();
       }
     };
+    // Długie przytrzymanie (500 ms, bez przesunięcia palca) — menu wydarzenia.
+    // Wyprzedza własny long-press FullCalendara (1000 ms) uruchamiający przeciąganie.
+    let lpTimer = 0;
+    let lpX = 0;
+    let lpY = 0;
+    const cancelLp = () => {
+      if (lpTimer) {
+        window.clearTimeout(lpTimer);
+        lpTimer = 0;
+      }
+    };
+    const touchStart = (e: TouchEvent) => {
+      if (e.touches.length !== 1) return cancelLp();
+      lpX = e.touches[0].clientX;
+      lpY = e.touches[0].clientY;
+      cancelLp();
+      lpTimer = window.setTimeout(() => {
+        lpTimer = 0;
+        const cur = freshEvent(arg.event);
+        if (!cur) return;
+        longPressRef.current = true;
+        // Klik po puszczeniu palca otwierałby panel — flagę zdejmujemy dopiero
+        // po turze zdarzeń, gdy syntetyczny `click` już przeleciał.
+        window.setTimeout(() => {
+          longPressRef.current = false;
+        }, 700);
+        eventLongPressRef.current(cur, lpX, lpY);
+      }, 500);
+    };
+    const touchMove = (e: TouchEvent) => {
+      const t = e.touches[0];
+      if (!t) return;
+      if (Math.abs(t.clientX - lpX) > 10 || Math.abs(t.clientY - lpY) > 10) cancelLp();
+    };
+    const touchEnd = () => cancelLp();
     el._alfaCtx = ctx;
     el._alfaDbl = dbl;
     el._alfaOver = over;
     el._alfaOut = out;
+    el._alfaTouchStart = touchStart;
+    el._alfaTouchMove = touchMove;
+    el._alfaTouchEnd = touchEnd;
     el.addEventListener("contextmenu", ctx);
     el.addEventListener("dblclick", dbl);
     el.addEventListener("mouseenter", over);
     el.addEventListener("mouseleave", out);
+    el.addEventListener("touchstart", touchStart, { passive: true });
+    el.addEventListener("touchmove", touchMove, { passive: true });
+    el.addEventListener("touchend", touchEnd, { passive: true });
+    el.addEventListener("touchcancel", touchEnd, { passive: true });
     // Własny dymek zamiast natywnego `title`: kafelki bywają wąskie, więc dymek
     // pokazuje pełny tytuł z kropką typu, termin z czasem trwania, obiekt,
     // techników i stan (status/rozliczenie/protokół/realizacja) jako pigułki.
@@ -1779,6 +1869,12 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
     if (el._alfaDbl) el.removeEventListener("dblclick", el._alfaDbl);
     if (el._alfaOver) el.removeEventListener("mouseenter", el._alfaOver);
     if (el._alfaOut) el.removeEventListener("mouseleave", el._alfaOut);
+    if (el._alfaTouchStart) el.removeEventListener("touchstart", el._alfaTouchStart);
+    if (el._alfaTouchMove) el.removeEventListener("touchmove", el._alfaTouchMove);
+    if (el._alfaTouchEnd) {
+      el.removeEventListener("touchend", el._alfaTouchEnd);
+      el.removeEventListener("touchcancel", el._alfaTouchEnd);
+    }
   }, []);
 
   /**
@@ -1958,6 +2054,15 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
           onSelect: () => void setStatus(ev, "done"),
         });
       }
+      // Zmiana terminu bez przeciągania — na dotyku drag&drop wymaga celowania
+      // w kilkupikselowy kafelek przy jednoczesnym przewijaniu strony.
+      items.push({
+        key: "move",
+        label: "Przenieś…",
+        icon: MoveRight,
+        hint: fmtShort(ev.startAt, ev.allDay),
+        onSelect: () => setMoveTarget(ev),
+      });
       // Kafelka notatki nie duplikujemy — nowy kafelek powstaje przez wskazanie notatki.
       if (!isNoteEvent(ev.type)) {
         items.push({
@@ -2052,6 +2157,9 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
   }, []);
   const handleEventClick = (arg: EventClickArg) => {
     arg.jsEvent.preventDefault();
+    // Po długim przytrzymaniu przeglądarka i tak wysyła `click` — panel wydarzenia
+    // przykryłby dopiero co otwarte menu.
+    if (longPressRef.current) return;
     const ev = freshEvent(arg.event);
     if (!ev) return;
     if (clickTimerRef.current != null) {
@@ -2108,6 +2216,36 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
     }
   };
 
+  /**
+   * Przeniesienie z formularza („Przenieś…” w menu wydarzenia) — ta sama ścieżka
+   * co drag&drop (`PATCH /move`), tylko bez celowania palcem w 7-pikselowy kafelek.
+   * Długość wydarzenia zostaje bez zmian.
+   */
+  const moveEventTo = async (ev: CalendarEvent, date: string, time: string | null) => {
+    const oldStart = parseLocal(ev.startAt);
+    const oldEnd = ev.endAt ? parseLocal(ev.endAt) : null;
+    const durationMs = oldEnd ? Math.max(0, oldEnd.getTime() - oldStart.getTime()) : 0;
+    const [y, m, d] = date.split("-").map(Number);
+    if (!y || !m || !d) return;
+    const allDay = ev.allDay || !time;
+    const [hh, mm] = (time ?? "00:00").split(":").map(Number);
+    const start = new Date(y, m - 1, d, allDay ? 0 : (hh ?? 0), allDay ? 0 : (mm ?? 0));
+    const end = new Date(start.getTime() + (durationMs || (allDay ? 86400000 : 3600000)));
+    const startAt = allDay ? toDateStr(start) : toDateTimeStr(start);
+    const endAt = allDay ? toDateStr(end) : toDateTimeStr(end);
+    const prev = ev;
+    setAllEvents((list) => list.map((e) => (e.id === ev.id ? { ...e, startAt, endAt, allDay } : e)));
+    try {
+      await calendarApi.move(ev.id, { startAt, endAt, allDay });
+      announce(`Przeniesiono „${ev.title}” na ${fmtShort(startAt, allDay)}`);
+      setMoveTarget(null);
+      await loadEvents();
+    } catch (err) {
+      setAllEvents((list) => list.map((e) => (e.id === ev.id ? prev : e)));
+      notifyError(err, "Nie udało się przesunąć wydarzenia");
+    }
+  };
+
   const api = () => calendarRef.current?.getApi();
   const changeView = useCallback(
     (v: ViewName) => {
@@ -2144,6 +2282,24 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
     else if (isRoute) setAnchorDate(new Date());
     else api()?.today();
   }, [isBoard, isRoute]);
+
+  /**
+   * Skok na dowolną datę (klikalny tytuł okresu → wybór daty). Na telefonie to
+   * jedyny sposób na przeskoczenie o więcej niż kilka okresów — strzałkami byłoby
+   * to kilkadziesiąt tapnięć.
+   */
+  const navGoto = useCallback(
+    (d: Date) => {
+      if (isBoard) setAnchorDate(startOfMonth(d));
+      else if (isRoute) setAnchorDate(d);
+      else api()?.gotoDate(d);
+    },
+    [isBoard, isRoute]
+  );
+  /** Otwarty wybór daty pod tytułem okresu. */
+  const [datePickerOpen, setDatePickerOpen] = useState(false);
+  /** Menu „⋯” (mobile) — kotwiczone przy przycisku, korzysta z `ContextMenu`. */
+  const [moreMenu, setMoreMenu] = useState<{ x: number; y: number } | null>(null);
 
   // Ogłaszaj zmianę okresu czytnikom ekranu.
   useEffect(() => {
@@ -2489,6 +2645,63 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
 
   /** Treść kafelka w siatce — zależy od działu (podpis z przypisanymi). */
   const renderEventContent = useMemo(() => makeRenderEventContent(cfg), [cfg]);
+
+  /**
+   * Przejście do widoku Dnia z konkretną datą — na telefonie to jedyne miejsce,
+   * gdzie widać pełną treść wydarzenia (Miesiąc pokazuje same paski).
+   */
+  const openDay = useCallback(
+    (date: Date) => {
+      changeView("timeGridDay");
+      calendarRef.current?.getApi()?.gotoDate(date);
+    },
+    [changeView]
+  );
+  /**
+   * „+N więcej”: na telefonie w Miesiącu zamiast dymka (mieści 3 pozycje i wychodzi
+   * poza ekran) otwieramy dzień. W siatce godzinowej „+N” pochodzi z `eventMaxStack`
+   * i dymek jest na miejscu — pokazuje właśnie te wydarzenia, które się nie zmieściły.
+   */
+  const handleMoreLinkClick = useCallback(
+    (arg: MoreLinkArg) => {
+      if (mobile && arg.view.type === "dayGridMonth") {
+        // Zwrócona nazwa widoku = `zoomTo(date, view)` po stronie FullCalendara;
+        // stan `view` w Reakcie dociąga `datesSet`, tu zostaje tylko zapamiętanie.
+        hideTooltip();
+        storeView(cfg, "timeGridDay");
+        return "timeGridDay";
+      }
+      return undefined;
+    },
+    [cfg, mobile]
+  );
+  /** Tapnięcie w dzień Miesiąca na telefonie = lista tego dnia (widok Dzień). */
+  const handleDateClick = useCallback(
+    (arg: DateClickArg) => {
+      if (mobile && arg.view.type === "dayGridMonth") openDay(arg.date);
+    },
+    [mobile, openDay]
+  );
+
+  /**
+   * Realna wysokość paska narzędzi w zmiennej CSS — nagłówki dni w Liście
+   * przyklejają się pod nim (`--alfa-cal-toolbar-h` w Calendar.css). Stała
+   * wartość się rozjeżdżała: pasek zmienia wysokość wraz z zawartością.
+   */
+  useEffect(() => {
+    if (!mobile) return;
+    const root = document.documentElement;
+    const el = document.querySelector<HTMLElement>('[data-testid="calendar-toolbar"]');
+    if (!el) return;
+    const apply = () => root.style.setProperty("--alfa-cal-toolbar-h", `${Math.round(el.offsetHeight)}px`);
+    apply();
+    const ro = new ResizeObserver(apply);
+    ro.observe(el);
+    return () => {
+      ro.disconnect();
+      root.style.removeProperty("--alfa-cal-toolbar-h");
+    };
+  }, [mobile, view]);
   /** Kolumny Tablicy: statusy albo typy w kolejności z konfiguracji działu. */
   const boardColumns = useMemo(
     () => buildBoardColumns(boardGroup, cfg.typeOrder, cfg.statusOrder),
@@ -2661,6 +2874,78 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
     />
   );
 
+  /**
+   * Menu „⋯” na telefonie — wszystko, co na desktopie stoi w pasku jako osobne
+   * przyciski (Aktywność, Asystent, ICS, legenda) plus rzeczy, które na mobile
+   * były dotąd niedostępne: przełącznik weekendów i skrót do wydarzeń po terminie.
+   */
+  const moreItems: ContextMenuItem[] = [
+    {
+      key: "activity",
+      label: activityOpen ? "Zamknij aktywność" : "Aktywność",
+      icon: Activity,
+      hint: "dziennik zmian",
+      onSelect: () => {
+        setAssistantOpen(false);
+        setActivityOpen((o) => !o);
+      },
+    },
+    ...(assistantAllowed
+      ? [
+          {
+            key: "assistant",
+            label: assistantOpen ? "Zamknij asystenta" : "Asystent",
+            icon: Sparkles,
+            hint: "AI",
+            onSelect: () => {
+              setActivityOpen(false);
+              setAssistantOpen((o) => !o);
+            },
+          } as ContextMenuItem,
+        ]
+      : []),
+    {
+      key: "ics",
+      label: "Subskrybuj (ICS)",
+      icon: Rss,
+      hint: "Outlook / Google",
+      onSelect: () => setIcsOpen(true),
+    },
+    ...(isFc
+      ? [
+          {
+            key: "weekends",
+            label: weekends ? "Ukryj weekendy" : "Pokaż weekendy",
+            icon: weekends ? CalendarDays : CalendarRange,
+            hint: weekendHidden > 0 && !weekends ? `${weekendHidden} ${plEvents(weekendHidden)}` : undefined,
+            onSelect: () => setWeekends(!weekends),
+          } as ContextMenuItem,
+        ]
+      : []),
+    ...(overdueTotal > 0 && !isBoard
+      ? [
+          {
+            key: "overdue",
+            label: `${overdueTotal} po terminie`,
+            icon: AlertTriangle,
+            hint: "pokaż tablicę",
+            onSelect: () => {
+              changeView("board");
+              setBoardGroup("status");
+            },
+          } as ContextMenuItem,
+        ]
+      : []),
+    { key: "sep-help", label: null, separator: true },
+    {
+      key: "help",
+      label: "Legenda i skróty",
+      icon: HelpCircle,
+      hint: "kolory, gesty",
+      onSelect: () => setHelpOpen(true),
+    },
+  ];
+
   return (
     // Bez space-y na korzeniu: pusty węzeł aria-live dostawał margines, który
     // spychał siatkę w dół. Odstępy ustawiają same elementy.
@@ -2701,14 +2986,19 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
           <div
             className={cn(
               "flex flex-wrap items-center justify-between gap-2",
-              mobile && "sticky top-16 z-20 -mx-4 border-b bg-background px-4 py-2"
+              // Na telefonie pasek to dwa zwarte rzędy (nawigacja + akcje) —
+              // razem ~96 px zamiast rozlewających się trzech linijek przycisków.
+              // Ujemny margines musi odpowiadać paddingowi <main> (px-3), inaczej
+              // pasek wystaje 8 px poza ekran i jest przycinany.
+              mobile && "sticky top-16 z-20 -mx-3 flex-col items-stretch gap-1.5 border-b bg-background px-3 py-1.5"
             )}
+            data-testid="calendar-toolbar"
           >
-            <div className="flex min-w-0 items-center gap-1">
+            <div className={cn("flex min-w-0 items-center gap-1", mobile && "relative")}>
               <Button
                 variant="outline"
                 size="icon"
-                className="h-10 w-10 md:h-9 md:w-9"
+                className={cn("h-10 w-10 shrink-0 md:h-9 md:w-9", mobile && "order-1")}
                 onClick={navPrev}
                 aria-label={`Poprzedni ${periodNoun}`}
                 {...tip(`Poprzedni ${periodNoun}`, { shortcut: "←" })}
@@ -2718,7 +3008,7 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
               <Button
                 variant="outline"
                 size="sm"
-                className="h-10 md:h-9"
+                className={cn("h-10 shrink-0 md:h-9", mobile && "order-4 px-2.5")}
                 onClick={navToday}
                 {...tip(`Wróć do bieżącego okresu (${periodNoun} z dzisiejszą datą)`, { shortcut: "T" })}
               >
@@ -2727,22 +3017,49 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
               <Button
                 variant="outline"
                 size="icon"
-                className="h-10 w-10 md:h-9 md:w-9"
+                className={cn("h-10 w-10 shrink-0 md:h-9 md:w-9", mobile && "order-3")}
                 onClick={navNext}
                 aria-label={`Następny ${periodNoun}`}
                 {...tip(`Następny ${periodNoun}`, { shortcut: "→" })}
               >
                 <ChevronRight className="h-4 w-4" />
               </Button>
-              <h2
-                className="ml-1 min-w-0 truncate text-base font-semibold capitalize sm:ml-2 sm:text-lg"
-                aria-live="off"
-              >
-                {title}
-              </h2>
+              {mobile ? (
+                <>
+                  {/* Tytuł okresu jako przycisk — jedyne wejście do skoku na dowolną
+                      datę na telefonie (strzałkami to kilkadziesiąt tapnięć). */}
+                  <button
+                    type="button"
+                    onClick={() => setDatePickerOpen((o) => !o)}
+                    aria-expanded={datePickerOpen}
+                    aria-label={`Okres: ${title}. Wybierz datę`}
+                    data-testid="calendar-title-button"
+                    className="order-2 flex h-10 min-w-0 flex-1 items-center justify-center gap-1 rounded-md px-1 text-base font-semibold capitalize hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    <span className="truncate">{title}</span>
+                    <CalendarDays className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
+                  </button>
+                  {datePickerOpen && (
+                    <DateJump
+                      onClose={() => setDatePickerOpen(false)}
+                      onPick={(d) => {
+                        navGoto(d);
+                        setDatePickerOpen(false);
+                      }}
+                    />
+                  )}
+                </>
+              ) : (
+                <h2
+                  className="ml-1 min-w-0 truncate text-base font-semibold capitalize sm:ml-2 sm:text-lg"
+                  aria-live="off"
+                >
+                  {title}
+                </h2>
+              )}
               {loading && loadedOnce && (
                 <Loader2
-                  className="ml-1 h-4 w-4 shrink-0 animate-spin text-muted-foreground"
+                  className={cn("ml-1 h-4 w-4 shrink-0 animate-spin text-muted-foreground", mobile && "order-2")}
                   aria-label="Odświeżanie"
                 />
               )}
@@ -2775,7 +3092,77 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
                 </button>
               )}
             </div>
-            <div className="flex flex-wrap items-center justify-end gap-2 min-w-0">
+            <div
+              className={cn(
+                "flex items-center justify-end min-w-0",
+                mobile ? "flex-nowrap gap-1.5" : "flex-wrap gap-2"
+              )}
+            >
+              {/* Mobile: jeden zwarty rząd — wybór widoku (select mieści 6 opcji
+                  w jednym polu), filtry z licznikiem, menu „⋯” i „+”. Reszta akcji
+                  (Aktywność, Asystent, ICS, Pomoc) siedzi w menu „⋯”. */}
+              {mobile && (
+                <>
+                  <label className="sr-only" htmlFor="cal-view-mobile">
+                    Widok
+                  </label>
+                  <select
+                    id="cal-view-mobile"
+                    data-testid="view-select-mobile"
+                    value={view}
+                    onChange={(e) => changeView(e.target.value as ViewName)}
+                    className="h-10 min-w-0 flex-1 rounded-md border border-input bg-background px-2 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    {orderedViews.map((v) => (
+                      <option key={v.key} value={v.key}>
+                        {v.label}
+                      </option>
+                    ))}
+                  </select>
+                  <Button
+                    variant={activeFilterCount ? "secondary" : "outline"}
+                    size="icon"
+                    className="relative h-10 w-10 shrink-0"
+                    onClick={() => setFiltersOpen(true)}
+                    aria-label={`Filtry${activeFilterCount ? ` (${activeFilterCount} aktywne)` : ""}`}
+                    data-testid="filters-open-mobile"
+                  >
+                    <Filter className="h-4 w-4" />
+                    {activeFilterCount > 0 && (
+                      <span className="absolute -right-1 -top-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-bold text-primary-foreground">
+                        {activeFilterCount}
+                      </span>
+                    )}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    className="h-10 w-10 shrink-0"
+                    aria-label="Więcej akcji: aktywność, asystent, ICS, legenda"
+                    aria-expanded={moreMenu !== null}
+                    data-testid="calendar-more"
+                    onClick={(e) => {
+                      const r = e.currentTarget.getBoundingClientRect();
+                      setMoreMenu(moreMenu ? null : { x: r.right, y: r.bottom + 4 });
+                    }}
+                  >
+                    <MoreHorizontal className="h-4 w-4" />
+                  </Button>
+                  {editable && (
+                    <Button
+                      size="icon"
+                      className="h-10 w-10 shrink-0"
+                      onClick={() => openCreate()}
+                      aria-label="Nowe wydarzenie"
+                      data-testid="calendar-create-mobile"
+                    >
+                      <Plus className="h-4 w-4" />
+                    </Button>
+                  )}
+                </>
+              )}
+              {!mobile && (
+                <>
               {isBoard && !mobile && (
                 <SegmentedControl
                   label="Grupowanie tablicy"
@@ -2914,6 +3301,8 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
                   </Button>
                 )}
               </div>
+                </>
+              )}
             </div>
           </div>
 
@@ -3063,12 +3452,24 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
                 slotMaxTime="20:00:00"
                 slotDuration="00:30:00"
                 scrollTime="07:00:00"
-                dayMaxEvents={mobile ? 2 : fit ? true : 3}
+                // Miesiąc na telefonie: kafelki są paskami (CSS), więc mieści się ich
+                // więcej niż dwa; reszta idzie w „+N”, które prowadzi do widoku Dnia.
+                dayMaxEvents={mobile ? 4 : fit ? true : 3}
                 weekNumbers={!mobile}
                 weekText="T"
                 eventTimeFormat={{ hour: "2-digit", minute: "2-digit", hour12: false }}
-                slotLabelFormat={{ hour: "2-digit", minute: "2-digit", hour12: false }}
+                // Rynna godzin na telefonie ma 40 px — mieści się „7”, nie „07:00”.
+                slotLabelFormat={
+                  mobile
+                    ? { hour: "numeric", minute: "2-digit", omitZeroMinute: true, hour12: false }
+                    : { hour: "2-digit", minute: "2-digit", hour12: false }
+                }
                 dayPopoverFormat={{ weekday: "long", day: "numeric", month: "long" }}
+                // Wąskie ekrany: ograniczamy liczbę kolumn na nakładających się
+                // wydarzeniach (reszta w „+N”) i skracamy godzinę do samego początku.
+                views={mobile ? MOBILE_VIEW_OPTIONS : undefined}
+                moreLinkClick={handleMoreLinkClick}
+                dateClick={handleDateClick}
                 editable={editable}
                 eventStartEditable={editable}
                 eventDurationEditable={editable}
@@ -3108,7 +3509,7 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
                     onNext={navNext}
                   />
                 )}
-                moreLinkContent={(a) => `+${a.num} więcej`}
+                moreLinkContent={(a) => (mobile ? `+${a.num}` : `+${a.num} więcej`)}
                 moreLinkHint={(n) => `Pokaż pozostałe ${eventsCount(n)} tego dnia`}
                 navLinkHint={(t) => `Przejdź do dnia: ${t}`}
                 closeHint="Zamknij listę wydarzeń dnia"
@@ -3153,16 +3554,39 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
           </div>
         </div>
 
-        {/* Panel Aktywność */}
-        {activityOpen && (
-          <ActivityPanel
-            entries={activity}
-            loading={activityLoading}
-            onClose={() => setActivityOpen(false)}
-            onOpenEvent={(id) => void openEventById(id)}
-            onRefresh={() => void loadActivity()}
-          />
-        )}
+        {/* Panel Aktywność. Poniżej lg grid ma jedną kolumnę, więc zwykła karta
+            lądowała pod całym kalendarzem (kilka ekranów niżej) — na telefonie
+            wchodzi więc arkuszem dolnym, jak filtry i asystent. */}
+        {activityOpen &&
+          (mobile ? (
+            <div className="fixed inset-0 z-50 flex flex-col justify-end md:hidden" data-testid="activity-sheet">
+              <button
+                type="button"
+                className="absolute inset-0 bg-black/40"
+                aria-label="Zamknij aktywność"
+                onClick={() => setActivityOpen(false)}
+              />
+              <div className="alfa-toast relative max-h-[85vh] overflow-hidden rounded-t-2xl border-t bg-card shadow-2xl">
+                <div className="mx-auto mb-1 mt-2 h-1 w-10 rounded-full bg-muted-foreground/30" aria-hidden />
+                <ActivityPanel
+                  entries={activity}
+                  loading={activityLoading}
+                  onClose={() => setActivityOpen(false)}
+                  onOpenEvent={(id) => void openEventById(id)}
+                  onRefresh={() => void loadActivity()}
+                  sheet
+                />
+              </div>
+            </div>
+          ) : (
+            <ActivityPanel
+              entries={activity}
+              loading={activityLoading}
+              onClose={() => setActivityOpen(false)}
+              onOpenEvent={(id) => void openEventById(id)}
+              onRefresh={() => void loadActivity()}
+            />
+          ))}
 
         {/* Panel wydarzenia — zwęża kalendarz zamiast go zasłaniać */}
         {dialogOpen && eventEditor()}
@@ -3222,6 +3646,47 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
               ? fmtRange(ctxMenu.startAt, ctxMenu.endAt, ctxMenu.allDay)
               : undefined
         }
+      />
+
+      {/* Menu „⋯” (mobile) — ten sam komponent co menu kontekstowe, kotwiczony
+          pod przyciskiem zamiast pod kursorem. */}
+      <ContextMenu
+        open={moreMenu !== null}
+        x={moreMenu?.x ?? 0}
+        y={moreMenu?.y ?? 0}
+        items={moreItems.map((it) => ({
+          ...it,
+          onSelect: () => {
+            setMoreMenu(null);
+            it.onSelect?.();
+          },
+        }))}
+        onClose={() => setMoreMenu(null)}
+        header="Kalendarz"
+        headerIcon={CalendarDays}
+      />
+
+      {/* Legenda i skróty na telefonie — arkusz dolny (na desktopie to popover
+          pod przyciskiem „?”, którego na mobile w pasku nie ma). */}
+      {mobile && helpOpen && (
+        <div className="fixed inset-0 z-50 flex flex-col justify-end md:hidden">
+          <button
+            type="button"
+            className="absolute inset-0 bg-black/40"
+            aria-label="Zamknij pomoc"
+            onClick={() => setHelpOpen(false)}
+          />
+          <HelpPopover cfg={cfg} onClose={() => setHelpOpen(false)} editable={editable} sheet />
+        </div>
+      )}
+
+      {/* „Przenieś…” — zmiana terminu bez drag&drop (ta sama trasa: PATCH /move) */}
+      <MoveEventDialog
+        event={moveTarget}
+        onClose={() => setMoveTarget(null)}
+        onMove={(date, time) => {
+          if (moveTarget) void moveEventTo(moveTarget, date, time);
+        }}
       />
 
       {/* Usuwanie z menu kontekstowego — ta sama ścieżka co „Usuń” w dialogu */}
@@ -3437,10 +3902,13 @@ function HelpPopover({
   cfg,
   onClose,
   editable,
+  sheet = false,
 }: {
   cfg: CalendarConfig;
   onClose: () => void;
   editable: boolean;
+  /** Wariant mobilny: arkusz dolny zamiast popovera przy przycisku „?”. */
+  sheet?: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -3476,7 +3944,12 @@ function HelpPopover({
       ref={ref}
       role="dialog"
       aria-label="Legenda i skróty"
-      className="alfa-pop absolute right-0 top-11 z-40 max-h-[calc(100vh-12rem)] w-[26rem] max-w-[calc(100vw-2rem)] overflow-y-auto rounded-lg border bg-popover p-4 text-sm text-popover-foreground shadow-xl"
+      className={cn(
+        "alfa-pop overflow-y-auto border bg-popover text-sm text-popover-foreground shadow-xl",
+        sheet
+          ? "relative z-50 max-h-[85vh] rounded-t-2xl border-t p-4 pb-6"
+          : "absolute right-0 top-11 z-40 max-h-[calc(100vh-12rem)] w-[26rem] max-w-[calc(100vw-2rem)] rounded-lg p-4"
+      )}
     >
       <div className="mb-3 flex items-center justify-between">
         <h3 className="text-sm font-semibold">Legenda i skróty</h3>
@@ -3484,7 +3957,7 @@ function HelpPopover({
           <X className="h-4 w-4" />
         </Button>
       </div>
-      <div className="grid grid-cols-2 gap-4">
+      <div className={cn("grid gap-4", sheet ? "grid-cols-1" : "grid-cols-2")}>
         <div className="space-y-3">
           <div>
             <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Typy</p>
@@ -3520,6 +3993,17 @@ function HelpPopover({
           </div>
         </div>
         <div className="space-y-3">
+          {sheet && (
+            <div>
+              <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Dotyk</p>
+              <ul className="space-y-1 text-xs text-muted-foreground">
+                <li className="flex gap-2"><MousePointerClick className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden /><span>Tapnięcie — panel wydarzenia</span></li>
+                <li className="flex gap-2"><MousePointerClick className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden /><span>Przytrzymanie (pół sekundy) — menu wydarzenia: status, „Przenieś…”, duplikat, usuń</span></li>
+                <li className="flex gap-2"><MoveRight className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden /><span>Przesunięcie palcem w bok — poprzedni / następny okres</span></li>
+                <li className="flex gap-2"><CalendarDays className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden /><span>Tapnięcie w tytuł okresu — skok na dowolną datę</span></li>
+              </ul>
+            </div>
+          )}
           <div>
             <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Mysz</p>
             <ul className="space-y-1 text-xs text-muted-foreground">
@@ -3555,6 +4039,168 @@ function HelpPopover({
         Wydarzenia powiązane z obiektem są też widoczne w zakładce „Kalendarz” na{" "}
         <Link to="/objects" className="underline">karcie obiektu</Link>.
       </p>
+    </div>
+  );
+}
+
+/**
+ * „Przenieś…” — data i godzina wprost, plus skróty o dzień/tydzień. Alternatywa dla
+ * przeciągania, które na dotyku wymaga trafienia w kilkupikselowy kafelek.
+ */
+function MoveEventDialog({
+  event,
+  onClose,
+  onMove,
+}: {
+  event: CalendarEvent | null;
+  onClose: () => void;
+  onMove: (date: string, time: string | null) => void;
+}) {
+  const start = event ? parseLocal(event.startAt) : null;
+  const [date, setDate] = useState("");
+  const [time, setTime] = useState("");
+  useEffect(() => {
+    if (!event || !start) return;
+    setDate(toDateStr(start));
+    setTime(event.allDay ? "" : toDateTimeStr(start).slice(11, 16));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [event?.id, event?.startAt]);
+  if (!event) return null;
+  const shift = (days: number) => {
+    const d = parseLocal(date || toDateStr(new Date()));
+    d.setDate(d.getDate() + days);
+    setDate(toDateStr(d));
+  };
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="sm:max-w-sm" data-testid="move-event-dialog">
+        <DialogHeader>
+          <DialogTitle>Przenieś wydarzenie</DialogTitle>
+          <DialogDescription className="truncate">
+            {event.title} · obecnie {fmtShort(event.startAt, event.allDay)}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <div className="flex flex-wrap gap-2">
+            {[
+              [1, "+1 dzień"],
+              [7, "+1 tydz."],
+              [-1, "−1 dzień"],
+              [-7, "−1 tydz."],
+            ].map(([d, label]) => (
+              <Button
+                key={label as string}
+                type="button"
+                variant="outline"
+                className="h-10 flex-1 px-2 text-xs"
+                onClick={() => shift(d as number)}
+              >
+                {label as string}
+              </Button>
+            ))}
+          </div>
+          <div className="flex gap-2">
+            <label className="min-w-0 flex-1 text-xs font-medium text-muted-foreground">
+              Data
+              <input
+                type="date"
+                value={date}
+                onChange={(e) => setDate(e.target.value)}
+                data-testid="move-event-date"
+                className="mt-1 h-11 w-full rounded-md border border-input bg-background px-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              />
+            </label>
+            {!event.allDay && (
+              <label className="w-28 shrink-0 text-xs font-medium text-muted-foreground">
+                Godzina
+                <input
+                  type="time"
+                  value={time}
+                  onChange={(e) => setTime(e.target.value)}
+                  data-testid="move-event-time"
+                  className="mt-1 h-11 w-full rounded-md border border-input bg-background px-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                />
+              </label>
+            )}
+          </div>
+          <p className="text-xs text-muted-foreground">Długość wydarzenia zostaje bez zmian.</p>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" className="h-11" onClick={onClose}>
+            Anuluj
+          </Button>
+          <Button
+            className="h-11"
+            disabled={!date}
+            onClick={() => onMove(date, event.allDay ? null : time || null)}
+            data-testid="move-event-confirm"
+          >
+            Przenieś
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/**
+ * Skok na datę spod tytułu okresu (mobile). Natywny `<input type="date">` daje
+ * systemowy wybór daty — bez własnego mini-kalendarza i bez ryzyka, że kafelki
+ * wyboru będą mniejsze od palca.
+ */
+function DateJump({ onClose, onPick }: { onClose: () => void; onPick: (d: Date) => void }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [value, setValue] = useState(() => toDateStr(new Date()));
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (ref.current?.contains(t)) return;
+      // klik w tytuł obsługuje toggle rodzica
+      if ((t as HTMLElement).closest?.('[data-testid="calendar-title-button"]')) return;
+      onClose();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        onClose();
+      }
+    };
+    document.addEventListener("mousedown", onDown, true);
+    document.addEventListener("keydown", onKey, true);
+    return () => {
+      document.removeEventListener("mousedown", onDown, true);
+      document.removeEventListener("keydown", onKey, true);
+    };
+  }, [onClose]);
+  const go = () => {
+    const [y, m, d] = value.split("-").map(Number);
+    if (!y || !m || !d) return;
+    onPick(new Date(y, m - 1, d));
+  };
+  return (
+    <div
+      ref={ref}
+      role="dialog"
+      aria-label="Skocz na datę"
+      className="alfa-pop absolute inset-x-0 top-11 z-40 rounded-lg border bg-popover p-2 shadow-xl"
+      data-testid="calendar-date-jump"
+    >
+      <div className="flex items-center gap-2">
+        <input
+          type="date"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") go();
+          }}
+          aria-label="Data"
+          autoFocus
+          className="h-11 min-w-0 flex-1 rounded-md border border-input bg-background px-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        />
+        <Button className="h-11 shrink-0" onClick={go}>
+          Idź
+        </Button>
+      </div>
     </div>
   );
 }
@@ -4165,12 +4811,15 @@ function ActivityPanel({
   onClose,
   onOpenEvent,
   onRefresh,
+  sheet = false,
 }: {
   entries: ActivityEntry[];
   loading: boolean;
   onClose: () => void;
   onOpenEvent: (id: number) => void;
   onRefresh: () => void;
+  /** Wariant mobilny: karta w arkuszu dolnym (bez ramki, z własnym przewijaniem). */
+  sheet?: boolean;
 }) {
   const [action, setAction] = useState("");
   const [query, setQuery] = useState("");
@@ -4201,7 +4850,12 @@ function ActivityPanel({
   }, [filtered]);
 
   return (
-    <Card className="flex h-fit min-w-0 flex-col lg:h-full lg:min-h-0 lg:overflow-hidden">
+    <Card
+      className={cn(
+        "flex min-w-0 flex-col lg:h-full lg:min-h-0 lg:overflow-hidden",
+        sheet ? "max-h-[80vh] overflow-y-auto border-0 bg-transparent shadow-none" : "h-fit"
+      )}
+    >
       <CardContent className="flex min-h-0 flex-1 flex-col p-3">
         <div className="mb-2 flex items-center justify-between">
           <h2 className="flex items-center gap-2 text-sm font-semibold">

@@ -336,8 +336,10 @@ export function JobsMap({
       const icon = L.divIcon({
         className: "tm-icon",
         html: `<div class="tm-office" title="Biuro">${typeIconSvg("biuro")}</div>`,
-        iconSize: [22, 22],
-        iconAnchor: [11, 11],
+        // 44×44 to OBSZAR DOTYKU, nie rysunek: znacznik dalej ma 22 px,
+        // tyle że wyśrodkowane w kwadracie celu (patrz `.tm-icon`).
+        iconSize: [44, 44],
+        iconAnchor: [22, 22],
       });
       L.marker([office.lat, office.lng], { icon, title: "Biuro", alt: "Biuro", zIndexOffset: -200 }).addTo(
         layer,
@@ -364,7 +366,9 @@ export function JobsMap({
         count > 1
           ? `${name} — ${jobsLabel(count)}, najbliższe ${when}`
           : `${name} — ${first.typeLabel}, ${when}`;
-      const icon = L.divIcon({ className: "tm-icon", html, iconSize: [30, 30], iconAnchor: [15, 15] });
+      // Kropla zostaje 30-pikselowa, cel dotyku ma 44 (PLAN pkt 2) — pinezka
+      // jest jedyną drogą do dolnej karty zlecenia.
+      const icon = L.divIcon({ className: "tm-icon", html, iconSize: [44, 44], iconAnchor: [22, 22] });
       L.marker([pin.lat, pin.lng], {
         icon,
         title,
@@ -411,10 +415,12 @@ export function JobsMap({
         if (meRef.current) map.removeLayer(meRef.current);
         meRef.current = L.marker(here, {
           icon: L.divIcon({
-            className: "tm-icon",
+            // `tm-icon-me` wyłącza dotyk: ten marker niczego nie otwiera,
+            // więc jego kwadrat nie ma prawa zjadać przeciągania mapy.
+            className: "tm-icon tm-icon-me",
             html: `<div class="tm-me" title="Twoja pozycja"></div>`,
-            iconSize: [18, 18],
-            iconAnchor: [9, 9],
+            iconSize: [44, 44],
+            iconAnchor: [22, 22],
           }),
           title: "Twoja pozycja",
           alt: "Twoja pozycja",

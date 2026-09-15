@@ -4,6 +4,7 @@ import { useTechnikMe } from "./lib/me";
 import { CalendarDays, MapPin, MoreHorizontal, Sun } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useKeyboardVar } from "./lib/keyboard";
+import { bindTechnikTheme } from "./lib/theme";
 import type { NavItem } from "./lib/nav";
 import { BottomNav } from "./ui/bottom-nav";
 import { TopBar } from "./ui/top-bar";
@@ -66,6 +67,10 @@ const ROUTE_BACK: [RegExp, string][] = [[/^\/technik\/co-nowego/, "/technik/wiec
  *
  * Protokół idzie dodatkowo bez tab bara: to formularz wypełniany u klienta
  * i każdy piksel nad klawiaturą jest tam wart więcej niż skrót do „Dziś”.
+ * Dostaje za to `pb-kb` zamiast `pb-6`: bez zapasu wysokości równego
+ * klawiaturze strona protokołu nie miała się DOKĄD przewinąć
+ * (`scrollHeight == innerHeight`) i pole z fokusem zostawało pod klawiaturą
+ * Safari, mimo poprawnego `scrollIntoView`.
  */
 export function TechnikShell({ children }: { children: ReactNode }) {
   const { pathname } = useLocation();
@@ -74,8 +79,28 @@ export function TechnikShell({ children }: { children: ReactNode }) {
   // Wysokość klawiatury → `--kb` (sticky paski akcji, FAB, toasty).
   useKeyboardVar();
 
-  // Liczniki na tab barze: WSZYSTKIE zlecenia na dziś i wszystkie nadchodzące
-  // (14 dni, z dzisiejszymi — tyle samo, ile pokazuje ekran „Nadchodzące”).
+  /*
+   * DWIE RZECZY, KTÓRE MUSZĄ SIEDZIEĆ NA <html>, A NIE W PANELU.
+   *
+   * 1. `technik-html` — `scroll-padding-bottom` i `overscroll-behavior-y`
+   *    działają wyłącznie na elemencie, który się przewija, a jest nim
+   *    `documentElement`, nie `.technik-root` (patrz technik.css).
+   * 2. `dark` — Tailwind ma `darkMode: ["class"]`, więc klasa jest globalna.
+   *    Panel ma własny przełącznik („Więcej”), ale CRM po wyjściu z `/technik`
+   *    ma wrócić do swojego jasnego motywu — stąd sprzątanie w cleanupie.
+   */
+  useEffect(() => {
+    document.documentElement.classList.add("technik-html");
+    const unbindTheme = bindTechnikTheme();
+    return () => {
+      document.documentElement.classList.remove("technik-html");
+      unbindTheme();
+    };
+  }, []);
+
+  // Liczniki na tab barze: zlecenia na dziś oraz PRZYSZŁE (od jutra do 14 dni).
+  // Dzisiejsze liczy tylko plakietka „Dziś” — inaczej technik sumowałby je dwa razy.
+
   // Odświeżane przy każdej zmianie trasy, bo po „Zakończ” technik wraca
   // na listę i liczby mają się zgadzać z tym, co widzi.
   useEffect(() => {
@@ -117,7 +142,7 @@ export function TechnikShell({ children }: { children: ReactNode }) {
           // Nagłówek (własny albo `TopBar`) niesie już `pt-safe`.
           ownHeader ? "pt-0" : topBar ? "pt-3" : "pt-safe-3",
           // Miejsce na tab bar (56 px) + bezpieczny obszar.
-          nav ? "pb-[calc(3.5rem+1.5rem+env(safe-area-inset-bottom,0px))]" : "pb-6",
+          nav ? "pb-[calc(3.5rem+1.5rem+env(safe-area-inset-bottom,0px))]" : "pb-kb",
         )}
       >
         {children}

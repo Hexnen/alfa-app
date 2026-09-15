@@ -21,8 +21,26 @@
   touch-action: manipulation;
   -webkit-tap-highlight-color: transparent;
   -webkit-text-size-adjust: 100%;
+}
+
+/*
+ * SCROLL NALEŻY DO <html>, NIE DO `.technik-root`.
+ *
+ * Obie reguły niżej stały wcześniej na `.technik-root` i nie robiły nic:
+ * elementem przewijanym jest `document.scrollingElement`, czyli
+ * `documentElement` — `.technik-root` ma `scrollHeight == clientHeight`.
+ * Skutkiem było żywe pull-to-refresh w trakcie wypełniania protokołu
+ * i `scroll-padding`, który nigdy nie brał udziału w przewijaniu do pola
+ * z fokusem.
+ *
+ * Klasę `technik-html` zakłada i zdejmuje `TechnikShell` (useEffect) — poza
+ * panelem CRM ma się przewijać po swojemu.
+ */
+html.technik-html,
+html.technik-html body {
   /* Pole, do którego wjeżdża focus, ma zostać nad klawiaturą i paskiem akcji. */
   scroll-padding-bottom: 40dvh;
+  /* Bez pull-to-refresh i bez „odbijania” strony przy przeciąganiu mapy. */
   overscroll-behavior-y: none;
 }
 
@@ -51,6 +69,18 @@
 .technik-root .tabular,
 .technik-root [data-numeric] {
   font-variant-numeric: tabular-nums;
+}
+
+/* CZERWIEŃ TEKSTOWA. `--destructive` to kolor TŁA przycisku niszczącego:
+   w jasnym daje 3,76:1 na białym, a w ciemnym jest to ciemna czerwień
+   (#7f1d1d), więc „Wyloguj” miało tam 2:1. Tekst i ikony w panelu biorą
+   odcienie dobrane pod kontrast (6,47:1 i 7,23:1); tła (`bg-destructive`)
+   zostają bez zmian. */
+.technik-root .text-destructive {
+  color: #b91c1c;
+}
+.dark .technik-root .text-destructive {
+  color: #f87171;
 }
 
 .technik-root :focus-visible {
@@ -139,6 +169,23 @@
   min-height: 20rem;
 }
 
+/* Atrybucja Leafleta leci z arkusza z CDN: link #0078a8 na tle
+   `rgba(255,255,255,0.8)` zmieszanym z kafelkami dawał 3,33:1. Tło na pełną
+   biel i ciemniejszy błękit — to jedyny tekst na tym ekranie spoza panelu. */
+.technik-root .leaflet-control-attribution {
+  background: #fff;
+  color: #3f3f46;
+  padding: 0 6px;
+}
+/* Linki atrybucji to jedyne cele dotyku na tym ekranie, które nie należą do
+   panelu — i jedyne, które miały 14 px wysokości. `line-height` robi z nich
+   pełne 44 px bez ruszania kroju i pozycji tekstu. */
+.technik-root .leaflet-control-attribution a {
+  display: inline-block;
+  line-height: 44px;
+  color: #0c4a6e;
+}
+
 /* Gest mapy zostaje w mapie (Safari inaczej „odbija" całą stronę).
    Tło z tokenu, a nie `#ddd` z arkusza Leafleta: ten ładuje się z CDN PO
    Tailwindzie, więc `.leaflet-container` wygrywało z `bg-muted` i mapa miała
@@ -150,11 +197,25 @@
 }
 
 /* Kontener ikony — bez białego prostokąta, który Leaflet daje `divIcon`
-   domyślnie; etykieta ma prawo wyjść poza obrys 30×30. */
+   domyślnie; etykieta ma prawo wyjść poza obrys rysunku.
+
+   `iconSize` wszystkich trzech markerów to 44×44 (PLAN pkt 2), a rysunek
+   (kropla 30, biuro 22, moja pozycja 18) jest w tym kwadracie WYŚRODKOWANY —
+   reszta zostaje przezroczystym marginesem dotyku. Pinezka jest jedyną drogą
+   do dolnej karty zlecenia, więc 30 px było o 14 px za mało. */
 .technik-root .tm-icon {
   background: none;
   border: 0;
   overflow: visible;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* „Moja pozycja” niczego nie otwiera — jej 44-pikselowy kwadrat nie ma prawa
+   zjadać przeciągania mapy. */
+.technik-root .tm-icon-me {
+  pointer-events: none;
 }
 
 .technik-root .tm-pin {

@@ -8,8 +8,12 @@ import { buttonVariants } from "@/components/ui/button";
  * porzucenie niezapisanego protokołu). Zmiana statusu zlecenia idzie od razu,
  * z toastem — dodatkowe pytanie tylko spowalniałoby pracę u klienta.
  *
- * Okno jest centrowane na każdej szerokości: krótkie, dwa przyciski, nie ma
- * czego przewijać, a arkusz dolny da się zbyt łatwo odrzucić gestem.
+ * Okno jest centrowane na każdej szerokości (arkusz dolny da się zbyt łatwo
+ * odrzucić gestem), ale NIE zakładamy już, że zawsze jest krótkie: lista
+ * kontaktów w „Do kogo zadzwonić?” miała na telefonie w poziomie (844×390)
+ * 493 px przy 390 px ekranu i wychodziła poza kadr górą i dołem — tytuł
+ * i „Anuluj” były nieosiągalne. Stąd wyśrodkowanie flexem zamiast
+ * `translate`, własny `max-h` i scroll wewnątrz okna.
  */
 export const AlertDialog = AlertDialogPrimitive.Root;
 export const AlertDialogTrigger = AlertDialogPrimitive.Trigger;
@@ -22,16 +26,20 @@ export function AlertDialogContent({
   return (
     <AlertDialogPrimitive.Portal>
       <AlertDialogPrimitive.Overlay className="fixed inset-0 z-[80] bg-black/50" />
-      <AlertDialogPrimitive.Content
-        className={cn(
-          "fixed left-1/2 top-1/2 z-[81] flex w-[min(26rem,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2",
-          "flex-col gap-3 rounded-xl border bg-card p-4 text-card-foreground shadow-2xl outline-none",
-          className,
-        )}
-        {...props}
-      >
-        {children}
-      </AlertDialogPrimitive.Content>
+      {/* Warstwa centrująca przepuszcza dotyk (`pointer-events-none`), żeby
+          nakładka Radiksa nadal łapała kliknięcia poza oknem. */}
+      <div className="pointer-events-none fixed inset-0 z-[81] flex items-center justify-center">
+        <AlertDialogPrimitive.Content
+          className={cn(
+            "pointer-events-auto my-4 flex max-h-[calc(100dvh-2rem)] w-[min(26rem,calc(100vw-2rem))] flex-col gap-3",
+            "overflow-y-auto overscroll-contain rounded-xl border bg-card p-4 text-card-foreground shadow-2xl outline-none",
+            className,
+          )}
+          {...props}
+        >
+          {children}
+        </AlertDialogPrimitive.Content>
+      </div>
     </AlertDialogPrimitive.Portal>
   );
 }

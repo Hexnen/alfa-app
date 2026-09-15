@@ -951,7 +951,9 @@ export function Layout({ children }: LayoutProps) {
           Niska warstwa (z-30) i wąski obszar klikalny — dialogi, dymki i
           podglądy (z-50 i wyżej) przykrywają go, a reszta ekranu zostaje
           klikalna dzięki `pointer-events-none` na kontenerze. */}
-      <div className="pointer-events-none fixed bottom-2 right-3 z-30 print:hidden">
+      {/* Poniżej md badge przykrywał ostatni wiersz treści (kalendarz, listy) —
+          na telefonie każdy piksel u dołu jest zajęty, a „Co nowego” jest w menu. */}
+      <div className="pointer-events-none fixed bottom-2 right-3 z-30 hidden md:block print:hidden">
         <Link
           to="/co-nowego"
           title="Co nowego"

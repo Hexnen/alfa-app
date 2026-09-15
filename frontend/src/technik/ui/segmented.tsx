@@ -77,7 +77,7 @@ export function SegmentedControl<T extends string>({
       aria-label={label}
       onKeyDown={onKeyDown}
       className={cn(
-        "inline-flex items-stretch gap-1 rounded-xl bg-muted p-1",
+        "inline-flex items-stretch gap-2 rounded-xl bg-muted p-1",
         full && "flex w-full",
         className,
       )}

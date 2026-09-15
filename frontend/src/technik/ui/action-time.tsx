@@ -137,21 +137,24 @@ function ActionTimeBody({
             </div>
           </div>
           {future && (
-            <p role="alert" data-testid="action-time-error" className="text-sm text-destructive">
+            <p role="alert" data-testid="action-time-error" className="text-sm text-red-700 dark:text-red-400">
               Godzina z przyszłości
             </p>
           )}
+          {/* `shrink-0` + `sm:flex-1`, a nie samo `flex-1`: poniżej 640 px oś
+              główna jest PIONOWA, więc `flex: 1 1 0%` liczyło wysokość od zera
+              i nadpisywało `h-12` — „Zapisz” miał na telefonie 24 px. */}
           <div className="flex flex-col gap-2 sm:flex-row-reverse">
             <Button
               size="lg"
-              className="h-12 flex-1 text-base"
+              className="h-12 shrink-0 text-base sm:flex-1"
               disabled={busy || !canSave}
               data-testid="action-time-save"
               onClick={() => onSubmit(at)}
             >
               {confirmLabel}
             </Button>
-            <Button variant="outline" className="h-11 flex-1" disabled={busy} onClick={() => setCustom(false)}>
+            <Button variant="outline" className="h-11 shrink-0 sm:flex-1" disabled={busy} onClick={() => setCustom(false)}>
               Wstecz
             </Button>
           </div>

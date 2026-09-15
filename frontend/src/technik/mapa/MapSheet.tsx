@@ -59,7 +59,9 @@ export function MapSheet({
       <div className="flex items-start gap-2 px-3 pb-2 pt-2.5">
         <div className="min-w-0 flex-1">
           <h2 className="truncate text-base font-semibold">{title}</h2>
-          {subtitle && <p className="truncate text-xs text-muted-foreground">{subtitle}</p>}
+          {/* Adres w dwóch liniach — na 390 px „ul. Puławska 12, Warszawa”
+              ucinało się w pół nazwy miasta, a to jedyna treść tej karty. */}
+          {subtitle && <p className="text-xs text-muted-foreground line-clamp-2">{subtitle}</p>}
         </div>
         {onClose && (
           <button

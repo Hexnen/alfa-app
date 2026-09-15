@@ -83,20 +83,36 @@ export function KafleAkcji({
           <AlertDialogContent>
             <AlertDialogTitle>Do kogo zadzwonić?</AlertDialogTitle>
             <AlertDialogDescription>{job.objectName ?? "Kontakty do zlecenia"}</AlertDialogDescription>
-            <ul className="flex flex-col gap-2" data-testid="zlecenie-kontakty">
+            {/* Lista dostaje WŁASNY scroll, żeby tytuł i „Anuluj” zostały na
+                swoich miejscach także przy pięciu kontaktach na telefonie
+                w poziomie. */}
+            <ul
+              className="-mx-1 flex min-h-0 max-h-[50dvh] flex-col gap-2 overflow-y-auto overscroll-contain px-1"
+              data-testid="zlecenie-kontakty"
+            >
               {contacts.map((k) => (
                 <li key={`${k.source}-${k.phone}`}>
                   <button
                     type="button"
                     onClick={() => dial(k.phone)}
-                    className="flex min-h-14 w-full items-center gap-3 rounded-xl border bg-card px-3 text-left active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    className="flex min-h-14 w-full items-center gap-3 rounded-xl border bg-card px-3 py-2 text-left active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   >
                     <Phone className="h-5 w-5 shrink-0 text-primary" aria-hidden />
+                    {/* NUMER PIERWSZY I W CAŁOŚCI. Sklejone „rola · numer”
+                        ucinało się na telefonie dokładnie na numerze, czyli na
+                        jedynej rzeczy, po której technik wybiera, do kogo
+                        dzwoni. Rola schodzi linijkę niżej i tylko ona może się
+                        uciąć. */}
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-sm font-semibold leading-tight">{k.name}</span>
-                      <span className="block truncate text-xs leading-tight text-muted-foreground">
-                        {[k.role, k.phone].filter(Boolean).join(" · ")}
+                      <span className="block text-xs leading-tight tabular-nums text-muted-foreground">
+                        {k.phone}
                       </span>
+                      {k.role && (
+                        <span className="block truncate text-xs leading-tight text-muted-foreground">
+                          {k.role}
+                        </span>
+                      )}
                     </span>
                   </button>
                 </li>
@@ -125,7 +141,7 @@ export function KafleAkcji({
           Miejsce jest zarezerwowane także w trakcie liczenia, żeby kafle nie
           podskakiwały technikowi pod palcem. */}
       <p
-        className="col-start-1 min-h-4 truncate text-xs tabular-nums text-muted-foreground"
+        className="col-start-1 min-h-4 text-xs tabular-nums text-muted-foreground line-clamp-2"
         data-testid="zlecenie-dojazd"
       >
         {trip ?? (distanceLoading ? "Liczę dojazd…" : "")}
@@ -158,8 +174,10 @@ function Kafel({
   disabledReason: string | null;
   testId: string;
 }) {
+  // `min-h-14`, a nie `h-14`: adres („ul. Marszałkowska 100 lok. 44, Warszawa”)
+  // nie mieści się na 390 px w jednej linii, a to jedyna treść tego kafla.
   const base =
-    "flex h-14 min-w-0 items-center gap-2.5 rounded-xl border px-3 text-left transition-colors";
+    "flex min-h-14 min-w-0 items-center gap-2.5 rounded-xl border px-3 py-1.5 text-left transition-colors";
   const body = (
     <>
       <Icon
@@ -168,8 +186,10 @@ function Kafel({
       />
       <span className="min-w-0 flex-1">
         <span className="block truncate text-sm font-semibold leading-tight">{label}</span>
+        {/* Bez `block`: `line-clamp-2` ustawia własny `display`, a `block` stoi
+            w arkuszu później i klamra przestawała działać. */}
         {sub && (
-          <span className="block truncate text-xs leading-tight text-muted-foreground">{sub}</span>
+          <span className="text-xs leading-tight text-muted-foreground line-clamp-2">{sub}</span>
         )}
       </span>
     </>

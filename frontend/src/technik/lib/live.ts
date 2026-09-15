@@ -29,6 +29,13 @@ export type TechnikLiveKind = "updated" | "deleted" | "unassigned" | "notes";
 
 export interface TechnikLiveChange {
   kind: TechnikLiveKind;
+  /**
+   * `true` = to nie sygnał z biura, tylko dociągnięcie stanu po wznowieniu
+   * strumienia (restart backendu, uśpiona karta): w przerwie broker niczego nie
+   * powtórzy, więc listy przeładowują się same, a ekrany NIE pokazują
+   * komunikatów „biuro zmieniło…”.
+   */
+  resync?: boolean;
   /** Id zleceń objętych zmianą. Puste = „nie wiadomo które, przeładuj listę". */
   ids: number[];
   /** ISO z serwera — do logów; panel i tak reaguje natychmiast. */
@@ -76,6 +83,8 @@ const BACKOFF_MS = [1_000, 2_000, 5_000, 10_000, 30_000];
 let source: EventSource | null = null;
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
 let attempt = 0;
+/** Czy strumień był już kiedyś gotowy — drugie „ready” to wznowienie, nie start. */
+let everReady = false;
 
 function clearRetry(): void {
   if (retryTimer !== null) {
@@ -103,6 +112,11 @@ function openStream(): void {
   es.addEventListener("ready", () => {
     // Serwer się odezwał — następne zerwanie liczymy od najkrótszego odstępu.
     attempt = 0;
+    // Wznowienie po zerwaniu: sygnały z przerwy przepadły (broker w pamięci,
+    // bez powtórki) — jedno zbiorcze „przeładuj wszystko” zamiast liczenia na
+    // powrót fokusu.
+    if (everReady) emit({ kind: "updated", ids: [], at: new Date().toISOString(), resync: true });
+    everReady = true;
   });
   es.addEventListener("technik", (e) => {
     try {

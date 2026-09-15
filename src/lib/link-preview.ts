@@ -16,7 +16,7 @@
  * byłby dekoracją, bo `fetch` sam poszedłby za 302 na 127.0.0.1.
  *
  * Reszta ograniczeń: 6 s na całość, 512 KB ciała (czytane strumieniem, potem
- * abort), tylko `text/html` parsujemy, maks. 3 przekierowania, maks. 4 pobrania
+ * abort), tylko `text/html` parsujemy, maks. 6 przekierowań, maks. 4 pobrania
  * naraz w całym procesie i jedno naraz per URL.
  *
  * Wynik ląduje w tabeli `link_previews` (TTL: 7 dni dla `ok`, 1 h dla `error`).
@@ -76,7 +76,15 @@ export const TTL_ERROR_MS = 60 * 60 * 1000;
 
 const TIMEOUT_MS = 6_000;
 const MAX_BYTES = 512 * 1024;
-const MAX_REDIRECTS = 3;
+/**
+ * Ile przeskoków wolno przejść. Trójka była za mała dla Map Google: krótki
+ * `goo.gl/maps/…` rozwija się w `maps.google.com`, ten przerzuca na własny
+ * wariant adresu, a po drodze wchodzi jeszcze `consent.google.com` (zgoda na
+ * ciasteczka) — dwa dodatkowe skoki, po których zostawało „Za dużo
+ * przekierowań” zamiast karty. Dla linków niosących już punkt kończymy wcześniej
+ * (patrz `fetchPreviewRaw`), ale np. `/maps/search/<fraza>` musi dojść do końca.
+ */
+const MAX_REDIRECTS = 6;
 const MAX_PARALLEL = 4;
 const DESCRIPTION_MAX = 200;
 /** Zoom mini-mapy, gdy adres go nie niesie (kwartał ulic, a nie cała aglomeracja). */
@@ -465,6 +473,31 @@ async function fetchPreviewRaw(normalized: string): Promise<LinkPreview> {
     let res: Response | null = null;
 
     for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+      // Krótki link do Map (`goo.gl/maps/…`, `maps.app.goo.gl/…`) rozwija się w
+      // adres, który NIESIE JUŻ PUNKT — a dalej czeka jeszcze zgoda na
+      // ciasteczka (`consent.google.com`) i kolejne przerzuty, po których
+      // zostawało „Za dużo przekierowań” zamiast karty z mini-mapą. Skoro ze
+      // samego adresu da się odczytać współrzędne, nie ma po co pobierać strony:
+      // kończymy tutaj, a etykietę `resolveMap` weźmie z `/place/<Nazwa>` w
+      // adresie albo z geokodera odwrotnego. Ten sam wzorzec ma
+      // `GET /api/public/resolve-location` (src/routes/public.ts).
+      if (hop > 0) {
+        const fromUrl = parseGoogleMapsUrl(current);
+        if (fromUrl && fromUrl.lat !== undefined && fromUrl.lng !== undefined) {
+          const mapHost = bareHostname(new URL(current).hostname);
+          return {
+            ...base,
+            finalUrl: current,
+            host: mapHost,
+            title: null,
+            favicon: fallbackFavicon(mapHost),
+            siteName: mapHost,
+            status: "ok",
+            error: null,
+          };
+        }
+      }
+
       // Walidacja PRZY KAŻDYM przeskoku — 302 na 127.0.0.1 to najprostszy
       // sposób obejścia sprawdzenia zrobionego tylko raz, na wejściu.
       await assertFetchableUrl(current);

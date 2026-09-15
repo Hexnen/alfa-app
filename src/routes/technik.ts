@@ -92,9 +92,13 @@ const DEFAULT_HORIZON_DAYS = 14;
 
 /**
  * Koniec okna „Nadchodzące” liczony od dziś — WYŁĄCZNY, więc o jeden dzień
- * dalej niż horyzont listy. Front pyta dokładnie o to samo (dziś + 15 dni
- * wyłącznie, `frontend/src/technik/pages/Nadchodzace.tsx`); rozjazd o jeden
- * dzień dawał licznik na tab barze mniejszy niż liczba pozycji na liście.
+ * dalej niż horyzont listy (lista pyta o dziś + 15 dni wyłącznie,
+ * `frontend/src/technik/pages/Nadchodzace.tsx`).
+ *
+ * LICZNIK na tab barze zaczyna się natomiast od JUTRA: dzisiejsze zlecenia
+ * liczy plakietka „Dziś”, a technik chce wiedzieć „ile mam jeszcze przed sobą”,
+ * nie sumę obu zakładek. Lista „Nadchodzące” nadal pokazuje dziś jako pierwszą
+ * grupę — to widok, nie licznik.
  */
 const UPCOMING_END_OFFSET_DAYS = DEFAULT_HORIZON_DAYS + 1;
 
@@ -666,9 +670,9 @@ app.get("/me", (c) => {
         // technik z pełnym grafikiem widział na tab barze zaniżoną liczbę.
         today: myJobCount(tech.id, today, tomorrow),
         inProgress,
-        upcoming: myJobCount(tech.id, today, horizon),
+        upcoming: myJobCount(tech.id, tomorrow, horizon),
         changedToday: changedJobsCount(tech.id, user.id, today, tomorrow, seenToday),
-        changedUpcoming: changedJobsCount(tech.id, user.id, today, horizon, seenUpcoming),
+        changedUpcoming: changedJobsCount(tech.id, user.id, tomorrow, horizon, seenUpcoming),
       },
       office: officePoint(),
       /**
@@ -1023,7 +1027,9 @@ app.post("/jobs/:id/start", async (c) => {
       );
       addNote(tx, {
         eventId: ev.id,
-        text: `Rozpoczęto ${whenLabel(now)}`,
+        // Autor to „System”, więc nazwisko idzie w treści — biuro w kalendarzu ma
+        // widzieć, KTÓRY technik wszedł na obiekt, nie tylko o której.
+        text: `Rozpoczęto ${whenLabel(now)} — ${`${tech.firstName} ${tech.lastName}`.trim()}`,
         ctx,
         source: "system",
       });
@@ -1094,7 +1100,9 @@ app.post("/jobs/:id/finish", async (c) => {
       );
       addNote(tx, {
         eventId: ev.id,
-        text: noteText ? `Zakończono ${whenLabel(now)}. ${noteText}` : `Zakończono ${whenLabel(now)}`,
+        text: noteText
+          ? `Zakończono ${whenLabel(now)} — ${`${tech.firstName} ${tech.lastName}`.trim()}. ${noteText}`
+          : `Zakończono ${whenLabel(now)} — ${`${tech.firstName} ${tech.lastName}`.trim()}`,
         ctx,
         source: noteText ? "user" : "system",
       });
@@ -1149,7 +1157,7 @@ app.post("/jobs/:id/reopen", (c) => {
       );
       addNote(tx, {
         eventId: ev.id,
-        text: `Wznowiono ${whenLabel(now)}`,
+        text: `Wznowiono ${whenLabel(now)} — ${`${tech.firstName} ${tech.lastName}`.trim()}`,
         ctx,
         source: "system",
       });

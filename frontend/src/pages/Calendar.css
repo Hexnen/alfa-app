@@ -848,46 +848,233 @@
     font-size: 0.68rem;
   }
   .alfa-calendar .fc .fc-dayGridMonth-view .fc-daygrid-day-frame {
-    min-height: 4.5rem;
+    min-height: 4rem;
   }
   .alfa-calendar .fc .fc-col-header-cell-cushion {
     padding: 5px 2px;
   }
-  .alfa-calendar .fc .fc-list-event-time {
+
+  /* ---- Miesiąc: paski zamiast kafelków ----
+     Komórka dnia ma ~62 px — nie mieści ani tytułu, ani godziny (sama godzina
+     nie niesie informacji). Zamiast tego pasek w kolorze typu: widać ILE i JAKIE
+     prace są danego dnia, a szczegóły otwiera tapnięcie w dzień (→ widok Dzień).
+     Treść zostaje w DOM dla czytnika ekranu (sr-only), znika tylko z ekranu. */
+  .alfa-calendar .fc .fc-dayGridMonth-view .fc-daygrid-day-events {
+    margin-bottom: 2px;
+  }
+  .alfa-calendar .fc .fc-dayGridMonth-view .fc-daygrid-event-harness {
+    margin-top: 2px;
+  }
+  .alfa-calendar .fc .fc-dayGridMonth-view .fc-daygrid-event {
+    height: 9px;
+    min-height: 9px;
+    margin-inline: 2px;
+    padding: 0;
+    border: 0;
+    border-radius: 3px;
+    background: hsl(var(--ev));
+    overflow: hidden;
+  }
+  .alfa-calendar .fc .fc-dayGridMonth-view .fc-daygrid-event:hover {
+    background: hsl(var(--ev));
+    transform: none;
+    box-shadow: none;
+  }
+  .alfa-calendar .fc .fc-dayGridMonth-view .fc-daygrid-event.cal-status-done {
+    opacity: 0.45;
+  }
+  .alfa-calendar .fc .fc-dayGridMonth-view .fc-daygrid-event.cal-status-cancelled {
+    opacity: 0.35;
+    background: hsl(var(--ev));
+  }
+  /* Po terminie: czerwona zaślepka od lewej, nie obwódka — na pasku 9 px
+     obwódka zjada cały kolor typu i wszystko robi się czerwone. */
+  .alfa-calendar .fc .fc-dayGridMonth-view .fc-daygrid-event.cal-overdue {
+    box-shadow: inset 5px 0 0 hsl(var(--cal-overdue));
+  }
+  .alfa-calendar .fc .fc-dayGridMonth-view .fc-daygrid-event .cal-ev {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  /* „+N” pod paskami — licznik reszty dnia, prowadzi do widoku Dnia. */
+  .alfa-calendar .fc .fc-dayGridMonth-view .fc-daygrid-more-link {
+    margin: 3px 0 0 2px;
+    padding: 0 5px;
+    font-size: 0.62rem;
+  }
+
+  /* ---- Siatka godzinowa: węższa rynna, wyższe sloty (tap ≥ 40 px) ---- */
+  .alfa-calendar .fc .fc-timegrid-axis,
+  .alfa-calendar .fc .fc-timegrid-slot-label {
+    width: 2.5rem;
+  }
+  .alfa-calendar .fc .fc-timegrid-slot-label-cushion {
+    padding: 0 4px;
+    font-size: 0.72rem;
+  }
+  .alfa-calendar .fc .fc-timegrid-axis-cushion {
+    max-width: 2.5rem;
+    padding: 2px;
+    font-size: 0.55rem;
+    letter-spacing: 0;
+  }
+  .alfa-calendar .fc .fc-timegrid-slot {
+    height: 2.5rem;
+  }
+  /* „+N” w siatce godzinowej (`eventMaxStack`): FullCalendar nadaje mu inline
+     tylko `top`/`bottom`, więc domyślnie rozciąga się na całą wysokość i pełną
+     szerokość ukrytych wydarzeń — czyli leży NA kafelku i zamazuje tytuł.
+     Ścieśniamy go do pigułki w prawym górnym rogu (miejsce po znacznikach,
+     które przy wąskim kafelku i tak są schowane). */
+  .alfa-calendar .fc .fc-timegrid-more-link {
+    left: auto;
+    right: 2px;
+    bottom: auto !important;
     width: auto;
-  }
-  .alfa-calendar .cal-list-sub {
-    max-width: 12rem;
-  }
-  /* Pigułki (rozliczenie/protokół/realizacja) + status nie mieszczą się obok
-     tytułu na 390 px — pozwalamy im się zawinąć, zamiast rozpychać stronę. */
-  .alfa-calendar .cal-list-item {
-    flex-wrap: wrap;
-  }
-  .alfa-calendar .cal-list-badges {
-    flex-wrap: wrap;
-    max-width: 100%;
     min-width: 0;
+    max-width: calc(100% - 4px);
+    height: auto;
+    padding: 1px 5px;
+    border: 1px solid hsl(var(--primary) / 0.45);
+    border-radius: 999px;
+    background: hsl(var(--background));
+    color: hsl(var(--primary));
+    font-size: 0.62rem;
+    font-weight: 700;
+    line-height: 1.35;
+    z-index: 5;
   }
-  /* Komórka tytułu w tabeli listy ma stałą szerokość — pigułki muszą się w niej
-     zmieścić, inaczej rozpychają stronę w poziomie. */
-  .alfa-calendar .fc-list-event-title {
-    max-width: 0;
+  .alfa-calendar .fc .fc-timegrid-more-link .fc-timegrid-more-link-inner {
+    padding: 0;
+    white-space: nowrap;
+  }
+
+  /* ---- Dymek „+N więcej” ----
+     Bez tego popover ma ~531 px przy ekranie 390 px i wychodzi poza krawędź
+     razem z przyciskiem zamknięcia. */
+  .alfa-calendar .fc .fc-popover {
+    left: 8px !important;
+    right: 8px;
+    width: auto;
+    min-width: 0;
+    max-width: calc(100vw - 16px);
+  }
+  .alfa-calendar .fc .fc-popover-header {
+    padding: 8px 6px 8px 10px;
+  }
+  .alfa-calendar .fc .fc-popover-close {
+    opacity: 1;
+    padding: 4px 6px;
+    font-size: 1.05rem;
+  }
+  .alfa-calendar .fc .fc-popover-body {
+    max-height: 60vh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  .alfa-calendar .fc .fc-popover .fc-list-event-time,
+  .alfa-calendar .fc .fc-popover .fc-daygrid-event {
+    white-space: normal;
+  }
+
+  /* ---- Lista ----
+     Kolumny: `table-layout: fixed` nie działa tu tak, jak się wydaje — nagłówek
+     tabeli FullCalendara jest `position: absolute` (sr-only), więc pierwszym
+     wierszem W UKŁADZIE jest nagłówek dnia z `colspan="3"` i przeglądarka dzieli
+     szerokość na trzy równe części: 121 px na godzinę, 121 px na kropkę, 121 px
+     na tytuł. Dlatego na telefonie wracamy do układu automatycznego i pilnujemy
+     tylko, żeby minimalna szerokość treści była mała (tytuł i podpis przycięte
+     przez `line-clamp`, nie przez `nowrap` — `nowrap` trzyma min-content równy
+     całemu tekstowi i rozpycha tabelę). */
+  .alfa-calendar .fc .fc-list-event td {
+    padding: 6px 8px;
+  }
+  .alfa-calendar .fc .fc-list-event-time {
+    width: 4.25rem;
+    padding-right: 4px;
+    font-size: 0.7rem;
+    line-height: 1.15;
+    white-space: normal;
+  }
+  .alfa-calendar .fc .fc-list-event-graphic {
+    width: 1.1rem;
+    padding-inline: 0;
+  }
+  .alfa-calendar .fc .fc-list-event-dot {
+    border-width: 4px;
+  }
+  .alfa-calendar .cal-list-item {
+    display: grid;
+    /* Pigułki dostają własny wiersz — postawione obok tytułu wyznaczałyby
+       szerokość kolumny swoim max-content (trzy pigułki = ~250 px) i tytuł
+       znikał z wiersza. */
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    grid-template-areas:
+      "ico title  series status"
+      "ico sub    sub    sub"
+      "ico badges badges badges";
+    align-items: center;
+    column-gap: 6px;
+    row-gap: 1px;
   }
   .alfa-calendar .cal-list-item > * {
     min-width: 0;
   }
-  /* Po zawinięciu pigułki zaczynają wiersz od lewej (bez margin-left:auto). */
-  .alfa-calendar .cal-list-badges,
-  .alfa-calendar .cal-list-status {
+  .alfa-calendar .cal-list-item > .cal-ev-icon {
+    grid-area: ico;
+  }
+  /* `line-clamp` zamiast `nowrap` + wielokropka: przycina tak samo, ale
+     min-content komórki zostaje mały, więc tabela nie rozpycha strony. */
+  .alfa-calendar .cal-list-item > .cal-ev-title {
+    grid-area: title;
+    display: -webkit-box;
+    -webkit-line-clamp: 1;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+    white-space: normal;
+    font-size: 0.78rem;
+  }
+  .alfa-calendar .cal-list-item > .cal-ev-series {
+    grid-area: series;
+  }
+  .alfa-calendar .cal-list-item > .cal-list-sub {
+    grid-area: sub;
+    display: -webkit-box;
+    -webkit-line-clamp: 1;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+    white-space: normal;
+    max-width: none;
+    font-size: 0.7rem;
+  }
+  .alfa-calendar .cal-list-item > .cal-list-badges {
+    grid-area: badges;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    justify-self: end;
+    margin-left: 0;
+  }
+  .alfa-calendar .cal-list-item > .cal-list-status {
+    grid-area: status;
+    justify-self: end;
     margin-left: 0;
   }
   .alfa-calendar .cal-skeleton {
     padding-top: 36px;
   }
-  /* Nagłówki dni w liście przyklejone do sticky toolbara (wys. ~3.25rem). */
+  /* Nagłówki dni w liście przyklejone pod paskiem strony (4rem) i paskiem
+     kalendarza — jego realną wysokość podaje `--alfa-cal-toolbar-h`
+     (ResizeObserver w CalendarPage). */
   .alfa-calendar .fc .fc-list-sticky .fc-list-day > * {
-    top: 3.25rem;
+    top: calc(4rem + var(--alfa-cal-toolbar-h, 3.25rem));
   }
 }
 
@@ -924,14 +1111,10 @@
   overflow-wrap: break-word;
 }
 @media (max-width: 767px) {
-  /* Na wąskich ekranach tabela nie może rozpychać strony w poziomie. */
-  .alfa-calendar .fc-list-table {
-    table-layout: fixed;
-  }
-  .alfa-calendar .fc-list-event-time {
-    width: 5.5rem;
-    white-space: normal;
-  }
+  /* Układ automatyczny — `table-layout: fixed` dzielił szerokość na trzy równe
+     kolumny (nagłówek tabeli jest poza układem, patrz sekcja „Kompaktowa siatka
+     na małych ekranach”). Przed rozpychaniem strony chroni mały min-content
+     treści: tytuł i podpis są przycinane `line-clamp`-em, nie `nowrap`-em. */
   .alfa-calendar .fc-list-event-title {
     overflow-wrap: anywhere;
   }

@@ -73,7 +73,10 @@ export function Naglowek({
           <h1 className="truncate text-base font-semibold leading-tight" title={title}>
             {title}
           </h1>
-          <div className="flex min-w-0 items-center gap-1.5">
+          {/* `flex-wrap`: przy 320/360 px godziny („dziś 14:00–16:00”) nie
+              mieszczą się obok pigułki typu i wcześniej ucinały się w pół —
+              teraz schodzą do własnej linii w całości. */}
+          <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5">
             {/* Pigułka typu: ikona niesie znaczenie także bez koloru. Na telefonie
                 zostaje sama ikona — etykieta „Konserwacja” zjadała tam godziny,
                 a to ta sama konwencja, co na karcie zlecenia. */}
@@ -87,7 +90,7 @@ export function Naglowek({
               {TypeIcon && <TypeIcon className="h-3 w-3" aria-hidden />}
               <span className="hidden sm:inline">{typeMeta?.label ?? job.typeLabel}</span>
             </span>
-            <span className="truncate text-xs tabular-nums text-muted-foreground">
+            <span className="whitespace-nowrap text-xs tabular-nums text-muted-foreground">
               {when} {hours}
             </span>
             <WeatherMark brief={weather} compact />

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Minus, Plus } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { scrollFieldIntoView } from "../lib/keyboard";
 
 /**
  * STEPPER ± — godziny protokołu (±0,5 h), kilometry (±1 km).
@@ -63,7 +64,7 @@ export function Stepper({
       aria-label={label}
       data-testid={testId}
       className={cn(
-        "inline-flex items-center gap-1 rounded-xl border border-input bg-background p-1",
+        "inline-flex items-center gap-2 rounded-xl border border-input bg-background p-1",
         disabled && "opacity-60",
         className,
       )}
@@ -90,6 +91,9 @@ export function Stepper({
             // nie ma się dopisywać do tego, co technik wpisze.
             setDraft(String(value).replace(".", ","));
             requestAnimationFrame(() => e.target.select());
+            // Stepper stoi w kroku 1 protokołu na samym dole ekranu — bez tego
+            // „Godziny” i „Kilometry” chowały się pod klawiaturą iPada.
+            scrollFieldIntoView(e.currentTarget);
           }}
           onChange={(e) => {
             const raw = e.target.value;

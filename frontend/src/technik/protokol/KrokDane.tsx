@@ -3,6 +3,7 @@ import type { TechnikJobDistance } from "@/lib/api";
 import { Input } from "@/components/ui/input";
 import { REALIZATION_WORK_TYPE_META } from "@/lib/calendar-labels";
 import { cn } from "@/lib/utils";
+import { scrollFieldIntoView } from "../lib/keyboard";
 import { Chip, ChipGroup } from "../ui/chip";
 import { Field, Panel, ReadRow, WarnNote } from "../ui/panel";
 import { Stepper } from "../ui/stepper";
@@ -99,7 +100,7 @@ export function KrokDane({
       {/* --- DATA I GODZINY ------------------------------------------ */}
       <Panel icon={CalendarDays} title="Wykonanie">
         <Field label="Data wykonania" htmlFor="p-date">
-          <ChipGroup className="mb-2">
+          <ChipGroup>
             <Chip
               selected={form.workDate === today}
               disabled={readOnly}
@@ -125,6 +126,7 @@ export function KrokDane({
             value={form.workDate}
             disabled={readOnly}
             onChange={(e) => set("workDate", e.target.value)}
+            onFocus={(e) => scrollFieldIntoView(e.currentTarget)}
             className="h-12 w-full text-base tabular-nums"
           />
         </Field>
@@ -137,7 +139,7 @@ export function KrokDane({
               : "Bez godzin biuro nie rozliczy zlecenia — wstaw z planu albo dolicz stepperem."
           }
         >
-          <ChipGroup className="mb-2">
+          <ChipGroup>
             {plannedHours != null && (
               <Chip
                 selected={form.actualHours === plannedHours}

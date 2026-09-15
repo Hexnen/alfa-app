@@ -1,3 +1,4 @@
+import { Suspense, lazy } from "react";
 import {
   BrowserRouter,
   Routes,
@@ -6,70 +7,196 @@ import {
   useLocation,
 } from "react-router-dom";
 import { Layout } from "./components/Layout";
-import { Dashboard } from "./pages/Dashboard";
-import { Contractors } from "./pages/Contractors";
-import { Objects } from "./pages/Objects";
-import { Salespeople } from "./pages/Salespeople";
-import { Spolki } from "./pages/Spolki";
-import { ObjectDetails } from "./pages/ObjectDetails";
-import { Contracts } from "./pages/Contracts";
-import { ContractDetails } from "./pages/ContractDetails";
-import { Orders } from "./pages/Orders";
-import { Technical } from "./pages/Technical";
-import { Kadry } from "./pages/Kadry";
-import { Analityka, AnalitykaRedirect } from "./pages/Analityka";
-import { Monitoring } from "./pages/Monitoring";
-import { Templates } from "./pages/Templates";
-import { Warehouse } from "./pages/Warehouse";
-import { Manuals } from "./pages/Manuals";
-import { CoNowego } from "./pages/CoNowego";
-import { Uslugi } from "./pages/Uslugi";
-import { Oferty } from "./pages/Oferty";
-import { Calendar } from "./pages/Calendar";
-import { OrderDetails } from "./pages/OrderDetails";
-import { CmaReports } from "./pages/CmaReports";
-import { CmaReportDetails } from "./pages/CmaReportDetails";
-import { CmaTrends } from "./pages/CmaTrends";
-import { CmaCameraOutages } from "./pages/CmaCameraOutages";
-import { CmaObjects } from "./pages/CmaObjects";
-import { CmaInterventionGroups } from "./pages/CmaInterventionGroups";
-import { CmaSettings } from "./pages/CmaSettings";
-import { Ofi } from "./pages/Ofi";
-import { HandlowyPulpit } from "./pages/HandlowyPulpit";
-import { HandlowyLeady } from "./pages/HandlowyLeady";
-import { HandlowyLeadDetails } from "./pages/HandlowyLeadDetails";
-import { HandlowyKalendarz } from "./pages/HandlowyKalendarz";
-import { HandlowyAktywnosci } from "./pages/HandlowyAktywnosci";
-import { HandlowyKontakty } from "./pages/HandlowyKontakty";
-import { AdminUsers } from "./pages/AdminUsers";
-import { AdminAssistant } from "./pages/AdminAssistant";
-import { AdminCalendar } from "./pages/AdminCalendar";
-import { AdminCompany } from "./pages/AdminCompany";
-import { AdminMail } from "./pages/AdminMail";
-import { AdminTechnik } from "./pages/AdminTechnik";
-import { PublicOrderForm } from "./pages/PublicOrderForm";
-import { PublicOffer } from "./pages/PublicOffer";
 import { PluginImportBridge } from "./components/PluginImportBridge";
-import { TechnikApp } from "./technik/TechnikApp";
 import { useAuth } from "./auth/AuthProvider";
 import { usePerms, tabKeyForPath } from "./auth/permissions";
 import AuthScreen from "./auth/AuthScreen";
 
+/*
+ * PODZIAŁ BUNDLA
+ *
+ * Każda strona top-level wchodzi przez `React.lazy`, bo inaczej jeden build
+ * sklejał całego CRM-a (kalendarz, designer monitoringu, magazyn, oferty,
+ * asystent) w jeden plik ~3,3 MB — a technik na LTE ściągał go w całości, żeby
+ * zobaczyć cztery zlecenia. W chunku wejściowym zostaje tylko powłoka:
+ * router, `AuthProvider`, `Layout` i ekran logowania.
+ *
+ * Strony eksportują nazwane komponenty (nie `default`), stąd `.then(...)`
+ * przepisujące eksport na `default` — tego wymaga `React.lazy`.
+ */
+
+// Panel technika — osobna aplikacja na tablet; jego chunk nie ma prawa ciągnąć
+// niczego z CRM-a poza wspólnymi klockami `components/ui` i `lib/api`.
+const TechnikApp = lazy(() =>
+  import("./technik/TechnikApp").then((m) => ({ default: m.TechnikApp })),
+);
+
+// Publiczne, niezalogowane trasy — klient otwiera je z linku w mailu i nie ma
+// powodu ściągać przy tym CRM-a.
+const PublicOrderForm = lazy(() =>
+  import("./pages/PublicOrderForm").then((m) => ({ default: m.PublicOrderForm })),
+);
+const PublicOffer = lazy(() =>
+  import("./pages/PublicOffer").then((m) => ({ default: m.PublicOffer })),
+);
+
+const Dashboard = lazy(() =>
+  import("./pages/Dashboard").then((m) => ({ default: m.Dashboard })),
+);
+const CoNowego = lazy(() =>
+  import("./pages/CoNowego").then((m) => ({ default: m.CoNowego })),
+);
+const Contractors = lazy(() =>
+  import("./pages/Contractors").then((m) => ({ default: m.Contractors })),
+);
+const Objects = lazy(() =>
+  import("./pages/Objects").then((m) => ({ default: m.Objects })),
+);
+const ObjectDetails = lazy(() =>
+  import("./pages/ObjectDetails").then((m) => ({ default: m.ObjectDetails })),
+);
+const Salespeople = lazy(() =>
+  import("./pages/Salespeople").then((m) => ({ default: m.Salespeople })),
+);
+const Spolki = lazy(() => import("./pages/Spolki").then((m) => ({ default: m.Spolki })));
+const Contracts = lazy(() =>
+  import("./pages/Contracts").then((m) => ({ default: m.Contracts })),
+);
+const ContractDetails = lazy(() =>
+  import("./pages/ContractDetails").then((m) => ({ default: m.ContractDetails })),
+);
+const Orders = lazy(() => import("./pages/Orders").then((m) => ({ default: m.Orders })));
+const OrderDetails = lazy(() =>
+  import("./pages/OrderDetails").then((m) => ({ default: m.OrderDetails })),
+);
+const Technical = lazy(() =>
+  import("./pages/Technical").then((m) => ({ default: m.Technical })),
+);
+const Monitoring = lazy(() =>
+  import("./pages/Monitoring").then((m) => ({ default: m.Monitoring })),
+);
+const Templates = lazy(() =>
+  import("./pages/Templates").then((m) => ({ default: m.Templates })),
+);
+const Calendar = lazy(() =>
+  import("./pages/Calendar").then((m) => ({ default: m.Calendar })),
+);
+const Warehouse = lazy(() =>
+  import("./pages/Warehouse").then((m) => ({ default: m.Warehouse })),
+);
+const Manuals = lazy(() =>
+  import("./pages/Manuals").then((m) => ({ default: m.Manuals })),
+);
+const Uslugi = lazy(() => import("./pages/Uslugi").then((m) => ({ default: m.Uslugi })));
+const Oferty = lazy(() => import("./pages/Oferty").then((m) => ({ default: m.Oferty })));
+const Kadry = lazy(() => import("./pages/Kadry").then((m) => ({ default: m.Kadry })));
+const Analityka = lazy(() =>
+  import("./pages/Analityka").then((m) => ({ default: m.Analityka })),
+);
+const AnalitykaRedirect = lazy(() =>
+  import("./pages/Analityka").then((m) => ({ default: m.AnalitykaRedirect })),
+);
+const Ofi = lazy(() => import("./pages/Ofi").then((m) => ({ default: m.Ofi })));
+const HandlowyPulpit = lazy(() =>
+  import("./pages/HandlowyPulpit").then((m) => ({ default: m.HandlowyPulpit })),
+);
+const HandlowyLeady = lazy(() =>
+  import("./pages/HandlowyLeady").then((m) => ({ default: m.HandlowyLeady })),
+);
+const HandlowyLeadDetails = lazy(() =>
+  import("./pages/HandlowyLeadDetails").then((m) => ({
+    default: m.HandlowyLeadDetails,
+  })),
+);
+const HandlowyKalendarz = lazy(() =>
+  import("./pages/HandlowyKalendarz").then((m) => ({ default: m.HandlowyKalendarz })),
+);
+const HandlowyAktywnosci = lazy(() =>
+  import("./pages/HandlowyAktywnosci").then((m) => ({ default: m.HandlowyAktywnosci })),
+);
+const HandlowyKontakty = lazy(() =>
+  import("./pages/HandlowyKontakty").then((m) => ({ default: m.HandlowyKontakty })),
+);
+const CmaReports = lazy(() =>
+  import("./pages/CmaReports").then((m) => ({ default: m.CmaReports })),
+);
+const CmaReportDetails = lazy(() =>
+  import("./pages/CmaReportDetails").then((m) => ({ default: m.CmaReportDetails })),
+);
+const CmaTrends = lazy(() =>
+  import("./pages/CmaTrends").then((m) => ({ default: m.CmaTrends })),
+);
+const CmaCameraOutages = lazy(() =>
+  import("./pages/CmaCameraOutages").then((m) => ({ default: m.CmaCameraOutages })),
+);
+const CmaObjects = lazy(() =>
+  import("./pages/CmaObjects").then((m) => ({ default: m.CmaObjects })),
+);
+const CmaInterventionGroups = lazy(() =>
+  import("./pages/CmaInterventionGroups").then((m) => ({
+    default: m.CmaInterventionGroups,
+  })),
+);
+const CmaSettings = lazy(() =>
+  import("./pages/CmaSettings").then((m) => ({ default: m.CmaSettings })),
+);
+const AdminUsers = lazy(() =>
+  import("./pages/AdminUsers").then((m) => ({ default: m.AdminUsers })),
+);
+const AdminAssistant = lazy(() =>
+  import("./pages/AdminAssistant").then((m) => ({ default: m.AdminAssistant })),
+);
+const AdminCalendar = lazy(() =>
+  import("./pages/AdminCalendar").then((m) => ({ default: m.AdminCalendar })),
+);
+const AdminCompany = lazy(() =>
+  import("./pages/AdminCompany").then((m) => ({ default: m.AdminCompany })),
+);
+const AdminMail = lazy(() =>
+  import("./pages/AdminMail").then((m) => ({ default: m.AdminMail })),
+);
+const AdminTechnik = lazy(() =>
+  import("./pages/AdminTechnik").then((m) => ({ default: m.AdminTechnik })),
+);
+
+/** Pełnoekranowy stan ładowania — ten sam co w `AuthedApp`, gdy czekamy na sesję. */
+function FullPageFallback() {
+  return (
+    <div className="min-h-dvh flex items-center justify-center text-muted-foreground text-sm">
+      Ładowanie…
+    </div>
+  );
+}
+
+/**
+ * Stan ładowania strony WEWNĄTRZ `Layout` — sidebar i nagłówek już stoją, więc
+ * nie zabieramy całej wysokości ekranu, tylko obszar treści.
+ */
+function PageFallback() {
+  return (
+    <div className="flex min-h-[40vh] items-center justify-center text-muted-foreground text-sm">
+      Ładowanie…
+    </div>
+  );
+}
+
 function App() {
   return (
     <BrowserRouter>
-      <Routes>
-        {/* Public, unauthenticated intake form (external Alfa branding) */}
-        <Route path="/formularz/zlecenie" element={<PublicOrderForm />} />
-        {/* Public, unauthenticated client-facing offer (link + print/PDF) */}
-        <Route path="/oferta/:token" element={<PublicOffer />} />
-        {/* Panel technika — osobna aplikacja na tablet, poza `AuthedApp` i poza
-            `Layout`. Ma własny ekran logowania i własną powłokę; `AuthProvider`
-            opakowuje całe `App`, więc konto jest to samo co w CRM. */}
-        <Route path="/technik/*" element={<TechnikApp />} />
-        {/* Everything else goes through the authenticated app shell */}
-        <Route path="/*" element={<AuthedApp />} />
-      </Routes>
+      <Suspense fallback={<FullPageFallback />}>
+        <Routes>
+          {/* Public, unauthenticated intake form (external Alfa branding) */}
+          <Route path="/formularz/zlecenie" element={<PublicOrderForm />} />
+          {/* Public, unauthenticated client-facing offer (link + print/PDF) */}
+          <Route path="/oferta/:token" element={<PublicOffer />} />
+          {/* Panel technika — osobna aplikacja na tablet, poza `AuthedApp` i poza
+              `Layout`. Ma własny ekran logowania i własną powłokę; `AuthProvider`
+              opakowuje całe `App`, więc konto jest to samo co w CRM. */}
+          <Route path="/technik/*" element={<TechnikApp />} />
+          {/* Everything else goes through the authenticated app shell */}
+          <Route path="/*" element={<AuthedApp />} />
+        </Routes>
+      </Suspense>
     </BrowserRouter>
   );
 }
@@ -78,11 +205,7 @@ function AuthedApp() {
   const { user, loading, offline, retry } = useAuth();
 
   if (loading) {
-    return (
-      <div className="min-h-dvh flex items-center justify-center text-muted-foreground text-sm">
-        Ładowanie…
-      </div>
-    );
+    return <FullPageFallback />;
   }
   // `/api/auth/me` nie doszło (padł backend, zerwana sieć) — nie wiemy, kim
   // jest użytkownik, więc ekran logowania byłby fałszywą informacją „sesja
@@ -116,7 +239,8 @@ function AuthedApp() {
           i WEWNĄTRZ routera (używa `useNavigate`), a nie w `App`, gdzie
           obejmowałby też publiczne trasy bez sesji. */}
       <PluginImportBridge />
-      <Routes>
+      <Suspense fallback={<PageFallback />}>
+        <Routes>
         <Route path="/" element={<Dashboard />} />
         {/* Historia zmian — dostępna dla każdego zalogowanego, bez uprawnień. */}
         <Route path="/co-nowego" element={<CoNowego />} />
@@ -186,7 +310,8 @@ function AuthedApp() {
           <Route path="/admin/poczta" element={<AdminMail />} />
           <Route path="/admin/technik" element={<AdminTechnik />} />
         </Routes>
-      </Layout>
+      </Suspense>
+    </Layout>
   );
 }
 
