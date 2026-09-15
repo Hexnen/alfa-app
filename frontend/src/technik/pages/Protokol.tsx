@@ -26,6 +26,7 @@ import { clockOf, dayOf } from "../lib/dates";
 import { getJobDistance, peekJobDistance } from "../lib/distance";
 import { ActionTimeDialog } from "../ui/action-time";
 import { rememberDeviceNames } from "../lib/devices";
+import { jobCanProtocol } from "../lib/jobs";
 import {
   STEP_KEYS,
   shortContactName,
@@ -574,15 +575,24 @@ export function Protokol() {
   }
 
   if (!protocol || !form) {
+    // Typ bez papieru („nagranie”, „biuro”, urlop): backend odmówiłby założenia,
+    // więc zamiast przycisku prowadzącego w 409 mówimy wprost, o co chodzi.
+    // Ekran zlecenia karty protokołu w ogóle nie pokazuje — tu trafia się
+    // z zapamiętanego adresu albo po zmianie typu przez biuro.
+    const noProtocolType = !!job && !jobCanProtocol(job);
     return (
       <div className="pt-4">
         <EmptyState
           icon={ClipboardList}
-          title="Protokołu jeszcze nie ma"
-          description={error ?? "Załóż go tutaj albo na ekranie zlecenia."}
+          title={noProtocolType ? "To zlecenie nie ma protokołu" : "Protokołu jeszcze nie ma"}
+          description={
+            noProtocolType
+              ? `${job?.typeLabel ?? "Ten typ"} rozlicza się bez papieru — wystarczą notatki i zdjęcia przy zleceniu.`
+              : (error ?? "Załóż go tutaj albo na ekranie zlecenia.")
+          }
           action={
             <div className="flex flex-col gap-2 sm:flex-row">
-              {canEdit && !error && (
+              {canEdit && !error && !noProtocolType && (
                 <Button className="h-11" disabled={creating} onClick={() => void createProtocol()}>
                   {creating ? "Zakładam…" : "Załóż protokół"}
                 </Button>

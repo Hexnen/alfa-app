@@ -20,7 +20,7 @@ import { markJobSeen } from "../lib/seen";
 import { useJobWeather } from "../lib/useWeather";
 import { useTechnikAccess } from "../lib/access";
 import { clockOf, dayOf, timeOf } from "../lib/dates";
-import { jobStateOf } from "../lib/jobs";
+import { jobCanProgress, jobCanProtocol, jobStateOf } from "../lib/jobs";
 import { Naglowek } from "../zlecenie/Naglowek";
 import { KafleAkcji } from "../zlecenie/KafleAkcji";
 import { CoDoZrobienia } from "../zlecenie/CoDoZrobienia";
@@ -175,6 +175,11 @@ export function Zlecenie() {
   }
 
   const state = jobStateOf(job);
+  // Co na tym zleceniu da się zrobić — rozstrzyga backend, bo to on zna
+  // ustawienia kalendarza. Typ bez protokołu („nagranie”, „biuro”) nie dostaje
+  // karty papieru, urlop dodatkowo nie ma „Rozpocznij”.
+  const canProtocol = jobCanProtocol(job);
+  const canProgress = jobCanProgress(job);
 
   const start = async (at?: string) => {
     if (busy) return;
@@ -274,8 +279,9 @@ export function Zlecenie() {
         <KafleAkcji job={job} distance={distance} distanceLoading={distanceLoading} />
 
         {/* Zlecenie bez obiektu: protokół wyjdzie niepełny, a dojazdu nie ma
-            z czego policzyć. To informacja, nie blokada. */}
-        {job.objectId == null && (
+            z czego policzyć. To informacja, nie blokada — i tylko tam, gdzie
+            papier w ogóle powstaje (dzień w biurze obiektu nie ma z definicji). */}
+        {job.objectId == null && canProtocol && (
           <WarnNote data-testid="zlecenie-bez-obiektu">
             Zlecenie nie ma przypiętego obiektu — adres i dane klienta w protokole trzeba będzie
             sprawdzić z biurem.
@@ -291,15 +297,20 @@ export function Zlecenie() {
           onChanged={reload}
         />
 
-        <ProtokolKarta
-          jobId={job.id}
-          protocol={job.protocol}
-          detail={protocolDetail}
-          canEdit={canEdit}
-          busy={busy}
-          cancelled={state === "cancelled"}
-          onCreate={() => void openProtocol()}
-        />
+        {/* Karta papieru tylko dla zleceń, które go mają. Dla „nagrania” czy
+            dnia w biurze backend odpowiedziałby 409, więc zamiast przycisku
+            prowadzącego w błąd nie ma tu nic. */}
+        {canProtocol && (
+          <ProtokolKarta
+            jobId={job.id}
+            protocol={job.protocol}
+            detail={protocolDetail}
+            canEdit={canEdit}
+            busy={busy}
+            cancelled={state === "cancelled"}
+            onCreate={() => void openProtocol()}
+          />
+        )}
       </div>
 
       <PasekAkcji
@@ -309,6 +320,8 @@ export function Zlecenie() {
         canEdit={canEdit}
         busy={busy}
         hasProtocol={job.protocol != null}
+        canProtocol={canProtocol}
+        canProgress={canProgress}
         onStart={() => setAskTime("start")}
         onFinish={() => setAskTime("finish")}
         onProtocol={() => void openProtocol()}

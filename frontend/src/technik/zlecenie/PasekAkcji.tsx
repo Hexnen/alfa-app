@@ -30,6 +30,11 @@ function canReopen(state: JobState, finishedAt: string | null): boolean {
  *
  * Bez prawa edycji (podgląd zlecenia) zostaje sam stan: pasek nie znika, żeby
  * treść nie podskakiwała, ale nie obiecuje akcji zakończonej błędem 403.
+ *
+ * TAK SAMO DLA TYPÓW BEZ AKCJI. Panel pokazuje dziś każdy typ przypisany
+ * technikowi: urlop nie ma czego „rozpoczynać” (`canProgress`), a „nagranie”
+ * czy „biuro” nie mają protokołu (`canProtocol`). Zamiast przycisku, który
+ * wraca z 409, zostaje sam stan — pasek trzyma wtedy tylko linijkę po lewej.
  */
 export function PasekAkcji({
   state,
@@ -38,6 +43,8 @@ export function PasekAkcji({
   canEdit,
   busy,
   hasProtocol,
+  canProtocol = true,
+  canProgress = true,
   onStart,
   onFinish,
   onProtocol,
@@ -49,6 +56,10 @@ export function PasekAkcji({
   canEdit: boolean;
   busy: boolean;
   hasProtocol: boolean;
+  /** Czy dla tego typu w ogóle istnieje protokół (backend: `canProtocol`). */
+  canProtocol?: boolean;
+  /** Czy „Rozpocznij”/„Zakończ”/„Wznów” mają sens (backend: `canProgress`). */
+  canProgress?: boolean;
   onStart: () => void;
   onFinish: () => void;
   onProtocol: () => void;
@@ -56,19 +67,23 @@ export function PasekAkcji({
   onReopen: () => void;
 }) {
   const actions = canEdit && state !== "cancelled";
-  const reopenable = actions && canReopen(state, finishedAt);
+  const reopenable = actions && canProgress && canReopen(state, finishedAt);
 
+  // `null` = ten typ nie ma głównej akcji (urlop bez protokołu, „nagranie” po
+  // zakończeniu) — pasek zostaje wtedy przy samej linijce stanu.
   const primary =
-    state === "planned"
+    state === "planned" && canProgress
       ? { label: "Rozpocznij", icon: Play, onClick: onStart }
-      : state === "running"
+      : state === "running" && canProgress
         ? { label: "Zakończ", icon: CircleCheckBig, onClick: onFinish }
-        : {
-            label: hasProtocol ? "Otwórz protokół" : "Protokół",
-            icon: FileText,
-            onClick: onProtocol,
-          };
-  const PrimaryIcon = primary.icon;
+        : canProtocol
+          ? {
+              label: hasProtocol ? "Otwórz protokół" : "Protokół",
+              icon: FileText,
+              onClick: onProtocol,
+            }
+          : null;
+  const PrimaryIcon = primary?.icon;
 
   return (
     <div className="fixed inset-x-0 bottom-kb-nav z-40 border-t bg-background/95 backdrop-blur-sm">
@@ -104,7 +119,7 @@ export function PasekAkcji({
             )}
             {/* Protokół bywa potrzebny jeszcze przed „Zakończ” (klient podpisuje
                 przy aucie), więc w toku zostaje OBOK głównej akcji. */}
-            {state === "running" && (
+            {state === "running" && canProtocol && (
               <Button
                 variant="outline"
                 size="lg"
@@ -117,16 +132,18 @@ export function PasekAkcji({
                 <span className="sr-only sm:not-sr-only">Protokół</span>
               </Button>
             )}
-            <Button
-              size="lg"
-              className="h-12 shrink-0 px-5 text-base"
-              disabled={busy}
-              onClick={primary.onClick}
-              data-testid="zlecenie-akcja"
-            >
-              <PrimaryIcon className="mr-2 h-5 w-5" />
-              {busy ? "Chwileczkę…" : primary.label}
-            </Button>
+            {primary && PrimaryIcon && (
+              <Button
+                size="lg"
+                className="h-12 shrink-0 px-5 text-base"
+                disabled={busy}
+                onClick={primary.onClick}
+                data-testid="zlecenie-akcja"
+              >
+                <PrimaryIcon className="mr-2 h-5 w-5" />
+                {busy ? "Chwileczkę…" : primary.label}
+              </Button>
+            )}
           </>
         )}
       </div>

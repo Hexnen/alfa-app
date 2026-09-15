@@ -33,7 +33,7 @@ import { briefTextOf, noteEventLinks, noteOfRow, noteWithAttachments, type Note 
 import type { MsgMail } from "./outlook-msg.js";
 import { attachmentOfRow, type StoredAttachment } from "./calendar-attachments.js";
 import { expandOccurrences, describeRule, shiftLocal, diffMinutes, type RecurrenceRule } from "./calendar-recurrence.js";
-import { ApiError, BILLING_HIDDEN_TYPES, BILLING_LABELS, PROTOCOL_TYPES, STATUS_LABELS, TYPE_LABELS } from "./calendar-labels.js";
+import { ApiError, BILLING_HIDDEN_TYPES, BILLING_LABELS, PROTOCOL_TYPES, STATUS_LABELS, TECHNIK_PUSH_TYPES, TYPE_LABELS } from "./calendar-labels.js";
 import { queueTechnicianPush, type PushCollapse } from "./push.js";
 import { rememberEventTechnicians } from "./calendar-live.js";
 import { mentionKeys } from "./note-mentions.js";
@@ -618,17 +618,17 @@ export function getEventRow(dbx: DbOrTx, id: number): CalendarEventRow | undefin
 // (src/lib/push.ts). Ani jeden z tych wywołań nie ma prawa opóźnić ani wywalić
 // mutacji kalendarza.
 //
-// CO WYSYŁAMY. Tylko to, co dla technika jest ZLECENIEM: dział techniczny
-// i typy objęte protokołem (serwis, montaż, demontaż, konserwacja, wizja).
-// Biuro, przygotowanie, urlopy, kafelki notatek i cały dział handlowy — nie.
+// CO WYSYŁAMY. To, co technik widzi w panelu: dział techniczny i każdy typ
+// poza urlopem (nieobecność, nie robota) oraz kafelkiem notatki. Dział
+// handlowy — nigdy, bo panelu technika w ogóle nie dotyczy.
 //
 // KOMU NIE WYSYŁAMY. Osobie, która sama tę zmianę zrobiła: technik klikający
 // „Zakończ" w panelu nie ma dostawać powiadomienia o własnym kliknięciu
 // (`excludeUserId` = `ctx.user.id`).
 // ---------------------------------------------------------------------------
 
-/** Typy, które w panelu technika są „zleceniem”. */
-const PUSH_TYPES = PROTOCOL_TYPES;
+/** Typy, które w panelu technika są „zleceniem” (TECHNIK_PUSH_TYPES = widoczne minus urlop). */
+const PUSH_TYPES = TECHNIK_PUSH_TYPES;
 
 /** Czy o tym wydarzeniu w ogóle powiadamiamy. */
 function isPushableEvent(ev: Pick<CalendarEventRow, "department" | "type">): boolean {

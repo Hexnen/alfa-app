@@ -10140,7 +10140,13 @@ export interface TechnikJobProtocol {
 /** Wiersz listy zleceń — dokładnie tyle, ile pokazuje karta na agendzie. */
 export interface TechnikJob {
   id: number;
-  /** Typ wydarzenia kalendarza (serwis, montaz, demontaz, konserwacja, wizja). */
+  /**
+   * Typ wydarzenia kalendarza. Panel pokazuje KAŻDY typ działu technicznego
+   * przypisany technikowi (serwis, montaż, demontaż, konserwacja, wizja, ale
+   * też nagranie, biuro, przygotowanie czy urlop), więc front nie może zakładać
+   * zamkniętej listy: nieznany typ dostaje etykietę z `typeLabel` i domyślne
+   * kolory (`lib/jobs.ts`).
+   */
   type: string;
   /** Etykieta typu po polsku — liczona przez backend, front jej nie tłumaczy. */
   typeLabel: string;
@@ -10176,6 +10182,15 @@ export interface TechnikJob {
   /** Czasy cudzych, nie-systemowych notatek (SQLite UTC), najnowsze pierwsze — do „x nowych notatek”. */
   foreignNotesAt?: string[];
   protocol: TechnikJobProtocol | null;
+  /**
+   * Czy dla tego zlecenia w ogóle istnieje protokół (typ objęty realizacją
+   * w ustawieniach kalendarza albo papier już jest). `false` — np. „nagranie”,
+   * „biuro”, urlop — chowa całą kartę protokołu: backend odpowiedziałby 409.
+   * Starszy backend pola nie odsyła (`undefined` = zachowaj się jak dotąd).
+   */
+  canProtocol?: boolean;
+  /** Czy mają sens „Rozpocznij”/„Zakończ”/„Wznów” (`false` dla urlopu). */
+  canProgress?: boolean;
   /** Imiona i nazwiska pozostałych techników z tego zlecenia. */
   coTechnicians: string[];
 }

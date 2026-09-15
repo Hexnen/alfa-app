@@ -8,6 +8,10 @@
  *
  * CZYJE ZLECENIA. Wyłącznie te, do których zalogowany jest przypisany:
  * `technicians.user_id = :me` (migracja 0101) → `calendar_event_assignees`.
+ * JAKIE TYPY: wszystkie z działu technicznego poza kafelkiem notatki —
+ * „nagranie”, dzień w biurze czy urlop to też jego grafik (TECHNIK_JOB_TYPES
+ * w src/lib/calendar-labels.ts). Czego na danym typie NIE da się zrobić
+ * (protokół, „Rozpocznij”), mówią flagi `canProtocol`/`canProgress` w JobJson.
  * Konto bez powiązania nie jest błędem — dostaje `linked: false` i pustą listę,
  * a mutacje 409; tak wygląda świeżo założone konto, zanim admin je podepnie.
  *
@@ -25,12 +29,18 @@
 import { Hono, type Context } from "hono";
 import { createReadStream, statSync } from "node:fs";
 import { Readable } from "node:stream";
-import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, ne, notInArray, or, sql } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
-import type { CalendarEvent as CalendarEventRow, Protocol, User } from "../db/schema.js";
+import type { CalendarEvent as CalendarEventRow, CalendarEventType, Protocol, User } from "../db/schema.js";
 import { getUser } from "../middleware/auth.js";
 import { canEdit } from "../lib/auth/permissions.js";
-import { ApiError, PROTOCOL_TYPES, TYPE_LABELS } from "../lib/calendar-labels.js";
+import {
+  ApiError,
+  TECHNIK_HIDDEN_TYPES,
+  TYPE_LABELS,
+  technikCanProgress,
+} from "../lib/calendar-labels.js";
+import { getCalendarConfig, isRealizationType } from "../lib/calendar-config.js";
 import {
   addNote,
   canManageNote,
@@ -174,9 +184,15 @@ function handleError(c: Context, error: unknown, what: string) {
 // ---------------------------------------------------------------------------
 
 /**
- * Warunki „to jest zlecenie TEGO technika": dział techniczny, żywe, nieanulowane,
- * typ z pracami na obiekcie (PROTOCOL_TYPES) i przypisanie do niego.
- * Urlopy, biuro i przygotowanie celowo poza listą — to nie są wyjazdy do klienta.
+ * Warunki „to jest dzień TEGO technika": dział techniczny, żywe, nieanulowane
+ * i przypisanie do wydarzenia.
+ *
+ * TYPU NIE FILTRUJEMY (poza `notatka`, patrz TECHNIK_HIDDEN_TYPES). Wcześniej
+ * na tablet wchodziły wyłącznie typy z protokołem, więc „nagranie”, „biuro”
+ * czy „przygotowanie” przypisane technikowi znikały bez śladu — z jego punktu
+ * widzenia biuro po prostu o nich nie powiedziało. Skoro ktoś wpisał technika
+ * do wydarzenia działu technicznego, to jest to jego robota; co da się na niej
+ * zrobić (protokół, „Rozpocznij”) rozstrzygają osobno flagi w `JobJson`.
  *
  * `includeCancelled` — wyłącznie dla POJEDYNCZEGO zlecenia (`myEvent`). Push
  * „Zlecenie odwołane" prowadzi wprost na `/technik/zlecenie/<id>`, a odwołane
@@ -190,7 +206,7 @@ function mineConditions(technicianId: number, opts: { includeCancelled?: boolean
     eq(schema.calendarEvents.department, "technical"),
     isNull(schema.calendarEvents.deletedAt),
     ...(opts.includeCancelled ? [] : [ne(schema.calendarEvents.status, "cancelled")]),
-    inArray(schema.calendarEvents.type, [...PROTOCOL_TYPES]),
+    notInArray(schema.calendarEvents.type, [...TECHNIK_HIDDEN_TYPES]),
     sql`${schema.calendarEvents.id} IN (SELECT event_id FROM calendar_event_assignees WHERE technician_id = ${technicianId})`,
   ];
 }
@@ -318,6 +334,22 @@ export interface JobJson {
   /** Czasy (SQLite UTC) cudzych, nie-systemowych notatek, najnowsze pierwsze — „x nowych notatek” na kafelku. */
   foreignNotesAt: string[];
   protocol: JobProtocolBrief | null;
+  /**
+   * Czy dla tego zlecenia w ogóle da się mieć protokół. Papier powstaje tylko
+   * z realizacji, a tę dostają WYŁĄCZNIE typy objęte ustawieniem kalendarza
+   * (`calendar.realization_types`, domyślnie prace na obiekcie). „Nagranie”,
+   * „biuro”, „przygotowanie” czy urlop protokołu nie mają i nie będą miały —
+   * front chowa wtedy przycisk, zamiast prowadzić technika w 409.
+   *
+   * Liczone z KONFIGURACJI, nie ze sztywnej listy: admin może dołożyć typ
+   * w /admin/kalendarz i panel ma to od razu uszanować.
+   */
+  canProtocol: boolean;
+  /**
+   * Czy „Rozpocznij”/„Zakończ”/„Wznów” mają tu sens (patrz `technikCanProgress`).
+   * `false` dla urlopu — to nieobecność, nie robota z godzinami.
+   */
+  canProgress: boolean;
   /** Pozostali technicy na tym zleceniu (imię i nazwisko) — z kim jedzie. */
   coTechnicians: string[];
 }
@@ -346,6 +378,9 @@ function protocolBrief(p: Protocol | null): JobProtocolBrief | null {
 function toJobs(rows: CalendarEventRow[], technicianId: number, userId: number | null = null): JobJson[] {
   if (rows.length === 0) return [];
   const ids = rows.map((r) => r.id);
+  // Ustawienia kalendarza raz na cały zbiór — to zapytania po kluczu głównym,
+  // ale nie ma powodu powtarzać ich dla każdego z 500 zleceń w oknie.
+  const calendarCfg = getCalendarConfig().values;
 
   const objectIds = [...new Set(rows.map((r) => r.objectId).filter((v): v is number => v != null))];
   const objects = objectIds.length
@@ -476,6 +511,8 @@ function toJobs(rows: CalendarEventRow[], technicianId: number, userId: number |
       notesCount: notesByEvent.get(ev.id) ?? 0,
       foreignNotesAt: foreignNotesAt.get(ev.id) ?? [],
       protocol: protocolBrief(proto ?? null),
+      canProtocol: proto != null || isRealizationType(ev.type as CalendarEventType, calendarCfg),
+      canProgress: technikCanProgress(ev.type as CalendarEventType),
       coTechnicians: coByEvent.get(ev.id) ?? [],
     };
   });
@@ -944,6 +981,20 @@ function mutationTarget(c: Context, rawId: string): { tech: LinkedTechnician; ev
   return { tech, ev, ctx: ctxOf(c) };
 }
 
+/**
+ * „Rozpocznij”/„Zakończ”/„Wznów” opisują pracę z godzinami. Urlop wchodzi na
+ * listę (technik ma widzieć zajęty dzień), ale nie ma w nim czego startować:
+ * front tych przycisków nie pokazuje, a router nie ma prawa na to liczyć —
+ * żądanie z odświeżonej karty sprzed zmiany typu też tu trafi.
+ */
+function assertProgressable(ev: CalendarEventRow): void {
+  if (technikCanProgress(ev.type as CalendarEventType)) return;
+  throw new ApiError(
+    409,
+    `${TYPE_LABELS[ev.type] ?? ev.type} to nie jest zlecenie — nie ma czego rozpoczynać ani kończyć`
+  );
+}
+
 /** „HH:MM" z czasu lokalnego serwera — do treści notatki systemowej. */
 function hhmm(d: Date): string {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
@@ -1003,6 +1054,7 @@ function momentFromBody(body: Record<string, unknown>, ev: CalendarEventRow): Da
 app.post("/jobs/:id/start", async (c) => {
   try {
     const { tech, ev, ctx } = mutationTarget(c, c.req.param("id"));
+    assertProgressable(ev);
     // Idempotentnie: drugie kliknięcie (odświeżona karta, słaby zasięg) nie
     // przestawia godziny rozpoczęcia i nie dopisuje drugiej notatki.
     if (ev.startedAt) {
@@ -1050,6 +1102,7 @@ app.post("/jobs/:id/start", async (c) => {
 app.post("/jobs/:id/finish", async (c) => {
   try {
     const { tech, ev, ctx } = mutationTarget(c, c.req.param("id"));
+    assertProgressable(ev);
     const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
     const noteText = typeof body.note === "string" ? body.note.trim() : "";
     // Idempotentnie, tak jak „Rozpocznij”: drugie tapnięcie na słabym zasięgu
@@ -1135,6 +1188,7 @@ const REOPEN_WINDOW_MS = 24 * 60 * 60 * 1000;
 app.post("/jobs/:id/reopen", (c) => {
   try {
     const { tech, ev, ctx } = mutationTarget(c, c.req.param("id"));
+    assertProgressable(ev);
     if (!ev.finishedAt || ev.status !== "done") {
       throw new ApiError(409, "Zlecenie nie jest zakończone");
     }
@@ -1308,9 +1362,16 @@ app.delete("/attachments/:attachmentId", (c) => {
  * który stoi u klienta. „ręcznie odpięte” nic mu nie mówi — a to jedyny powód,
  * którego nie naprawi sam.
  */
-function protocolBlockedMessage(reason: string | undefined): string {
+function protocolBlockedMessage(reason: string | undefined, ev?: CalendarEventRow): string {
   if (reason === "ręcznie odpięte") {
     return "Biuro odpięło to zlecenie od realizacji — zadzwoń do biura";
+  }
+  // Typ spoza ustawienia realizacji („nagranie”, „biuro”, urlop): to nie jest
+  // awaria do zgłoszenia, tylko właściwość tej roboty. Front i tak chowa wtedy
+  // przycisk (`canProtocol`), ale link z pamięci przeglądarki trafia tutaj.
+  if (reason === "typ nieobjęty") {
+    const label = ev ? TYPE_LABELS[ev.type] ?? ev.type : "To zlecenie";
+    return `${label} nie ma protokołu — takiej roboty nie rozlicza się papierem`;
   }
   return `Nie można założyć protokołu: ${reason ?? "nieznany powód"}`;
 }
@@ -1381,7 +1442,7 @@ app.post("/jobs/:id/protocol", (c) => {
           error:
             "protocol" in outcome && outcome.protocol
               ? "To zlecenie ma już protokół"
-              : protocolBlockedMessage(outcome.reason),
+              : protocolBlockedMessage(outcome.reason, ev),
           data: { protocol: "protocol" in outcome ? protocolBrief(outcome.protocol ?? null) : null },
         },
         409

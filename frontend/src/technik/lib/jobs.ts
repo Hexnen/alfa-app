@@ -78,6 +78,26 @@ export function typeChipClass(type: string): string {
 }
 
 /**
+ * CZY TO ZLECENIE MA PAPIER.
+ *
+ * Panel pokazuje wszystkie typy przypisane technikowi, ale protokół powstaje
+ * tylko z realizacji — „nagranie”, „biuro”, „przygotowanie” i urlop jej nie
+ * dostają, więc przycisk „Protokół” kończyłby się komunikatem błędu. Decyduje
+ * BACKEND (`canProtocol` liczone z ustawień kalendarza, nie ze sztywnej listy
+ * typów); starsza odpowiedź bez tego pola zachowuje się jak dotąd.
+ */
+export function jobCanProtocol(job: Pick<TechnikJob, "canProtocol" | "protocol">): boolean {
+  // Papier, który już jest, otwieramy zawsze — nawet gdyby admin właśnie zdjął
+  // ten typ z listy objętych realizacją.
+  return job.protocol != null || (job.canProtocol ?? true);
+}
+
+/** Czy mają sens „Rozpocznij”/„Zakończ”/„Wznów” (urlop: nie). */
+export function jobCanProgress(job: Pick<TechnikJob, "canProgress">): boolean {
+  return job.canProgress ?? true;
+}
+
+/**
  * Link do nawigacji. Gotowy `mapsUrl` z kartoteki wygrywa (pinezka stoi tam,
  * gdzie wjeżdża auto), a gdy go nie ma — wyszukiwanie po adresie. Sam adres
  * bez obiektu to i tak lepszy cel niż brak przycisku.

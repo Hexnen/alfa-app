@@ -63,9 +63,14 @@ export interface VersionUpdate {
  */
 export const UPDATES_CURRENT: VersionUpdate[] = [
   {
-    version: "1.11.0–1.13.0",
+    version: "1.11.0–1.14.0",
     date: "2026-09-15",
     entries: [
+      {
+        text: "Panel technika: na tablet trafiają wszystkie typy wydarzeń przypisane technikowi, nie tylko te z protokołem",
+        type: "feat",
+        module: "technik",
+      },
       {
         text: "Kalendarz na telefonie: pasek narzędzi zajmuje piątą część ekranu zamiast prawie połowy, widok wybiera się z listy, a datę z kalendarzyka po tapnięciu w tytuł",
         type: "feat",
@@ -291,9 +296,24 @@ export const UPDATES: VersionUpdate[] = [...UPDATES_CURRENT, ...UPDATES_2026];
  */
 export const UPDATES_TECHNIK: VersionUpdate[] = [
   {
-    version: "1.5.0–1.6.1",
+    version: "1.5.0–1.7.0",
     date: "2026-09-15",
     entries: [
+      {
+        text: "Na liście widzisz wszystko, co masz w grafiku: nagrania, biuro, przygotowanie i urlop, a nie tylko roboty z protokołem",
+        type: "feat",
+        module: "technik",
+      },
+      {
+        text: "Zlecenie bez protokołu (np. nagranie) da się rozpocząć i zakończyć jak każde inne, bez karty papieru",
+        type: "feat",
+        module: "technik",
+      },
+      {
+        text: "Urlop jest w grafiku tylko do wglądu, bez przycisków rozpoczynania",
+        type: "tweak",
+        module: "technik",
+      },
       { text: "Usprawnienia pod maską", type: "tweak", module: "technik" },
       {
         text: "Zmiany z biura (termin, opis, notatka, odwołanie, przypisanie) pojawiają się na liście i w zleceniu od razu, bez odświeżania",

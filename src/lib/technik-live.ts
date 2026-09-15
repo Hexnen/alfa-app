@@ -18,7 +18,7 @@
  */
 import { and, eq } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
-import { PROTOCOL_TYPES } from "./calendar-labels.js";
+import { TECHNIK_JOB_TYPES } from "./calendar-labels.js";
 import { getEventRow } from "./calendar-mutations.js";
 import type { CalendarChange } from "./calendar-live.js";
 
@@ -29,7 +29,7 @@ import type { CalendarChange } from "./calendar-live.js";
  *  - `notes`  — doszła/zmieniła się notatka przy zleceniu,
  *  - `deleted` — biuro usunęło wydarzenie,
  *  - `unassigned` — technika zdjęto ze zlecenia (albo zlecenie przestało nim być,
- *    np. po zmianie typu na „biuro"); zlecenie ma zniknąć z listy.
+ *    np. po zmianie typu na kafelek notatki); zlecenie ma zniknąć z listy.
  */
 export type TechnikChangeKind = "updated" | "deleted" | "unassigned" | "notes";
 
@@ -63,8 +63,8 @@ function isAssigned(eventId: number, technicianId: number): boolean {
  *
  * Rozstrzygnięcie per wydarzenie:
  *  - wydarzenia nie ma / jest usunięte, a technik był z nim związany → `deleted`,
- *  - technik nadal przypisany do zlecenia (dział techniczny + typ objęty
- *    protokołem) → `updated` albo `notes`. ODWOŁANE (`status = cancelled`) też
+ *  - technik nadal przypisany do zlecenia (dział techniczny + typ widoczny
+ *    w panelu) → `updated` albo `notes`. ODWOŁANE (`status = cancelled`) też
  *    tu wpada: to jest zmiana, którą technik ma zobaczyć na ekranie zlecenia,
  *    a z listy i tak wypadnie przy przeładowaniu,
  *  - przypisania już nie ma (albo wydarzenie przestało być zleceniem), a przed
@@ -90,7 +90,9 @@ export function technikChangesFor(change: CalendarChange, technicianId: number):
       deleted.push(id);
       continue;
     }
-    const isJob = row.department === "technical" && PROTOCOL_TYPES.includes(row.type);
+    // Ten sam zakres, co lista panelu (mineConditions): dział techniczny
+    // i wszystko poza kafelkiem notatki.
+    const isJob = row.department === "technical" && TECHNIK_JOB_TYPES.includes(row.type);
     if (assigned && isJob) mine.push(id);
     else gone.push(id);
   }

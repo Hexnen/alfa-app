@@ -7,8 +7,12 @@
  *
  * Co jest tu pilnowane:
  *   • technik widzi WYŁĄCZNIE zlecenia, do których jest przypisany — cudze 404,
- *   • dział handlowy, urlopy, anulowane i usunięte nie wchodzą na listę
+ *   • lista to WSZYSTKIE typy działu technicznego przypisane technikowi
+ *     (serwis, ale też „nagranie”, „biuro”, urlop) — poza kafelkiem notatki;
+ *     dział handlowy, anulowane i usunięte nadal nie wchodzą
  *     (router świadomie nie używa calendar-scope, patrz src/routes/technik.ts),
+ *   • typ bez protokołu: szczegóły 200 z `canProtocol: false`, a próba założenia
+ *     papieru → 409; urlop dodatkowo bez „Rozpocznij”/„Zakończ” (`canProgress`),
  *   • „Rozpocznij" jest idempotentne i podbija planned → confirmed,
  *   • „Zakończ" idzie wspólną ścieżką mutacji: wydarzenie dostaje realizację
  *     (dowód, że zadziałało `onEventUpdated`, a nie surowy UPDATE),
@@ -392,7 +396,7 @@ const object = db
 
 function insertEvent(p: {
   title: string;
-  type: "serwis" | "montaz" | "urlop" | "spotkanie";
+  type: "serwis" | "montaz" | "urlop" | "spotkanie" | "nagranie" | "biuro" | "notatka";
   department?: "technical" | "handlowy";
   status?: "planned" | "confirmed" | "done" | "cancelled";
   technicianIds: number[];
@@ -444,6 +448,12 @@ try {
     hour: 14,
   });
   const vacationJob = insertEvent({ title: "Urlop", type: "urlop", technicianIds: [tech.id], hour: 15 });
+  // Typy WYJAZDOWE/biurowe bez protokołu — panel ma je pokazywać tak samo jak serwis.
+  const recordingJob = insertEvent({ title: "Nagranie", type: "nagranie", technicianIds: [tech.id], hour: 7 });
+  const officeDayJob = insertEvent({ title: "Dzien w biurze", type: "biuro", technicianIds: [tech.id], hour: 8 });
+  // Kafelek notatki: jedyny typ, którego panel nie pokazuje NIGDY (nie ma techników,
+  // wskazuje notatkę innego wydarzenia) — tu wpisany ręcznie, żeby to udowodnić.
+  const noteTileJob = insertEvent({ title: "Kafelek notatki", type: "notatka", technicianIds: [tech.id], hour: 6 });
   const cancelledJob = insertEvent({ title: "Anulowane", type: "serwis", status: "cancelled", technicianIds: [tech.id], hour: 16 });
   const deletedJob = insertEvent({ title: "Usuniete", type: "serwis", technicianIds: [tech.id], deleted: true, hour: 17 });
 
@@ -484,9 +494,22 @@ try {
   ok("lista: zawiera własne zlecenia", [job, jobStart, jobFinish, jobProtocol].every((id) => listIds.includes(id)), listIds);
   ok("lista: NIE zawiera cudzego zlecenia", !listIds.includes(otherJob), listIds);
   ok("lista: NIE zawiera wydarzenia handlowego", !listIds.includes(salesJob), listIds);
-  ok("lista: NIE zawiera urlopu", !listIds.includes(vacationJob), listIds);
+  // „Wszystkie typy": technik widzi też nagranie, dzień w biurze i własny urlop —
+  // to jego grafik, a nie tylko lista robót z papierem.
+  ok("lista: zawiera nagranie (typ bez protokołu)", listIds.includes(recordingJob), listIds);
+  ok("lista: zawiera dzień w biurze", listIds.includes(officeDayJob), listIds);
+  ok("lista: zawiera urlop (grafik technika)", listIds.includes(vacationJob), listIds);
+  ok("lista: NIE zawiera kafelka notatki", !listIds.includes(noteTileJob), listIds);
   ok("lista: NIE zawiera anulowanego", !listIds.includes(cancelledJob), listIds);
   ok("lista: NIE zawiera usuniętego", !listIds.includes(deletedJob), listIds);
+
+  // Liczniki na tab barze też liczą wszystkie typy — nagranie na dziś ma je podbić.
+  const todayBefore = (await counts(""))?.today ?? 0;
+  insertEvent({ title: "Nagranie dzisiejsze", type: "nagranie", technicianIds: [tech.id], day: dayOffset(0), hour: 7 });
+  ok("me: nagranie na dziś podbija licznik „Dziś”", (await counts(""))?.today === todayBefore + 1, {
+    todayBefore,
+    after: (await counts(""))?.today,
+  });
 
   const first = ((list.data as Record<string, unknown>[]) ?? []).find((j) => j.id === job);
   ok("JobJson: obiekt, adres i kontakt z kartoteki", first?.objectName === `${PREFIX} Obiekt` && first?.address === "Testowa 1, Poznań" && first?.contactPerson === "Pani Basia", first);
@@ -500,7 +523,73 @@ try {
   ok("szczegóły: własne zlecenie → 200 z notatkami", detail.status === 200 && Array.isArray((detail.data as { notes?: unknown[] })?.notes), detail);
   ok("szczegóły: cudze zlecenie → 404", (await T("GET", `/jobs/${otherJob}`)).status === 404);
   ok("szczegóły: wydarzenie handlowe → 404", (await T("GET", `/jobs/${salesJob}`)).status === 404);
-  ok("szczegóły: urlop → 404", (await T("GET", `/jobs/${vacationJob}`)).status === 404);
+  ok("szczegóły: kafelek notatki → 404", (await T("GET", `/jobs/${noteTileJob}`)).status === 404);
+
+  // --- Typy bez protokołu: ekran działa, papieru nie ma -------------------
+  const recDetail = await T("GET", `/jobs/${recordingJob}`);
+  const recJob = recDetail.data as { type?: string; typeLabel?: string; canProtocol?: boolean; canProgress?: boolean; notes?: unknown[] };
+  ok(
+    "szczegóły: nagranie → 200 (nie 4xx) z etykietą typu i notatkami",
+    recDetail.status === 200 && recJob?.type === "nagranie" && recJob?.typeLabel === "Nagranie" && Array.isArray(recJob?.notes),
+    recDetail
+  );
+  ok("szczegóły: nagranie bez protokołu (canProtocol: false)", recJob?.canProtocol === false, recJob);
+  ok("szczegóły: nagranie MA rozpoczęcie (canProgress: true)", recJob?.canProgress === true, recJob);
+  const officeDetail = await T("GET", `/jobs/${officeDayJob}`);
+  ok(
+    "szczegóły: biuro → 200 z canProtocol: false",
+    officeDetail.status === 200 && (officeDetail.data as { canProtocol?: boolean })?.canProtocol === false,
+    officeDetail
+  );
+  const vacationDetail = await T("GET", `/jobs/${vacationJob}`);
+  const vacationData = vacationDetail.data as { canProtocol?: boolean; canProgress?: boolean };
+  ok(
+    "szczegóły: urlop → 200, ale bez protokołu i bez rozpoczęcia",
+    vacationDetail.status === 200 && vacationData?.canProtocol === false && vacationData?.canProgress === false,
+    vacationDetail
+  );
+  // Zlecenie typu serwis ma oba prawa — kontrola, że flagi nie są stale false.
+  ok(
+    "szczegóły: serwis ma canProtocol i canProgress",
+    (detail.data as { canProtocol?: boolean; canProgress?: boolean })?.canProtocol === true &&
+      (detail.data as { canProgress?: boolean })?.canProgress === true,
+    detail.data
+  );
+
+  // Protokół dla typu nieobjętego realizacją: 409 ze zdaniem po ludzku, nie 500.
+  const recProtocol = await T("POST", `/jobs/${recordingJob}/protocol`);
+  ok(
+    "protokół: typ bez realizacji („nagranie”) → 409 z czytelnym powodem",
+    recProtocol.status === 409 && /nie ma protokołu/i.test(recProtocol.error ?? ""),
+    recProtocol
+  );
+  // Urlopu się nie rozpoczyna ani nie kończy — to nieobecność, nie robota.
+  const vacStart = await T("POST", `/jobs/${vacationJob}/start`);
+  ok(
+    "start: urlop → 409 („to nie jest zlecenie”)",
+    vacStart.status === 409 && /nie jest zlecenie/i.test(vacStart.error ?? ""),
+    vacStart
+  );
+  const vacFinish = await T("POST", `/jobs/${vacationJob}/finish`, {});
+  ok("zakończ: urlop → 409", vacFinish.status === 409, vacFinish);
+  // Nagranie natomiast przechodzi normalną ścieżkę pracy.
+  const recStart = await T("POST", `/jobs/${recordingJob}/start`);
+  ok(
+    "start: nagranie → 200 (typ bez protokołu da się rozpocząć)",
+    recStart.status === 200 && !!(recStart.data as { startedAt?: string | null })?.startedAt,
+    recStart
+  );
+  const recFinish = await T("POST", `/jobs/${recordingJob}/finish`, {});
+  ok(
+    "zakończ: nagranie → 200, status done, BEZ realizacji",
+    recFinish.status === 200 &&
+      (recFinish.data as { status?: string })?.status === "done" &&
+      db.select({ r: schema.calendarEvents.realizationId }).from(schema.calendarEvents).where(eq(schema.calendarEvents.id, recordingJob)).get()?.r == null,
+    recFinish
+  );
+  // Notatka i zdjęcia działają na każdym typie — to jedyny dziennik „nagrania”.
+  const recNote = await T("POST", `/jobs/${recordingJob}/notes`, { text: `${PREFIX} materiał zgrany` });
+  ok("notatka: typ bez protokołu przyjmuje wpis do dziennika", recNote.status === 201, recNote);
 
   // =========================================================================
   // 4. Rozpocznij — idempotentne, planned → confirmed
@@ -1105,7 +1194,7 @@ try {
       sent
     );
 
-    // Typy spoza protokołu i cudze działy nie są zleceniem technika.
+    // Typ bez protokołu jest zleceniem technika tak samo jak serwis (cudze działy nie).
     sent.length = 0;
     db.transaction((tx) =>
       createEvent(
@@ -1122,7 +1211,30 @@ try {
       )
     );
     await flushPush();
-    ok("push: typ spoza protokołów (biuro) → 0 ładunków", sent.length === 0, sent);
+    ok(
+      "push: typ bez protokołu (biuro) też jest zleceniem → 1 ładunek",
+      sent.length === 1 && sent[0].title === "Nowe zlecenie" && /Biuro —/.test(sent[0].body),
+      sent
+    );
+
+    // Urlop to nieobecność: widać go w panelu, ale telefonu nim nie budzimy.
+    sent.length = 0;
+    db.transaction((tx) =>
+      createEvent(
+        tx,
+        parseInput({
+          type: "urlop",
+          title: `${PREFIX} Push urlop`,
+          department: "technical",
+          startAt: `${FUTURE_DAY}T08:00`,
+          endAt: `${FUTURE_DAY}T16:00`,
+          technicianIds: [tech.id],
+        }),
+        { user: adminUser }
+      )
+    );
+    await flushPush();
+    ok("push: urlop → 0 ładunków", sent.length === 0, sent);
   } finally {
     restoreTransport();
   }
