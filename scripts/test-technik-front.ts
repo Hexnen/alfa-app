@@ -19,7 +19,9 @@
  *   • K1  — Enter, spacja i wcięcie przeżywają drogę przez stan pola „Uwagi”,
  *   • N1  — linia rozwinięta ręcznie („… - kanał 3”) to nadal czynność ze słownika,
  *   • N3  — `shortContactName` wycina nawiasy, telefony i maile z KAŻDEGO miejsca,
- *   • S4  — dzień podpisu liczony ze znacznika, a nie z pierwszych pięciu znaków ISO.
+ *   • S4  — dzień podpisu liczony ze znacznika, a nie z pierwszych pięciu znaków ISO,
+ *   • G1  — wybór z galerii: film odpada, HEIC jest rozpoznany, zdjęcie sprzed dnia
+ *           dostaje adnotację „17.09 14:20” (pełne zdanie siedzi w dymku).
  */
 process.env.TZ = "Europe/Warsaw";
 
@@ -29,8 +31,10 @@ import {
   formatStampDayMonth,
   isFutureStamp,
   parseStamp,
+  photoTakenLabel,
   upcomingDayOf,
 } from "../frontend/src/technik/lib/dates.js";
+import { isHeicLike, isImageLike } from "../frontend/src/technik/lib/image.js";
 import {
   shortContactName,
   toForm,
@@ -295,6 +299,46 @@ ok(
   formatStampDayMonth("2026-09-14 23:30:00"),
 );
 ok("brak podpisu = myślnik", formatStampDayMonth(null) === "—", formatStampDayMonth(null));
+
+/* ------------------------------------------------------------------ *
+ * G1 — zdjęcia z galerii: co wolno dołożyć i z jakiej daty
+ * ------------------------------------------------------------------ */
+
+console.log("\n— G1: rozpoznanie pliku z galerii —");
+const plik = (name: string, type: string) => new File([new Uint8Array([1])], name, { type });
+
+ok("zwykłe zdjęcie przechodzi", isImageLike(plik("IMG_1.jpg", "image/jpeg")));
+ok("film z galerii odpada", !isImageLike(plik("VID_1.mp4", "video/mp4")));
+ok("PDF z galerii odpada", !isImageLike(plik("umowa.pdf", "application/pdf")));
+// Udostępnianie z „Plików” na iPadzie potrafi nie podać typu MIME w ogóle.
+ok("bez typu MIME decyduje rozszerzenie", isImageLike(plik("IMG_2.HEIC", "")));
+ok("bez typu i bez rozszerzenia obrazka — odpada", !isImageLike(plik("notatka", "")));
+
+ok("HEIC po typie MIME", isHeicLike(plik("x.jpg", "image/heic")));
+ok("HEIC po rozszerzeniu, gdy typu brak", isHeicLike(plik("IMG_3.heic", "")));
+// Android przy udostępnianiu potrafi wstawić octet-stream zamiast typu.
+ok("HEIC w przebraniu octet-stream", isHeicLike(plik("IMG_4.HEIF", "application/octet-stream")));
+ok("JPEG to nie HEIC", !isHeicLike(plik("IMG_5.jpg", "image/jpeg")));
+// Po udanej konwersji plik nazywa się .jpg i ma typ image/jpeg — to jest
+// dokładnie ten warunek, po którym `prepareForUpload` poznaje sukces.
+ok("po konwersji nie zostaje śladu HEIC-a", !isHeicLike(plik("IMG_3.jpg", "image/jpeg")));
+
+console.log("\n— G1: data wykonania zdjęcia —");
+const TERAZ = new Date("2026-09-18T12:00:00");
+ok("świeże z aparatu — bez adnotacji", photoTakenLabel(TERAZ.getTime() - 60_000, TERAZ) === null);
+ok(
+  "wczorajsze z galerii — z datą i godziną",
+  photoTakenLabel(new Date("2026-09-17T14:20:00").getTime(), TERAZ) === "17.09 14:20",
+  photoTakenLabel(new Date("2026-09-17T14:20:00").getTime(), TERAZ),
+);
+ok(
+  "jednocyfrowy dzień i godzina mają zero wiodące",
+  photoTakenLabel(new Date("2026-09-03T08:05:00").getTime(), TERAZ) === "03.09 08:05",
+  photoTakenLabel(new Date("2026-09-03T08:05:00").getTime(), TERAZ),
+);
+// Zegar aparatu bywa ustawiony w przyszłość — wtedy lepiej nic nie pisać.
+ok("znacznik z przyszłości — bez adnotacji", photoTakenLabel(TERAZ.getTime() + 3_600_000, TERAZ) === null);
+ok("brak znacznika — bez adnotacji", photoTakenLabel(0, TERAZ) === null && photoTakenLabel(undefined, TERAZ) === null);
 
 console.log(`\n${failures === 0 ? "WSZYSTKO OK" : `BŁĘDÓW: ${failures}`}`);
 process.exit(failures === 0 ? 0 : 1);

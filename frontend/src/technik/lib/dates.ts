@@ -182,3 +182,34 @@ export function formatDatePl(iso: string | null | undefined): string {
   const [y, m, d] = day.split("-");
   return y && m && d ? `${d}.${m}.${y}` : day;
 }
+
+/** Ile wstecz zdjęcie uchodzi jeszcze za „prosto z aparatu” (bez adnotacji). */
+export const PHOTO_FRESH_MIN = 10;
+
+/**
+ * „17.09 14:20” — adnotacja przy zdjęciu WYBRANYM Z GALERII, czyli takim,
+ * którego `File.lastModified` jest wyraźnie starszy niż chwila wyboru.
+ *
+ * Po co: notatka dostaje datę WPISU, nie datę zdjęcia. Zdjęcie sprzed tygodnia
+ * dołożone do dzisiejszego zlecenia wygląda w kalendarzu biura jak dzisiejsze —
+ * a różnica bywa całym sensem wpisu („tak to zastałem w poniedziałek”).
+ *
+ * Sam znacznik, BEZ słowa „zrobione”: pasek ma się zmieścić w miniaturze
+ * szerokiej na jedną trzecią telefonu, a pełne zdanie siedzi w dymku.
+ *
+ * `null` dla zdjęcia świeżego (prosto z aparatu — adnotacja byłaby szumem)
+ * i dla znacznika, którego nie ma albo jest z przyszłości (zegar aparatu).
+ */
+export function photoTakenLabel(
+  lastModified: number | null | undefined,
+  now: Date = new Date(),
+): string | null {
+  if (typeof lastModified !== "number" || !Number.isFinite(lastModified) || lastModified <= 0) {
+    return null;
+  }
+  if (lastModified > now.getTime() - PHOTO_FRESH_MIN * 60_000) return null;
+  const d = new Date(lastModified);
+  if (Number.isNaN(d.getTime())) return null;
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(d.getDate())}.${p(d.getMonth() + 1)} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}

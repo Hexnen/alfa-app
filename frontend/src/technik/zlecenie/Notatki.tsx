@@ -5,6 +5,7 @@ import {
   ChevronDown,
   ChevronRight,
   FileText,
+  Images,
   MessageSquare,
   Paperclip,
   Send,
@@ -22,8 +23,8 @@ import { ClearableTextarea } from "../ui/clearable-input";
 import { ConfirmDialog } from "../ui/confirm";
 import { Lightbox } from "../ui/lightbox";
 import { useToast } from "../ui/toast";
-import { shrinkImage } from "../lib/image";
-import { clockOf } from "../lib/dates";
+import { isImageLike, prepareForUpload } from "../lib/image";
+import { clockOf, photoTakenLabel } from "../lib/dates";
 
 /**
  * NOTATKI — sekcja zwinięta domyślnie.
@@ -57,7 +58,9 @@ export function Notatki({
   /** Tekstowy postęp wysyłki („Przygotowuję 2 z 3…”) — kręciołek nic tu nie mówi. */
   const [progress, setProgress] = useState<string | null>(null);
   const [picked, setPicked] = useState<PickedPhoto[]>([]);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  /** Aparat (`capture`) i galeria (`multiple`) to DWA różne inputy — patrz pasek niżej. */
+  const cameraInputRef = useRef<HTMLInputElement>(null);
+  const galleryInputRef = useRef<HTMLInputElement>(null);
   /** Otwarty podgląd: notatka + indeks zdjęcia w jej galerii. */
   const [lightbox, setLightbox] = useState<{ noteId: number; index: number } | null>(null);
   /** Załącznik czekający na potwierdzenie usunięcia. */
@@ -77,26 +80,55 @@ export function Notatki({
   // pierwszy wiersz listy.
   const latest = notes[0];
 
-  /** Zdjęcia z `<input type="file">` — dokładane do już wybranych, do limitu serwera. */
+  /**
+   * Zdjęcia z `<input type="file">` — dokładane do już wybranych, do limitu
+   * serwera. Oba przyciski (aparat i galeria) wchodzą TĄ SAMĄ drogą.
+   *
+   * Multiwybór z galerii bywa hojny: przy przekroczeniu limitu bierzemy tyle,
+   * ile się mieści, i mówimy ile zostało za burtą — odrzucenie całej paczki
+   * kazałoby technikowi zaczynać wybór od zera. Filmy i inne nie-obrazki
+   * (Android pokazuje je w tym samym selektorze) wypadają od razu, zamiast
+   * wracać błędem serwera po minucie wysyłki.
+   */
   const pickPhotos = (list: FileList | null) => {
     if (!list || list.length === 0) return;
-    const room = CALENDAR_ATTACHMENT_MAX_FILES - picked.length;
-    if (room <= 0) {
-      toastError(`Do jednej notatki można dodać najwyżej ${CALENDAR_ATTACHMENT_MAX_FILES} zdjęć.`);
-      return;
-    }
-    const files = Array.from(list).slice(0, room);
-    if (list.length > room) {
-      toastError(
-        `Dodano ${files.length} z ${list.length} — limit to ${CALENDAR_ATTACHMENT_MAX_FILES} zdjęć na notatkę.`,
+    const all = Array.from(list);
+    const images = all.filter(isImageLike);
+    const skipped: string[] = [];
+    if (images.length < all.length) {
+      skipped.push(
+        all.length - images.length === 1
+          ? `„${all.find((f) => !isImageLike(f))?.name ?? "plik"}” to nie zdjęcie`
+          : `${all.length - images.length} plików to nie zdjęcia`,
       );
     }
+    const room = Math.max(0, CALENDAR_ATTACHMENT_MAX_FILES - picked.length);
+    const files = images.slice(0, room);
+    if (images.length > files.length) {
+      skipped.push(
+        `limit to ${CALENDAR_ATTACHMENT_MAX_FILES} zdjęć na notatkę, pominięto ${images.length - files.length}`,
+      );
+    }
+    if (skipped.length) {
+      // Część zdjęć weszła — to informacja, nie awaria; czerwień zostaje dla
+      // wyboru, z którego nie wpadło nic.
+      toast({
+        message: `${files.length ? `Dodano ${photoCount(files.length)}` : "Nic nie dodano"} — ${skipped.join("; ")}.`,
+        kind: files.length ? "info" : "error",
+        duration: 8000,
+      });
+    }
+    if (files.length === 0) return;
+    const now = new Date();
     setPicked((prev) => [
       ...prev,
       ...files.map((file) => ({
         key: `${file.name}-${file.lastModified}-${Math.random()}`,
         file,
         previewUrl: URL.createObjectURL(file),
+        // Zdjęcie z galerii bywa sprzed tygodnia — notatka dostanie dzisiejszą
+        // datę, więc dzień wykonania musi być widać przy miniaturze.
+        taken: photoTakenLabel(file.lastModified, now),
       })),
     ]);
   };
@@ -122,7 +154,10 @@ export function Notatki({
         const files: File[] = [];
         for (const [i, p] of picked.entries()) {
           setProgress(`Przygotowuję ${i + 1} z ${picked.length}…`);
-          files.push(await shrinkImage(p.file));
+          // Rzuca czytelnym zdaniem przy HEIC-u, którego nie zdekodowała ani
+          // przeglądarka, ani (za chwilę) serwer — wtedy nie leci NIC, a wybór
+          // zostaje na ekranie, żeby było co poprawić.
+          files.push(await prepareForUpload(p.file));
         }
         setProgress(`Wysyłam ${photoCount(files.length)}…`);
         await technikApi.addNoteWithFiles(jobId, { text: content, files });
@@ -226,12 +261,37 @@ export function Notatki({
               {picked.length > 0 && (
                 <ul className="grid grid-cols-3 gap-2 sm:grid-cols-5">
                   {picked.map((p) => (
-                    <li key={p.key} className="relative">
+                    <li key={p.key} className="relative overflow-hidden rounded-lg border">
+                      {/* Podkładka spod miniatury — widać ją, gdy przeglądarka
+                          nie zdekoduje pliku (HEIC z Androida). Bez niej
+                          w kafelku zostawał połamany obrazek z nazwą pliku
+                          wylewającą się poza ramkę. */}
+                      <span className="absolute inset-0 flex flex-col items-center justify-center gap-1 bg-muted px-1 text-center text-[10px] leading-tight text-muted-foreground">
+                        <Images className="h-4 w-4" aria-hidden />
+                        <span className="line-clamp-2 break-all">{p.file.name}</span>
+                      </span>
                       <img
                         src={p.previewUrl}
                         alt={p.file.name}
-                        className="aspect-square w-full rounded-lg border object-cover"
+                        className="relative aspect-square w-full object-cover"
+                        onError={(e) => {
+                          e.currentTarget.hidden = true;
+                        }}
                       />
+                      {/* Data wykonania tylko przy zdjęciu z galerii — przy
+                          świeżym z aparatu byłaby powtórzeniem „teraz”.
+                          Na pasku sam znacznik, pełne zdanie w dymku: przy
+                          trzech miniaturach w rzędzie „zrobione” urywało się
+                          w połowie i zostawało „zrobione 17.09 1…”. */}
+                      {p.taken && (
+                        <span
+                          className="pointer-events-none absolute inset-x-0 bottom-0 truncate rounded-b-lg bg-background/85 px-1 py-0.5 text-center text-[10px] leading-tight text-muted-foreground"
+                          title={`zrobione ${p.taken}`}
+                          data-testid="technik-note-photo-taken"
+                        >
+                          {p.taken}
+                        </span>
+                      )}
                       <button
                         type="button"
                         onClick={() => removePicked(p.key)}
@@ -250,43 +310,77 @@ export function Notatki({
                 </ul>
               )}
 
-              {/* Aparat obok wysyłki: na tablecie „Zdjęcie” otwiera aparat
-                  (capture), a przytrzymanie daje wybór z galerii. */}
+              {/* DWA WEJŚCIA NA ZDJĘCIA, bo telefon nie umie ich pogodzić
+                  w jednym: `capture="environment"` otwiera od razu celownik
+                  aparatu i przy okazji UNIEWAŻNIA `multiple` — z galerii nie
+                  dało się wtedy wziąć nic, a już na pewno nie serii. Więc
+                  „Aparat” to input z `capture`, a „Galeria” osobny, bez niego,
+                  za to z `multiple`. Oba lecą do tego samego `pickPhotos`.
+
+                  Na telefonie (390 px) galeria jest kwadratem 44 px z samą
+                  ikoną — inaczej trzy podpisy nie mieszczą się w jednym pasku
+                  z „Wyślij”; na tablecie dostaje podpis. */}
               <div className="flex gap-2">
                 <Button
                   variant="outline"
-                  className="h-11 shrink-0"
+                  className="h-11 shrink-0 px-3"
                   disabled={noteBusy}
-                  onClick={() => fileInputRef.current?.click()}
+                  onClick={() => cameraInputRef.current?.click()}
                   data-testid="technik-note-photo-button"
                 >
                   <Camera className="mr-2 h-4 w-4" />
-                  Zdjęcie
+                  Aparat
                 </Button>
                 <Button
-                  className="h-11 flex-1"
+                  variant="outline"
+                  className="h-11 w-11 shrink-0 p-0 sm:w-auto sm:px-3"
+                  disabled={noteBusy}
+                  onClick={() => galleryInputRef.current?.click()}
+                  aria-label="Wybierz z galerii"
+                  title="Wybierz z galerii"
+                  data-testid="technik-note-gallery-button"
+                >
+                  <Images className="h-4 w-4 sm:mr-2" aria-hidden />
+                  <span className="hidden sm:inline">Galeria</span>
+                </Button>
+                <Button
+                  className="h-11 min-w-0 flex-1"
                   disabled={(!noteText.trim() && picked.length === 0) || noteBusy}
                   onClick={() => void addNote()}
                   data-testid="zlecenie-notatka-zapisz"
                 >
-                  <Send className="mr-2 h-4 w-4" />
-                  {noteBusy
-                    ? (progress ?? "Zapisywanie…")
-                    : picked.length
-                      ? `Wyślij (${picked.length})`
-                      : "Dodaj notatkę"}
+                  <Send className="mr-2 h-4 w-4 shrink-0" />
+                  <span className="truncate">
+                    {noteBusy
+                      ? (progress ?? "Zapisywanie…")
+                      : picked.length
+                        ? `Wyślij (${picked.length})`
+                        : "Dodaj notatkę"}
+                  </span>
                 </Button>
               </div>
               <input
-                ref={fileInputRef}
+                ref={cameraInputRef}
                 type="file"
                 accept="image/*"
                 capture="environment"
-                multiple
                 className="hidden"
+                data-testid="technik-note-camera-input"
                 onChange={(e) => {
                   pickPhotos(e.target.files);
                   // Bez tego drugie zdjęcie tego samego pliku nie wywoła `change`.
+                  e.target.value = "";
+                }}
+              />
+              <input
+                ref={galleryInputRef}
+                type="file"
+                accept="image/*"
+                multiple
+                className="hidden"
+                data-testid="technik-note-gallery-input"
+                onChange={(e) => {
+                  pickPhotos(e.target.files);
                   e.target.value = "";
                 }}
               />
@@ -456,6 +550,8 @@ interface PickedPhoto {
   key: string;
   file: File;
   previewUrl: string;
+  /** „zrobione 17.09 14:20” dla zdjęcia z galerii; `null` dla świeżego z aparatu. */
+  taken: string | null;
 }
 
 function revokeAll(items: PickedPhoto[]): void {

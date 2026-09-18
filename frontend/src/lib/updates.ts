@@ -63,6 +63,17 @@ export interface VersionUpdate {
  */
 export const UPDATES_CURRENT: VersionUpdate[] = [
   {
+    version: "1.16.0",
+    date: "2026-09-18",
+    entries: [
+      {
+        text: "Panel technika: do notatki zlecenia można dodać zdjęcia z galerii telefonu, nie tylko prosto z aparatu",
+        type: "feat",
+        module: "technik",
+      },
+    ],
+  },
+  {
     version: "1.11.0–1.15.0",
     date: "2026-09-15",
     entries: [
@@ -300,6 +311,27 @@ export const UPDATES: VersionUpdate[] = [...UPDATES_CURRENT, ...UPDATES_2026];
  * wpisów — co się zmienia w robocie, bez nazw modułów i ekranów.
  */
 export const UPDATES_TECHNIK: VersionUpdate[] = [
+  {
+    version: "1.9.0",
+    date: "2026-09-18",
+    entries: [
+      {
+        text: "Obok „Aparat” jest „Galeria”: zdjęcia zrobione wcześniej dodajesz do notatki po kilka naraz, zamiast fotografować wszystko drugi raz",
+        type: "feat",
+        module: "technik",
+      },
+      {
+        text: "Przy zdjęciu z galerii widać, kiedy zostało zrobione",
+        type: "tweak",
+        module: "technik",
+      },
+      {
+        text: "Gdy telefon poda format, którego nie da się dodać, albo film zamiast zdjęcia, dostajesz jasny komunikat, a wybrane zdjęcia zostają na ekranie",
+        type: "fix",
+        module: "technik",
+      },
+    ],
+  },
   {
     version: "1.5.0–1.8.0",
     date: "2026-09-15",
