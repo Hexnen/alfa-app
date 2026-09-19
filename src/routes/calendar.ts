@@ -76,6 +76,7 @@ import { streamChangeFeed } from "../lib/sse-stream.js";
 import {
   ATTACHMENT_MAX_FILES,
   attachmentFilePath,
+  attachmentRows,
   contentDisposition,
   formFlag,
   parseNoteForm,
@@ -84,6 +85,7 @@ import {
   uploadRejectReason,
   type IncomingFile,
 } from "../lib/calendar-attachments.js";
+import type { ClientPhotoMeta } from "../lib/photo-meta.js";
 import { canManageNote, getNoteRow } from "../lib/calendar-mutations.js";
 import {
   attachmentsMetaOf,
@@ -436,6 +438,7 @@ function parseMailField(raw: unknown): MsgMail | null {
 async function readNoteBody(c: Context): Promise<{
   text: string;
   files: IncomingFile[];
+  photoMeta: Array<ClientPhotoMeta | null> | null;
   copyToObject: boolean;
   mail: MsgMail | null;
   extractMsgAttachments: boolean;
@@ -446,6 +449,7 @@ async function readNoteBody(c: Context): Promise<{
     return {
       text: String(body?.text ?? ""),
       files: [],
+      photoMeta: null,
       copyToObject: body?.copyToObject === true,
       mail: null,
       extractMsgAttachments: false,
@@ -453,12 +457,13 @@ async function readNoteBody(c: Context): Promise<{
   }
   const form = await c.req.formData().catch(() => null);
   if (!form) throw new ApiError(400, "Nieprawidłowe dane formularza");
-  // `text` + `files` czyta wspólny parser (ten sam, z którego korzysta panel
-  // technika); tu zostają już tylko pola kalendarza.
-  const { text, files } = await parseNoteForm(form);
+  // `text`, `files` i `photoMeta` czyta wspólny parser (ten sam, z którego
+  // korzysta panel technika); tu zostają już tylko pola kalendarza.
+  const { text, files, photoMeta } = await parseNoteForm(form);
   return {
     text,
     files,
+    photoMeta,
     copyToObject: formFlag(form, "copyToObject"),
     mail: parseMailField(form.get("mail")),
     extractMsgAttachments: formFlag(form, "extractMsgAttachments"),
@@ -524,7 +529,7 @@ app.post("/events/:id/notes", async (c) => {
   const id = Number(c.req.param("id"));
   if (!Number.isInteger(id)) return c.json({ success: false, error: "Nieprawidłowe id" }, 400);
   try {
-    const { text, files, copyToObject, mail, extractMsgAttachments: extractMsg } = await readNoteBody(c);
+    const { text, files, photoMeta, copyToObject, mail, extractMsgAttachments: extractMsg } = await readNoteBody(c);
     // Wydarzenie i treść sprawdzamy PRZED zapisem plików (żeby nie mielić obrazków
     // dla nieistniejącego wydarzenia); pliki lądują na dysku przed transakcją, a przy
     // błędzie wstawiania są sprzątane.
@@ -542,7 +547,9 @@ app.post("/events/:id/notes", async (c) => {
     const { extra, skipped } = mail && extractMsg ? extractMsgAttachments(files) : { extra: [], skipped: [] };
     const stored = await storeUploads(id, [...files, ...extra]);
     // storeUploads oddaje wyniki w kolejności wejścia — wszystko po `files` przyszło z maila.
-    const attachments = stored.map((a, i) => (i < files.length ? a : { ...a, origin: "msg" as const }));
+    // `photoMeta` z frontu jest wyrównane z `files`, więc załączniki z maila opisze
+    // wyłącznie EXIF odczytany przez serwer (i tak są nietknięte — nie szły przez canvas).
+    const attachments = attachmentRows(stored, photoMeta, (i) => (i < files.length ? undefined : "msg"));
     let note: Note;
     try {
       note = db.transaction((tx) => {

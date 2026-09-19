@@ -21,7 +21,10 @@
  *   • N3  — `shortContactName` wycina nawiasy, telefony i maile z KAŻDEGO miejsca,
  *   • S4  — dzień podpisu liczony ze znacznika, a nie z pierwszych pięciu znaków ISO,
  *   • G1  — wybór z galerii: film odpada, HEIC jest rozpoznany, zdjęcie sprzed dnia
- *           dostaje adnotację „17.09 14:20” (pełne zdanie siedzi w dymku).
+ *           dostaje adnotację „17.09 14:20” (pełne zdanie siedzi w dymku),
+ *   • F1  — metadane zdjęcia: EXIF → photoMeta (DMS→dziesiętne z półkulą, strefa
+ *           aparatu, fallback na datę pliku w Warszawie — też zimą), przycinanie
+ *           zestawu do 8 KB i formatery panelu „i” (1/x s, f/x, haversine).
  */
 process.env.TZ = "Europe/Warsaw";
 
@@ -41,6 +44,26 @@ import {
   toPayload,
   type FormState,
 } from "../frontend/src/technik/lib/protocol.js";
+import {
+  EXIF_MAX_BYTES,
+  dmsToDecimal,
+  epochToWarsaw,
+  exifDateToLocalIso,
+  exifToPhotoMeta,
+  formatAperture,
+  formatCoords,
+  formatExposureTime,
+  formatExtraValue,
+  formatMeters,
+  formatTakenAt,
+  haversineMeters,
+  mapsLink,
+  normalizeOffset,
+  parseJpegExif,
+  pickExtra,
+  takenAtEpoch,
+  toAttachmentMeta,
+} from "../frontend/src/lib/photo-meta.js";
 import {
   isActivityPicked,
   matchedActivity,
@@ -339,6 +362,208 @@ ok(
 // Zegar aparatu bywa ustawiony w przyszłość — wtedy lepiej nic nie pisać.
 ok("znacznik z przyszłości — bez adnotacji", photoTakenLabel(TERAZ.getTime() + 3_600_000, TERAZ) === null);
 ok("brak znacznika — bez adnotacji", photoTakenLabel(0, TERAZ) === null && photoTakenLabel(undefined, TERAZ) === null);
+
+
+/* ------------------------------------------------------------------ *
+ * F1 — metadane zdjęcia: EXIF → PhotoMetaInput i formatery panelu „i”
+ * ------------------------------------------------------------------ */
+
+console.log("\n— F1: współrzędne z EXIF-u —");
+// Stopnie-minuty-sekundy: 52° 13′ 46,92″ N = 52,2297.
+ok(
+  "DMS + N → dodatnia szerokość",
+  dmsToDecimal([52, 13, 46.92], "N") === 52.2297,
+  dmsToDecimal([52, 13, 46.92], "N"),
+);
+// Półkula S/W musi ZMIENIĆ ZNAK — bez tego zdjęcie z Chile ląduje w Europie.
+ok("DMS + S → ujemna szerokość", dmsToDecimal([33, 27, 0], "S") === -33.45, dmsToDecimal([33, 27, 0], "S"));
+ok("DMS + W → ujemna długość", dmsToDecimal([70, 39, 0], "W") === -70.65, dmsToDecimal([70, 39, 0], "W"));
+ok("DMS bez półkuli → dodatnia", dmsToDecimal([21, 0, 43.92], undefined) === 21.0122);
+ok("brak DMS → null", dmsToDecimal(undefined, "N") === null);
+
+console.log("\n— F1: data z EXIF-u i strefa —");
+ok(
+  'EXIF „2026:09:17 14:20:05” → lokalny ISO',
+  exifDateToLocalIso("2026:09:17 14:20:05") === "2026-09-17T14:20:05",
+  exifDateToLocalIso("2026:09:17 14:20:05"),
+);
+// Aparat bez ustawionej daty — to nie jest data, tylko puste pole.
+ok("EXIF „0000:00:00 00:00:00” → null", exifDateToLocalIso("0000:00:00 00:00:00") === null);
+ok("EXIF ze śmieci → null", exifDateToLocalIso("wczoraj") === null);
+ok('offset „+02:00” przechodzi', normalizeOffset("+02:00") === "+02:00");
+ok('offset „+0200” dostaje dwukropek', normalizeOffset("+0200") === "+02:00", normalizeOffset("+0200"));
+ok("offset ze śmieci → null", normalizeOffset("CEST") === null);
+
+// Lipiec = czas letni (UTC+2), styczeń = zimowy (UTC+1). Ta sama funkcja,
+// dwa różne przesunięcia — właśnie o to się rozbija „data z pliku”.
+ok(
+  "lastModified z lipca → 12:00 +02:00",
+  JSON.stringify(epochToWarsaw(Date.UTC(2026, 6, 1, 10, 0, 0))) ===
+    JSON.stringify({ takenAt: "2026-07-01T12:00:00", takenAtOffset: "+02:00" }),
+  epochToWarsaw(Date.UTC(2026, 6, 1, 10, 0, 0)),
+);
+ok(
+  "lastModified ze stycznia → 11:00 +01:00 (zima)",
+  JSON.stringify(epochToWarsaw(Date.UTC(2026, 0, 14, 10, 0, 0))) ===
+    JSON.stringify({ takenAt: "2026-01-14T11:00:00", takenAtOffset: "+01:00" }),
+  epochToWarsaw(Date.UTC(2026, 0, 14, 10, 0, 0)),
+);
+ok("lastModified = 0 → null", epochToWarsaw(0) === null);
+
+console.log("\n— F1: mapowanie EXIF → photoMeta —");
+const FAKTY = {
+  name: "IMG_0042.jpg",
+  type: "image/jpeg",
+  size: 3_145_728,
+  lastModified: Date.UTC(2026, 0, 14, 10, 0, 0),
+};
+const SUROWY = {
+  tags: {
+    Make: "Apple",
+    Model: "iPhone 13",
+    LensModel: "iPhone 13 back camera 5.7mm f/1.8",
+    DateTimeOriginal: "2026:09:17 14:20:05",
+    OffsetTimeOriginal: "+02:00",
+    Orientation: 6,
+    ISO: 200,
+    FNumber: 1.8,
+    ExposureTime: 0.008,
+    PixelXDimension: 4032,
+    PixelYDimension: 3024,
+  },
+  gps: {
+    GPSLatitude: [52, 13, 46.92],
+    GPSLatitudeRef: "N",
+    GPSLongitude: [21, 0, 43.92],
+    GPSLongitudeRef: "E",
+    GPSHPositioningError: 12,
+    GPSAltitude: 110,
+    GPSAltitudeRef: 0,
+  },
+  frame: { width: 4032, height: 3024 },
+};
+const META = exifToPhotoMeta(SUROWY, FAKTY, "camera");
+ok('data z EXIF-u wygrywa z datą pliku', META.takenAt === "2026-09-17T14:20:05" && META.takenAtSource === "exif", META);
+ok("strefa aparatu przepisana", META.takenAtOffset === "+02:00");
+ok("pinezka dziesiętna", META.gps?.lat === 52.2297 && META.gps?.lng === 21.0122, META.gps);
+ok("dokładność i wysokość", META.gps?.accuracyM === 12 && META.gps?.altitudeM === 110, META.gps);
+ok("aparat i obiektyw", META.camera?.make === "Apple" && META.camera?.model === "iPhone 13" && !!META.camera?.lens);
+// Orientation 6 = zdjęcie pionowe zapisane poziomo; w panelu mają stać boki,
+// które widać na ekranie, a nie te z matrycy.
+ok("obrót z EXIF-u zamienia boki", META.orig?.width === 3024 && META.orig?.height === 4032, META.orig);
+ok("waga i format oryginału", META.orig?.size === 3_145_728 && META.orig?.mime === "image/jpeg");
+ok("bez MakerNote i miniatur w extra", !("MakerNote" in (META.exif ?? {})));
+
+// Zdjęcie bez EXIF-u (zrzut ekranu, plik po canvasie) — zostaje data pliku,
+// przeliczona na czas warszawski, i OZNACZONA jako orientacyjna.
+const BEZ_EXIF = exifToPhotoMeta(null, FAKTY, "upload");
+ok(
+  "brak EXIF-u → data z pliku, czas warszawski (zima)",
+  BEZ_EXIF.takenAtSource === "file" && BEZ_EXIF.takenAt === "2026-01-14T11:00:00",
+  BEZ_EXIF,
+);
+ok("brak EXIF-u → bez pinezki i bez aparatu", !BEZ_EXIF.gps && !BEZ_EXIF.camera);
+ok("capturedVia idzie z wyboru, nie z pliku", BEZ_EXIF.capturedVia === "upload" && META.capturedVia === "camera");
+
+console.log("\n— F1: przycinanie zestawu EXIF —");
+const PELNY = pickExtra(SUROWY.tags, SUROWY.gps) ?? {};
+ok(
+  "pełny zestaw mieści się w 8 KB",
+  new TextEncoder().encode(JSON.stringify(PELNY)).length <= EXIF_MAX_BYTES,
+  JSON.stringify(PELNY).length,
+);
+ok("ISO i przysłona są w zestawie", PELNY.ISO === 200 && PELNY.FNumber === 1.8, PELNY);
+// Przy ciasnym limicie spadają pola NAJMNIEJ istotne — ISO zostaje do końca.
+const CIASNY = pickExtra(SUROWY.tags, SUROWY.gps, 40) ?? {};
+ok(
+  "ciasny limit zostawia najważniejsze i nie przekracza limitu",
+  new TextEncoder().encode(JSON.stringify(CIASNY)).length <= 40 && "ISO" in CIASNY,
+  CIASNY,
+);
+
+console.log("\n— F1: formatery panelu —");
+ok('ExposureTime 0,008 → „1/125 s”', formatExposureTime(0.008) === "1/125 s", formatExposureTime(0.008));
+ok('ExposureTime 2 → „2 s”', formatExposureTime(2) === "2 s", formatExposureTime(2));
+ok("ExposureTime 0 → pusto", formatExposureTime(0) === "");
+ok('FNumber 1,8 → „f/1,8”', formatAperture(1.8) === "f/1,8", formatAperture(1.8));
+ok('FNumber 2 → „f/2”', formatAperture(2) === "f/2", formatAperture(2));
+ok(
+  "formatExtraValue zna czas i przysłonę",
+  formatExtraValue("ExposureTime", 0.008) === "1/125 s" && formatExtraValue("FNumber", 1.8) === "f/1,8",
+);
+ok("Flash: bit 0 mówi, czy błysnęło", formatExtraValue("Flash", 16) === "Bez błysku" && formatExtraValue("Flash", 25) === "Błysk");
+ok('data wykonania „17.09.2026, 14:20”', formatTakenAt("2026-09-17T14:20:05") === "17.09.2026, 14:20", formatTakenAt("2026-09-17T14:20:05"));
+ok("współrzędne skrócone z półkulami", formatCoords(52.2297, 21.0122) === "52,2297° N, 21,0122° E", formatCoords(52.2297, 21.0122));
+ok("link do map z kropką dziesiętną", mapsLink(52.2297, 21.0122) === "https://www.google.com/maps?q=52.2297,21.0122");
+
+console.log("\n— F1: odległość od obiektu —");
+// 0,01° długości na szerokości Warszawy to ~682 m — tyle, ile wyjdzie z mapy.
+const D = haversineMeters(52.2297, 21.0122, 52.2297, 21.0222);
+ok("haversine: 0,01° długości ≈ 682 m", Math.abs(D - 682) < 10, D);
+ok("haversine: ten sam punkt = 0 m", haversineMeters(52.2297, 21.0122, 52.2297, 21.0122) === 0);
+ok('dystans po ludzku: „120 m” i „1,2 km”', formatMeters(118) === "120 m" && formatMeters(1234) === "1,2 km", [formatMeters(118), formatMeters(1234)]);
+
+console.log("\n— F1: moment wykonania kontra moment dodania —");
+// Ze strefą aparatu liczymy PRAWDZIWY moment; bez niej znacznik czytamy jako
+// lokalny, czyli tak, jak go widzi patrzący na ekran.
+ok(
+  "takenAtEpoch ze strefą",
+  takenAtEpoch({ takenAt: "2026-09-17T14:20:05", takenAtOffset: "+02:00" }) === Date.UTC(2026, 8, 17, 12, 20, 5),
+  takenAtEpoch({ takenAt: "2026-09-17T14:20:05", takenAtOffset: "+02:00" }),
+);
+ok("takenAtEpoch bez daty → null", takenAtEpoch({ takenAt: null }) === null);
+const PRZEZ_API = toAttachmentMeta(META);
+ok(
+  "toAttachmentMeta wypełnia null-e kontraktu",
+  PRZEZ_API.gps?.accuracyM === 12 && PRZEZ_API.camera?.make === "Apple" && PRZEZ_API.extra !== null,
+  PRZEZ_API,
+);
+ok(
+  "toAttachmentMeta dla pustych metadanych",
+  toAttachmentMeta(BEZ_EXIF).gps === null && toAttachmentMeta(BEZ_EXIF).camera === null,
+);
+
+console.log("\n— F1: parser JPEG-a —");
+ok("nie-JPEG → null, bez wyjątku", parseJpegExif(new Uint8Array([1, 2, 3, 4, 5, 6]).buffer as ArrayBuffer) === null);
+ok("obcięty JPEG → null, bez wyjątku", parseJpegExif(new Uint8Array([0xff, 0xd8, 0xff, 0xe1, 0x00]).buffer as ArrayBuffer) === null);
+try {
+  // Prawdziwy JPEG z EXIF-em — składany sharpem z `node_modules` backendu,
+  // żeby test sprawdzał parser na bajtach, a nie na wymyślonym obiekcie.
+  const { default: sharp } = await import("sharp");
+  const jpeg = await sharp({
+    create: { width: 640, height: 480, channels: 3, background: { r: 30, g: 90, b: 140 } },
+  })
+    .withExif({
+      IFD0: { Make: "Apple", Model: "iPhone 13", Software: "17.5.1" },
+      IFD2: {
+        DateTimeOriginal: "2026:09:17 14:20:05",
+        OffsetTimeOriginal: "+02:00",
+        ExposureTime: "0.008",
+        FNumber: "1.8",
+        ISOSpeedRatings: "200",
+        LensModel: "iPhone 13 back camera 5.7mm f/1.8",
+      },
+      IFD3: {
+        GPSLatitude: "52/1 13/1 4692/100",
+        GPSLatitudeRef: "N",
+        GPSLongitude: "21/1 0/1 4392/100",
+        GPSLongitudeRef: "E",
+        GPSHPositioningError: "12/1",
+      },
+    })
+    .jpeg()
+    .toBuffer();
+  const ab = jpeg.buffer.slice(jpeg.byteOffset, jpeg.byteOffset + jpeg.byteLength) as ArrayBuffer;
+  const raw = parseJpegExif(ab);
+  ok("APP1 znaleziony w prawdziwym pliku", raw !== null && raw.tags.Make === "Apple", raw?.tags);
+  const z = exifToPhotoMeta(raw, { ...FAKTY, size: jpeg.length }, "gallery");
+  ok("data z prawdziwego pliku", z.takenAt === "2026-09-17T14:20:05" && z.takenAtSource === "exif", z.takenAt);
+  ok("pinezka z prawdziwego pliku", z.gps?.lat === 52.2297 && z.gps?.lng === 21.0122, z.gps);
+  ok("wymiary z ramki JPEG-a", z.orig?.width === 640 && z.orig?.height === 480, z.orig);
+  ok("czułość i przysłona w extra", z.exif?.ISO === 200 && z.exif?.FNumber === 1.8, z.exif);
+} catch (e) {
+  ok(`parser na prawdziwym JPEG-u (sharp: ${e instanceof Error ? e.message : e})`, false);
+}
 
 console.log(`\n${failures === 0 ? "WSZYSTKO OK" : `BŁĘDÓW: ${failures}`}`);
 process.exit(failures === 0 ? 0 : 1);

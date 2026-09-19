@@ -157,6 +157,7 @@ import {
   type CalendarConfig,
 } from "@/lib/calendar-config";
 import { LEAD_STAGE_META } from "@/lib/sales-labels";
+import { readPhotoMeta } from "@/lib/photo-meta";
 import { travelLine, travelSourceLabel, useTravel } from "@/lib/travel";
 import { cn } from "@/lib/utils";
 import { CalendarEventNotes, MailNoteHeader, type CalendarEventNotesHandle } from "@/components/CalendarEventNotes";
@@ -2623,7 +2624,13 @@ export function CalendarEventDialog({
           try {
             // Załączniki (oryginalny .msg) i nagłówek maila jadą tylko multipartem.
             if (firstNoteFiles.length > 0 || firstNoteMail) {
+              // Metadane zdjęć jak w CalendarEventNotes: bez nich obrazek bez EXIF-u
+              // (zrzut ekranu, skan) wróciłby z `meta: null`, bez „Wgrany plik · wymiary”.
+              const photoMeta = await Promise.all(
+                firstNoteFiles.map((f) => (f.type.startsWith("image/") ? readPhotoMeta(f, "upload") : null)),
+              );
               const noteRes = await calendarApi.addNoteWithFiles(saved.id, firstNote.trim(), firstNoteFiles, {
+                photoMeta,
                 mail: firstNoteMail,
                 // Wypakowanie ma sens tylko przy mailu — bez niego nie ma z czego.
                 extractMsgAttachments: !!firstNoteMail && extractMsgAtt,

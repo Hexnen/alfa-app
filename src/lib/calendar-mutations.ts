@@ -24,14 +24,13 @@ import {
   type CalendarSeriesFreq,
   type CalendarEventNote as CalendarEventNoteRow,
   type CalendarNoteSource,
-  type NoteAttachmentOrigin,
   CALENDAR_NOTE_MAX,
 } from "../db/schema.js";
 import { logActivity, logFieldDiffs, userLabelOf, type ActivityUser, type DbOrTx, type Tx } from "./activity-log.js";
 import { onEventCreated, onEventDeleted, onEventRestored, onEventUpdated } from "./calendar-realizations.js";
 import { briefTextOf, noteEventLinks, noteOfRow, noteWithAttachments, type Note } from "./calendar-queries.js";
 import type { MsgMail } from "./outlook-msg.js";
-import { attachmentOfRow, type StoredAttachment } from "./calendar-attachments.js";
+import { attachmentOfRow, type AttachmentRowInput } from "./calendar-attachments.js";
 import { expandOccurrences, describeRule, shiftLocal, diffMinutes, type RecurrenceRule } from "./calendar-recurrence.js";
 import { ApiError, BILLING_HIDDEN_TYPES, BILLING_LABELS, PROTOCOL_TYPES, STATUS_LABELS, TECHNIK_PUSH_TYPES, TYPE_LABELS } from "./calendar-labels.js";
 import { queueTechnicianPush, type PushCollapse } from "./push.js";
@@ -1388,9 +1387,11 @@ export interface AddNoteInput {
   source?: CalendarNoteSource;
   /**
    * Pliki już zapisane na dysku (src/lib/calendar-attachments.ts storeUploads) — tu tylko wiersze.
-   * `origin` odróżnia upload ręczny od załącznika wypakowanego z maila (domyślnie „upload”).
+   * `origin` odróżnia upload ręczny od załącznika wypakowanego z maila (domyślnie „upload”),
+   * a kolumny `takenAt…metaJson` niosą metadane zdjęcia (migracja 0113) — jedno i drugie
+   * składa `attachmentRows`.
    */
-  attachments?: Array<StoredAttachment & { origin?: NoteAttachmentOrigin }>;
+  attachments?: AttachmentRowInput[];
 }
 
 /**

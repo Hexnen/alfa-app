@@ -53,6 +53,7 @@ import {
 } from "../lib/calendar-mutations.js";
 import {
   attachmentFilePath,
+  attachmentRows,
   attachmentsByNote,
   contentDisposition,
   parseNoteForm,
@@ -61,6 +62,7 @@ import {
   type IncomingFile,
   type NoteAttachmentJson,
 } from "../lib/calendar-attachments.js";
+import type { ClientPhotoMeta } from "../lib/photo-meta.js";
 import {
   clientIdOf,
   publishCalendarChange,
@@ -1332,26 +1334,34 @@ app.post("/jobs/:id/reopen", (c) => {
 // `bodyLimitFor` w src/routes/index.ts.
 // ---------------------------------------------------------------------------
 
-/** `text` + `files` z ciała żądania — multipart albo JSON (wtedy bez plików). */
-async function readJobNoteBody(c: Context): Promise<{ text: string; files: IncomingFile[] }> {
+/**
+ * `text` + `files` (+ `photoMeta`) z ciała żądania — multipart albo JSON (wtedy bez plików).
+ *
+ * `photoMeta` jest tu WAŻNIEJSZE niż w biurze: panel zmniejsza zdjęcie canvasem
+ * jeszcze na telefonie, więc do serwera dociera plik BEZ EXIF-u — data, GPS
+ * i model aparatu przychodzą wyłącznie tym polem.
+ */
+async function readJobNoteBody(
+  c: Context
+): Promise<{ text: string; files: IncomingFile[]; photoMeta: Array<ClientPhotoMeta | null> | null }> {
   if (!/multipart\/form-data/i.test(c.req.header("content-type") ?? "")) {
     const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
-    return { text: parseNoteText(body.text), files: [] };
+    return { text: parseNoteText(body.text), files: [], photoMeta: null };
   }
   const form = await c.req.formData().catch(() => null);
   if (!form) throw new ApiError(400, "Nieprawidłowe dane formularza");
-  const { text, files } = await parseNoteForm(form);
+  const { text, files, photoMeta } = await parseNoteForm(form);
   // Zdjęcie samo w sobie jest treścią — pusty tekst przechodzi tylko z plikami.
-  return { text: parseNoteText(text, files.length > 0), files };
+  return { text: parseNoteText(text, files.length > 0), files, photoMeta };
 }
 
 app.post("/jobs/:id/notes", async (c) => {
   try {
     const { ev, ctx } = mutationTarget(c, c.req.param("id"));
-    const { text, files } = await readJobNoteBody(c);
+    const { text, files, photoMeta } = await readJobNoteBody(c);
     // Zlecenie sprawdzone wyżej (mutationTarget), więc obrazki mielimy dopiero
     // teraz; przy błędzie wstawiania wiersza sprzątamy je z dysku.
-    const attachments = files.length ? await storeUploads(ev.id, files) : [];
+    const attachments = files.length ? attachmentRows(await storeUploads(ev.id, files), photoMeta) : [];
     let note;
     try {
       note = db.transaction((tx) => addNote(tx, { eventId: ev.id, text, ctx, attachments }));

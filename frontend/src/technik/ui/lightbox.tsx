@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, X } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { PhotoMetaInfo } from "@/components/PhotoMetaInfo";
+import type { AttachmentMeta } from "@/lib/photo-meta";
 
 /**
  * LIGHTBOX — zdjęcie z notatki na cały ekran tabletu.
@@ -16,6 +18,8 @@ export interface LightboxItem {
   id: number;
   url: string;
   fileName: string;
+  /** Metadane zdjęcia — obsługuje je przycisk „i” w pasku. Brak = bez przycisku. */
+  meta?: AttachmentMeta | null;
 }
 
 /** Minimalna długość gestu, po której uznajemy go za przewinięcie, a nie drgnięcie palca. */
@@ -26,12 +30,20 @@ export function Lightbox({
   index,
   onIndexChange,
   onClose,
+  createdAt,
+  objectLat,
+  objectLng,
 }: {
   items: LightboxItem[];
   /** Indeks otwartego zdjęcia; `null` = lightbox zamknięty. */
   index: number | null;
   onIndexChange: (next: number) => void;
   onClose: () => void;
+  /** Data wpisu, do którego należą zdjęcia — panel „i” dopisuje „dodane …”. */
+  createdAt?: Date | null;
+  /** Pinezka obiektu zlecenia — panel „i” liczy z niej odległość zdjęcia. */
+  objectLat?: number | null;
+  objectLng?: number | null;
 }) {
   const open = index !== null && index >= 0 && index < items.length;
   const [touchX, setTouchX] = useState<number | null>(null);
@@ -117,14 +129,26 @@ export function Lightbox({
         <span className="pl-4 text-sm tabular-nums text-white/70">
           {items.length > 1 ? `${index + 1} / ${items.length}` : ""}
         </span>
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="Zamknij podgląd"
-          className="flex h-11 w-11 items-center justify-center text-white/90"
-        >
-          <X className="h-6 w-6" />
-        </button>
+        <span className="flex items-center gap-1">
+          {/* Dane zdjęcia także na pełnym ekranie: to tutaj technik ogląda
+              numer seryjny i tutaj zwykle pada pytanie „kiedy to było?”. */}
+          <PhotoMetaInfo
+            meta={item.meta}
+            createdAt={createdAt ?? null}
+            objectLat={objectLat}
+            objectLng={objectLng}
+            tone="dark"
+            big
+          />
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Zamknij podgląd"
+            className="flex h-11 w-11 items-center justify-center text-white/90"
+          >
+            <X className="h-6 w-6" />
+          </button>
+        </span>
       </div>
 
       {/* Zdjęcie wypełnia resztę ekranu; tap poza nim zamyka. */}

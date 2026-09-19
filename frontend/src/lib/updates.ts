@@ -63,7 +63,7 @@ export interface VersionUpdate {
  */
 export const UPDATES_CURRENT: VersionUpdate[] = [
   {
-    version: "1.17.0",
+    version: "1.17.0–1.18.0",
     date: "2026-09-19",
     title: "Kadry: miesiąc prowadzony od godzin do wypłat",
     entries: [
@@ -121,6 +121,16 @@ export const UPDATES_CURRENT: VersionUpdate[] = [
         text: "Tabele Kadr wyglądają jak kalendarz: pełne nazwy kolumn, ikony akcji po najechaniu, legenda pod znakiem zapytania i nowa kolejność zakładek",
         type: "style",
         module: "kadry",
+      },
+      {
+        text: "Przy zdjęciu w notatce wydarzenia jest przycisk „i”: kiedy i gdzie zdjęcie zrobiono, jak daleko od obiektu, jakim urządzeniem i w jakiej rozdzielczości, bez dopytywania technika",
+        type: "feat",
+        module: "techniczny",
+      },
+      {
+        text: "Panel technika: zdjęcia w notatkach zapamiętują datę i miejsce wykonania",
+        type: "feat",
+        module: "technik",
       },
     ],
   },
@@ -373,6 +383,22 @@ export const UPDATES: VersionUpdate[] = [...UPDATES_CURRENT, ...UPDATES_2026];
  * wpisów — co się zmienia w robocie, bez nazw modułów i ekranów.
  */
 export const UPDATES_TECHNIK: VersionUpdate[] = [
+  {
+    version: "1.10.0",
+    date: "2026-09-19",
+    entries: [
+      {
+        text: "Zdjęcie dodane z galerii zachowuje prawdziwą datę i miejsce wykonania, więc biuro widzi, że powstało na obiekcie, nawet gdy wysyłasz je wieczorem",
+        type: "feat",
+        module: "technik",
+      },
+      {
+        text: "Pod „i” przy zdjęciu sprawdzisz datę, miejsce i odległość od obiektu",
+        type: "feat",
+        module: "technik",
+      },
+    ],
+  },
   {
     version: "1.9.0",
     date: "2026-09-18",

@@ -295,6 +295,8 @@ export function Zlecenie() {
           notes={job.notes}
           canEdit={canEdit && state !== "cancelled"}
           onChanged={reload}
+          objectLat={job.lat}
+          objectLng={job.lng}
         />
 
         {/* Karta papieru tylko dla zleceń, które go mają. Dla „nagrania” czy

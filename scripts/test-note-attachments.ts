@@ -63,7 +63,7 @@ function appFor(user: User) {
 const asAdmin = appFor(admin);
 const asOther = appFor(other);
 
-type NoteJson = { id: number; text: string; attachments: { id: number; fileName: string; mime: string; size: number; kind: string; width: number | null; height: number | null; url: string }[] };
+type NoteJson = { id: number; text: string; attachments: { id: number; fileName: string; mime: string; size: number; kind: string; width: number | null; height: number | null; url: string; meta: unknown }[] };
 type Resp = { success: boolean; data?: NoteJson; error?: string };
 
 function multipart(text: string | null, files: { name: string; type: string; data: Buffer }[]): FormData {
@@ -147,12 +147,16 @@ try {
   const notes = loadNotes(db, ev.id);
   ok("loadNotes: 3 notatki, załączniki [1, 2, 0]", notes.length === 3 && notes.map((n) => n.attachments.length).join() === "1,2,0", notes.map((n) => n.attachments.length));
   const keys = Object.keys(notes[0].attachments[0]).sort().join();
-  // `origin` doszło z migracją 0096 (upload vs załącznik wypakowany z maila .msg).
+  // `origin` doszło z migracją 0096 (upload vs załącznik wypakowany z maila .msg),
+  // `meta` z 0113 (metadane zdjęcia — szczegóły w scripts/test-photo-meta.ts).
   ok(
-    "loadNotes: klucze załącznika id,fileName,mime,size,kind,origin,width,height,url",
-    keys === "fileName,height,id,kind,mime,origin,size,url,width",
+    "loadNotes: klucze załącznika id,fileName,mime,size,kind,origin,width,height,url,meta",
+    keys === "fileName,height,id,kind,meta,mime,origin,size,url,width",
     keys
   );
+  // PNG wygenerowany sharpem nie ma EXIF-u, a test nie wysyła pola `photoMeta` —
+  // takiego załącznika nie opisuje nic i `meta` musi zostać nullem.
+  ok("loadNotes: obrazek bez EXIF-u i bez photoMeta → meta = null", notes[0].attachments[0].meta === null, notes[0].attachments[0].meta);
   ok("loadNotes: zwykły upload ma origin=upload", notes[0].attachments[0].origin === "upload", notes[0].attachments[0].origin);
   const g = await asOther.request(`/calendar/events/${ev.id}/notes`);
   const gj = (await g.json()) as { data: NoteJson[] };

@@ -18,13 +18,21 @@ import {
   type TechnikJobNote,
 } from "@/lib/api";
 import { Button } from "@/components/ui/button";
+import { PhotoMetaInfo } from "@/components/PhotoMetaInfo";
+import {
+  readPhotoMeta,
+  takenAtEpoch,
+  toAttachmentMeta,
+  type PhotoCapturedVia,
+  type PhotoMetaInput,
+} from "@/lib/photo-meta";
 import { cn } from "@/lib/utils";
 import { ClearableTextarea } from "../ui/clearable-input";
 import { ConfirmDialog } from "../ui/confirm";
 import { Lightbox } from "../ui/lightbox";
 import { useToast } from "../ui/toast";
 import { isImageLike, prepareForUpload } from "../lib/image";
-import { clockOf, photoTakenLabel } from "../lib/dates";
+import { clockOf, parseStamp, photoTakenLabel } from "../lib/dates";
 
 /**
  * NOTATKI — sekcja zwinięta domyślnie.
@@ -43,12 +51,17 @@ export function Notatki({
   notes,
   canEdit,
   onChanged,
+  objectLat,
+  objectLng,
 }: {
   jobId: number;
   notes: TechnikJobNote[];
   canEdit: boolean;
   /** Przeładowanie zlecenia po zapisie / usunięciu załącznika. */
   onChanged: () => void;
+  /** Pinezka obiektu — panel „i” liczy z niej „~120 m od obiektu”. */
+  objectLat?: number | null;
+  objectLng?: number | null;
 }) {
   const { toast, toastError } = useToast();
   const [open, setOpen] = useState(false);
@@ -90,7 +103,7 @@ export function Notatki({
    * (Android pokazuje je w tym samym selektorze) wypadają od razu, zamiast
    * wracać błędem serwera po minucie wysyłki.
    */
-  const pickPhotos = (list: FileList | null) => {
+  const pickPhotos = (list: FileList | null, capturedVia: PhotoCapturedVia) => {
     if (!list || list.length === 0) return;
     const all = Array.from(list);
     const images = all.filter(isImageLike);
@@ -120,17 +133,35 @@ export function Notatki({
     }
     if (files.length === 0) return;
     const now = new Date();
-    setPicked((prev) => [
-      ...prev,
-      ...files.map((file) => ({
-        key: `${file.name}-${file.lastModified}-${Math.random()}`,
-        file,
-        previewUrl: URL.createObjectURL(file),
-        // Zdjęcie z galerii bywa sprzed tygodnia — notatka dostanie dzisiejszą
-        // datę, więc dzień wykonania musi być widać przy miniaturze.
-        taken: photoTakenLabel(file.lastModified, now),
-      })),
-    ]);
+    const added: PickedPhoto[] = files.map((file) => ({
+      key: `${file.name}-${file.lastModified}-${Math.random()}`,
+      file,
+      previewUrl: URL.createObjectURL(file),
+      // Zdjęcie z galerii bywa sprzed tygodnia — notatka dostanie dzisiejszą
+      // datę, więc dzień wykonania musi być widać przy miniaturze. Zanim
+      // dojedzie EXIF, znacznik bierzemy z daty pliku: miniatura ma się
+      // pokazać od razu, a nie po odczycie serii z galerii.
+      taken: photoTakenLabel(file.lastModified, now),
+      meta: null,
+    }));
+    setPicked((prev) => [...prev, ...added]);
+
+    // EXIF czytamy z ORYGINAŁU i ZARAZ PO WYBORZE — kompresja przez canvas
+    // (`prepareForUpload`) kasuje wszystkie metadane, więc po niej nie byłoby
+    // już czego czytać. Odczyt nie może niczego blokować: `readPhotoMeta` sam
+    // pilnuje limitu czasu i nigdy nie rzuca, a wynik tylko podmienia stan.
+    void Promise.all(
+      added.map(async (p) => {
+        const meta = await readPhotoMeta(p.file, capturedVia);
+        setPicked((prev) =>
+          prev.map((item) =>
+            item.key === p.key
+              ? { ...item, meta, taken: photoTakenLabel(takenAtEpoch(toAttachmentMeta(meta)), now) }
+              : item,
+          ),
+        );
+      }),
+    );
   };
 
   const removePicked = (key: string) => {
@@ -152,15 +183,19 @@ export function Notatki({
         // Kompresja idzie plik po pliku — na tablecie to sekunda na zdjęcie,
         // więc technik ma widzieć, na którym stoimy.
         const files: File[] = [];
+        // Metadane jadą OSOBNYM polem, wyrównane indeksami z `files` — plik
+        // po kompresji nie ma już ani daty, ani pinezki, więc to jedyna droga.
+        const photoMeta: (PhotoMetaInput | null)[] = [];
         for (const [i, p] of picked.entries()) {
           setProgress(`Przygotowuję ${i + 1} z ${picked.length}…`);
           // Rzuca czytelnym zdaniem przy HEIC-u, którego nie zdekodowała ani
           // przeglądarka, ani (za chwilę) serwer — wtedy nie leci NIC, a wybór
           // zostaje na ekranie, żeby było co poprawić.
           files.push(await prepareForUpload(p.file));
+          photoMeta.push(p.meta);
         }
         setProgress(`Wysyłam ${photoCount(files.length)}…`);
-        await technikApi.addNoteWithFiles(jobId, { text: content, files });
+        await technikApi.addNoteWithFiles(jobId, { text: content, files, photoMeta });
       }
       revokeAll(picked);
       setPicked([]);
@@ -238,6 +273,8 @@ export function Notatki({
                   canDeleteFiles={canEdit && n.mine === true}
                   onPreview={(index) => setLightbox({ noteId: n.id, index })}
                   onDelete={setToDelete}
+                  objectLat={objectLat}
+                  objectLng={objectLng}
                 />
               ))}
             </ul>
@@ -292,6 +329,16 @@ export function Notatki({
                           {p.taken}
                         </span>
                       )}
+                      {/* Dane zdjęcia JESZCZE PRZED wysyłką: jak aparat nie
+                          złapał GPS-u albo ma zegar z zeszłego roku, lepiej
+                          zobaczyć to teraz niż w kalendarzu biura za tydzień. */}
+                      <PhotoMetaInfo
+                        meta={p.meta ? toAttachmentMeta(p.meta) : null}
+                        objectLat={objectLat}
+                        objectLng={objectLng}
+                        big
+                        className="absolute left-0 top-0 items-start justify-start p-1"
+                      />
                       <button
                         type="button"
                         onClick={() => removePicked(p.key)}
@@ -367,7 +414,7 @@ export function Notatki({
                 className="hidden"
                 data-testid="technik-note-camera-input"
                 onChange={(e) => {
-                  pickPhotos(e.target.files);
+                  pickPhotos(e.target.files, "camera");
                   // Bez tego drugie zdjęcie tego samego pliku nie wywoła `change`.
                   e.target.value = "";
                 }}
@@ -380,7 +427,7 @@ export function Notatki({
                 className="hidden"
                 data-testid="technik-note-gallery-input"
                 onChange={(e) => {
-                  pickPhotos(e.target.files);
+                  pickPhotos(e.target.files, "gallery");
                   e.target.value = "";
                 }}
               />
@@ -395,6 +442,9 @@ export function Notatki({
         index={lightbox?.index ?? null}
         onIndexChange={(index) => setLightbox((l) => (l ? { ...l, index } : l))}
         onClose={() => setLightbox(null)}
+        createdAt={parseStamp(notes.find((n) => n.id === lightbox?.noteId)?.createdAt)}
+        objectLat={objectLat}
+        objectLng={objectLng}
       />
 
       {/* Usunięcie zdjęcia jest nieodwracalne — pytamy, jak przy podpisie. */}
@@ -423,15 +473,20 @@ function Wpis({
   canDeleteFiles,
   onPreview,
   onDelete,
+  objectLat,
+  objectLng,
 }: {
   note: TechnikJobNote;
   jobId: number;
   canDeleteFiles: boolean;
   onPreview: (index: number) => void;
   onDelete: (att: CalendarNoteAttachment) => void;
+  objectLat?: number | null;
+  objectLng?: number | null;
 }) {
   const system = note.source === "system";
   const images = imagesOf(note);
+  const createdAt = parseStamp(note.createdAt);
   const files = (note.attachments ?? []).filter((a) => a.kind !== "image");
   // Notatka systemowa protokołu kończy się linkiem do CRM-a — rola „technik”
   // nie ma tam wstępu, więc w panelu prowadzi on do TEGO SAMEGO protokołu
@@ -467,7 +522,9 @@ function Wpis({
 
       {images.length > 0 && (
         <ul className={cn("grid grid-cols-3 gap-2 sm:grid-cols-5", body && "mt-2")}>
-          {images.map((a, i) => (
+          {images.map((a, i) => {
+            const taken = sentTakenLabel(a, createdAt);
+            return (
             <li key={a.id} className="relative">
               <button
                 type="button"
@@ -483,6 +540,25 @@ function Wpis({
                   className="aspect-square w-full object-cover"
                 />
               </button>
+              {/* Zdjęcie zrobione wcześniej niż wpis ma to napisane wprost —
+                  notatka nosi datę DODANIA, a różnica bywa całą jej treścią. */}
+              {taken && (
+                <span
+                  className="pointer-events-none absolute inset-x-0 bottom-0 truncate rounded-b-lg bg-background/85 px-1 py-0.5 text-center text-[10px] leading-tight text-muted-foreground"
+                  title={`zrobione ${taken}`}
+                  data-testid="technik-note-sent-taken"
+                >
+                  {taken}
+                </span>
+              )}
+              <PhotoMetaInfo
+                meta={a.meta}
+                createdAt={createdAt}
+                objectLat={objectLat}
+                objectLng={objectLng}
+                big
+                className="absolute left-0 top-0 items-start justify-start p-1"
+              />
               {canDeleteFiles && (
                 <button
                   type="button"
@@ -496,7 +572,8 @@ function Wpis({
                 </button>
               )}
             </li>
-          ))}
+            );
+          })}
         </ul>
       )}
 
@@ -552,10 +629,22 @@ interface PickedPhoto {
   previewUrl: string;
   /** „zrobione 17.09 14:20” dla zdjęcia z galerii; `null` dla świeżego z aparatu. */
   taken: string | null;
+  /** EXIF oryginału; `null` dopóki trwa odczyt albo gdy plik nic nie niesie. */
+  meta: PhotoMetaInput | null;
 }
 
 function revokeAll(items: PickedPhoto[]): void {
   for (const p of items) URL.revokeObjectURL(p.previewUrl);
+}
+
+/**
+ * „17.09 14:20” pod miniaturą WYSŁANEGO zdjęcia — tylko wtedy, gdy data
+ * wykonania rozjeżdża się z datą wpisu o więcej niż `PHOTO_FRESH_MIN`.
+ * Reszta metadanych siedzi pod „i”; tu ma być sam fakt „to nie jest z dziś”.
+ */
+function sentTakenLabel(att: CalendarNoteAttachment, createdAt: Date | null): string | null {
+  if (!att.meta || !createdAt) return null;
+  return photoTakenLabel(takenAtEpoch(att.meta), createdAt);
 }
 
 /** Obrazki notatki (pliki inne niż zdjęcia lecą osobną listą chipów). */

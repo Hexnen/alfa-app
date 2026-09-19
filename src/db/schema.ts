@@ -3257,6 +3257,35 @@ export const calendarNoteAttachments = sqliteTable(
     origin: text("origin", { enum: NOTE_ATTACHMENT_ORIGINS }).default("upload").notNull(),
     width: integer("width"),
     height: integer("height"),
+    // --- Metadane zdjęcia (migracja 0113) -----------------------------------
+    // Plik na dysku jest BEZ EXIF-u (sharp `.rotate().webp()` go zrzuca), a panel
+    // technika zmniejsza zdjęcie canvasem jeszcze przed wysyłką — dlatego „kiedy
+    // i gdzie zrobiono zdjęcie” mieszka tutaj, a nie w pliku. Wszystko NULL-owalne:
+    // komplet NULL-i = `meta: null` w API (stary załącznik, nic nie wiadomo).
+    // Znaczenia i walidacja: src/lib/photo-meta.ts.
+    /** Czas z aparatu, LOKALNY, „YYYY-MM-DDTHH:mm:ss” (bez strefy — ta jest obok). */
+    takenAt: text("taken_at"),
+    /** Przesunięcie strefowe czasu z aparatu, np. „+02:00”. */
+    takenAtOffset: text("taken_at_offset"),
+    /** Skąd wzięto datę: „exif” | „file” | „none” (enum pilnuje TS, nie SQLite). */
+    takenAtSource: text("taken_at_source"),
+    /** Jak plik trafił do notatki: „camera” | „gallery” | „upload” | „msg”. */
+    capturedVia: text("captured_via"),
+    gpsLat: real("gps_lat"),
+    gpsLng: real("gps_lng"),
+    /** Deklarowany błąd pozycji w metrach (EXIF GPSHPositioningError / accuracy z przeglądarki). */
+    gpsAccuracyM: real("gps_accuracy_m"),
+    gpsAltitudeM: real("gps_altitude_m"),
+    cameraMake: text("camera_make"),
+    cameraModel: text("camera_model"),
+    cameraLens: text("camera_lens"),
+    /** Wymiary/rozmiar/typ ORYGINAŁU — przed canvasem na telefonie i przed konwersją do WebP. */
+    origWidth: integer("orig_width"),
+    origHeight: integer("orig_height"),
+    origSize: integer("orig_size"),
+    origMime: text("orig_mime"),
+    /** Reszta sensownych pól EXIF jako JSON, max 8 KB (bez MakerNote, miniatur i binariów). */
+    metaJson: text("meta_json"),
     createdAt: text("created_at")
       .default(sql`(datetime('now'))`)
       .notNull(),

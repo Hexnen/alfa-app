@@ -4,6 +4,11 @@ import type { ObjectServiceKey } from "./utils";
 // Prefill formularza zlecenia z szansy zwraca DOKŁADNIE stan tego formularza —
 // import wyłącznie typu (kasowany przy budowie), więc cyklu w runtime nie ma.
 import type { OrderIntakeFormState } from "./orderIntakeSteps";
+// Metadane zdjęcia (EXIF) — typy i odczyt siedzą w `photo-meta.ts`, bo
+// korzysta z nich i panel technika, i kalendarz biura. Import TYLKO typów.
+import type { AttachmentMeta, PhotoMetaInput } from "./photo-meta";
+
+export type { AttachmentMeta, PhotoMetaInput };
 
 const API_BASE = "/api";
 
@@ -6242,6 +6247,11 @@ export interface CalendarNoteAttachment {
   height: number | null;
   /** Ścieżka względem origin (`/api/calendar/attachments/:id`); `?download=1` wymusza pobranie. */
   url: string;
+  /**
+   * Metadane zdjęcia: data wykonania, pinezka, aparat, parametry oryginału.
+   * `null` = zdjęcie ich nie miało; BRAK POLA = starszy backend (traktuj jak `null`).
+   */
+  meta?: AttachmentMeta | null;
 }
 
 /** Limity załączników notatki — zgodne z backendem (walidacja po stronie klienta). */
@@ -6782,11 +6792,22 @@ export const calendarApi = {
     eventId: number,
     text: string,
     files: File[],
-    opts?: { copyToObject?: boolean; mail?: CalendarNoteMailHeader | null; extractMsgAttachments?: boolean }
+    opts?: {
+      copyToObject?: boolean;
+      mail?: CalendarNoteMailHeader | null;
+      extractMsgAttachments?: boolean;
+      /** Metadane zdjęć, wyrównane indeksami z `files` (`null` = plik bez nich). */
+      photoMeta?: (PhotoMetaInput | null)[];
+    }
   ) {
     const formData = new FormData();
     formData.append("text", text);
     for (const f of files) formData.append("files", f, f.name);
+    // Bez tego pola zdjęcie BEZ EXIF-u nie ma w odpowiedzi żadnych metadanych —
+    // a „Wgrany plik” i wymiary oryginału warto pokazać także przy zrzucie ekranu.
+    if (opts?.photoMeta?.some((m) => m != null)) {
+      formData.append("photoMeta", JSON.stringify(opts.photoMeta));
+    }
     // Multipart nie zna booleanów — backend czyta „1”.
     if (opts?.copyToObject) formData.append("copyToObject", "1");
     // Nagłówek maila jako JSON w jednym polu (backend: parseMailField).
@@ -10955,11 +10976,17 @@ export const technikApi = {
    */
   async addNoteWithFiles(
     id: number,
-    payload: { text?: string; files: File[] }
+    payload: { text?: string; files: File[]; photoMeta?: (PhotoMetaInput | null)[] }
   ): Promise<TechnikJobNote> {
     const fd = new FormData();
     fd.append("text", payload.text ?? "");
     for (const f of payload.files) fd.append("files", f, f.name);
+    // EXIF oryginału, odczytany PRZED kompresją (canvas go kasuje). Tablica
+    // wyrównana indeksami z `files`; `null` = plik bez metadanych. Starszy
+    // backend pole po prostu zignoruje.
+    if (payload.photoMeta?.some((m) => m != null)) {
+      fd.append("photoMeta", JSON.stringify(payload.photoMeta));
+    }
     const r = await requestMultipart<ApiResponse<TechnikJobNote>>(`/technik/jobs/${id}/notes`, fd);
     return r.data as TechnikJobNote;
   },

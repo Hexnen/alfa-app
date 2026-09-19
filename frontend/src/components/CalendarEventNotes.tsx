@@ -69,9 +69,11 @@ import {
   type CalendarNoteMailHeader,
   type ParsedMsgAttachmentMeta,
 } from "@/lib/api";
-import { NOTE_MAX, fmtRelative, fmtShort, fmtTimestamp, initials, notesLabel } from "@/lib/calendar-labels";
+import { NOTE_MAX, fmtRelative, fmtShort, fmtTimestamp, initials, notesLabel, parseTimestamp } from "@/lib/calendar-labels";
 import { mentionSuggestions, parseMentions, toDateStr } from "@/lib/note-mentions";
 import { cn } from "@/lib/utils";
+import { PhotoMetaInfo } from "@/components/PhotoMetaInfo";
+import { readPhotoMeta } from "@/lib/photo-meta";
 import { RichText, RichTextInline } from "@/components/RichText";
 import { RichTextProvider } from "@/components/RichTextProvider";
 import { looksLikeMailNote } from "@/lib/richtext";
@@ -1076,8 +1078,15 @@ export function CalendarEventNotes({
     setAdding(true);
     setError(null);
     try {
+      // Biuro NIE zmniejsza plików (lecą oryginały), więc EXIF przetrwałby
+      // i bez nas. Czytamy go mimo to: inaczej zdjęcie BEZ EXIF-u — zrzut
+      // ekranu, skan, kadr z komunikatora — wracałoby z `meta: null` i nie
+      // miałoby przy sobie nawet „Wgrany plik · 1920 × 1080 · PNG”.
+      const photoMeta = files.length
+        ? await Promise.all(files.map((f) => (isImageFile(f) ? readPhotoMeta(f, "upload") : null)))
+        : [];
       const res = files.length
-        ? await calendarApi.addNoteWithFiles(eventId, text, files, { copyToObject: copy })
+        ? await calendarApi.addNoteWithFiles(eventId, text, files, { copyToObject: copy, photoMeta })
         : await calendarApi.addNote(eventId, text, { copyToObject: copy });
       if (res.data) publish([...notes, res.data]);
       setDraft("");
@@ -1241,6 +1250,18 @@ export function CalendarEventNotes({
   const canSubmit = !adding && (draftLen > 0 || pending.length > 0);
 
   /**
+   * Data wpisu, z którego pochodzi otwarty obrazek — panel „i” w lightboxie
+   * dopisuje z niej „dodane …”, gdy zdjęcie jest wyraźnie starsze od notatki.
+   * Szukamy po id załącznika, bo `lightbox` trzyma sam plik, nie wpis.
+   */
+  const lightboxNoteAt = lightbox
+    ? (() => {
+        const owner = notes.find((n) => (n.attachments ?? []).some((a) => a.id === lightbox.id));
+        return owner ? parseTimestamp(owner.createdAt) : null;
+      })()
+    : null;
+
+  /**
    * Galeria załączników notatki. `hideIds` to pliki wypakowane z maila, które
    * pokazuje już wiersz „Załączniki:” w nagłówku — nagłówek ma pierwszeństwo,
    * żeby ten sam plik nie stał w dwóch miejscach.
@@ -1293,6 +1314,14 @@ export function CalendarEventNotes({
                     className="h-full w-full object-cover transition-transform group-hover/att:scale-[1.03]"
                   />
                 </button>
+                {/* Kółko „i” — data wykonania, pinezka, aparat. Widoczne dopiero
+                    pod kursorem (i zawsze na dotyku), żeby galeria notatki
+                    została galerią, a nie tablicą ikon. */}
+                <PhotoMetaInfo
+                  meta={a.meta}
+                  createdAt={parseTimestamp(n.createdAt)}
+                  className="absolute bottom-0 left-0 items-end justify-start p-1 opacity-80 sm:opacity-0 sm:group-hover/att:opacity-100 sm:focus-visible:opacity-100 [&[data-open]]:opacity-100"
+                />
                 {removeBtn(a, "absolute right-1 top-1 opacity-80 sm:opacity-0 sm:group-hover/att:opacity-100 sm:focus-visible:opacity-100")}
               </li>
             ))}
@@ -1785,9 +1814,14 @@ export function CalendarEventNotes({
                 />
               </div>
               <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-                <span className="tabular-nums">
-                  {lightbox.width && lightbox.height ? `${lightbox.width}×${lightbox.height} · ` : ""}
-                  {fmtFileSize(lightbox.size)}
+                <span className="flex items-center gap-1">
+                  <span className="tabular-nums">
+                    {lightbox.width && lightbox.height ? `${lightbox.width}×${lightbox.height} · ` : ""}
+                    {fmtFileSize(lightbox.size)}
+                  </span>
+                  {/* Te same dane co przy miniaturze — pytanie „kiedy to było
+                      zrobione?” pada najczęściej właśnie nad powiększeniem. */}
+                  <PhotoMetaInfo meta={lightbox.meta} createdAt={lightboxNoteAt} />
                 </span>
                 <Button asChild size="sm" variant="outline" className="h-8">
                   <a href={downloadUrl(lightbox)} download={lightbox.fileName}>

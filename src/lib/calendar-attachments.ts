@@ -21,6 +21,16 @@ import { DATA_DIR, schema } from "../db/index.js";
 import type { CalendarAttachmentKind, CalendarNoteAttachment, NoteAttachmentOrigin } from "../db/schema.js";
 import type { DbOrTx } from "./activity-log.js";
 import { ApiError } from "./calendar-labels.js";
+import {
+  attachmentMetaJson,
+  mergePhotoMeta,
+  parseClientPhotoMeta,
+  readServerPhotoMeta,
+  type AttachmentMetaJson,
+  type ClientPhotoMeta,
+  type PhotoMetaColumns,
+  type ServerPhotoMeta,
+} from "./photo-meta.js";
 
 export const ATTACHMENTS_DIR = resolve(DATA_DIR, "attachments");
 /** Maksymalnie tyle plików na jedną notatkę. */
@@ -75,6 +85,56 @@ export interface StoredAttachment {
   kind: CalendarAttachmentKind;
   width: number | null;
   height: number | null;
+  /**
+   * Metadane odczytane z SUROWEGO bufora obrazka, zanim sharp zrzucił EXIF
+   * (src/lib/photo-meta.ts). `null` dla plików, które nie są obrazkiem.
+   *
+   * Pole jest DODATKIEM dla notatek kalendarza — pozostali konsumenci
+   * `storeUploads` (manuale, drafty umów, grupy interwencyjne) po prostu je
+   * ignorują; Drizzle pomija nadmiarowe klucze przy `values({...s})`.
+   */
+  photoMeta: ServerPhotoMeta | null;
+}
+
+/**
+ * Wiersz do wstawienia w `calendar_note_attachments`: to, co zapisano na dysku,
+ * BEZ `photoMeta` (to nie kolumna), za to z gotowymi kolumnami metadanych
+ * i `origin`. Buduje go `attachmentRows`.
+ */
+export type AttachmentRowInput = Omit<StoredAttachment, "photoMeta"> & {
+  origin?: NoteAttachmentOrigin;
+} & Partial<PhotoMetaColumns>;
+
+/**
+ * Scala metadane serwera (EXIF z oryginału) z tymi, które przysłał front
+ * (`photoMeta`), i oddaje gotowe wiersze dla `addNote`. Używają tego OBA routery
+ * przyjmujące notatki ze zdjęciami — kalendarz biurowy i panel technika — żeby
+ * zdjęcie z tabletu opisywało się dokładnie tak samo jak upload z biura.
+ *
+ * `clientMeta` jest wyrównane indeksami z plikami z multipartu; pliki doklejone
+ * przez serwer (wypakowane z `.msg`) stoją ZA nimi, więc po prostu nie mają
+ * odpowiednika i dostają metadane wyłącznie z EXIF-u.
+ *
+ * Metadane dostają TYLKO obrazki — przy PDF-ie czy `.docx` nie ma czego opisywać.
+ */
+export function attachmentRows(
+  stored: StoredAttachment[],
+  clientMeta: Array<ClientPhotoMeta | null> | null,
+  originOf?: (index: number) => NoteAttachmentOrigin | undefined
+): AttachmentRowInput[] {
+  return stored.map((s, i) => {
+    const { photoMeta, ...row } = s;
+    const origin = originOf?.(i);
+    const meta =
+      s.kind === "image"
+        ? mergePhotoMeta({
+            server: photoMeta,
+            client: clientMeta?.[i] ?? null,
+            capturedViaFallback: origin === "msg" ? "msg" : "upload",
+          })
+        : {};
+    return origin ? { ...row, origin, ...meta } : { ...row, ...meta };
+  });
 }
 
 /** Kształt załącznika w JSON notatki (kontrakt z frontem). */
@@ -89,6 +149,12 @@ export interface NoteAttachmentJson {
   width: number | null;
   height: number | null;
   url: string;
+  /**
+   * Metadane zdjęcia (migracja 0113) albo `null`, gdy nic o nim nie wiadomo —
+   * tak wyglądają WSZYSTKIE załączniki sprzed tej zmiany. `width`/`height` obok
+   * opisują plik na dysku (WebP), `meta.orig` — oryginał sprzed konwersji.
+   */
+  meta: AttachmentMetaJson | null;
 }
 
 export function attachmentOfRow(r: CalendarNoteAttachment): NoteAttachmentJson {
@@ -102,6 +168,7 @@ export function attachmentOfRow(r: CalendarNoteAttachment): NoteAttachmentJson {
     width: r.width,
     height: r.height,
     url: `${ATTACHMENT_URL_PREFIX}/${r.id}`,
+    meta: attachmentMetaJson(r),
   };
 }
 
@@ -124,23 +191,36 @@ export function attachmentsByNote(dbx: DbOrTx, noteIds: number[]): Map<number, N
 }
 
 /**
- * Wspólne pola multipartu notatki: `text` (opcjonalne) + wiele `files`. Używają
- * tego OBA routery przyjmujące notatki z plikami — kalendarz biurowy
- * (src/routes/calendar.ts) i panel technika (src/routes/technik.ts) — żeby
+ * Wspólne pola multipartu notatki: `text` (opcjonalne), wiele `files` i opcjonalne
+ * `photoMeta`. Używają tego OBA routery przyjmujące notatki z plikami — kalendarz
+ * biurowy (src/routes/calendar.ts) i panel technika (src/routes/technik.ts) — żeby
  * zdjęcie z tabletu przechodziło dokładnie tę samą drogę co upload z biura.
  * Pola specyficzne dla routera (mail, copyToObject) czyta wołający sam.
+ *
+ * `photoMeta` to JSON: tablica wyrównana indeksami z `files` (element może być
+ * `null`) — front dosyła tak dane, które zginęły przy zmniejszaniu zdjęcia
+ * canvasem. Brak pola, zły JSON albo zła długość tablicy = `null`, czyli
+ * „ignorujemy metadane klienta”; upload przechodzi normalnie, bo stary front
+ * tego pola w ogóle nie wysyła.
  *
  * Pliki lądują w pamięci — sufit ciała żądania pilnuje `bodyLimitFor`
  * w src/routes/index.ts, sufit pojedynczego pliku `validateUploads`.
  */
-export async function parseNoteForm(form: FormData): Promise<{ text: string; files: IncomingFile[] }> {
+export async function parseNoteForm(
+  form: FormData
+): Promise<{ text: string; files: IncomingFile[]; photoMeta: Array<ClientPhotoMeta | null> | null }> {
   const textField = form.get("text");
   const files: IncomingFile[] = [];
   for (const entry of form.getAll("files")) {
     if (!(entry instanceof File)) continue;
     files.push({ name: entry.name, mime: entry.type, data: Buffer.from(await entry.arrayBuffer()) });
   }
-  return { text: typeof textField === "string" ? textField : "", files };
+  const photoMetaField = form.get("photoMeta");
+  return {
+    text: typeof textField === "string" ? textField : "",
+    files,
+    photoMeta: parseClientPhotoMeta(typeof photoMetaField === "string" ? photoMetaField : null, files.length),
+  };
 }
 
 /** Multipart nie zna typów — checkbox przychodzi jako "1"/"true". */
@@ -211,6 +291,11 @@ export function uploadRejectReason(file: IncomingFile): string | null {
  * `<eventId>` dla notatek kalendarza, `manuals/<manualId>` dla manuali). Obrazki → WebP
  * (rotate wg EXIF, max 2560 px dłuższego boku, bez powiększania). Przy błędzie w połowie
  * sprząta już zapisane pliki i rzuca dalej — wołający nie ma nic do posprzątania.
+ *
+ * Konwersja ZRZUCA EXIF z pliku na dysku i tak ma zostać (plik leci przeglądarce,
+ * a razem z EXIF-em wyciekałyby współrzędne i numery seryjne). Dlatego JESZCZE
+ * PRZED nią czytamy z surowego bufora `photoMeta` — notatki kalendarza zapisują
+ * je do bazy (`attachmentRows`), pozostali konsumenci po prostu pole ignorują.
  */
 export async function storeUploads(scope: string | number, files: IncomingFile[]): Promise<StoredAttachment[]> {
   validateUploads(files);
@@ -225,6 +310,14 @@ export async function storeUploads(scope: string | number, files: IncomingFile[]
       const cls = classify(f.name, f.mime);
       const original = baseName(f.name);
       if (cls.kind === "image") {
+        // Odczyt EXIF-u z ORYGINAŁU — po `.webp()` nie ma już czego czytać.
+        // Nieczytelne metadane nie mogą wywrócić uploadu: w najgorszym razie null.
+        let photoMeta: ServerPhotoMeta | null = null;
+        try {
+          photoMeta = await readServerPhotoMeta(f.data, f.mime);
+        } catch {
+          photoMeta = null;
+        }
         let out: { data: Buffer; info: OutputInfo };
         try {
           out = await sharp(f.data, { failOn: "error" })
@@ -245,12 +338,13 @@ export async function storeUploads(scope: string | number, files: IncomingFile[]
           kind: "image",
           width: out.info.width,
           height: out.info.height,
+          photoMeta,
         });
       } else {
         const ext = extOf(original) || "bin";
         const storedPath = `${scopeDir}/${randomUUID()}.${ext}`;
         writeFileSync(join(ATTACHMENTS_DIR, storedPath), f.data);
-        stored.push({ fileName: original, mime: cls.mime, size: f.data.length, storedPath, kind: "file", width: null, height: null });
+        stored.push({ fileName: original, mime: cls.mime, size: f.data.length, storedPath, kind: "file", width: null, height: null, photoMeta: null });
       }
     }
   } catch (error) {
