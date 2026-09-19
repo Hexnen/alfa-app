@@ -2,10 +2,14 @@
 // księgowości → kwoty od księgowości → wynagrodzenia (przelew/gotówka).
 // Każdy nagłówek kolumny ma tooltip (hover) z opisem, z czego się kalkuluje.
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Navigate, useParams } from "react-router-dom";
+import {
+  Navigate,
+  useNavigate,
+  useParams,
+  useSearchParams,
+} from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -24,31 +28,69 @@ import {
 } from "@/components/KadryForms";
 import { HrHoursTab } from "@/components/kadry/HoursTab";
 import { DepartmentsTab } from "@/components/kadry/DepartmentsTab";
-import { TABLE_SELECT_CLS, hrs, money } from "@/components/kadry/shared";
-import { SortTh, Th, type SortDir } from "@/components/kadry/parts";
-import { catalogLabel } from "@/lib/labels";
-import { printHrStatement } from "@/lib/hrPrint";
+import { PayrollTab, type PayrollGapMode } from "@/components/kadry/PayrollTab";
+import { ObjectsTab } from "@/components/kadry/ObjectsTab";
+import { NormsTab } from "@/components/kadry/NormsTab";
+import { HistoryTab } from "@/components/kadry/HistoryTab";
+import { EmployeeHistory } from "@/components/kadry/EmployeeHistory";
+import { EntityHistory } from "@/components/kadry/EntityHistory";
+import { MonthNav } from "@/components/kadry/MonthNav";
+import { KadryHelp, type KadryHelpTab } from "@/components/kadry/KadryHelp";
+import { MonthStatusBar } from "@/components/kadry/MonthStatusBar";
+import { useConfirm } from "@/components/kadry/useConfirm";
+// Kadry „na żywo” (SSE) + rezerwacja list do edycji: sygnał o cudzej zmianie
+// przeładowuje miesiąc w tle, a `useEditLock` pilnuje, kto ma prawo pisać.
+import { hrChangeHitsMonth, useHrLive } from "@/lib/hrLive";
+import { useEditLock } from "@/components/kadry/useEditLock";
+import { cmpNum, cmpText, hrs, money } from "@/components/kadry/shared";
+import { monthYearLabel } from "@/lib/plDates";
+import { KpiDelta } from "@/components/kadry/monthCompare";
+import { MoreFiltersButton, SortTh, Th, type SortDir } from "@/components/kadry/parts";
+import {
+  EmptyRow,
+  IconButton,
+  KadryBadge,
+  KpiTile,
+  NUM_CELL_CLS,
+  RowActions,
+  SectionHeading,
+  SegmentedControl,
+  departmentTone,
+  TEXT_TONE,
+  TFOOT_ROW_CLS,
+  THEAD_CLS,
+} from "@/components/kadry/ui";
+import { tip } from "@/components/ui/tooltip";
 import { usePerms } from "@/auth/permissions";
 import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
 import { cn } from "@/lib/utils";
 import {
   Plus,
   ChevronDown,
-  ChevronLeft,
   ChevronRight,
+  CalendarPlus,
   Pencil,
   Trash2,
-  Printer,
-  AlertTriangle,
+  FileText,
   Search,
+  Users,
   X,
 } from "lucide-react";
+// Okres obowiązywania umowy (migracja 0112): formatowanie kolumny „Obowiązuje”
+// i tony pigułki statusu — wspólne z formularzem umowy.
+import {
+  CONTRACT_STATUS_HINT,
+  CONTRACT_STATUS_TONE,
+  CONTRACT_SUPERSEDABLE,
+  contractPeriodLabel,
+} from "@/components/kadry/contract-period";
 import {
   getCompanies,
-  getHrSummary,
-  getHrPayroll,
+  // Komplet miesiąca jednym żądaniem — patrz `loadMonth` (backend liczy
+  // wypłaty RAZ, zamiast trzech przebiegów na kafle i poprzedni miesiąc).
+  getHrMonth,
+  type HrMonthStatus,
   saveHrPayroll,
-  getHrHours,
   createHrHours,
   updateHrHours,
   deleteHrHours,
@@ -58,23 +100,21 @@ import {
   updateHrEmployee,
   deleteHrEmployee,
   getHrObjects,
-  createHrObject,
-  updateHrObject,
-  deleteHrObject,
   getHrObjectCatalog,
-  setHrObjectMapping,
   getHrDepartments,
   getHrContracts,
+  getHrExpiringContracts,
   createHrContract,
   updateHrContract,
+  supersedeHrContract,
   deleteHrContract,
   getHrNorms,
-  saveHrNorm,
-  getHrOffice,
   createHrOffice,
   updateHrOffice,
   deleteHrOffice,
   type HrSummary,
+  type HrPrevSummary,
+  type HrPrevPayrollRow,
   type HrPayrollRow,
   type HrPayrollSaveInput,
   type HrHoursEntry,
@@ -86,26 +126,12 @@ import {
   type HrDepartment,
   type HrContract,
   type HrContractInput,
+  type HrExpiringContract,
   type HrMonthNorm,
   type HrOfficeRow,
   type HrOfficeInput,
   type Company,
 } from "@/lib/api";
-
-const MONTH_NAMES = [
-  "Styczeń",
-  "Luty",
-  "Marzec",
-  "Kwiecień",
-  "Maj",
-  "Czerwiec",
-  "Lipiec",
-  "Sierpień",
-  "Wrzesień",
-  "Październik",
-  "Listopad",
-  "Grudzień",
-];
 
 const BONUS_SHORT: Record<string, string> = {
   brak: "—",
@@ -115,61 +141,24 @@ const BONUS_SHORT: Record<string, string> = {
 };
 
 /**
- * Pozycje słownika kadrowego, które NIE są obiektem chronionym, tylko kosztem
- * technicznym firmy: `#BIURO`, `#zlecenie`. Mapowanie ich na pojedynczy obiekt
- * zrzuciłoby koszt centrali na jednego klienta, więc zostają niezmapowane
- * celowo.
- *
- * Praca działowa (dawna pozycja `CMA` i reszta) NIE należy już tutaj — ma
- * własny słownik w Kadry → Działy. Rozpoznawanie po nazwie było zresztą pułapką:
- * nowa pozycja nazwana „CMA" dostawałaby etykietę „koszt wspólny", mimo że pula
- * kosztów siedzi teraz przy dziale i jest oznaczona flagą, a nie nazwą.
+ * Filtr „Umowy” w kartotece. Dwie ostatnie wartości to przypomnienia o okresie
+ * obowiązywania (migracja 0112) — lista bierze się z `GET /hr/contracts/expiring`,
+ * a nie z liczenia dat w przeglądarce: „dziś” liczy serwer.
  */
-function overheadKind(name: string): "techniczna" | null {
-  return name.trim().startsWith("#") ? "techniczna" : null;
-}
-
-// --- sortowanie list: wspólne porównania (wzorzec z Obiektów i Spółek) ---
-
 /**
- * Teksty po polsku (żeby Ł nie lądowało za Z), a puste na końcu w OBU
- * kierunkach — jak NULLS LAST w SQL. Inaczej „sortuj po dziale” zaczynałoby się
- * od osób bez działu, czyli od wierszy, które w tej kolumnie nic nie mówią.
+ * Okno przypomnień o końcu umowy. 30 dni to okres wypowiedzenia liczony
+ * w miesiącach — tyle trzeba, żeby zdążyć przygotować aneks albo nową umowę.
  */
-const cmpText = (
-  a: string | null | undefined,
-  b: string | null | undefined,
-  mul: number,
-): number => {
-  const as = (a ?? "").trim();
-  const bs = (b ?? "").trim();
-  if (!as || !bs) return !as && !bs ? 0 : as ? -1 : 1;
-  return as.localeCompare(bs, "pl") * mul;
-};
+const EXPIRING_DAYS = 30;
 
-/** Liczby — ta sama reguła: brak wartości zawsze na końcu. */
-const cmpNum = (
-  a: number | null | undefined,
-  b: number | null | undefined,
-  mul: number,
-): number => {
-  if (a == null || b == null)
-    return a == null && b == null ? 0 : a == null ? 1 : -1;
-  return (a - b) * mul;
-};
-
-/**
- * Kwoty, które tabela rysuje pustą komórką przy zerze (przelew/gotówka/wypłata,
- * kwota biura) — zero znaczy tu „nic nie ma”, więc sortuje się jak brak.
- */
-const cmpMoney = (a: number, b: number, mul: number) =>
-  cmpNum(a || null, b || null, mul);
-
-/** Kwota z pola widełek — przecinek jak kropka, śmieci znaczą „bez ograniczenia”. */
-function parseAmount(raw: string): number | undefined {
-  const n = parseFloat(raw.replace(",", "."));
-  return Number.isFinite(n) ? n : undefined;
-}
+const EMPLOYEE_CONTRACT_FILTERS = [
+  "all",
+  "none",
+  "with",
+  "konczace",
+  "zakonczone",
+] as const;
+type EmployeeContractsFilter = (typeof EMPLOYEE_CONTRACT_FILTERS)[number];
 
 /** Kartoteka pracowników — kolumny, po których wolno sortować. */
 type EmployeeSortKey =
@@ -192,87 +181,24 @@ const EMPLOYEE_DIR: Record<EmployeeSortKey, SortDir> = {
   updatedAt: "desc",
 };
 
-type PayrollSortKey =
-  | "employeeName"
-  | "company"
-  | "contractType"
-  | "maksGodziny"
-  | "faktGodziny"
-  | "stawkaNetto"
-  | "kwotaGlowna"
-  | "kwotaWyrownania"
-  | "dodatekFinalny"
-  | "przelew"
-  | "gotowka"
-  | "wyplata";
-
-const PAYROLL_DIR: Record<PayrollSortKey, SortDir> = {
-  employeeName: "asc",
-  company: "asc",
-  contractType: "asc",
-  maksGodziny: "desc",
-  faktGodziny: "desc",
-  stawkaNetto: "desc",
-  kwotaGlowna: "desc",
-  kwotaWyrownania: "desc",
-  dodatekFinalny: "desc",
-  przelew: "desc",
-  gotowka: "desc",
-  wyplata: "desc",
-};
-
-type OfficeSortKey =
-  | "employeeName"
-  | "company"
-  | "hoursForAccounting"
-  | "rate"
-  | "total";
-
-const OFFICE_DIR: Record<OfficeSortKey, SortDir> = {
-  employeeName: "asc",
-  company: "asc",
-  hoursForAccounting: "desc",
-  rate: "desc",
-  total: "desc",
-};
-
-type ObjectSortKey = "name" | "hoursTotal" | "employeesCount" | "mapping";
-
-const OBJECT_DIR: Record<ObjectSortKey, SortDir> = {
-  name: "asc",
-  hoursTotal: "desc",
-  employeesCount: "desc",
-  mapping: "asc",
-};
-
-/**
- * Tryb „Braki” w wynagrodzeniach. `braki` odpowiada dokładnie liczbie z kafla
- * (`summary.gaps` — wiersze z którymkolwiek brakiem, każdy liczony raz), a dwa
- * kolejne tryby rozbijają go na składniki z podpisu kafla — dzięki temu z liczby
- * na kaflu da się dojść do konkretnych wierszy, zamiast szukać ich po tabeli
- * okiem. Składniki mogą sumować się do więcej niż `gaps`, bo jedna umowa bywa
- * jednocześnie bez kwoty i z dodatkiem do przeliczenia.
- */
-type PayrollGapMode = "all" | "braki" | "missing" | "pending" | "warnings";
-
-/**
- * Wiersz bez kwoty od księgowości — ten sam warunek, którym backend liczy
- * `summary.missingMain` (`src/routes/hr.ts`). Rozjechanie się tych dwóch reguł
- * dałoby kafel z liczbą, której filtr nie potrafi odtworzyć.
- */
-const payrollMissingMain = (r: HrPayrollRow) =>
-  r.faktGodziny != null && r.faktGodziny > 0 && r.kwotaGlowna == null;
-
-/** Filtr aktywności — wspólny kształt dla kartoteki i słownika obiektów. */
+/** Filtr aktywności kartoteki pracowników. */
 type ActiveFilter = "all" | "active" | "inactive";
 
+/**
+ * Kolejność zakładek idzie od danych STAŁYCH do ROBOTY MIESIĄCA: normy i
+ * słowniki ustawia się raz, godziny i wynagrodzenia wypełnia co miesiąc —
+ * więc to one stoją na końcu, najbliżej miejsca, w którym kadrowa spędza czas.
+ * Domyślne przekierowanie `/kadry` zostaje na wynagrodzeniach.
+ */
 const KADRY_TABS = [
-  "wynagrodzenia",
-  "godziny",
-  "pracownicy",
-  "obiekty",
-  "dzialy",
   "normy",
+  "dzialy",
+  "obiekty",
+  "pracownicy",
+  "godziny",
+  "wynagrodzenia",
+  // Dziennik zmian modułu — ostatnia zakładka, bo to widok wsteczny.
+  "historia",
 ] as const;
 
 // Dawne podzakładki scalone w „Pracownicy" — stare adresy (zakładki w
@@ -288,11 +214,39 @@ export function Kadry() {
   const { canEdit } = usePerms();
   const editable = canEdit(`kadry/${tab}`);
   const hoursEditable = canEdit("kadry/godziny");
+  const navigate = useNavigate();
+  /**
+   * Miesiąc siedzi w adresie (`?m=2026-09`). Przedtem żył tylko w stanie
+   * komponentu: odświeżenie strony wracało do bieżącego miesiąca, a link
+   * wysłany księgowej („zobacz sierpień”) otwierał u niej wrzesień.
+   */
+  const [searchParams, setSearchParams] = useSearchParams();
   const now = new Date();
-  const [year, setYear] = useState(now.getFullYear());
-  const [month, setMonth] = useState(now.getMonth() + 1);
+  const monthParam = searchParams.get("m") ?? "";
+  const parsed = /^(\d{4})-(\d{1,2})$/.exec(monthParam);
+  const year =
+    parsed && Number(parsed[2]) >= 1 && Number(parsed[2]) <= 12
+      ? Number(parsed[1])
+      : now.getFullYear();
+  const month =
+    parsed && Number(parsed[2]) >= 1 && Number(parsed[2]) <= 12
+      ? Number(parsed[2])
+      : now.getMonth() + 1;
+
+  const setYearMonth = useCallback(
+    (y: number, m: number) => {
+      const next = new URLSearchParams(searchParams);
+      next.set("m", `${y}-${String(m).padStart(2, "0")}`);
+      // `replace`: przewijanie miesięcy nie ma zapychać historii przeglądarki
+      // (dziesięć kliknięć strzałką = dziesięć wciśnięć „wstecz”).
+      setSearchParams(next, { replace: true });
+    },
+    [searchParams, setSearchParams],
+  );
 
   const [summary, setSummary] = useState<HrSummary | null>(null);
+  /** Stan miesiąca (otwarty/zamknięty) — pasek nad tabelą i blokada edycji. */
+  const [monthStatus, setMonthStatus] = useState<HrMonthStatus | null>(null);
   const [payroll, setPayroll] = useState<HrPayrollRow[]>([]);
   const [hours, setHours] = useState<HrHoursEntry[]>([]);
   const [office, setOffice] = useState<HrOfficeRow[]>([]);
@@ -303,52 +257,72 @@ export function Kadry() {
   /** Działy firmy — druga grupa w selekcie przypisania godzin + zakładka Działy. */
   const [departments, setDepartments] = useState<HrDepartment[]>([]);
   const [contracts, setContracts] = useState<HrContract[]>([]);
+  /**
+   * Umowy do przedłużenia (`GET /hr/contracts/expiring`): kończące się w ciągu
+   * 30 dni i już zakończone bez następczyni. Liczy je serwer — inaczej „za ile
+   * dni” zależałoby od zegara i strefy przeglądarki.
+   */
+  const [expiring, setExpiring] = useState<HrExpiringContract[]>([]);
   /** Słownik spółek — źródło listy wyboru w umowie i podpowiedzi w biurze. */
   const [companies, setCompanies] = useState<Company[]>([]);
   const [norms, setNorms] = useState<HrMonthNorm[]>([]);
   const [loading, setLoading] = useState(true);
+  /**
+   * Kwoty główne z POPRZEDNIEGO miesiąca (umowa → kwota). Wpisywanie 147 liczb
+   * z kartki to idealne warunki na literówkę o rząd wielkości; wartość obok
+   * pola daje punkt odniesienia bez przełączania miesiąca.
+   */
+  const [prevAmounts, setPrevAmounts] = useState<Map<number, number>>(new Map());
+  /**
+   * Poprzedni miesiąc do porównania: sumy pod kaflami i wypłaty per umowa dla
+   * sekcji „Największe zmiany". Zawsze miesiąc BEZPOŚREDNIO poprzedni — pusty
+   * lipiec zostaje pusty, zamiast po cichu ustąpić miejsca czerwcowi.
+   */
+  const [prevSummary, setPrevSummary] = useState<HrPrevSummary | null>(null);
+  const [prevPayroll, setPrevPayroll] = useState<HrPrevPayrollRow[]>([]);
 
-  const [payrollEdit, setPayrollEdit] = useState<HrPayrollRow | null>(null);
   const [hoursFormOpen, setHoursFormOpen] = useState(false);
   const [hoursEdit, setHoursEdit] = useState<HrHoursEntry | null>(null);
   const [employeeFormOpen, setEmployeeFormOpen] = useState(false);
   const [employeeEdit, setEmployeeEdit] = useState<HrEmployee | null>(null);
   const [contractFormOpen, setContractFormOpen] = useState(false);
   const [contractEdit, setContractEdit] = useState<HrContract | null>(null);
+  /**
+   * Umowa, którą nowa ma ZASTĄPIĆ („Nowa umowa od…”). Zapis idzie wtedy przez
+   * `POST /hr/contracts/:id/supersede`: bieżąca dostaje datę zakończenia dzień
+   * przed startem nowej, w jednej transakcji.
+   */
+  const [supersedeContract, setSupersedeContract] = useState<HrContract | null>(
+    null,
+  );
   const [officeFormOpen, setOfficeFormOpen] = useState(false);
   const [officeEdit, setOfficeEdit] = useState<HrOfficeRow | null>(null);
 
   /**
-   * Szukajka wypłat — obejmuje TEŻ sekcję Biuro pod tabelą. Obie listy są
-   * rozliczeniem tego samego miesiąca, więc filtr, który zawężał tylko górną
-   * połowę ekranu, pokazywał „wypłaty Kowalskiego” razem z całym biurem.
+   * Wiersz otwarty w dialogu wypłaty razem z listą, po której chodzą przyciski
+   * „Poprzedni / Następny” — lista pochodzi z tabeli (po filtrach i sortowaniu),
+   * więc nawigacja idzie dokładnie tak, jak widać na ekranie.
    */
-  const [payrollFilter, setPayrollFilter] = useState("");
-  /** Spółka — wspólna dla wypłat ochrony i biura (jedna lista wyboru na oba). */
-  const [payrollCompany, setPayrollCompany] = useState<string>("all");
-  const [payrollContractType, setPayrollContractType] = useState<
-    "all" | "praca" | "zlecenie"
-  >("all");
-  /** Zgłoszenie: `none` = wiersz bez ZUA i bez ZZA (umowa nieprzypisana do gałęzi). */
-  const [payrollRegistration, setPayrollRegistration] = useState<
-    "all" | "zua" | "zza" | "none"
-  >("all");
-  const [payrollBonusType, setPayrollBonusType] = useState<string>("all");
-  const [payrollMainChannel, setPayrollMainChannel] = useState<
-    "all" | "przelew" | "gotowka"
-  >("all");
-  const [payrollMaxSource, setPayrollMaxSource] = useState<
-    "all" | "override" | "individual" | "norm"
-  >("all");
-  const [payrollGaps, setPayrollGaps] = useState<PayrollGapMode>("all");
-  const [payrollMin, setPayrollMin] = useState("");
-  const [payrollMax, setPayrollMax] = useState("");
-  const [payrollSort, setPayrollSort] = useState<PayrollSortKey>("employeeName");
-  const [payrollDir, setPayrollDir] = useState<SortDir>("asc");
-  const [officeSort, setOfficeSort] = useState<OfficeSortKey>("employeeName");
-  const [officeDir, setOfficeDir] = useState<SortDir>("asc");
+  const [payrollDialog, setPayrollDialog] = useState<{
+    list: HrPayrollRow[];
+    index: number;
+  } | null>(null);
+  /** Żądanie z kafla „Braki” — PayrollTab ustawia sobie filtr po zmianie nonce. */
+  const [gapsRequest, setGapsRequest] = useState<{
+    mode: PayrollGapMode;
+    nonce: number;
+  } | null>(null);
+  /** Filtry kartoteki schowane pod „Filtry (n)". */
+  const [showEmployeeFilters, setShowEmployeeFilters] = useState(false);
 
-  const [employeeFilter, setEmployeeFilter] = useState("");
+  /**
+   * Szukajka kartoteki. Stan początkowy z `?q=` — dziennik zmian („Historia”)
+   * linkuje nazwiskiem do `/kadry/pracownicy?q=Nazwisko Imię`, żeby kliknięcie
+   * wpisu prowadziło prosto do tej osoby, a nie do listy wszystkich.
+   */
+  const [employeeFilter, setEmployeeFilter] = useState(
+    () => searchParams.get("q") ?? "",
+  );
   /** Kartoteka: wszyscy / tylko ochrona (umowy) / tylko biuro — dawne podzakładki. */
   const [employeeKind, setEmployeeKind] = useState<"all" | "ochrona" | "biuro">(
     "all",
@@ -370,34 +344,61 @@ export function Kadry() {
   /** Spółka z umów LUB z rozliczenia biura (`all` = bez filtra). */
   const [employeeCompany, setEmployeeCompany] = useState<string>("all");
   /**
-   * „Ochrona bez umów”: `none` = tylko osoby bez ani jednej umowy (to one nie
-   * pojawią się w wynagrodzeniach), `with` = tylko z umowami.
+   * Filtr umów w kartotece: `none` = osoby bez ani jednej umowy (to one nie
+   * pojawią się w wynagrodzeniach), `with` = tylko z umowami, `konczace` /
+   * `zakonczone` = lista z przypomnień o okresie obowiązywania (migracja 0112).
+   *
+   * Stan początkowy z adresu (`?umowy=konczace`), bo kafel „Umowy do
+   * przedłużenia” prowadzi tu linkiem — po odświeżeniu strony filtr ma zostać.
    */
-  const [employeeContracts, setEmployeeContracts] = useState<
-    "all" | "none" | "with"
-  >("all");
+  const [employeeContracts, setEmployeeContracts] = useState<EmployeeContractsFilter>(
+    () => {
+      const raw = searchParams.get("umowy") ?? "all";
+      return (
+        EMPLOYEE_CONTRACT_FILTERS as readonly string[]
+      ).includes(raw)
+        ? (raw as EmployeeContractsFilter)
+        : "all";
+    },
+  );
   const [employeeSort, setEmployeeSort] = useState<EmployeeSortKey>("fullName");
   const [employeeDir, setEmployeeDir] = useState<SortDir>("asc");
 
-  const [objectSearch, setObjectSearch] = useState("");
-  const [objectMapping, setObjectMapping] = useState<
-    "all" | "mapped" | "unmapped"
-  >("all");
-  const [objectActive, setObjectActive] = useState<ActiveFilter>("all");
-  /** Pozycje techniczne (#BIURO, #zlecenie): ukryj / tylko one / wszystkie. */
-  const [objectTech, setObjectTech] = useState<"all" | "hide" | "only">("all");
-  const [objectWithHours, setObjectWithHours] = useState(false);
-  const [objectSort, setObjectSort] = useState<ObjectSortKey>("hoursTotal");
-  const [objectDir, setObjectDir] = useState<SortDir>("desc");
-
-  /** Rozwinięci pracownicy w kartotece (umowy + biuro pod wierszem). */
+  /** Rozwinięci pracownicy w kartotece (umowy pod wierszem). */
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   /** Pracownik podstawiany w nowej umowie / nowym wpisie biura. */
   const [formEmployeeId, setFormEmployeeId] = useState<number | undefined>();
-  const [newObjectName, setNewObjectName] = useState("");
-  const [normDraft, setNormDraft] = useState<
-    Record<number, { workNorm: string; contractNorm: string }>
-  >({});
+  /** Wspólne okno potwierdzenia modułu (zamiast `window.confirm`). */
+  const confirm = useConfirm();
+
+  /**
+   * REZERWACJE TRZECH LIST MIESIĄCA (wypłaty, godziny, biuro).
+   *
+   * Stoją TUTAJ, a nie w zakładkach, bo dialogi wiersza (godziny, biuro,
+   * wypłata) i automatyczne przeniesienie z poprzedniego miesiąca też zapisują
+   * — a backend od migracji 0109 żąda rezerwacji przy KAŻDYM zapisie danych
+   * miesięcznych. Zakładki dostają je propsem: tam są przełącznikiem trybu
+   * i paskiem „kto edytuje”, tutaj — warunkiem zapisu z okna dialogowego
+   * (`ensure()` bierze listę na czas zapisu i oddaje ją po chwili).
+   *
+   * Prawo edycji liczymy z KLUCZA ZAKŁADKI, nie z `editable` (to ostatnie
+   * dotyczy zakładki akurat otwartej): wpis biura zapisuje się z Wynagrodzeń,
+   * a wpis godzin z dialogu otwartego nad Godzinami.
+   */
+  const payrollEditable = canEdit("kadry/wynagrodzenia");
+  const payrollLock = useEditLock({ scope: "payroll", year, month, enabled: payrollEditable });
+  const officeLock = useEditLock({ scope: "office", year, month, enabled: payrollEditable });
+  const hoursLock = useEditLock({ scope: "hours", year, month, enabled: hoursEditable });
+  /**
+   * Świeży uchwyt rezerwacji godzin dla `loadMonth`. Przez ref, a nie wprost:
+   * `loadMonth` jest `useCallback`, a wciągnięcie w jego zależności stanu,
+   * który zmienia się przy każdym heartbeacie, przeładowywałoby miesiąc
+   * w kółko (efekt niżej woła `loadMonth` po każdej zmianie tożsamości).
+   */
+  const hoursLockRef = useRef(hoursLock);
+  useEffect(() => {
+    hoursLockRef.current = hoursLock;
+  });
 
   // Carry-over: jedna próba na parę (year, month) w tej sesji + ochrona przed
   // zapisem stanu po szybkiej zmianie miesiąca (klucz ostatniego żądania)
@@ -412,6 +413,18 @@ export function Kadry() {
     [],
   );
 
+  /**
+   * Ciche przeliczenie miesiąca po serii zapisów inline: wiersz podmienia się
+   * od razu (odpowiedź PUT-a), ale kafle i sumy liczy backend — raz na serię,
+   * nie po każdej wpisanej liczbie.
+   */
+  const scheduleSilentReload = () => {
+    if (hoursRefreshRef.current) window.clearTimeout(hoursRefreshRef.current);
+    hoursRefreshRef.current = window.setTimeout(() => {
+      void loadMonth({ silent: true });
+    }, 1500);
+  };
+
   // `silent` — odświeżenie w tle po zapisie inline: dane mają się przeliczyć
   // (godziny karmią wynagrodzenia i kafle), ale tabela nie ma migotać
   // komunikatem „Ładowanie…" pod palcami wpisującego.
@@ -420,14 +433,12 @@ export function Kadry() {
     monthKeyRef.current = key;
     if (!opts?.silent) setLoading(true);
     try {
-      const fetchAll = () =>
-        Promise.all([
-          getHrSummary(year, month),
-          getHrPayroll(year, month),
-          getHrHours(year, month),
-          getHrOffice(year, month),
-        ]);
-      let [s, p, h, o] = await fetchAll();
+      // JEDNO żądanie na komplet miesiąca (kafle + wypłaty + godziny + biuro +
+      // stan + kwoty z poprzedniego miesiąca). Wcześniej sześć równoległych
+      // żądań, z czego TRZY uruchamiały pełną kalkulację płac na 147 umowach —
+      // także przy cichym odświeżeniu po każdej serii zapisów inline.
+      const fetchAll = () => getHrMonth(year, month);
+      let bundle = (await fetchAll()).data ?? null;
       // Auto-przeniesienie aktywnych pracowników z poprzedniego miesiąca:
       // tylko gdy miesiąc pusty, użytkownik ma edycję godzin, miesiąc nie jest
       // dalej niż 1 w przód (przewijanie w przyszłość nie tworzy kaskady
@@ -435,39 +446,65 @@ export function Kadry() {
       const nowIdx =
         new Date().getFullYear() * 12 + new Date().getMonth() + 1;
       if (
-        (h.data ?? []).length === 0 &&
+        (bundle?.hours ?? []).length === 0 &&
         hoursEditable &&
+        // W zamkniętym miesiącu backend i tak odmówi (423) — nie ma po co
+        // wołać przeniesienia i czekać na błąd przy każdym wejściu.
+        bundle?.monthStatus.status !== "closed" &&
         year * 12 + month - nowIdx <= 1 &&
         !carryTriedRef.current.has(key)
       ) {
-        carryTriedRef.current.add(key);
         try {
-          const res = await carryOverHrHours(year, month);
-          if ((res.data?.inserted ?? 0) > 0) {
-            [s, p, h, o] = await fetchAll();
+          // Przeniesienie to ZAPIS, więc wymaga rezerwacji listy godzin —
+          // `ensure` bierze ją po cichu i oddaje po chwili. Gdy listę trzyma
+          // ktoś inny (właśnie wypełnia ten miesiąc), przeniesienia po prostu
+          // nie robimy: i tak zrobi je on, a dwie serie stubów naraz to ostatnie,
+          // czego ten ekran potrzebuje.
+          //
+          // „Próbowano w tej sesji” zapisujemy DOPIERO po faktycznej próbie:
+          // odmowa rezerwacji nie jest odpowiedzią „nie ma czego przenosić”,
+          // a oznaczona z góry blokowałaby ponowienie do końca sesji — także
+          // wtedy, gdy tamta osoba zwolni listę pięć sekund później.
+          if (await hoursLockRef.current.ensure(true)) {
+            carryTriedRef.current.add(key);
+            const res = await carryOverHrHours(year, month);
+            if ((res.data?.inserted ?? 0) > 0) {
+              bundle = (await fetchAll()).data ?? bundle;
+            }
           }
         } catch {
-          // Błąd carry-over (np. sieć) nie blokuje widoku pustego miesiąca
+          // Błąd carry-over (np. sieć) nie blokuje widoku pustego miesiąca;
+          // próba jest już odnotowana, więc nie powtarza się w kółko.
+          carryTriedRef.current.add(key);
         }
       }
       if (monthKeyRef.current !== key) return; // zmieniono miesiąc w trakcie
-      setSummary(s.data ?? null);
-      setPayroll(p.data ?? []);
-      setHours(h.data ?? []);
-      setOffice(o.data ?? []);
+      setSummary(bundle?.summary ?? null);
+      setMonthStatus(bundle?.monthStatus ?? null);
+      setPayroll(bundle?.payroll ?? []);
+      setHours(bundle?.hours ?? []);
+      setOffice(bundle?.office ?? []);
+      setPrevAmounts(
+        new Map((bundle?.prevAmounts ?? []).map((r) => [r.contractId, r.mainAmount])),
+      );
+      setPrevSummary(bundle?.prevSummary ?? null);
+      setPrevPayroll(bundle?.prevPayroll ?? []);
     } finally {
       if (monthKeyRef.current === key && !opts?.silent) setLoading(false);
     }
   }, [year, month, hoursEditable]);
 
   const loadDictionaries = useCallback(async () => {
-    const [e, o, c, comp, cat, dep] = await Promise.all([
+    const [e, o, c, comp, cat, dep, exp] = await Promise.all([
       getHrEmployees(),
       getHrObjects(),
       getHrContracts(),
       getCompanies(),
       getHrObjectCatalog(),
       getHrDepartments(),
+      // Ta sama lista zasila kafel „Umowy do przedłużenia” i filtr kartoteki,
+      // więc jedzie razem ze słownikami — jedno odświeżenie po każdym zapisie.
+      getHrExpiringContracts(EXPIRING_DAYS),
     ]);
     setEmployees(e.data ?? []);
     setObjects(o.data ?? []);
@@ -475,12 +512,12 @@ export function Kadry() {
     setCompanies(comp.data ?? []);
     setObjectCatalog(cat.data ?? []);
     setDepartments(dep.data ?? []);
+    setExpiring(exp.data ?? []);
   }, []);
 
   const loadNorms = useCallback(async () => {
     const n = await getHrNorms(year);
     setNorms(n.data ?? []);
-    setNormDraft({});
   }, [year]);
 
   useEffect(() => {
@@ -493,20 +530,37 @@ export function Kadry() {
     loadNorms();
   }, [loadNorms]);
 
-  const shiftMonth = (delta: number) => {
-    let m = month + delta;
-    let y = year;
-    if (m < 1) {
-      m = 12;
-      y -= 1;
-    }
-    if (m > 12) {
-      m = 1;
-      y += 1;
-    }
-    setMonth(m);
-    setYear(y);
-  };
+  /**
+   * NA ŻYWO. Sygnał z `/api/hr/live` mówi tylko „coś się zmieniło” — dane
+   * dociągamy zwykłymi zapytaniami, więc uprawnień pilnuje backend jak dotąd.
+   * Odświeżenie jest CICHE (`silent`): tabela nie ma migotać „Ładowanie…” pod
+   * palcami osoby, która akurat wpisuje kwoty, a brudnopisy komórek żyją
+   * w stanie zakładek i cudzy zapis ich nie dotyka.
+   *
+   * Własnych zapisów tu nie ma — pomija je serwer po identyfikatorze karty
+   * (`?client=`), a karta i tak odświeża się po odpowiedzi API.
+   */
+  const liveRefreshRef = useRef<number | null>(null);
+  useHrLive((change) => {
+    if (change.scope === "locks") return; // stan rezerwacji ogarnia `useEditLock`
+    if (!hrChangeHitsMonth(change, year, month)) return;
+    if (liveRefreshRef.current) window.clearTimeout(liveRefreshRef.current);
+    // Jedna operacja w Kadrach potrafi wypuścić kilka sygnałów w ułamku sekundy
+    // (wklejka kwot, przeniesienie z poprzedniego miesiąca) — stąd zebranie ich
+    // w jedno przeładowanie.
+    liveRefreshRef.current = window.setTimeout(() => {
+      liveRefreshRef.current = null;
+      void loadMonth({ silent: true });
+      if (change.scope === "dictionary" || change.resync) void loadDictionaries();
+      if (change.scope === "norms" || change.resync) void loadNorms();
+    }, 300);
+  });
+  useEffect(
+    () => () => {
+      if (liveRefreshRef.current) window.clearTimeout(liveRefreshRef.current);
+    },
+    [],
+  );
 
   const activeEmployees = useMemo(
     () => employees.filter((e) => e.active),
@@ -514,91 +568,22 @@ export function Kadry() {
   );
 
   /**
-   * Pozycje kadrowe: filtr + sortowanie w jednym przebiegu. Domyślnie od
-   * najcięższych — mapuje się je ręcznie i po kolei, więc na górze mają stać
-   * te, na których wisi najwięcej godzin: to one przeniosą do Analityki
-   * największy kawałek kosztu osobowego.
+   * Pracownik → PORTAL jego działu (`hr_departments.portal`). Po tym tabela
+   * wypłat i biura poznaje, że wiersz należy do sekcji, którą rezerwuje ktoś
+   * inny — takie wiersze są wyszarzone i nie dają się zapisać (backend i tak
+   * odrzuci je 423). Wpisy godzin mają własny dział, więc pytają o portal
+   * wprost słownika działów.
    */
-  const objectsVisible = useMemo(() => {
-    const q = objectSearch.trim().toLowerCase();
-    const list = objects.filter((o) => {
-      if (q && !o.name.toLowerCase().includes(q)) return false;
-      if (objectMapping === "mapped" && o.objectId == null) return false;
-      if (objectMapping === "unmapped" && o.objectId != null) return false;
-      if (objectActive === "active" && !o.active) return false;
-      if (objectActive === "inactive" && o.active) return false;
-      const tech = overheadKind(o.name) != null;
-      if (objectTech === "hide" && tech) return false;
-      if (objectTech === "only" && !tech) return false;
-      if (objectWithHours && o.hoursTotal <= 0) return false;
-      return true;
-    });
+  const portalOfEmployee = useCallback(
+    (employeeId: number | null | undefined): string | null => {
+      if (employeeId == null) return null;
+      const e = employees.find((x) => x.id === employeeId);
+      if (e?.departmentId == null) return null;
+      return departments.find((d) => d.id === e.departmentId)?.portal ?? null;
+    },
+    [employees, departments],
+  );
 
-    const mul = objectDir === "asc" ? 1 : -1;
-    const mappingLabel = (o: HrObject) =>
-      o.object ? catalogLabel(o.object) : "";
-    const cmp = (a: HrObject, b: HrObject) => {
-      switch (objectSort) {
-        case "name":
-          return cmpText(a.name, b.name, mul);
-        case "employeesCount":
-          return cmpNum(a.employeesCount, b.employeesCount, mul);
-        case "mapping":
-          return cmpText(mappingLabel(a), mappingLabel(b), mul);
-        default:
-          // Godziny: 0 to „pozycja bez historii” — tabela pisze tam kreskę,
-          // więc w sortowaniu zachowuje się jak brak wartości.
-          return cmpMoney(a.hoursTotal, b.hoursTotal, mul);
-      }
-    };
-    return list.sort(
-      (a, b) => cmp(a, b) || a.name.localeCompare(b.name, "pl") || a.id - b.id,
-    );
-  }, [
-    objects,
-    objectSearch,
-    objectMapping,
-    objectActive,
-    objectTech,
-    objectWithHours,
-    objectSort,
-    objectDir,
-  ]);
-
-  const objectFiltersActive =
-    objectSearch !== "" ||
-    objectMapping !== "all" ||
-    objectActive !== "all" ||
-    objectTech !== "all" ||
-    objectWithHours;
-
-  const clearObjectFilters = () => {
-    setObjectSearch("");
-    setObjectMapping("all");
-    setObjectActive("all");
-    setObjectTech("all");
-    setObjectWithHours(false);
-  };
-
-  /**
-   * Postęp mapowania liczymy TYLKO z pozycji, które mają godziny i nie są
-   * kosztem ogólnym: pozycja bez godzin nic do Analityki nie wniesie, a
-   * #BIURO / CMA nie mają być mapowane — w mianowniku zaniżałyby wynik na stałe.
-   */
-  const mappingProgress = useMemo(() => {
-    const relevant = objects.filter(
-      (o) => o.hoursTotal > 0 && !overheadKind(o.name),
-    );
-    const mapped = relevant.filter((o) => o.objectId != null);
-    const sum = (list: HrObject[]) =>
-      list.reduce((acc, o) => acc + o.hoursTotal, 0);
-    return {
-      total: relevant.length,
-      mapped: mapped.length,
-      hoursTotal: sum(relevant),
-      hoursMapped: sum(mapped),
-    };
-  }, [objects]);
 
   // Kartoteka: umowy podpięte pod pracownika (wiersz rozwijany).
   const contractsByEmployee = useMemo(() => {
@@ -610,6 +595,23 @@ export function Kadry() {
     }
     return m;
   }, [contracts]);
+
+  /** Umowy do przedłużenia w rozbiciu na osoby — filtr kartoteki i znacznik w wierszu umowy. */
+  const expiringByEmployee = useMemo(() => {
+    const m = new Map<number, HrExpiringContract[]>();
+    for (const c of expiring) {
+      const list = m.get(c.employeeId);
+      if (list) list.push(c);
+      else m.set(c.employeeId, [c]);
+    }
+    return m;
+  }, [expiring]);
+
+  /** Szybkie „czy ta umowa jest na liście do przedłużenia” (ikona w wierszu). */
+  const expiringById = useMemo(
+    () => new Map(expiring.map((c) => [c.id, c])),
+    [expiring],
+  );
 
   /** Spółki widziane przez kartotekę — z umów i z rozliczeń biura (cała historia). */
   const employeeCompanyOptions = useMemo(() => {
@@ -638,6 +640,20 @@ export function Kadry() {
       if (employeeActive === "inactive" && e.active) return false;
       if (employeeContracts === "none" && ctrs.length > 0) return false;
       if (employeeContracts === "with" && ctrs.length === 0) return false;
+      // Przypomnienia o okresie: pokazujemy OSOBY, których dotyczy wpis z listy
+      // `expiring` — kartoteka jest listą ludzi, a umowę widać po rozwinięciu.
+      if (
+        (employeeContracts === "konczace" ||
+          employeeContracts === "zakonczone") &&
+        !expiringByEmployee
+          .get(e.id)
+          ?.some((x) =>
+            employeeContracts === "konczace"
+              ? x.reason === "konczaca"
+              : x.reason === "zakonczona",
+          )
+      )
+        return false;
       if (
         employeeCompany !== "all" &&
         !companiesOf(e).some((c) => c === employeeCompany)
@@ -694,7 +710,15 @@ export function Kadry() {
     employeeSort,
     employeeDir,
     contractsByEmployee,
+    expiringByEmployee,
   ]);
+
+  /** Ile ze SCHOWANYCH filtrów kartoteki jest aktywnych (licznik na przycisku). */
+  const hiddenEmployeeFilters = [
+    employeeDept !== "all",
+    employeeCompany !== "all",
+    employeeContracts !== "all",
+  ].filter(Boolean).length;
 
   const employeeFiltersActive =
     employeeFilter !== "" ||
@@ -706,13 +730,39 @@ export function Kadry() {
     employeeCompany !== "all" ||
     employeeContracts !== "all";
 
+  /** Ile umów czeka na przedłużenie — podpis kafla i liczniki w selekcie. */
+  const expiringCounts = useMemo(
+    () => ({
+      konczace: expiring.filter((c) => c.reason === "konczaca").length,
+      zakonczone: expiring.filter((c) => c.reason === "zakonczona").length,
+      razem: expiring.length,
+    }),
+    [expiring],
+  );
+
+  /**
+   * Filtr umów zostaje w adresie (`?umowy=konczace`) — kafel „Umowy do
+   * przedłużenia” linkuje tu z Wynagrodzeń, a listę trzeba dać się wysłać
+   * dalej („zobacz, komu kończą się umowy”).
+   */
+  const changeEmployeeContracts = useCallback(
+    (v: EmployeeContractsFilter) => {
+      setEmployeeContracts(v);
+      const next = new URLSearchParams(searchParams);
+      if (v === "all") next.delete("umowy");
+      else next.set("umowy", v);
+      setSearchParams(next, { replace: true });
+    },
+    [searchParams, setSearchParams],
+  );
+
   const clearEmployeeFilters = () => {
     setEmployeeFilter("");
     setEmployeeKind("all");
     setEmployeeDept("all");
     setEmployeeActive("active");
     setEmployeeCompany("all");
-    setEmployeeContracts("all");
+    changeEmployeeContracts("all");
   };
 
   const visibleContractsCount = employeesVisible.reduce(
@@ -728,160 +778,6 @@ export function Kadry() {
       return next;
     });
 
-  /** Spółki z rozliczenia miesiąca — jedna lista wyboru na wypłaty i biuro. */
-  const payrollCompanyOptions = useMemo(() => {
-    const set = new Set<string>();
-    for (const r of payroll) if (r.company) set.add(r.company);
-    for (const r of office) if (r.company) set.add(r.company);
-    return [...set].sort((a, b) => a.localeCompare(b, "pl"));
-  }, [payroll, office]);
-
-  const payrollVisible = useMemo(() => {
-    const q = payrollFilter.trim().toLowerCase();
-    const min = parseAmount(payrollMin);
-    const max = parseAmount(payrollMax);
-    const list = payroll.filter((r) => {
-      if (q && !`${r.employeeName} ${r.company}`.toLowerCase().includes(q))
-        return false;
-      if (payrollCompany !== "all" && r.company !== payrollCompany) return false;
-      if (
-        payrollContractType !== "all" &&
-        r.contractType !== payrollContractType
-      )
-        return false;
-      if (
-        payrollRegistration !== "all" &&
-        (r.registration ?? "none") !== payrollRegistration
-      )
-        return false;
-      if (payrollBonusType !== "all" && r.bonusType !== payrollBonusType)
-        return false;
-      if (payrollMainChannel !== "all" && r.mainChannel !== payrollMainChannel)
-        return false;
-      if (payrollMaxSource !== "all" && r.maxHoursSource !== payrollMaxSource)
-        return false;
-      if (payrollGaps === "missing" && !payrollMissingMain(r)) return false;
-      if (payrollGaps === "pending" && !r.bonusPending) return false;
-      if (payrollGaps === "braki" && !payrollMissingMain(r) && !r.bonusPending)
-        return false;
-      if (payrollGaps === "warnings" && r.warnings.length === 0) return false;
-      if (min !== undefined && r.wyplata < min) return false;
-      if (max !== undefined && r.wyplata > max) return false;
-      return true;
-    });
-
-    const mul = payrollDir === "asc" ? 1 : -1;
-    const cmp = (a: HrPayrollRow, b: HrPayrollRow) => {
-      switch (payrollSort) {
-        case "company":
-          return cmpText(a.company, b.company, mul);
-        case "contractType":
-          return cmpText(a.contractType, b.contractType, mul);
-        case "maksGodziny":
-          return cmpNum(a.maksGodziny, b.maksGodziny, mul);
-        case "faktGodziny":
-          return cmpNum(a.faktGodziny, b.faktGodziny, mul);
-        case "stawkaNetto":
-          return cmpNum(a.stawkaNetto, b.stawkaNetto, mul);
-        case "kwotaGlowna":
-          return cmpNum(a.kwotaGlowna, b.kwotaGlowna, mul);
-        case "kwotaWyrownania":
-          return cmpNum(a.kwotaWyrownania, b.kwotaWyrownania, mul);
-        case "dodatekFinalny":
-          return cmpNum(a.dodatekFinalny, b.dodatekFinalny, mul);
-        case "przelew":
-          return cmpMoney(a.przelew, b.przelew, mul);
-        case "gotowka":
-          return cmpMoney(a.gotowka, b.gotowka, mul);
-        case "wyplata":
-          return cmpMoney(a.wyplata, b.wyplata, mul);
-        default:
-          return cmpText(a.employeeName, b.employeeName, mul);
-      }
-    };
-    // Remis rozstrzyga nazwisko i id umowy — czyli dokładnie kolejność, w
-    // której backend oddaje wiersze; jedna osoba miewa kilka umów w miesiącu.
-    return list.sort(
-      (a, b) =>
-        cmp(a, b) ||
-        a.employeeName.localeCompare(b.employeeName, "pl") ||
-        a.contractId - b.contractId,
-    );
-  }, [
-    payroll,
-    payrollFilter,
-    payrollCompany,
-    payrollContractType,
-    payrollRegistration,
-    payrollBonusType,
-    payrollMainChannel,
-    payrollMaxSource,
-    payrollGaps,
-    payrollMin,
-    payrollMax,
-    payrollSort,
-    payrollDir,
-  ]);
-
-  /**
-   * Biuro dzieli z wypłatami szukajkę i filtr spółki (to jedno rozliczenie
-   * miesiąca w dwóch tabelach), ale ma własne sortowanie — kolumny są inne.
-   */
-  const officeVisible = useMemo(() => {
-    const q = payrollFilter.trim().toLowerCase();
-    const list = office.filter((r) => {
-      if (q && !`${r.employeeName} ${r.company}`.toLowerCase().includes(q))
-        return false;
-      if (payrollCompany !== "all" && r.company !== payrollCompany) return false;
-      return true;
-    });
-    const mul = officeDir === "asc" ? 1 : -1;
-    const cmp = (a: HrOfficeRow, b: HrOfficeRow) => {
-      switch (officeSort) {
-        case "company":
-          return cmpText(a.company, b.company, mul);
-        case "hoursForAccounting":
-          return cmpNum(a.hoursForAccounting, b.hoursForAccounting, mul);
-        case "rate":
-          return cmpNum(a.rate, b.rate, mul);
-        case "total":
-          return cmpMoney(a.total, b.total, mul);
-        default:
-          return cmpText(a.employeeName, b.employeeName, mul);
-      }
-    };
-    return list.sort(
-      (a, b) =>
-        cmp(a, b) ||
-        a.employeeName.localeCompare(b.employeeName, "pl") ||
-        a.id - b.id,
-    );
-  }, [office, payrollFilter, payrollCompany, officeSort, officeDir]);
-
-  const payrollFiltersActive =
-    payrollFilter !== "" ||
-    payrollCompany !== "all" ||
-    payrollContractType !== "all" ||
-    payrollRegistration !== "all" ||
-    payrollBonusType !== "all" ||
-    payrollMainChannel !== "all" ||
-    payrollMaxSource !== "all" ||
-    payrollGaps !== "all" ||
-    payrollMin !== "" ||
-    payrollMax !== "";
-
-  const clearPayrollFilters = () => {
-    setPayrollFilter("");
-    setPayrollCompany("all");
-    setPayrollContractType("all");
-    setPayrollRegistration("all");
-    setPayrollBonusType("all");
-    setPayrollMainChannel("all");
-    setPayrollMaxSource("all");
-    setPayrollGaps("all");
-    setPayrollMin("");
-    setPayrollMax("");
-  };
 
   /**
    * Klik w nagłówek: ta sama kolumna odwraca kierunek, nowa startuje od swojego
@@ -903,41 +799,57 @@ export function Kadry() {
       setDir(defaults[key]);
     };
 
-  const togglePayrollSort = makeToggleSort(
-    payrollSort,
-    setPayrollSort,
-    setPayrollDir,
-    PAYROLL_DIR,
-  );
-  const toggleOfficeSort = makeToggleSort(
-    officeSort,
-    setOfficeSort,
-    setOfficeDir,
-    OFFICE_DIR,
-  );
   const toggleEmployeeSort = makeToggleSort(
     employeeSort,
     setEmployeeSort,
     setEmployeeDir,
     EMPLOYEE_DIR,
   );
-  const toggleObjectSort = makeToggleSort(
-    objectSort,
-    setObjectSort,
-    setObjectDir,
-    OBJECT_DIR,
-  );
 
   // --- handlery CRUD (wzorzec: zapis → przeładowanie miesiąca/słowników) ---
 
+  /**
+   * Zapis z dialogu wypłaty. PUT oddaje PRZELICZONY wiersz, więc podmieniamy go
+   * na miejscu (dialog nawiguje po liście i nie może jej pod sobą przeładować),
+   * a kafle podsumowania dociągamy w tle raz na serię zmian.
+   */
   const handlePayrollSave = async (data: HrPayrollSaveInput) => {
     if (!editable) return;
-    await saveHrPayroll(data);
-    await loadMonth();
+    // Zapis z dialogu idzie także z PODGLĄDU, a backend żąda rezerwacji listy
+    // przy każdym zapisie — `ensure` bierze ją na czas zapisu (i pokazuje okno
+    // „poprosić o zwolnienie?”, jeśli trzyma ją ktoś inny).
+    if (!(await payrollLock.ensure())) return;
+    const res = await saveHrPayroll(data);
+    if (res.data) handlePayrollRowSaved(res.data);
+    else await loadMonth({ silent: true });
+  };
+
+  /** Wiersz zapisany (inline albo z dialogu) — podmiana + ciche przeliczenie kafli. */
+  const handlePayrollRowSaved = (saved: HrPayrollRow) => {
+    setPayroll((prev) =>
+      prev.map((r) => (r.contractId === saved.contractId ? saved : r)),
+    );
+    setPayrollDialog((d) =>
+      d
+        ? {
+            ...d,
+            list: d.list.map((r) =>
+              r.contractId === saved.contractId ? saved : r,
+            ),
+          }
+        : d,
+    );
+    scheduleSilentReload();
+  };
+
+  const handleOfficeRowSaved = (saved: HrOfficeRow) => {
+    setOffice((prev) => prev.map((r) => (r.id === saved.id ? saved : r)));
+    scheduleSilentReload();
   };
 
   const handleHoursSubmit = async (data: HrHoursInput) => {
     if (!editable) return;
+    if (!(await hoursLock.ensure())) return;
     if (hoursEdit) await updateHrHours(hoursEdit.id, data);
     else await createHrHours(data);
     await loadMonth();
@@ -969,204 +881,285 @@ export function Kadry() {
           : r,
       ),
     );
-    if (hoursRefreshRef.current) window.clearTimeout(hoursRefreshRef.current);
-    hoursRefreshRef.current = window.setTimeout(() => {
-      void loadMonth({ silent: true });
-    }, 1500);
+    scheduleSilentReload();
   };
 
-  const handleHoursDelete = async (row: HrHoursEntry) => {
+  const handleHoursDelete = (row: HrHoursEntry) => {
     if (!editable) return;
-    if (!window.confirm(`Usunąć wpis godzin: ${row.employeeName}?`)) return;
-    try {
-      await deleteHrHours(row.id);
-      await loadMonth();
-    } catch (err) {
-      alert(err instanceof Error ? err.message : "Błąd usuwania");
-    }
+    confirm.ask({
+      title: `Usunąć wpis godzin: ${row.employeeName}?`,
+      description:
+        "Wpis zniknie z miesiąca, a jego godziny przestaną wchodzić do wynagrodzeń.",
+      onConfirm: async () => {
+        if (!(await hoursLock.ensure())) return;
+        await deleteHrHours(row.id);
+        await loadMonth();
+      },
+    });
   };
 
+  /**
+   * Nowy pracownik OCHRONY prowadzi prosto do umowy: bez niej osoba nie pojawi
+   * się w wynagrodzeniach, a dotąd trzeba było pamiętać o drugim kroku (lista
+   * „ochrona bez umów” regularnie o tym przypominała). Dialog umowy otwiera się
+   * z podstawioną osobą; przy edycji i przy biurze nic się nie dzieje.
+   */
   const handleEmployeeSubmit = async (data: HrEmployeeInput) => {
     if (!editable) return;
-    if (employeeEdit) await updateHrEmployee(employeeEdit.id, data);
-    else await createHrEmployee(data);
+    if (employeeEdit) {
+      await updateHrEmployee(employeeEdit.id, data);
+      await loadDictionaries();
+      return;
+    }
+    const created = await createHrEmployee(data);
     await loadDictionaries();
+    if (created.data && created.data.kind === "ochrona") {
+      setContractEdit(null);
+      setSupersedeContract(null);
+      setFormEmployeeId(created.data.id);
+      setContractFormOpen(true);
+    }
   };
 
-  const handleEmployeeDelete = async (row: HrEmployee) => {
+  const handleEmployeeDelete = (row: HrEmployee) => {
     if (!editable) return;
-    if (
-      !window.confirm(
-        `Usunąć pracownika ${row.fullName}? Usunie to też jego godziny i umowy.`,
-      )
-    )
-      return;
-    try {
-      await deleteHrEmployee(row.id);
-      await Promise.all([loadDictionaries(), loadMonth()]);
-    } catch (err) {
-      alert(err instanceof Error ? err.message : "Błąd usuwania");
-    }
+    confirm.ask({
+      title: `Usunąć pracownika ${row.fullName}?`,
+      description:
+        "Razem z kartoteką znikną jego wpisy godzin, umowy i dane płacowe ze wszystkich miesięcy. Jeśli osoba tylko odeszła z firmy — ustaw ją jako nieaktywną zamiast usuwać.",
+      onConfirm: async () => {
+        await deleteHrEmployee(row.id);
+        await Promise.all([loadDictionaries(), loadMonth()]);
+      },
+    });
   };
 
   const handleContractSubmit = async (data: HrContractInput) => {
     if (!editable) return;
-    if (contractEdit) await updateHrContract(contractEdit.id, data);
+    if (supersedeContract) {
+      // Data startu jest wymuszona przez formularz (przycisk zapisu bez niej
+      // jest wyłączony), więc tu wystarczy ją przekazać dalej.
+      await supersedeHrContract(supersedeContract.id, {
+        ...data,
+        validFrom: data.validFrom as string,
+      });
+    } else if (contractEdit) await updateHrContract(contractEdit.id, data);
     else await createHrContract(data);
     await Promise.all([loadDictionaries(), loadMonth()]);
   };
 
-  const handleContractDelete = async (row: HrContract) => {
+  const handleContractDelete = (row: HrContract) => {
     if (!editable) return;
-    if (
-      !window.confirm(
-        `Usunąć umowę ${row.employeeName} — ${row.company}? Usunie to też jej dane płacowe.`,
-      )
-    )
-      return;
-    try {
-      await deleteHrContract(row.id);
-      await Promise.all([loadDictionaries(), loadMonth()]);
-    } catch (err) {
-      alert(err instanceof Error ? err.message : "Błąd usuwania");
-    }
+    confirm.ask({
+      title: `Usunąć umowę ${row.employeeName} — ${row.company}?`,
+      description:
+        "Usunie to też dane płacowe tej umowy ze wszystkich miesięcy (kwoty od księgowości, stawki, nadpisania).",
+      onConfirm: async () => {
+        await deleteHrContract(row.id);
+        await Promise.all([loadDictionaries(), loadMonth()]);
+      },
+    });
   };
 
   const handleOfficeSubmit = async (data: HrOfficeInput) => {
     if (!editable) return;
+    if (!(await officeLock.ensure())) return;
     if (officeEdit) await updateHrOffice(officeEdit.id, data);
     else await createHrOffice(data);
     await loadMonth();
   };
 
-  const handleOfficeDelete = async (row: HrOfficeRow) => {
+  const handleOfficeDelete = (row: HrOfficeRow) => {
     if (!editable) return;
-    if (!window.confirm(`Usunąć wpis biura: ${row.employeeName}?`)) return;
-    try {
-      await deleteHrOffice(row.id);
-      await loadMonth();
-    } catch (err) {
-      alert(err instanceof Error ? err.message : "Błąd usuwania");
-    }
-  };
-
-  const handleObjectAdd = async () => {
-    if (!editable) return;
-    const name = newObjectName.trim();
-    if (!name) return;
-    try {
-      await createHrObject({ name });
-      setNewObjectName("");
-      await loadDictionaries();
-    } catch (err) {
-      alert(err instanceof Error ? err.message : "Błąd dodawania obiektu");
-    }
-  };
-
-  const handleObjectRename = async (row: HrObject) => {
-    if (!editable) return;
-    const name = window.prompt("Nazwa obiektu:", row.name);
-    if (!name || name.trim() === row.name) return;
-    try {
-      await updateHrObject(row.id, { name: name.trim(), active: row.active });
-      await loadDictionaries();
-    } catch (err) {
-      alert(err instanceof Error ? err.message : "Błąd zapisu obiektu");
-    }
-  };
-
-  const handleObjectToggle = async (row: HrObject) => {
-    if (!editable) return;
-    try {
-      await updateHrObject(row.id, { name: row.name, active: !row.active });
-      await loadDictionaries();
-    } catch (err) {
-      alert(err instanceof Error ? err.message : "Błąd zapisu obiektu");
-    }
-  };
-
-  const handleObjectDelete = async (row: HrObject) => {
-    if (!editable) return;
-    if (!window.confirm(`Usunąć obiekt ${row.name}?`)) return;
-    try {
-      await deleteHrObject(row.id);
-      await loadDictionaries();
-    } catch (err) {
-      alert(err instanceof Error ? err.message : "Błąd usuwania");
-    }
-  };
-
-  /** Przypisanie pozycji kadrowej do obiektu z kartoteki (null = zdejmij). */
-  const handleObjectMapping = async (row: HrObject, objectId: number | null) => {
-    if (!editable) return;
-    try {
-      await setHrObjectMapping(row.id, objectId);
-      await loadDictionaries();
-    } catch (err) {
-      alert(err instanceof Error ? err.message : "Błąd zapisu mapowania");
-    }
-  };
-
-  const handleNormSave = async (m: number) => {
-    if (!editable) return;
-    const existing = norms.find((n) => n.month === m);
-    const draft = normDraft[m];
-    const workNorm = draft?.workNorm ?? String(existing?.workNorm ?? "");
-    const contractNorm =
-      draft?.contractNorm ?? String(existing?.contractNorm ?? "");
-    try {
-      await saveHrNorm({ year, month: m, workNorm, contractNorm });
-      await Promise.all([loadNorms(), loadMonth()]);
-    } catch (err) {
-      alert(err instanceof Error ? err.message : "Błąd zapisu normy");
-    }
+    confirm.ask({
+      title: `Usunąć wpis biura: ${row.employeeName}?`,
+      description: "Wpis zniknie z rozliczenia tego miesiąca.",
+      onConfirm: async () => {
+        if (!(await officeLock.ensure())) return;
+        await deleteHrOffice(row.id);
+        await loadMonth();
+      },
+    });
   };
 
   // --- kafelki podsumowania ---
+  // Kafle opisują MIESIĄC, więc stoją tylko tam, gdzie miesiąc coś znaczy:
+  // w Wynagrodzeniach i Godzinach. W kartotece, słownikach i normach zabierały
+  // 120 px wysokości na liczby, o których te ekrany nie są.
+  const monthlyTab = tab === "wynagrodzenia" || tab === "godziny";
+  /**
+   * Zamknięty miesiąc = tryb tylko do odczytu dla DANYCH MIESIĘCZNYCH. Zamiast
+   * osobnej flagi w każdej tabeli zdejmujemy `editable` tam, gdzie rysują się
+   * godziny, wypłaty i biuro — to ta sama ścieżka, którą UI wygasza konto bez
+   * prawa edycji (chowa dodawanie, kosze i tryb wpisywania). Powód blokady
+   * mówi pasek `MonthStatusBar` nad tabelą. Słowniki (Pracownicy, Obiekty,
+   * Działy, Normy) zostają edytowalne — nie należą do miesiąca.
+   */
+  const monthClosed = monthStatus?.status === "closed";
+
+  /** Skok do wynagrodzeń z ustawionym filtrem braków (kafel „Braki"). */
+  const goToPayrollGaps = (mode: PayrollGapMode) => {
+    setGapsRequest({ mode, nonce: Date.now() });
+    if (tab !== "wynagrodzenia")
+      navigate({ pathname: "/kadry/wynagrodzenia", search: searchParams.toString() });
+  };
+  const goToHours = () =>
+    navigate({ pathname: "/kadry/godziny", search: searchParams.toString() });
+
+  /**
+   * Kafel „Biuro" prowadzi do listy, którą podsumowuje. Podzakładka Wynagrodzeń
+   * siedzi w adresie (`?lista=stale`), więc wystarczy dołożyć parametr — nie
+   * ma osobnej ścieżki „powiedz PayrollTabowi, żeby przełączył listę".
+   */
+  const goToOffice = () => {
+    const next = new URLSearchParams(searchParams);
+    next.set("lista", "stale");
+    navigate(
+      { pathname: "/kadry/wynagrodzenia", search: next.toString() },
+      { replace: true },
+    );
+  };
+
+  /**
+   * Kafel „Umowy do przedłużenia” prowadzi do kartoteki z gotowym filtrem —
+   * przypomnienie bez drogi do listy byłoby samym wyrzutem sumienia.
+   */
+  const goToExpiring = () => {
+    setEmployeeContracts("konczace");
+    navigate({
+      pathname: "/kadry/pracownicy",
+      search: new URLSearchParams({ umowy: "konczace" }).toString(),
+    });
+  };
+
+  /**
+   * Różnica pod wartością kafla. Punktem odniesienia jest miesiąc
+   * BEZPOŚREDNIO poprzedni — także gdy jest pusty; wtedy zamiast „−100%"
+   * (spadku, którego nie było) stoi „brak danych za lipiec".
+   */
+  const prevMonthLabel = prevSummary
+    ? monthYearLabel(prevSummary.year, prevSummary.month)
+    : "";
+  const tileDelta = (
+    value: number,
+    prev: number | undefined,
+    testId: string,
+    /**
+     * Czy poprzedni miesiąc ma TO rozliczenie. Osobno dla każdej rodziny
+     * kafli: lipiec z godzinami, ale bez kwot, ma z czym porównać godziny
+     * i nie ma z czym — przelewów.
+     */
+    prevHasData: boolean,
+    format?: (v: number) => string,
+    prevNote?: string,
+  ) =>
+    prevSummary ? (
+      <KpiDelta
+        value={value}
+        prev={prev}
+        prevMonthLabel={prevMonthLabel}
+        prevHasData={prevHasData}
+        prevNote={prevNote}
+        format={format}
+        testId={testId}
+      />
+    ) : null;
+
+  /**
+   * Zastrzeżenie do kafli kwotowych: poprzedni miesiąc bez ani jednej kwoty od
+   * księgowości ma wypłaty złożone z samych premii i wyrównań. Różnica jest
+   * wtedy prawdziwa, ale mówi o stanie tamtego miesiąca, nie o wzroście płac.
+   */
+  const unsettledNote =
+    prevSummary && !prevSummary.payrollSettled
+      ? "miesiąc nierozliczony: same premie i wyrównania z godzin, bez kwot od księgowości"
+      : undefined;
+
   const tiles = summary
     ? [
         {
           label: "Godziny (suma)",
           value: hrs(summary.totalHours),
+          delta: tileDelta(
+            summary.totalHours,
+            prevSummary?.totalHours,
+            "kadry-tile-godziny-delta",
+            prevSummary?.hasHours ?? false,
+            (v) => `${hrs(v)} h`,
+          ),
           sub: `${summary.employeesWithHours} pracowników, ${summary.hoursEntries} wpisów`,
-          tip: "Suma godzin wypracowanych + UW + L4 ze wszystkich wpisów miesiąca",
+          tip: "Suma godzin wypracowanych + UW + L4 ze wszystkich wpisów miesiąca — kliknij, aby przejść do Godzin",
+          onClick: goToHours,
         },
         {
-          label: "Przelewy",
+          label: "Przelewy netto",
           value: money(summary.przelew),
+          delta: tileDelta(
+            summary.przelew,
+            prevSummary?.przelew,
+            "kadry-tile-przelewy-delta",
+            prevSummary?.hasPayroll ?? false,
+            undefined,
+            unsettledNote,
+          ),
           sub: "wypłaty na konto",
-          tip: "Suma części przelewowych wypłat ochrony (kwoty główne + dodatki kanałem przelew)",
+          tip: "Suma części przelewowych wypłat ochrony (kwoty główne + dodatki kanałem przelew). Wszystkie kwoty w Kadrach są NETTO — księgowość podaje tu wyłącznie kwoty do wypłaty, kwot brutto aplikacja nie zna.",
         },
         {
-          label: "Gotówka",
+          label: "Gotówka netto",
           value: money(summary.gotowka),
+          delta: tileDelta(
+            summary.gotowka,
+            prevSummary?.gotowka,
+            "kadry-tile-gotowka-delta",
+            prevSummary?.hasPayroll ?? false,
+            undefined,
+            unsettledNote,
+          ),
           sub: "wypłaty gotówką",
-          tip: "Suma części gotówkowych wypłat ochrony (kwoty główne + dodatki kanałem gotówka)",
+          tip: "Suma części gotówkowych wypłat ochrony NETTO (kwoty główne + dodatki kanałem gotówka)",
         },
         {
-          label: "Wypłaty razem",
+          label: "Wypłaty razem netto",
           value: money(summary.wyplaty),
+          delta: tileDelta(
+            summary.wyplaty,
+            prevSummary?.wyplaty,
+            "kadry-tile-wyplaty-delta",
+            prevSummary?.hasPayroll ?? false,
+            undefined,
+            unsettledNote,
+          ),
           sub: `${summary.contractsCount} umów`,
-          tip: "Przelewy + gotówka (ochrona, bez biura)",
+          tip: "Przelewy + gotówka na rękę (ochrona, bez biura) — kwoty NETTO",
         },
         {
           label: "Braki",
           value: String(summary.gaps),
+          // Jedyny kafel BEZ porównania: „braki" to robota do zrobienia w tym
+          // miesiącu, a nie wielkość, która rośnie albo maleje — „+3 braki
+          // (+150%)" nie znaczy nic poza tym, że miesiąc jest w trakcie.
+          delta: null,
           sub: `${summary.missingMain} bez kwoty, ${summary.pendingBonus} do przeliczenia`,
-          tip: "Wiersze z godzinami bez kwoty od księgowości albo z dodatkiem czekającym na stawkę (umowa z oboma brakami liczona raz)",
-          accent: summary.gaps > 0 ? "text-amber-600" : undefined,
+          tip: "Wiersze z godzinami bez kwoty NETTO od księgowości albo z dodatkiem czekającym na stawkę — kliknij, aby zobaczyć właśnie te wiersze",
+          accent: summary.gaps > 0 ? TEXT_TONE.warn : undefined,
+          onClick: () => goToPayrollGaps("braki"),
         },
         {
-          label: "Biuro",
+          label: "Biuro netto",
           value: money(summary.officeTotal),
+          delta: tileDelta(
+            summary.officeTotal,
+            prevSummary?.officeTotal,
+            "kadry-tile-biuro-delta",
+            prevSummary?.hasOffice ?? false,
+          ),
           sub: `${summary.officeCount} wpisów`,
-          tip: "Suma wypłat biura: podstawy ROR + delegacje/gotówka",
+          tip: "Suma wypłat biura na rękę: podstawy ROR + delegacje/gotówka (kwoty NETTO) — kliknij, aby otworzyć listę „Stałe”",
+          onClick: goToOffice,
         },
       ]
     : [];
-
-  const sumPrzelew = payrollVisible.reduce((s, r) => s + r.przelew, 0);
-  const sumGotowka = payrollVisible.reduce((s, r) => s + r.gotowka, 0);
 
   if (tab && MERGED_TABS[tab]) {
     return <Navigate to={`/kadry/${MERGED_TABS[tab]}`} replace />;
@@ -1177,759 +1170,131 @@ export function Kadry() {
 
   // Wybór miesiąca dotyczy całej zakładki — wstawiamy go w pasek narzędzi
   // każdej podzakładki, zamiast zajmować osobny rząd nad kaflami.
+  // Wraz z miesiącem jedzie „?” — legenda ma stać w pasku każdej zakładki,
+  // a to jedyny element paska, który wszystkie trzy zakładki miesięczne
+  // (wynagrodzenia, godziny, kartoteka) dostają z tego pliku.
   const monthNav = (
-    <div className="flex items-center gap-1">
-      <Button variant="outline" size="icon" onClick={() => shiftMonth(-1)}>
-        <ChevronLeft className="h-4 w-4" />
-      </Button>
-      <span className="min-w-[150px] text-center font-medium">
-        {MONTH_NAMES[month - 1]} {year}
-      </span>
-      <Button variant="outline" size="icon" onClick={() => shiftMonth(1)}>
-        <ChevronRight className="h-4 w-4" />
-      </Button>
-    </div>
+    <>
+      <MonthNav year={year} month={month} onChange={setYearMonth} />
+      <KadryHelp tab={tab as KadryHelpTab} />
+    </>
   );
+
+  /** Przypomnienie o umowach — tam, gdzie jest co z nim zrobić, i tylko gdy jest. */
+  const showExpiringTile =
+    expiringCounts.razem > 0 && (monthlyTab || tab === "pracownicy");
 
   return (
     <div className="space-y-3">
       {!editable && <ReadOnlyBanner className="mb-4" />}
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
-        {tiles.map((t) => (
-          <Card key={t.label} title={t.tip} className="cursor-help">
-            <CardContent className="p-4">
-              <p className="text-xs uppercase tracking-wide text-muted-foreground">
-                {t.label}
-              </p>
-              <p className={cn("mt-1 text-xl font-bold", t.accent)}>
-                {t.value}
-              </p>
-              <p className="text-xs text-muted-foreground">{t.sub}</p>
-            </CardContent>
-          </Card>
-        ))}
-      </div>
+      {(monthlyTab || showExpiringTile) && (
+        <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+          {monthlyTab &&
+            tiles.map((t) => (
+              <KpiTile
+                key={t.label}
+                label={t.label}
+                value={t.value}
+                // Różnica idzie NAD podpis: pod liczbą czyta się ją jako jej
+                // ciąg dalszy, pod „147 umów" — jako komentarz do umów.
+                sub={
+                  <>
+                    {t.delta}
+                    <div>{t.sub}</div>
+                  </>
+                }
+                hint={t.tip}
+                tone={t.accent}
+                onClick={t.onClick}
+                testId={`kadry-tile-${t.label.split(" ")[0].toLowerCase()}`}
+              />
+            ))}
+          {/* Jedyny kafel, który NIE opisuje miesiąca: termin umowy nie ma nic
+              wspólnego z wybranym okresem, a przypomnieć trzeba zanim minie.
+              Dlatego stoi i w Wynagrodzeniach, i w kartotece — i tylko wtedy,
+              gdy naprawdę jest o czym mówić. */}
+          {showExpiringTile && (
+            <KpiTile
+              label="Umowy do przedłużenia"
+              value={String(expiringCounts.razem)}
+              sub={
+                expiringCounts.zakonczone > 0
+                  ? `${expiringCounts.konczace} kończy się, ${expiringCounts.zakonczone} po terminie`
+                  : `w ciągu ${EXPIRING_DAYS} dni`
+              }
+              hint={`Umowy z datą „obowiązuje do” w ciągu ${EXPIRING_DAYS} dni oraz te, którym termin już minął, a nikt nie podpisał następnej w tej samej spółce. Kliknij, aby zobaczyć te osoby w kartotece.`}
+              tone={TEXT_TONE.warn}
+              active={employeeContracts === "konczace"}
+              onClick={goToExpiring}
+              testId="kadry-tile-umowy"
+            />
+          )}
+        </div>
+      )}
+
+      {/* Stan miesiąca: lista kontrolna i „Zamknij miesiąc", a po zamknięciu —
+          baner z podpisem i „Otwórz ponownie". Stoi nad tabelą Wynagrodzeń
+          i Godzin, bo dotyczy obu (zamknięty miesiąc blokuje jedno i drugie). */}
+      {monthlyTab && (
+        <MonthStatusBar
+          status={monthStatus}
+          year={year}
+          month={month}
+          canClose={canEdit("kadry/wynagrodzenia")}
+          onChanged={() => void loadMonth()}
+        />
+      )}
 
       <Tabs value={tab}>
         {/* ==================== WYNAGRODZENIA ==================== */}
+        {/* Tabela wypłat, rozliczenie biura i tryb edycji inline siedzą
+            w PayrollTab: to ekran WPISYWANIA (147 kwot miesięcznie), więc ma
+            własny stan brudnopisów i filtrów, tak jak Godziny. */}
         <TabsContent value="wynagrodzenia" className="space-y-4">
-          <div className="flex flex-wrap items-center gap-2">
-            {monthNav}
-            <div className="relative min-w-[200px] max-w-xs flex-1">
-              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                value={payrollFilter}
-                onChange={(e) => setPayrollFilter(e.target.value)}
-                placeholder="Szukaj: pracownik / spółka…"
-                className="pl-10"
-                data-testid="kadry-wynagrodzenia-filter-search"
-              />
-            </div>
-            <Select value={payrollCompany} onValueChange={setPayrollCompany}>
-              <SelectTrigger
-                className="w-[190px]"
-                data-testid="kadry-wynagrodzenia-filter-company"
-              >
-                <SelectValue placeholder="Spółka" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">Wszystkie spółki</SelectItem>
-                {payrollCompanyOptions.map((c) => (
-                  <SelectItem key={c} value={c}>
-                    {c}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Select
-              value={payrollContractType}
-              onValueChange={(v) =>
-                setPayrollContractType(v as typeof payrollContractType)
-              }
-            >
-              <SelectTrigger
-                className="w-[160px]"
-                data-testid="kadry-wynagrodzenia-filter-contract-type"
-              >
-                <SelectValue placeholder="Umowa" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">Umowa: wszystkie</SelectItem>
-                <SelectItem value="praca">Praca (UoP)</SelectItem>
-                <SelectItem value="zlecenie">Zlecenie</SelectItem>
-              </SelectContent>
-            </Select>
-            <Select
-              value={payrollRegistration}
-              onValueChange={(v) =>
-                setPayrollRegistration(v as typeof payrollRegistration)
-              }
-            >
-              <SelectTrigger
-                className="w-[170px]"
-                data-testid="kadry-wynagrodzenia-filter-registration"
-              >
-                <SelectValue placeholder="Zgłoszenie" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">Zgłoszenie: wszystkie</SelectItem>
-                <SelectItem value="zua">ZUA (umowa główna)</SelectItem>
-                <SelectItem value="zza">ZZA (nadwyżka)</SelectItem>
-                <SelectItem value="none">Bez zgłoszenia</SelectItem>
-              </SelectContent>
-            </Select>
-            <Select value={payrollBonusType} onValueChange={setPayrollBonusType}>
-              <SelectTrigger
-                className="w-[180px]"
-                data-testid="kadry-wynagrodzenia-filter-bonus-type"
-              >
-                <SelectValue placeholder="Dodatek" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">Dodatek: wszystkie</SelectItem>
-                <SelectItem value="brak">Bez dodatku</SelectItem>
-                <SelectItem value="gotowka">Gotówka</SelectItem>
-                <SelectItem value="delegacja_przelew">Deleg. przelew</SelectItem>
-                <SelectItem value="delegacja_gotowka">Deleg. gotówka</SelectItem>
-              </SelectContent>
-            </Select>
-            <Select
-              value={payrollMainChannel}
-              onValueChange={(v) =>
-                setPayrollMainChannel(v as typeof payrollMainChannel)
-              }
-            >
-              <SelectTrigger
-                className="w-[170px]"
-                data-testid="kadry-wynagrodzenia-filter-main-channel"
-              >
-                <SelectValue placeholder="Kanał głównej" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">Główna: oba kanały</SelectItem>
-                <SelectItem value="przelew">Główna: przelew</SelectItem>
-                <SelectItem value="gotowka">Główna: gotówka</SelectItem>
-              </SelectContent>
-            </Select>
-            <Select
-              value={payrollMaxSource}
-              onValueChange={(v) =>
-                setPayrollMaxSource(v as typeof payrollMaxSource)
-              }
-            >
-              <SelectTrigger
-                className="w-[190px]"
-                data-testid="kadry-wynagrodzenia-filter-max-source"
-              >
-                <SelectValue placeholder="Źródło maks" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">Maks: dowolne źródło</SelectItem>
-                <SelectItem value="norm">Maks: norma miesiąca</SelectItem>
-                <SelectItem value="individual">Maks: indywidualne</SelectItem>
-                <SelectItem value="override">Maks: nadpisane ręcznie</SelectItem>
-              </SelectContent>
-            </Select>
-            {/* Tryby odpowiadają kaflowi „Braki”: `braki` to jego liczba,
-                dwa kolejne — jego składniki z podpisu kafla. */}
-            <Select
-              value={payrollGaps}
-              onValueChange={(v) => setPayrollGaps(v as PayrollGapMode)}
-            >
-              <SelectTrigger
-                className="w-[200px]"
-                data-testid="kadry-wynagrodzenia-filter-gaps"
-              >
-                <SelectValue placeholder="Braki" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">Braki: wszystkie wiersze</SelectItem>
-                <SelectItem value="braki">Braki (jak na kaflu)</SelectItem>
-                <SelectItem value="missing">Kwota główna pusta</SelectItem>
-                <SelectItem value="pending">Dodatek do przeliczenia</SelectItem>
-                <SelectItem value="warnings">Z ostrzeżeniami</SelectItem>
-              </SelectContent>
-            </Select>
-            <div className="flex items-center gap-1">
-              <Input
-                value={payrollMin}
-                onChange={(e) => setPayrollMin(e.target.value)}
-                placeholder="Wypłata od"
-                inputMode="decimal"
-                className="w-[110px]"
-                data-testid="kadry-wynagrodzenia-filter-min"
-              />
-              <span className="text-muted-foreground">–</span>
-              <Input
-                value={payrollMax}
-                onChange={(e) => setPayrollMax(e.target.value)}
-                placeholder="do"
-                inputMode="decimal"
-                className="w-[90px]"
-                data-testid="kadry-wynagrodzenia-filter-max"
-              />
-            </div>
-            {payrollFiltersActive && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={clearPayrollFilters}
-                data-testid="kadry-wynagrodzenia-filters-clear"
-              >
-                <X className="mr-1 h-4 w-4" />
-                Wyczyść filtry
-              </Button>
-            )}
-            {/* Wydruk bierze to, co widać w tabeli — inaczej „zestawienie dla
-                księgowości” po zawężeniu do jednej spółki dowoziłoby wszystkie. */}
-            <Button
-              variant="outline"
-              className="ml-auto"
-              onClick={() => printHrStatement(payrollVisible, year, month)}
-            >
-              <Printer className="mr-2 h-4 w-4" />
-              Zestawienie dla księgowości
-            </Button>
-          </div>
-          <Card>
-            <CardContent className="overflow-x-auto p-0">
-              <table className="w-full min-w-[1280px] text-sm">
-                <thead className="border-b bg-muted/50 text-xs uppercase tracking-wide text-muted-foreground">
-                  <tr>
-                    <SortTh
-                      label="Pracownik"
-                      sortKey="employeeName"
-                      sort={payrollSort}
-                      dir={payrollDir}
-                      onSort={togglePayrollSort}
-                      testIdPrefix="kadry-wynagrodzenia-sort"
-                      tip="Pracownik z umowy — kliknij wiersz, aby wpisać kwoty i nadpisania"
-                    />
-                    <SortTh
-                      label="Spółka"
-                      sortKey="company"
-                      sort={payrollSort}
-                      dir={payrollDir}
-                      onSort={togglePayrollSort}
-                      testIdPrefix="kadry-wynagrodzenia-sort"
-                      tip="Spółka zatrudniająca (z umowy)"
-                    />
-                    <SortTh
-                      label="Umowa"
-                      sortKey="contractType"
-                      sort={payrollSort}
-                      dir={payrollDir}
-                      onSort={togglePayrollSort}
-                      testIdPrefix="kadry-wynagrodzenia-sort"
-                      tip="Typ umowy: Praca (UoP) / Zlecenie — decyduje o normie godzin i wliczaniu L4"
-                    />
-                    <Th tip="Zgłoszenie decydujące o gałęzi kalkulacji: ZUA = umowa główna (godziny do maks), ZZA = nadwyżka ponad normę umowy głównej">
-                      Rej.
-                    </Th>
-                    <SortTh
-                      label="Maks"
-                      sortKey="maksGodziny"
-                      sort={payrollSort}
-                      dir={payrollDir}
-                      onSort={togglePayrollSort}
-                      testIdPrefix="kadry-wynagrodzenia-sort"
-                      align="right"
-                      tip="Limit godzin: ręczne nadpisanie → indywidualne GODZINY MAKS z wpisów godzin (przy UoP, największy wpis) → norma miesiąca z zakładki Normy"
-                    />
-                    <SortTh
-                      label="Fakt"
-                      sortKey="faktGodziny"
-                      sort={payrollSort}
-                      dir={payrollDir}
-                      onSort={togglePayrollSort}
-                      testIdPrefix="kadry-wynagrodzenia-sort"
-                      align="right"
-                      tip="Godziny do rozliczenia: ZUA = min(wypracowane + UW (+ L4 przy UoP), maks); ZZA = nadwyżka ponad normę UoP (gdy pracownik ma umowę o pracę) albo ponad maks. Ręczne nadpisanie ma pierwszeństwo"
-                    />
-                    <Th
-                      tip="Godziny dodatku = wypracowane + UW (+ L4 przy UoP lub zleceniu w ALFA) − maks godziny; liczone tylko gdy umowa ma ustawiony dodatek"
-                      className="text-right"
-                    >
-                      Godz. dod.
-                    </Th>
-                    <SortTh
-                      label="Stawka"
-                      sortKey="stawkaNetto"
-                      sort={payrollSort}
-                      dir={payrollDir}
-                      onSort={togglePayrollSort}
-                      testIdPrefix="kadry-wynagrodzenia-sort"
-                      align="right"
-                      tip="Stawka netto = kwota główna NETTO ÷ fakt godziny"
-                    />
-                    <SortTh
-                      label="Kwota główna"
-                      sortKey="kwotaGlowna"
-                      sort={payrollSort}
-                      dir={payrollDir}
-                      onSort={togglePayrollSort}
-                      testIdPrefix="kadry-wynagrodzenia-sort"
-                      align="right"
-                      tip="Kwota główna NETTO — wpisywana ręcznie na podstawie zestawienia od księgowości (kanał: kolumna Główna)"
-                    />
-                    <SortTh
-                      label="Wyrówn."
-                      sortKey="kwotaWyrownania"
-                      sort={payrollSort}
-                      dir={payrollDir}
-                      onSort={togglePayrollSort}
-                      testIdPrefix="kadry-wynagrodzenia-sort"
-                      align="right"
-                      tip="Kwota wyrównania = wyrównanie stawki (zł/h, wpisywane ręcznie) × fakt godziny"
-                    />
-                    <Th
-                      tip="Kwota dodatku = godziny dodatku × stawka dodatku (gdy brak stawki dodatku — stawka netto z wypłaty głównej); ręczne nadpisanie ma pierwszeństwo"
-                      className="text-right"
-                    >
-                      Kwota dod.
-                    </Th>
-                    <Th
-                      tip="Premia/potrącenie = suma DODATKI − POTRĄCENIA z wpisów godzin miesiąca; przypisywana raz na pracownika (do pierwszej umowy nie-ZZA)"
-                      className="text-right"
-                    >
-                      Premia/potr.
-                    </Th>
-                    <SortTh
-                      label="Dod. finalny"
-                      sortKey="dodatekFinalny"
-                      sort={payrollSort}
-                      dir={payrollDir}
-                      onSort={togglePayrollSort}
-                      testIdPrefix="kadry-wynagrodzenia-sort"
-                      align="right"
-                      tip="Dodatek finalny = kwota dodatku + premia/potrącenie + kwota wyrównania"
-                    />
-                    <SortTh
-                      label="Przelew"
-                      sortKey="przelew"
-                      sort={payrollSort}
-                      dir={payrollDir}
-                      onSort={togglePayrollSort}
-                      testIdPrefix="kadry-wynagrodzenia-sort"
-                      align="right"
-                      tip="Przelew = kwota główna (gdy Główna=przelew) + dodatek finalny (gdy kanał dodatku=przelew; przy braku dodatku — kanałem wypłaty głównej). Poprawka względem Excela: premia bez dodatku nie przepada"
-                    />
-                    <SortTh
-                      label="Gotówka"
-                      sortKey="gotowka"
-                      sort={payrollSort}
-                      dir={payrollDir}
-                      onSort={togglePayrollSort}
-                      testIdPrefix="kadry-wynagrodzenia-sort"
-                      align="right"
-                      tip="Gotówka = kwota główna (gdy Główna=gotówka) + dodatek finalny (gdy kanał dodatku=gotówka; przy braku dodatku — kanałem wypłaty głównej)"
-                    />
-                    <SortTh
-                      label="Wypłata"
-                      sortKey="wyplata"
-                      sort={payrollSort}
-                      dir={payrollDir}
-                      onSort={togglePayrollSort}
-                      testIdPrefix="kadry-wynagrodzenia-sort"
-                      align="right"
-                      tip="Wypłata całkowita = przelew + gotówka"
-                    />
-                    <Th tip="Rodzaj dodatku z umowy — decyduje o godzinach dodatku i kanale ich wypłaty">
-                      Dodatek
-                    </Th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {loading ? (
-                    <tr>
-                      <td
-                        colSpan={17}
-                        className="px-3 py-8 text-center text-muted-foreground"
-                      >
-                        Ładowanie…
-                      </td>
-                    </tr>
-                  ) : payrollVisible.length === 0 ? (
-                    <tr>
-                      <td
-                        colSpan={17}
-                        className="px-3 py-8 text-center text-muted-foreground"
-                      >
-                        {payrollFiltersActive
-                          ? "Brak wypłat dla wybranych filtrów"
-                          : "Brak umów — dodaj je w zakładce Pracownicy"}
-                      </td>
-                    </tr>
-                  ) : (
-                    payrollVisible.map((r) => (
-                      <tr
-                        key={r.contractId}
-                        className={cn(
-                          "border-b hover:bg-accent/50",
-                          editable && "cursor-pointer",
-                        )}
-                        onClick={
-                          editable ? () => setPayrollEdit(r) : undefined
-                        }
-                      >
-                        <td className="whitespace-nowrap px-3 py-2 font-medium">
-                          {r.employeeName}
-                          {(r.warnings.length > 0 || r.bonusPending) && (
-                            <AlertTriangle
-                              className="ml-1 inline h-3.5 w-3.5 text-amber-500"
-                              aria-label={r.warnings.join("; ")}
-                            />
-                          )}
-                        </td>
-                        <td className="px-3 py-2">{r.company}</td>
-                        <td className="px-3 py-2">
-                          {r.contractType === "praca" ? "Praca" : "Zlecenie"}
-                        </td>
-                        <td className="px-3 py-2 uppercase">
-                          {r.registration ?? "—"}
-                        </td>
-                        <td
-                          className="px-3 py-2 text-right"
-                          title={
-                            r.maxHoursSource === "override"
-                              ? "Nadpisane ręcznie"
-                              : r.maxHoursSource === "individual"
-                                ? "Indywidualne GODZINY MAKS z wpisów godzin"
-                                : "Norma miesiąca"
-                          }
-                        >
-                          {hrs(r.maksGodziny)}
-                          {r.maxHoursSource !== "norm" && "*"}
-                        </td>
-                        <td className="px-3 py-2 text-right font-medium">
-                          {hrs(r.faktGodziny)}
-                          {r.inputs.actualHoursOverride != null && "*"}
-                        </td>
-                        <td className="px-3 py-2 text-right">
-                          {r.godzinyDodatek ? hrs(r.godzinyDodatek) : ""}
-                        </td>
-                        <td className="px-3 py-2 text-right">
-                          {r.stawkaNetto != null ? hrs(r.stawkaNetto) : ""}
-                        </td>
-                        <td className="px-3 py-2 text-right">
-                          {r.kwotaGlowna != null ? money(r.kwotaGlowna) : ""}
-                        </td>
-                        <td className="px-3 py-2 text-right">
-                          {r.kwotaWyrownania != null
-                            ? money(r.kwotaWyrownania)
-                            : ""}
-                        </td>
-                        <td className="px-3 py-2 text-right">
-                          {r.bonusPending ? (
-                            <span className="text-amber-600">do przelicz.</span>
-                          ) : r.kwotaDodatku != null ? (
-                            money(r.kwotaDodatku)
-                          ) : (
-                            ""
-                          )}
-                          {r.inputs.bonusAmountOverride != null && "*"}
-                        </td>
-                        <td
-                          className={cn(
-                            "px-3 py-2 text-right",
-                            (r.premiaPotracenie ?? 0) < 0 && "text-red-600",
-                          )}
-                        >
-                          {r.premiaPotracenie != null
-                            ? money(r.premiaPotracenie)
-                            : ""}
-                        </td>
-                        <td className="px-3 py-2 text-right">
-                          {r.dodatekFinalny != null
-                            ? money(r.dodatekFinalny)
-                            : ""}
-                        </td>
-                        <td className="px-3 py-2 text-right">
-                          {r.przelew ? money(r.przelew) : ""}
-                        </td>
-                        <td className="px-3 py-2 text-right">
-                          {r.gotowka ? money(r.gotowka) : ""}
-                        </td>
-                        <td className="px-3 py-2 text-right font-semibold">
-                          {r.wyplata ? money(r.wyplata) : ""}
-                        </td>
-                        <td className="px-3 py-2 text-xs text-muted-foreground">
-                          {BONUS_SHORT[r.bonusType]}
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-                {payrollVisible.length > 0 && (
-                  <tfoot>
-                    <tr className="border-t-2 bg-muted/40 font-semibold">
-                      <td className="px-3 py-2" colSpan={13}>
-                        Razem ({payrollVisible.length})
-                      </td>
-                      <td className="px-3 py-2 text-right">
-                        {money(sumPrzelew)}
-                      </td>
-                      <td className="px-3 py-2 text-right">
-                        {money(sumGotowka)}
-                      </td>
-                      <td className="px-3 py-2 text-right">
-                        {money(sumPrzelew + sumGotowka)}
-                      </td>
-                      <td />
-                    </tr>
-                  </tfoot>
-                )}
-              </table>
-            </CardContent>
-          </Card>
-          <p className="text-xs text-muted-foreground">
-            * — wartość nadpisana ręcznie. Kliknij wiersz, aby wpisać kwotę od
-            księgowości, stawkę dodatku lub nadpisania.
-          </p>
-
-          {/* ---------- BIURO ---------- */}
-          {/* Rozliczenie pracowników biura tego samego miesiąca — osobna
-              tabela, bo liczy się inaczej (kwota z godzin×stawki, rozbicie
-              ROR/gotówka), ale to wciąż „pieniądze za miesiąc”, więc siedzi
-              obok wypłat ochrony zamiast we własnej podzakładce. */}
-          <div className="flex flex-wrap items-center gap-3 pt-2">
-            <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
-              Biuro — {MONTH_NAMES[month - 1]} {year}
-            </h2>
-            {/* Licznik po filtrach: szukajka i spółka z paska nad wypłatami
-                obejmują też tę tabelę, więc trzeba widać, ile z ilu zostało. */}
-            <span
-              className="text-xs text-muted-foreground"
-              data-testid="kadry-biuro-count"
-            >
-              {officeVisible.length}
-              {officeVisible.length === office.length
-                ? ""
-                : ` z ${office.length}`}{" "}
-              wpisów
-            </span>
-            {editable && (
-              <Button
-                variant="outline"
-                size="sm"
-                className="ml-auto"
-                onClick={() => {
-                  setOfficeEdit(null);
-                  setOfficeFormOpen(true);
-                }}
-              >
-                <Plus className="mr-2 h-4 w-4" />
-                Dodaj wpis biura
-              </Button>
-            )}
-          </div>
-          <Card>
-            <CardContent className="overflow-x-auto p-0">
-              <table className="w-full min-w-[1080px] text-sm">
-                <thead className="border-b bg-muted/50 text-xs uppercase tracking-wide text-muted-foreground">
-                  <tr>
-                    <SortTh
-                      label="Pracownik"
-                      sortKey="employeeName"
-                      sort={officeSort}
-                      dir={officeDir}
-                      onSort={toggleOfficeSort}
-                      testIdPrefix="kadry-biuro-sort"
-                      tip="Pracownik biura — osobne rozliczenie, poza kalkulacją ochrony"
-                    />
-                    <SortTh
-                      label="Spółka"
-                      sortKey="company"
-                      sort={officeSort}
-                      dir={officeDir}
-                      onSort={toggleOfficeSort}
-                      testIdPrefix="kadry-biuro-sort"
-                      tip="Spółka i forma zatrudnienia (ALFA ETAT / ALFA UZ / …)"
-                    />
-                    <Th tip="Nominalne godziny etatu" className="text-right">
-                      Etat
-                    </Th>
-                    <Th tip="Urlop / chorobowe (h)" className="text-right">
-                      UW/L4
-                    </Th>
-                    <SortTh
-                      label="Godz. do księg."
-                      sortKey="hoursForAccounting"
-                      sort={officeSort}
-                      dir={officeDir}
-                      onSort={toggleOfficeSort}
-                      testIdPrefix="kadry-biuro-sort"
-                      align="right"
-                      tip="Godziny do księgowej — dla rozliczanych godzinowo (UZ)"
-                    />
-                    <SortTh
-                      label="Stawka"
-                      sortKey="rate"
-                      sort={officeSort}
-                      dir={officeDir}
-                      onSort={toggleOfficeSort}
-                      testIdPrefix="kadry-biuro-sort"
-                      align="right"
-                      tip="Stawka godzinowa (zł/h)"
-                    />
-                    <Th
-                      tip="Kwota wypłaty: ręczna, a gdy pusta — godziny do księgowej × stawka"
-                      className="text-right"
-                    >
-                      Kwota
-                    </Th>
-                    <Th
-                      tip="Podstawa ROR — część na przelew (podaje księgowość)"
-                      className="text-right"
-                    >
-                      Podstawa ROR
-                    </Th>
-                    <Th
-                      tip="Delegacje/gotówka: ręczna, a gdy pusta — kwota − podstawa ROR (gdy dodatnia)"
-                      className="text-right"
-                    >
-                      Deleg./gotówka
-                    </Th>
-                    <SortTh
-                      label="Razem"
-                      sortKey="total"
-                      sort={officeSort}
-                      dir={officeDir}
-                      onSort={toggleOfficeSort}
-                      testIdPrefix="kadry-biuro-sort"
-                      align="right"
-                      tip="Razem = podstawa ROR + delegacje/gotówka"
-                    />
-                    <Th className="w-20" />
-                  </tr>
-                </thead>
-                <tbody>
-                  {officeVisible.length === 0 ? (
-                    <tr>
-                      <td
-                        colSpan={11}
-                        className="px-3 py-8 text-center text-muted-foreground"
-                      >
-                        {loading
-                          ? "Ładowanie…"
-                          : payrollFiltersActive
-                            ? "Brak wpisów biura dla wybranych filtrów"
-                            : "Brak wpisów biura w tym miesiącu"}
-                      </td>
-                    </tr>
-                  ) : (
-                    officeVisible.map((r) => (
-                      <tr
-                        key={r.id}
-                        className={cn(
-                          "border-b hover:bg-accent/50",
-                          editable && "cursor-pointer",
-                        )}
-                        onClick={
-                          editable
-                            ? () => {
-                                setOfficeEdit(r);
-                                setOfficeFormOpen(true);
-                              }
-                            : undefined
-                        }
-                      >
-                        <td className="whitespace-nowrap px-3 py-2 font-medium">
-                          {r.employeeName}
-                        </td>
-                        <td className="px-3 py-2">{r.company || "—"}</td>
-                        <td className="px-3 py-2 text-right">
-                          {r.etatHours != null ? hrs(r.etatHours) : ""}
-                        </td>
-                        <td className="px-3 py-2 text-right">
-                          {r.uwL4 != null ? hrs(r.uwL4) : ""}
-                        </td>
-                        <td className="px-3 py-2 text-right">
-                          {r.hoursForAccounting != null
-                            ? hrs(r.hoursForAccounting)
-                            : ""}
-                        </td>
-                        <td className="px-3 py-2 text-right">
-                          {r.rate != null ? hrs(r.rate) : ""}
-                        </td>
-                        <td className="px-3 py-2 text-right">
-                          {r.amountComputed != null
-                            ? money(r.amountComputed)
-                            : ""}
-                          {r.amount == null && r.amountComputed != null && "*"}
-                        </td>
-                        <td className="px-3 py-2 text-right">
-                          {r.rorBase != null ? money(r.rorBase) : ""}
-                        </td>
-                        <td className="px-3 py-2 text-right">
-                          {r.cash != null ? money(r.cash) : ""}
-                          {r.cashOverride == null && r.cash != null && "*"}
-                        </td>
-                        <td className="px-3 py-2 text-right font-semibold">
-                          {r.total ? money(r.total) : ""}
-                        </td>
-                        <td className="px-3 py-2">
-                          {editable && (
-                            <div
-                              className="flex justify-end gap-1"
-                              onClick={(e) => e.stopPropagation()}
-                            >
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                onClick={() => {
-                                  setOfficeEdit(r);
-                                  setOfficeFormOpen(true);
-                                }}
-                              >
-                                <Pencil className="h-4 w-4" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                onClick={() => handleOfficeDelete(r)}
-                              >
-                                <Trash2 className="h-4 w-4" />
-                              </Button>
-                            </div>
-                          )}
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-                {/* Sumy liczą PRZEFILTROWANY zbiór — stopka ma podsumowywać to,
-                    co widać nad nią, a nie cały miesiąc. */}
-                {officeVisible.length > 0 && (
-                  <tfoot>
-                    <tr className="border-t-2 bg-muted/40 font-semibold">
-                      <td className="px-3 py-2" colSpan={7}>
-                        Razem ({officeVisible.length})
-                      </td>
-                      <td className="px-3 py-2 text-right">
-                        {money(
-                          officeVisible.reduce((s, r) => s + (r.rorBase ?? 0), 0),
-                        )}
-                      </td>
-                      <td className="px-3 py-2 text-right">
-                        {money(
-                          officeVisible.reduce((s, r) => s + (r.cash ?? 0), 0),
-                        )}
-                      </td>
-                      <td className="px-3 py-2 text-right">
-                        {money(officeVisible.reduce((s, r) => s + r.total, 0))}
-                      </td>
-                      <td />
-                    </tr>
-                  </tfoot>
-                )}
-              </table>
-            </CardContent>
-          </Card>
-          <p className="text-xs text-muted-foreground">
-            * — wartość wyliczona automatycznie (kwota z godzin × stawki,
-            gotówka z kwoty − podstawy ROR).
-          </p>
+          <PayrollTab
+            rows={payroll}
+            office={office}
+            hours={hours}
+            editable={editable && !monthClosed}
+            // Rezerwacje: wypłaty i biuro to dwie osobne listy (i dwie osobne
+            // blokady), choć mieszkają na jednym ekranie.
+            lock={payrollLock}
+            officeLock={officeLock}
+            portalOfEmployee={portalOfEmployee}
+            loading={loading}
+            monthNav={monthNav}
+            year={year}
+            month={month}
+            gapsRequest={gapsRequest}
+            prevAmounts={prevAmounts}
+            // Porównanie z poprzednim miesiącem: sekcja „Największe zmiany".
+            prevPayroll={prevPayroll}
+            prevSummary={prevSummary}
+            // Dane wystawcy na wydrukach — z bazy, nie z literału w szablonie.
+            companies={companies}
+            // Pasek postępu bierze liczby z listy kontrolnej backendu — tej
+            // samej, którą pokazuje pasek stanu miesiąca nad tabelą.
+            checklist={summary?.checklist ?? monthStatus?.checklist}
+            onRowSaved={handlePayrollRowSaved}
+            onOfficeRowSaved={handleOfficeRowSaved}
+            onOpenPayrollDialog={(row, list) =>
+              setPayrollDialog({
+                list,
+                index: list.findIndex((r) => r.contractId === row.contractId),
+              })
+            }
+            onOfficeAdd={() => {
+              setOfficeEdit(null);
+              setOfficeFormOpen(true);
+            }}
+            onOfficeEdit={(row) => {
+              setOfficeEdit(row);
+              setOfficeFormOpen(true);
+            }}
+            onOfficeDelete={handleOfficeDelete}
+            onOfficeCarriedOver={() => void loadMonth()}
+            onGoToHours={goToHours}
+          />
         </TabsContent>
 
         {/* ==================== GODZINY ==================== */}
@@ -1941,10 +1306,14 @@ export function Kadry() {
             rows={hours}
             objects={objects}
             departments={departments}
-            editable={editable}
+            editable={editable && !monthClosed}
+            lock={hoursLock}
             loading={loading}
             monthNav={monthNav}
+            year={year}
+            month={month}
             onRowSaved={handleHoursRowSaved}
+            onChanged={() => void loadMonth()}
             onAdd={() => {
               setHoursEdit(null);
               setHoursFormOpen(true);
@@ -1977,56 +1346,34 @@ export function Kadry() {
               />
             </div>
             {/* Dawne podzakładki jako filtr jednej listy: ochrona = osoby z
-                umowami, biuro = osoby z wpisami biura w tym miesiącu. */}
-            <div className="flex overflow-hidden rounded-md border">
-              {(
-                [
-                  ["all", "Wszyscy"],
-                  ["ochrona", "Ochrona"],
-                  ["biuro", "Biuro"],
-                ] as const
-              ).map(([k, label]) => (
-                <button
-                  key={k}
-                  type="button"
-                  onClick={() => setEmployeeKind(k)}
-                  data-testid={`kadry-pracownicy-filter-kind-${k}`}
-                  className={cn(
-                    "px-3 py-2 text-sm",
-                    employeeKind === k
-                      ? "bg-primary text-primary-foreground"
-                      : "hover:bg-accent",
-                  )}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-            {/* Dział pracownika: „bez działu" jest osobną opcją, bo to ona
-                wskazuje kartoteki do uzupełnienia. */}
-            <Select
-              value={employeeDept === "all" ? "all" : String(employeeDept)}
-              onValueChange={(v) =>
-                setEmployeeDept(v === "all" || v === "none" ? v : Number(v))
-              }
-            >
-              <SelectTrigger
-                className="w-[190px]"
-                title="Filtr po dziale z kartoteki pracownika"
-                data-testid="kadry-pracownicy-filter-dept"
-              >
-                <SelectValue placeholder="Dział" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">Wszystkie działy</SelectItem>
-                <SelectItem value="none">Bez działu</SelectItem>
-                {departments.map((d) => (
-                  <SelectItem key={d.id} value={String(d.id)}>
-                    {d.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+                umowami, biuro = osoby z wpisami biura w tym miesiącu.
+                Ten sam klocek, co podzakładki Wynagrodzeń — jeden przełącznik
+                segmentowy w module, nie trzy jego kopie o trzech wysokościach. */}
+            <SegmentedControl<"all" | "ochrona" | "biuro">
+              value={employeeKind}
+              onChange={setEmployeeKind}
+              ariaLabel="Rodzaj pracowników"
+              options={[
+                {
+                  value: "all",
+                  label: "Wszyscy",
+                  hint: "Cała kartoteka",
+                  testId: "kadry-pracownicy-filter-kind-all",
+                },
+                {
+                  value: "ochrona",
+                  label: "Ochrona",
+                  hint: "Osoby z umową kadrową — rozliczane w liście „Godzinowe”",
+                  testId: "kadry-pracownicy-filter-kind-ochrona",
+                },
+                {
+                  value: "biuro",
+                  label: "Biuro",
+                  hint: "Osoby z wpisem biura w wybranym miesiącu — lista „Stałe”",
+                  testId: "kadry-pracownicy-filter-kind-biuro",
+                },
+              ]}
+            />
             <Select
               value={employeeActive}
               onValueChange={(v) => setEmployeeActive(v as ActiveFilter)}
@@ -2043,43 +1390,12 @@ export function Kadry() {
                 <SelectItem value="all">Aktywni i nieaktywni</SelectItem>
               </SelectContent>
             </Select>
-            <Select value={employeeCompany} onValueChange={setEmployeeCompany}>
-              <SelectTrigger
-                className="w-[190px]"
-                title="Spółka z umowy albo z rozliczenia biura"
-                data-testid="kadry-pracownicy-filter-company"
-              >
-                <SelectValue placeholder="Spółka" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">Wszystkie spółki</SelectItem>
-                {employeeCompanyOptions.map((c) => (
-                  <SelectItem key={c} value={c}>
-                    {c}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            {/* Bez umowy = osoba, która nie pojawi się w wynagrodzeniach —
-                w ochronie to błąd do naprawienia, nie stan docelowy. */}
-            <Select
-              value={employeeContracts}
-              onValueChange={(v) =>
-                setEmployeeContracts(v as typeof employeeContracts)
-              }
-            >
-              <SelectTrigger
-                className="w-[180px]"
-                data-testid="kadry-pracownicy-filter-contracts"
-              >
-                <SelectValue placeholder="Umowy" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">Umowy: wszyscy</SelectItem>
-                <SelectItem value="none">Tylko bez umowy</SelectItem>
-                <SelectItem value="with">Tylko z umową</SelectItem>
-              </SelectContent>
-            </Select>
+            <MoreFiltersButton
+              open={showEmployeeFilters}
+              onToggle={() => setShowEmployeeFilters((v) => !v)}
+              count={hiddenEmployeeFilters}
+              testId="kadry-pracownicy-filters-more"
+            />
             {employeeFiltersActive && (
               <Button
                 variant="ghost"
@@ -2111,11 +1427,12 @@ export function Kadry() {
                   variant="outline"
                   onClick={() => {
                     setContractEdit(null);
+                    setSupersedeContract(null);
                     setFormEmployeeId(undefined);
                     setContractFormOpen(true);
                   }}
                 >
-                  <Plus className="mr-2 h-4 w-4" />
+                  <Plus className="mr-1 h-4 w-4" />
                   Umowa
                 </Button>
                 <Button
@@ -2124,12 +1441,96 @@ export function Kadry() {
                     setEmployeeFormOpen(true);
                   }}
                 >
-                  <Plus className="mr-2 h-4 w-4" />
+                  <Plus className="mr-1 h-4 w-4" />
                   Dodaj pracownika
                 </Button>
               </div>
             )}
           </div>
+          {showEmployeeFilters && (
+            <div
+              className="flex flex-wrap items-center gap-2 rounded-md border border-dashed p-2"
+              data-testid="kadry-pracownicy-filters-row2"
+            >
+              {/* Dział pracownika: „bez działu" jest osobną opcją, bo to ona
+                  wskazuje kartoteki do uzupełnienia. */}
+              <Select
+                value={employeeDept === "all" ? "all" : String(employeeDept)}
+                onValueChange={(v) =>
+                  setEmployeeDept(v === "all" || v === "none" ? v : Number(v))
+                }
+              >
+                <SelectTrigger
+                  className="w-[190px]"
+                  {...tip("Filtr po dziale z kartoteki pracownika")}
+                  data-testid="kadry-pracownicy-filter-dept"
+                >
+                  <SelectValue placeholder="Dział" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">Wszystkie działy</SelectItem>
+                  <SelectItem value="none">Bez działu</SelectItem>
+                  {departments.map((d) => (
+                    <SelectItem key={d.id} value={String(d.id)}>
+                      {d.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Select value={employeeCompany} onValueChange={setEmployeeCompany}>
+                <SelectTrigger
+                  className="w-[190px]"
+                  {...tip("Spółka z umowy albo z rozliczenia biura")}
+                  data-testid="kadry-pracownicy-filter-company"
+                >
+                  <SelectValue placeholder="Spółka" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">Wszystkie spółki</SelectItem>
+                  {employeeCompanyOptions.map((c) => (
+                    <SelectItem key={c} value={c}>
+                      {c}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {/* Bez umowy = osoba, która nie pojawi się w wynagrodzeniach —
+                  w ochronie to błąd do naprawienia, nie stan docelowy. */}
+              <Select
+                value={employeeContracts}
+                onValueChange={(v) =>
+                  changeEmployeeContracts(v as EmployeeContractsFilter)
+                }
+              >
+                <SelectTrigger
+                  className="w-[260px]"
+                  {...tip(
+                    "Bez umowy = osoba, która nie pojawi się w wynagrodzeniach. Dwie ostatnie pozycje to przypomnienia o okresie obowiązywania — kończące się i te po terminie, którym nikt nie podpisał następnej.",
+                  )}
+                  data-testid="kadry-pracownicy-filter-contracts"
+                >
+                  <SelectValue placeholder="Umowy" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">Umowy: wszyscy</SelectItem>
+                  <SelectItem value="none">Tylko bez umowy</SelectItem>
+                  <SelectItem value="with">Tylko z umową</SelectItem>
+                  <SelectItem value="konczace">
+                    Kończące się w {EXPIRING_DAYS} dni
+                    {expiringCounts.konczace > 0
+                      ? ` (${expiringCounts.konczace})`
+                      : ""}
+                  </SelectItem>
+                  <SelectItem value="zakonczone">
+                    Zakończone bez następczyni
+                    {expiringCounts.zakonczone > 0
+                      ? ` (${expiringCounts.zakonczone})`
+                      : ""}
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          )}
           <Card>
             <CardContent className="overflow-x-auto p-0">
               <table className="w-full min-w-[1120px] text-sm">
@@ -2211,18 +1612,32 @@ export function Kadry() {
                 </thead>
                 <tbody>
                   {employeesVisible.length === 0 ? (
-                    <tr>
-                      <td
-                        colSpan={11}
-                        className="px-3 py-8 text-center text-muted-foreground"
-                      >
-                        {loading
-                          ? "Ładowanie…"
-                          : employeeFiltersActive
-                            ? "Brak pracowników dla wybranych filtrów"
-                            : "Brak pracowników"}
-                      </td>
-                    </tr>
+                    <EmptyRow
+                      colSpan={11}
+                      loading={loading}
+                      icon={Users}
+                      title={
+                        employeeFiltersActive
+                          ? "Brak pracowników dla wybranych filtrów"
+                          : "Kartoteka jest pusta"
+                      }
+                      description={
+                        employeeFiltersActive
+                          ? "Zdejmij filtry albo zmień szukajkę — nieaktywni też są na liście."
+                          : "Pracownicy trafiają tu ręcznie; dopiero po dodaniu umowy pojawią się w Wynagrodzeniach."
+                      }
+                      action={
+                        employeeFiltersActive ? (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={clearEmployeeFilters}
+                          >
+                            <X className="mr-1 h-4 w-4" /> Wyczyść filtry
+                          </Button>
+                        ) : undefined
+                      }
+                    />
                   ) : (
                     employeesVisible.map((r) => {
                       const rowContracts = contractsByEmployee.get(r.id) ?? [];
@@ -2231,7 +1646,8 @@ export function Kadry() {
                         <Fragment key={r.id}>
                           <tr
                             className={cn(
-                              "cursor-pointer border-b hover:bg-accent/50",
+                              // `group` — akcje po prawej wyłażą pod kursorem.
+                              "group cursor-pointer border-b hover:bg-accent/50",
                               isOpen && "bg-accent/30",
                             )}
                             onClick={() => toggleExpanded(r.id)}
@@ -2248,19 +1664,19 @@ export function Kadry() {
                             <td className="px-3 py-2">
                               <div className="flex flex-wrap items-center gap-1">
                                 {r.kind === "biuro" ? (
-                                  <span
-                                    className="inline-flex rounded-md bg-violet-100 px-2 py-0.5 text-xs font-medium text-violet-700"
-                                    title="Pracownik biura — rozliczany w zakładce Wynagrodzenia, sekcja Biuro"
+                                  <KadryBadge
+                                    tone="biuro"
+                                    hint="Pracownik biura — rozliczany w zakładce Wynagrodzenia, sekcja Biuro"
                                   >
                                     Biuro
-                                  </span>
+                                  </KadryBadge>
                                 ) : (
-                                  <span
-                                    className="inline-flex rounded-md bg-sky-100 px-2 py-0.5 text-xs font-medium text-sky-700"
-                                    title="Ochrona — rozliczana z umów kadrowych"
+                                  <KadryBadge
+                                    tone="ochrona"
+                                    hint="Ochrona — rozliczana z umów kadrowych"
                                   >
                                     Ochrona
-                                  </span>
+                                  </KadryBadge>
                                 )}
                               </div>
                             </td>
@@ -2273,9 +1689,36 @@ export function Kadry() {
                                   {rowContracts.length}
                                 </span>
                               ) : r.kind === "ochrona" ? (
-                                <span className="text-xs text-amber-600">
-                                  brak umów
-                                </span>
+                                // „Brak umów" to lista do naprawienia, więc jest
+                                // od razu drogą do naprawy: klik otwiera pustą
+                                // umowę tej osoby, zamiast zostawiać ostrzeżenie,
+                                // z którym trzeba iść gdzie indziej.
+                                editable ? (
+                                  <button
+                                    type="button"
+                                    className={cn(
+                                      "rounded px-1 text-xs font-medium underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                                      TEXT_TONE.warn,
+                                    )}
+                                    data-testid="kadry-pracownicy-add-contract"
+                                    {...tip(
+                                      `${r.fullName} nie ma żadnej umowy, więc nie pojawi się w Wynagrodzeniach. Kliknij, aby dodać pierwszą.`,
+                                    )}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setContractEdit(null);
+                                      setSupersedeContract(null);
+                                      setFormEmployeeId(r.id);
+                                      setContractFormOpen(true);
+                                    }}
+                                  >
+                                    brak umów
+                                  </button>
+                                ) : (
+                                  <span className={cn("text-xs", TEXT_TONE.warn)}>
+                                    brak umów
+                                  </span>
+                                )
                               ) : (
                                 <span className="text-xs text-muted-foreground">
                                   —
@@ -2283,7 +1726,19 @@ export function Kadry() {
                               )}
                             </td>
                             <td className="px-3 py-2 text-xs text-muted-foreground">
-                              {r.departmentName || "—"}
+                              {r.departmentName ? (
+                                <KadryBadge
+                                  tone={departmentTone(
+                                    departments.find(
+                                      (d) => d.id === r.departmentId,
+                                    ),
+                                  )}
+                                >
+                                  {r.departmentName}
+                                </KadryBadge>
+                              ) : (
+                                "—"
+                              )}
                             </td>
                             <td className="px-3 py-2 text-xs text-muted-foreground">
                               {[
@@ -2296,52 +1751,39 @@ export function Kadry() {
                                 .join(", ") || "—"}
                             </td>
                             <td className="px-3 py-2">
-                              <span
-                                className={cn(
-                                  "inline-flex rounded-md px-2 py-0.5 text-xs font-medium",
-                                  r.active
-                                    ? "bg-emerald-100 text-emerald-700"
-                                    : "bg-muted text-muted-foreground",
-                                )}
+                              <KadryBadge
+                                tone={r.active ? "aktywny" : "nieaktywny"}
                               >
                                 {r.active ? "aktywny" : "nieaktywny"}
-                              </span>
+                              </KadryBadge>
                             </td>
                             <td className="max-w-[240px] truncate px-3 py-2 text-xs text-muted-foreground">
                               {r.notes}
                             </td>
                             <td
-                              className="whitespace-nowrap px-3 py-2 text-xs text-muted-foreground"
-                              title={r.updatedAt}
+                              className="whitespace-nowrap px-3 py-2 text-xs tabular-nums text-muted-foreground"
+                              {...(r.updatedAt ? tip(r.updatedAt) : {})}
                             >
                               {r.updatedAt ? r.updatedAt.slice(0, 10) : "—"}
                             </td>
                             <td className="px-3 py-2">
                               {editable && (
-                                <div
-                                  className="flex justify-end gap-1"
-                                  onClick={(e) => e.stopPropagation()}
-                                >
-                                  <Button
-                                    variant="ghost"
-                                    size="icon"
-                                    title="Edytuj pracownika"
+                                <RowActions>
+                                  <IconButton
+                                    icon={Pencil}
+                                    label="Edytuj pracownika"
                                     onClick={() => {
                                       setEmployeeEdit(r);
                                       setEmployeeFormOpen(true);
                                     }}
-                                  >
-                                    <Pencil className="h-4 w-4" />
-                                  </Button>
-                                  <Button
-                                    variant="ghost"
-                                    size="icon"
-                                    title="Usuń pracownika"
+                                  />
+                                  <IconButton
+                                    icon={Trash2}
+                                    danger
+                                    label="Usuń pracownika"
                                     onClick={() => handleEmployeeDelete(r)}
-                                  >
-                                    <Trash2 className="h-4 w-4" />
-                                  </Button>
-                                </div>
+                                  />
+                                </RowActions>
                               )}
                             </td>
                           </tr>
@@ -2351,25 +1793,30 @@ export function Kadry() {
                                 <div className="space-y-4">
                                   {/* --- UMOWY pracownika --- */}
                                   <div className="space-y-2">
-                                    <div className="flex items-center gap-2">
-                                      <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                                        Umowy
-                                      </h3>
-                                      {editable && (
-                                        <Button
-                                          variant="ghost"
-                                          size="sm"
-                                          onClick={() => {
-                                            setContractEdit(null);
-                                            setFormEmployeeId(r.id);
-                                            setContractFormOpen(true);
-                                          }}
-                                        >
-                                          <Plus className="mr-1 h-3.5 w-3.5" />
-                                          Dodaj umowę
-                                        </Button>
-                                      )}
-                                    </div>
+                                    <SectionHeading
+                                      icon={FileText}
+                                      title="Umowy"
+                                      summary={
+                                        rowContracts.length || undefined
+                                      }
+                                      action={
+                                        editable ? (
+                                          <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            onClick={() => {
+                                              setContractEdit(null);
+                                              setSupersedeContract(null);
+                                              setFormEmployeeId(r.id);
+                                              setContractFormOpen(true);
+                                            }}
+                                          >
+                                            <Plus className="mr-1 h-3.5 w-3.5" />
+                                            Dodaj umowę
+                                          </Button>
+                                        ) : undefined
+                                      }
+                                    />
                                     {rowContracts.length === 0 ? (
                                       <p className="text-xs text-muted-foreground">
                                         Brak umów — bez nich pracownik nie pojawi
@@ -2378,7 +1825,7 @@ export function Kadry() {
                                     ) : (
                                       <div className="overflow-x-auto rounded-md border bg-background">
                                         <table className="w-full min-w-[760px] text-sm">
-                                          <thead className="border-b bg-muted/50 text-xs uppercase tracking-wide text-muted-foreground">
+                                          <thead className={THEAD_CLS}>
                                             <tr>
                                               <Th tip="Spółka zatrudniająca — ze słownika Spółki">
                                                 Spółka
@@ -2387,7 +1834,7 @@ export function Kadry() {
                                                 Umowa
                                               </Th>
                                               <Th tip="Ubezpieczenie chorobowe — informacyjne">
-                                                chor.
+                                                Chorobowe
                                               </Th>
                                               <Th tip="Zgłoszenie ZUA — niepuste włącza rozliczanie godzin do maks">
                                                 ZUA
@@ -2395,13 +1842,19 @@ export function Kadry() {
                                               <Th tip="Zgłoszenie ZZA — wiersz dostaje nadwyżkę godzin ponad normę umowy głównej">
                                                 ZZA
                                               </Th>
-                                              <Th tip="Kanał wypłaty głównej">
-                                                Główna
+                                              <Th
+                                                tip="Kanał wypłaty kwoty głównej: przelew / gotówka. To ustawienie umowy, nie kwota — samą kwotę wpisuje się co miesiąc w Wynagrodzeniach."
+                                                wrap
+                                              >
+                                                Kanał wypłaty
                                               </Th>
                                               <Th tip="Rodzaj dodatku — decyduje o godzinach nadwyżki i kanale ich wypłaty">
                                                 Dodatek
                                               </Th>
-                                              <Th tip="Nieaktywna umowa nie pojawia się w wynagrodzeniach (poza miesiącami z zapisanymi danymi)">
+                                              <Th tip="Okres obowiązywania umowy. Miesiąc jest najmniejszą jednostką rozliczenia: umowa od 15.09 liczy się we wrześniu w całości, a zakończona 31.08 nie wchodzi do września. Puste daty = bezterminowo.">
+                                                Obowiązuje
+                                              </Th>
+                                              <Th tip="Status liczony z dat i z ręcznego wyłącznika: przyszła / aktywna / zakończona / nieaktywna. Umowa, która nie obowiązuje, nie pojawia się w wynagrodzeniach (poza miesiącami z zapisanymi danymi)">
                                                 Status
                                               </Th>
                                               <Th className="w-20" />
@@ -2412,7 +1865,7 @@ export function Kadry() {
                                               <tr
                                                 key={ct.id}
                                                 className={cn(
-                                                  "border-b last:border-0 hover:bg-accent/50",
+                                                  "group border-b last:border-0 hover:bg-accent/50",
                                                   editable && "cursor-pointer",
                                                 )}
                                                 onClick={
@@ -2446,51 +1899,102 @@ export function Kadry() {
                                                 <td className="px-3 py-2">
                                                   {BONUS_SHORT[ct.bonusType]}
                                                 </td>
+                                                {/* Okres: „bezterminowo” to pełnoprawna
+                                                    wartość, nie brak danych — dlatego
+                                                    nigdy nie stoi tu myślnik. */}
+                                                <td
+                                                  className="whitespace-nowrap px-3 py-2 tabular-nums"
+                                                  data-testid="kadry-umowa-okres"
+                                                >
+                                                  {contractPeriodLabel(ct)}
+                                                  {expiringById.has(ct.id) && (
+                                                    <span
+                                                      className={cn(
+                                                        "ml-2 text-xs",
+                                                        TEXT_TONE.warn,
+                                                      )}
+                                                      {...tip(
+                                                        expiringById.get(ct.id)!
+                                                          .reason === "konczaca"
+                                                          ? `Kończy się za ${expiringById.get(ct.id)!.daysLeft} dni — nikt nie podpisał następnej w tej spółce`
+                                                          : `Termin minął ${-expiringById.get(ct.id)!.daysLeft} dni temu — nikt nie podpisał następnej w tej spółce`,
+                                                      )}
+                                                    >
+                                                      do przedłużenia
+                                                    </span>
+                                                  )}
+                                                </td>
                                                 <td className="px-3 py-2">
-                                                  <span
-                                                    className={cn(
-                                                      "inline-flex rounded-md px-2 py-0.5 text-xs font-medium",
-                                                      ct.active
-                                                        ? "bg-emerald-100 text-emerald-700"
-                                                        : "bg-muted text-muted-foreground",
-                                                    )}
+                                                  <KadryBadge
+                                                    tone={
+                                                      CONTRACT_STATUS_TONE[
+                                                        ct.status
+                                                      ] ?? "neutral"
+                                                    }
+                                                    hint={
+                                                      CONTRACT_STATUS_HINT[
+                                                        ct.status
+                                                      ]
+                                                    }
                                                   >
-                                                    {ct.active
-                                                      ? "aktywna"
-                                                      : "nieaktywna"}
-                                                  </span>
+                                                    {ct.status}
+                                                  </KadryBadge>
                                                 </td>
                                                 <td className="px-3 py-2">
                                                   {editable && (
-                                                    <div
-                                                      className="flex justify-end gap-1"
-                                                      onClick={(e) =>
-                                                        e.stopPropagation()
-                                                      }
-                                                    >
-                                                      <Button
-                                                        variant="ghost"
-                                                        size="icon"
-                                                        title="Edytuj umowę"
+                                                    <RowActions>
+                                                      <EntityHistory
+                                                        entityType="hr_contract"
+                                                        entityId={ct.id}
+                                                        title={`${r.fullName} — umowa ${ct.company}`}
+                                                      />
+                                                      {/* ZMIANA WARUNKÓW: nowe stawki
+                                                          od konkretnego dnia to nowa
+                                                          umowa, a nie poprawka w tej —
+                                                          edycja przeliczyłaby wstecz
+                                                          zamknięte miesiące.
+                                                          Tylko dla umów, które jeszcze
+                                                          coś znaczą (aktywna, także
+                                                          bezterminowa, i przyszła):
+                                                          zakończonej ani wyłączonej nie
+                                                          ma czego zamykać dzień
+                                                          wcześniej — tam nowa umowa
+                                                          powstaje przyciskiem „Nowa
+                                                          umowa" nad listą. */}
+                                                      {CONTRACT_SUPERSEDABLE.has(
+                                                        ct.status,
+                                                      ) && (
+                                                      <IconButton
+                                                        icon={CalendarPlus}
+                                                        label="Nowa umowa od… (zmiana warunków — bieżąca zostanie zamknięta dzień wcześniej)"
+                                                        testId="kadry-umowa-supersede"
                                                         onClick={() => {
-                                                          setContractEdit(ct);
+                                                          setContractEdit(null);
+                                                          setSupersedeContract(ct);
                                                           setFormEmployeeId(undefined);
                                                           setContractFormOpen(true);
                                                         }}
-                                                      >
-                                                        <Pencil className="h-4 w-4" />
-                                                      </Button>
-                                                      <Button
-                                                        variant="ghost"
-                                                        size="icon"
-                                                        title="Usuń umowę"
+                                                      />
+                                                      )}
+                                                      <IconButton
+                                                        icon={Pencil}
+                                                        label="Edytuj umowę"
+                                                        onClick={() => {
+                                                          setContractEdit(ct);
+                                                          setSupersedeContract(null);
+                                                          setFormEmployeeId(undefined);
+                                                          setContractFormOpen(true);
+                                                        }}
+                                                      />
+                                                      <IconButton
+                                                        icon={Trash2}
+                                                        danger
+                                                        label="Usuń umowę"
                                                         onClick={() =>
                                                           handleContractDelete(ct)
                                                         }
-                                                      >
-                                                        <Trash2 className="h-4 w-4" />
-                                                      </Button>
-                                                    </div>
+                                                      />
+                                                    </RowActions>
                                                   )}
                                                 </td>
                                               </tr>
@@ -2501,6 +2005,8 @@ export function Kadry() {
                                     )}
                                   </div>
 
+                                  {/* --- HISTORIA zmian pracownika (leniwa) --- */}
+                                  <EmployeeHistory employeeId={r.id} />
                                 </div>
                               </td>
                             </tr>
@@ -2512,15 +2018,20 @@ export function Kadry() {
                 </tbody>
                 {employeesVisible.length > 0 && (
                   <tfoot>
-                    <tr className="border-t-2 bg-muted/40 font-semibold">
+                    <tr className={TFOOT_ROW_CLS}>
                       <td className="px-3 py-2" colSpan={4}>
                         Razem ({employeesVisible.length}
                         {employeesVisible.length === employees.length
                           ? ""
                           : ` z ${employees.length}`}{" "}
-                        prac.)
+                        pracowników)
                       </td>
-                      <td className="px-3 py-2 text-right text-xs font-normal tabular-nums text-muted-foreground">
+                      <td
+                        className={cn(
+                          NUM_CELL_CLS,
+                          "text-xs font-normal text-muted-foreground",
+                        )}
+                      >
                         {visibleContractsCount}
                       </td>
                       <td colSpan={6} />
@@ -2538,331 +2049,16 @@ export function Kadry() {
 
 
         {/* ==================== OBIEKTY ==================== */}
+        {/* Słownik pozycji kadrowych i mapowanie na kartotekę — w osobnym
+            komponencie, bo ma własne filtry i edycję nazwy w wierszu. */}
         <TabsContent value="obiekty" className="space-y-4">
-          <div className="flex flex-wrap items-center gap-2">
-            {monthNav}
-            <div className="relative min-w-[180px] max-w-xs flex-1">
-              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                value={objectSearch}
-                onChange={(e) => setObjectSearch(e.target.value)}
-                placeholder="Szukaj: nazwa pozycji…"
-                className="pl-10"
-                data-testid="kadry-obiekty-filter-search"
-              />
-            </div>
-            <Select
-              value={objectMapping}
-              onValueChange={(v) => setObjectMapping(v as typeof objectMapping)}
-            >
-              <SelectTrigger
-                className="w-[190px]"
-                data-testid="kadry-obiekty-filter-mapping"
-              >
-                <SelectValue placeholder="Mapowanie" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">Mapowanie: wszystkie</SelectItem>
-                <SelectItem value="unmapped">Tylko niezmapowane</SelectItem>
-                <SelectItem value="mapped">Tylko zmapowane</SelectItem>
-              </SelectContent>
-            </Select>
-            <Select
-              value={objectActive}
-              onValueChange={(v) => setObjectActive(v as ActiveFilter)}
-            >
-              <SelectTrigger
-                className="w-[170px]"
-                data-testid="kadry-obiekty-filter-active"
-              >
-                <SelectValue placeholder="Aktywność" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">Aktywne i nieaktywne</SelectItem>
-                <SelectItem value="active">Tylko aktywne</SelectItem>
-                <SelectItem value="inactive">Tylko nieaktywne</SelectItem>
-              </SelectContent>
-            </Select>
-            {/* #BIURO / #zlecenie są celowo niezmapowane, więc przy przeglądaniu
-                „co zostało do zmapowania” tylko zaśmiecają listę. */}
-            <Select
-              value={objectTech}
-              onValueChange={(v) => setObjectTech(v as typeof objectTech)}
-            >
-              <SelectTrigger
-                className="w-[220px]"
-                data-testid="kadry-obiekty-filter-tech"
-              >
-                <SelectValue placeholder="Pozycje techniczne" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">Pozycje techniczne: pokaż</SelectItem>
-                <SelectItem value="hide">Pozycje techniczne: ukryj</SelectItem>
-                <SelectItem value="only">Tylko pozycje techniczne</SelectItem>
-              </SelectContent>
-            </Select>
-            <div className="flex items-center gap-2 whitespace-nowrap">
-              <Checkbox
-                id="kadry-obiekty-with-hours"
-                checked={objectWithHours}
-                onCheckedChange={(checked) =>
-                  setObjectWithHours(checked === true)
-                }
-                data-testid="kadry-obiekty-filter-with-hours"
-              />
-              <label
-                htmlFor="kadry-obiekty-with-hours"
-                className="cursor-pointer text-sm"
-              >
-                Tylko z godzinami
-              </label>
-            </div>
-            {objectFiltersActive && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={clearObjectFilters}
-                data-testid="kadry-obiekty-filters-clear"
-              >
-                <X className="mr-1 h-4 w-4" />
-                Wyczyść filtry
-              </Button>
-            )}
-            {editable && (
-              <div className="ml-auto flex max-w-md gap-2">
-                <Input
-                  value={newObjectName}
-                  onChange={(e) => setNewObjectName(e.target.value)}
-                  placeholder="Nazwa nowego obiektu…"
-                  onKeyDown={(e) => e.key === "Enter" && handleObjectAdd()}
-                />
-                <Button onClick={handleObjectAdd} disabled={!newObjectName.trim()}>
-                  <Plus className="mr-2 h-4 w-4" />
-                  Dodaj
-                </Button>
-              </div>
-            )}
-          </div>
-          {/* Postęp mapowania — od niego zależy, ile kosztu osobowego w ogóle
-              trafi do Analityki obiektów; niezmapowana pozycja zostaje kosztem
-              nieprzypisanym do nikogo. */}
-          <Card>
-            <CardContent className="space-y-2 p-4">
-              <div className="flex flex-wrap items-baseline justify-between gap-2">
-                <span className="text-sm font-medium">
-                  Zmapowano {mappingProgress.mapped} z {mappingProgress.total}{" "}
-                  pozycji z godzinami
-                </span>
-                <span className="text-xs text-muted-foreground">
-                  {hrs(mappingProgress.hoursMapped)} z{" "}
-                  {hrs(mappingProgress.hoursTotal)} godz. trafi do kosztu
-                  obiektów w Analityce
-                </span>
-              </div>
-              <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
-                <div
-                  className="h-full rounded-full bg-emerald-500 transition-all"
-                  style={{
-                    width: `${
-                      mappingProgress.total
-                        ? Math.round(
-                            (mappingProgress.mapped / mappingProgress.total) *
-                              100,
-                          )
-                        : 0
-                    }%`,
-                  }}
-                />
-              </div>
-              <p className="text-xs text-muted-foreground">
-                Słownik kadrowy powstał niezależnie od kartoteki i nazwy się nie
-                pokrywają, więc powiązanie ustawia się ręcznie. Pozycje
-                techniczne (#BIURO, #zlecenie) zostaw niezmapowane — to koszt
-                ogólny firmy, nie koszt obiektu. Praca działowa (CMA, Handlowy,
-                Księgowość…) ma własny słownik w Kadry → Działy i we wpisie
-                godzin wybiera się ją zamiast obiektu.
-              </p>
-            </CardContent>
-          </Card>
-          {/* Postęp mapowania powyżej liczy CAŁY słownik (to miara roboty do
-              wykonania), więc licznik listy stoi osobno — pokazuje, ile pozycji
-              zostało po filtrach. */}
-          <p
-            className="text-sm text-muted-foreground"
-            data-testid="kadry-obiekty-count"
-          >
-            {objectsVisible.length}
-            {objectsVisible.length === objects.length
-              ? ""
-              : ` z ${objects.length}`}{" "}
-            pozycji · {hrs(objectsVisible.reduce((s, o) => s + o.hoursTotal, 0))} h
-          </p>
-          <Card>
-            <CardContent className="p-0">
-              <table className="w-full text-sm">
-                <thead className="border-b bg-muted/50 text-xs uppercase tracking-wide text-muted-foreground">
-                  <tr>
-                    <SortTh
-                      label="Obiekt kadrowy"
-                      sortKey="name"
-                      sort={objectSort}
-                      dir={objectDir}
-                      onSort={toggleObjectSort}
-                      testIdPrefix="kadry-obiekty-sort"
-                      tip="Nazwa obiektu (posterunku) — słownik do wpisów godzin"
-                    />
-                    <SortTh
-                      label="Godziny"
-                      sortKey="hoursTotal"
-                      sort={objectSort}
-                      dir={objectDir}
-                      onSort={toggleObjectSort}
-                      testIdPrefix="kadry-obiekty-sort"
-                      align="right"
-                      tip="Suma godzin wypracowanych na tej pozycji z całej historii — im więcej, tym ważniejsze mapowanie"
-                    />
-                    <SortTh
-                      label="Pracownicy"
-                      sortKey="employeesCount"
-                      sort={objectSort}
-                      dir={objectDir}
-                      onSort={toggleObjectSort}
-                      testIdPrefix="kadry-obiekty-sort"
-                      align="right"
-                      tip="Ilu różnych pracowników kiedykolwiek księgowało godziny na tej pozycji"
-                    />
-                    <SortTh
-                      label="Obiekt w kartotece"
-                      sortKey="mapping"
-                      sort={objectSort}
-                      dir={objectDir}
-                      onSort={toggleObjectSort}
-                      testIdPrefix="kadry-obiekty-sort"
-                      tip="Obiekt z kartoteki, na który przeniosą się wynagrodzenia z tej pozycji (Analityka → Obiekty). Sortowanie ustawia niezmapowane na końcu"
-                    />
-                    <Th tip="Nieaktywny obiekt nie jest podpowiadany przy wpisywaniu godzin">
-                      Status
-                    </Th>
-                    <Th className="w-32" />
-                  </tr>
-                </thead>
-                <tbody>
-                  {objectsVisible.length === 0 && (
-                    <tr>
-                      <td
-                        colSpan={6}
-                        className="px-3 py-8 text-center text-muted-foreground"
-                      >
-                        {loading
-                          ? "Ładowanie…"
-                          : objectFiltersActive
-                            ? "Brak pozycji dla wybranych filtrów"
-                            : "Brak pozycji w słowniku kadrowym"}
-                      </td>
-                    </tr>
-                  )}
-                  {objectsVisible.map((r) => {
-                    const overhead = overheadKind(r.name);
-                    return (
-                      <tr
-                        key={r.id}
-                        className={cn(
-                          "border-b hover:bg-accent/50",
-                          overhead && "bg-muted/30 text-muted-foreground",
-                        )}
-                      >
-                        <td className="px-3 py-2 font-medium">
-                          {r.name}
-                          {overhead && (
-                            <span className="ml-2 rounded bg-muted px-1.5 py-0.5 text-[11px] font-normal">
-                              pozycja techniczna
-                            </span>
-                          )}
-                        </td>
-                        <td className="px-3 py-2 text-right tabular-nums">
-                          {r.hoursTotal ? hrs(r.hoursTotal) : "—"}
-                        </td>
-                        <td className="px-3 py-2 text-right tabular-nums">
-                          {r.employeesCount || "—"}
-                        </td>
-                        <td className="px-3 py-2">
-                          {overhead ? (
-                            <span
-                              className="text-xs italic"
-                              title="Koszt ogólny firmy — przypisanie go do jednego obiektu obciążyłoby jednego klienta kosztem wszystkich"
-                            >
-                              koszt ogólny, nie mapuj
-                            </span>
-                          ) : (
-                            <select
-                              className={TABLE_SELECT_CLS}
-                              value={r.objectId ?? ""}
-                              disabled={!editable}
-                              aria-label={`Obiekt w kartotece dla pozycji ${r.name}`}
-                              title={
-                                r.object
-                                  ? catalogLabel(r.object)
-                                  : "Wskaż obiekt z kartoteki, którego dotyczą godziny tej pozycji"
-                              }
-                              onChange={(e) =>
-                                handleObjectMapping(
-                                  r,
-                                  e.target.value ? Number(e.target.value) : null,
-                                )
-                              }
-                            >
-                              <option value="">— nie mapuj —</option>
-                              {objectCatalog.map((o) => (
-                                <option key={o.id} value={o.id}>
-                                  {catalogLabel(o)}
-                                </option>
-                              ))}
-                            </select>
-                          )}
-                        </td>
-                        <td className="px-3 py-2">
-                          <button
-                            type="button"
-                            onClick={() => handleObjectToggle(r)}
-                            disabled={!editable}
-                            className={cn(
-                              "inline-flex rounded-md px-2 py-0.5 text-xs font-medium",
-                              r.active
-                                ? "bg-emerald-100 text-emerald-700"
-                                : "bg-muted text-muted-foreground",
-                              !editable && "cursor-default",
-                            )}
-                          >
-                            {r.active ? "aktywny" : "nieaktywny"}
-                          </button>
-                        </td>
-                        <td className="px-3 py-2">
-                          {editable && (
-                            <div className="flex justify-end gap-1">
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                onClick={() => handleObjectRename(r)}
-                              >
-                                <Pencil className="h-4 w-4" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                onClick={() => handleObjectDelete(r)}
-                              >
-                                <Trash2 className="h-4 w-4" />
-                              </Button>
-                            </div>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </CardContent>
-          </Card>
+          <ObjectsTab
+            objects={objects}
+            catalog={objectCatalog}
+            editable={editable}
+            loading={loading}
+            onChanged={loadDictionaries}
+          />
         </TabsContent>
 
         {/* ==================== DZIAŁY ==================== */}
@@ -2884,115 +2080,56 @@ export function Kadry() {
         </TabsContent>
 
         {/* ==================== NORMY ==================== */}
+        {/* Normy chodzą po ROKU, nie po miesiącu — tabela pokazuje cały rok. */}
         <TabsContent value="normy" className="space-y-4">
-          <div className="flex flex-wrap items-center gap-3">{monthNav}</div>
-          <Card>
-            <CardContent className="p-0">
-              <table className="w-full max-w-2xl text-sm">
-                <thead className="border-b bg-muted/50 text-xs uppercase tracking-wide text-muted-foreground">
-                  <tr>
-                    <Th tip={`Miesiąc roku ${year}`}>Miesiąc</Th>
-                    <Th
-                      tip="Norma godzin dla umów o pracę — limit 'maks godziny', gdy pracownik nie ma indywidualnych GODZIN MAKS"
-                      className="text-right"
-                    >
-                      Norma — Praca
-                    </Th>
-                    <Th
-                      tip="Norma godzin dla zleceń — limit 'maks godziny' wierszy zleceniowych (w arkuszu stałe 158)"
-                      className="text-right"
-                    >
-                      Norma — Zlecenie
-                    </Th>
-                    <Th className="w-24" />
-                  </tr>
-                </thead>
-                <tbody>
-                  {MONTH_NAMES.map((name, idx) => {
-                    const m = idx + 1;
-                    const row = norms.find((n) => n.month === m);
-                    const draft = normDraft[m];
-                    return (
-                      <tr key={m} className="border-b">
-                        <td className="px-3 py-2 font-medium">{name}</td>
-                        <td className="px-3 py-2 text-right">
-                          <Input
-                            className="ml-auto h-8 w-24 text-right"
-                            inputMode="decimal"
-                            readOnly={!editable}
-                            value={draft?.workNorm ?? String(row?.workNorm ?? "")}
-                            onChange={(e) =>
-                              setNormDraft((p) => ({
-                                ...p,
-                                [m]: {
-                                  workNorm: e.target.value,
-                                  contractNorm:
-                                    p[m]?.contractNorm ??
-                                    String(row?.contractNorm ?? ""),
-                                },
-                              }))
-                            }
-                            placeholder="160"
-                          />
-                        </td>
-                        <td className="px-3 py-2 text-right">
-                          <Input
-                            className="ml-auto h-8 w-24 text-right"
-                            inputMode="decimal"
-                            readOnly={!editable}
-                            value={
-                              draft?.contractNorm ??
-                              String(row?.contractNorm ?? "")
-                            }
-                            onChange={(e) =>
-                              setNormDraft((p) => ({
-                                ...p,
-                                [m]: {
-                                  workNorm:
-                                    p[m]?.workNorm ??
-                                    String(row?.workNorm ?? ""),
-                                  contractNorm: e.target.value,
-                                },
-                              }))
-                            }
-                            placeholder="158"
-                          />
-                        </td>
-                        <td className="px-3 py-2 text-right">
-                          {editable && (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => handleNormSave(m)}
-                              disabled={!draft && !row}
-                            >
-                              Zapisz
-                            </Button>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </CardContent>
-          </Card>
-          <p className="text-xs text-muted-foreground">
-            Brak zapisanej normy = domyślnie 160 h (praca) / 158 h (zlecenie).
-          </p>
+          <NormsTab
+            year={year}
+            month={month}
+            norms={norms}
+            editable={editable}
+            onYearChange={(y) => setYearMonth(y, month)}
+            onSaved={() => {
+              void loadNorms();
+              void loadMonth({ silent: true });
+            }}
+          />
+        </TabsContent>
+
+        {/* ==================== HISTORIA (dziennik zmian) ==================== */}
+        <TabsContent value="historia" className="space-y-4">
+          <HistoryTab />
         </TabsContent>
       </Tabs>
 
       {/* ==================== DIALOGI ==================== */}
-      {payrollEdit && (
+      {payrollDialog && payrollDialog.index >= 0 && (
         <HrPayrollForm
-          key={payrollEdit.contractId}
+          key={payrollDialog.list[payrollDialog.index].contractId}
           open
-          onClose={() => setPayrollEdit(null)}
+          onClose={() => setPayrollDialog(null)}
           onSubmit={handlePayrollSave}
-          row={payrollEdit}
+          row={payrollDialog.list[payrollDialog.index]}
           year={year}
           month={month}
+          position={{
+            index: payrollDialog.index,
+            total: payrollDialog.list.length,
+          }}
+          hasPrev={payrollDialog.index > 0}
+          hasNext={payrollDialog.index < payrollDialog.list.length - 1}
+          onNavigate={(dir) =>
+            setPayrollDialog((d) =>
+              d
+                ? {
+                    ...d,
+                    index: Math.min(
+                      Math.max(d.index + dir, 0),
+                      d.list.length - 1,
+                    ),
+                  }
+                : d,
+            )
+          }
         />
       )}
       {hoursFormOpen && (
@@ -3023,12 +2160,21 @@ export function Kadry() {
       )}
       {contractFormOpen && (
         <HrContractForm
-          key={contractEdit?.id ?? `new-${formEmployeeId ?? ""}`}
+          key={
+            contractEdit?.id ??
+            (supersedeContract
+              ? `supersede-${supersedeContract.id}`
+              : `new-${formEmployeeId ?? ""}`)
+          }
           open
-          onClose={() => setContractFormOpen(false)}
+          onClose={() => {
+            setContractFormOpen(false);
+            setSupersedeContract(null);
+          }}
           onSubmit={handleContractSubmit}
           contract={contractEdit}
-          employees={contractEdit ? employees : activeEmployees}
+          supersede={supersedeContract}
+          employees={contractEdit || supersedeContract ? employees : activeEmployees}
           companies={companies}
           defaultEmployeeId={formEmployeeId}
         />

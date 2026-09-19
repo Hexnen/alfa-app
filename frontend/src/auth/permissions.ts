@@ -24,16 +24,21 @@ export const TABS: TabDef[] = [
   { key: "analityka/kontrahenci", label: "Kontrahenci", group: "Analityka" },
   { key: "analityka/obiekty", label: "Obiekty", group: "Analityka" },
   { key: "analityka/handlowcy", label: "Handlowcy", group: "Analityka" },
-  { key: "kadry/wynagrodzenia", label: "Wynagrodzenia", group: "Kadry" },
-  { key: "kadry/godziny", label: "Godziny", group: "Kadry" },
-  // Pracownicy = kartoteka osób razem z umowami (dawne "kadry/umowy");
-  // biuro trafiło do Wynagrodzeń. Stare klucze mapuje backend.
-  { key: "kadry/pracownicy", label: "Pracownicy", group: "Kadry" },
-  { key: "kadry/obiekty", label: "Obiekty", group: "Kadry" },
+  // Kolejność jak w menu: od danych ustawianych RAZ (normy, słowniki) do
+  // roboty comiesięcznej (godziny → wynagrodzenia).
+  { key: "kadry/normy", label: "Normy", group: "Kadry" },
   // Słownik działów firmy — osobny klucz od obiektów, bo to inny byt: godziny
   // działu są kosztem ogólnym, nie kosztem klienta.
   { key: "kadry/dzialy", label: "Działy", group: "Kadry" },
-  { key: "kadry/normy", label: "Normy", group: "Kadry" },
+  { key: "kadry/obiekty", label: "Obiekty", group: "Kadry" },
+  // Pracownicy = kartoteka osób razem z umowami (dawne "kadry/umowy");
+  // biuro trafiło do Wynagrodzeń. Stare klucze mapuje backend.
+  { key: "kadry/pracownicy", label: "Pracownicy", group: "Kadry" },
+  { key: "kadry/godziny", label: "Godziny", group: "Kadry" },
+  { key: "kadry/wynagrodzenia", label: "Wynagrodzenia", group: "Kadry" },
+  // Dziennik zmian Kadr (kto, kiedy, co zmienił) — patrz bliźniaczy wpis
+  // w src/lib/auth/permissions.ts.
+  { key: "kadry/historia", label: "Historia", group: "Kadry" },
   // Dział handlowy — lejek szans, aktywności i własny kalendarz. Osobne klucze
   // per podzakładka, bo pulpit i kalendarz nadaje się dać szerzej niż kartotekę
   // szans z kwotami. Klucz „handlowcy" (słownik) zostaje w grupie Ogólne.
@@ -42,6 +47,10 @@ export const TABS: TabDef[] = [
   { key: "handlowy/kontakty", label: "Kontakty", group: "Handlowy" },
   { key: "handlowy/aktywnosci", label: "Aktywności", group: "Handlowy" },
   { key: "handlowy/kalendarz", label: "Kalendarz", group: "Handlowy" },
+  // Mini-Kadry sekcji: godziny WŁASNEGO działu (lustro src/lib/auth/permissions.ts).
+  // Klucz nie otwiera Kadr — daje wgląd i edycję wyłącznie we wpisy działów
+  // swojej sekcji (zawężenie po stronie backendu: src/lib/hr-scope.ts).
+  { key: "handlowy/godziny", label: "Godziny działu", group: "Handlowy" },
   { key: "cma/raporty", label: "Raporty", group: "CMA" },
   { key: "cma/trendy", label: "Trendy", group: "CMA" },
   { key: "cma/braki-kamer", label: "Braki kamer", group: "CMA" },
@@ -53,6 +62,7 @@ export const TABS: TabDef[] = [
   // dostawać każdy, kto czyta raporty CMA.
   { key: "cma/grupy-interwencyjne", label: "Grupy interwencyjne", group: "CMA" },
   { key: "cma/ustawienia", label: "Ustawienia", group: "CMA" },
+  { key: "cma/godziny", label: "Godziny działu", group: "CMA" },
   { key: "technical/realizacje", label: "Realizacje", group: "Techniczny" },
   { key: "technical/protokoly", label: "Protokoły", group: "Techniczny" },
   { key: "technical/wyceny", label: "Wyceny", group: "Techniczny" },
@@ -71,7 +81,11 @@ export const TABS: TabDef[] = [
   { key: "technical/kalendarz", label: "Kalendarz", group: "Techniczny" },
   { key: "technical/projekty", label: "Projekty", group: "Techniczny" },
   { key: "technical/szablony", label: "Szablony", group: "Techniczny" },
+  { key: "technical/godziny", label: "Godziny działu", group: "Techniczny" },
   { key: "ofi", label: "OFI", group: "OFI" },
+  // Pierwsza realna podzakładka OFI — sekcja obejmuje dwa działy (OFI
+  // i Operacyjny), więc jako jedyna pokazuje kolumnę „Dział” i posterunki.
+  { key: "ofi/godziny", label: "Godziny działu", group: "OFI" },
   // Lustro wpisu z src/lib/auth/permissions.ts — panel technika (/technik):
   // podgląd własnych zleceń (view) i praca w terenie z protokołem (edit).
   { key: "technik", label: "Panel technika", group: "Technik" },

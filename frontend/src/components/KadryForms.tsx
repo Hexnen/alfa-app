@@ -1,10 +1,15 @@
 // Formularze dialogowe modułu Kadry: pracownik, wpis godzin, umowa,
 // dane płacowe miesiąca (kwoty od księgowości + nadpisania) i biuro.
-import { useState } from "react";
+//
+// Błędy zapisu lądują W OKNIE (czerwony tekst nad stopką), nie w `alert()`:
+// natywny alert zasłaniał formularz, gubił wpisane dane z pola widzenia i nie
+// dało się z niego skopiować komunikatu.
+import { useEffect, useRef, useState } from "react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 import { Textarea } from "./ui/textarea";
+import { tip } from "./ui/tooltip";
 import {
   Dialog,
   DialogContent,
@@ -12,6 +17,12 @@ import {
   DialogTitle,
   DialogFooter,
 } from "./ui/dialog";
+import { previewHrPayroll } from "@/lib/api";
+import { EntityHistory } from "@/components/kadry/EntityHistory";
+
+/** Rok i miesiąc → „2026-09” (klucz okresu wpisu w dzienniku zmian). */
+const ymKey = (year: number, month: number) =>
+  `${year}-${String(month).padStart(2, "0")}`;
 import type {
   Company,
   HrBonusType,
@@ -34,14 +45,39 @@ import type {
 // pola liczbowe (puste = null, przecinek dozwolony) oraz kodowanie przypisania
 // wiersza godzin (obiekt albo dział) — wspólne z tabelami Kadr
 import {
+  NUM_FIELD_ERROR,
   fieldToNum,
-  formatAssignment,
+  hrs,
+  isNumFieldValid,
+  money,
   numToField,
-  parseAssignment,
 } from "./kadry/shared";
+import { EmployeePicker } from "./kadry/EmployeePicker";
+// Okres obowiązywania umowy (migracja 0112) — formatowanie wspólne z kartoteką.
+import { datePl, shiftIsoDate } from "./kadry/contract-period";
+import { cn } from "@/lib/utils";
 
 const SELECT_CLS =
   "flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm";
+
+/** Ten sam select, tylko wygaszony — pole nieczynne ma to widać po sobie. */
+const cnSelect = (disabled: boolean) =>
+  disabled ? `${SELECT_CLS} cursor-not-allowed opacity-50` : SELECT_CLS;
+
+/** Komunikat błędu zapisu w stopce formularza — zamiast `alert()`. */
+function FormError({ message }: { message: string | null }) {
+  if (!message) return null;
+  return (
+    <p className="text-sm text-destructive" data-testid="kadry-form-error">
+      {message}
+    </p>
+  );
+}
+
+/** Opis pod polem: co wpisać i co to zmienia w kalkulacji. */
+function FieldHint({ children }: { children: React.ReactNode }) {
+  return <p className="text-xs text-muted-foreground">{children}</p>;
+}
 
 /**
  * Nazwy spółek do wyboru: aktywne ze słownika + wartość już zapisana w wierszu,
@@ -77,16 +113,32 @@ function NumField({
   value,
   onChange,
   hint,
+  prev,
 }: {
   id: string;
   label: string;
   value: string;
   onChange: (v: string) => void;
   hint?: string;
+  /**
+   * Wartość z POPRZEDNIEGO MIESIĄCA, gotowa do wyświetlenia („168"). W pustym
+   * polu jest podpowiedzią (placeholder), pod polem — punktem odniesienia,
+   * dokładnie jak kolumna „pop." w tabeli Godzin.
+   */
+  prev?: string;
 }) {
+  // „3 200,00” i „3200.50” są poprawne, „12h” i „3,2,1” — nie. Pole mówi to od
+  // razu (czerwona ramka + komunikat), a `hasInvalidNums` niżej nie pozwala
+  // wysłać takiego formularza: `fieldToNum` zwróciłby `null`, czyli po cichu
+  // wyczyściłby kwotę.
+  const invalid = !isNumFieldValid(value);
   return (
     <div className="space-y-2">
-      <Label htmlFor={id} title={hint} className={hint ? "cursor-help" : ""}>
+      <Label
+        htmlFor={id}
+        {...(hint ? tip(hint) : {})}
+        className={hint ? "cursor-help" : ""}
+      >
         {label}
       </Label>
       <Input
@@ -94,11 +146,41 @@ function NumField({
         inputMode="decimal"
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        placeholder="—"
+        placeholder={value === "" && prev ? prev : "—"}
+        aria-invalid={invalid || undefined}
+        aria-describedby={invalid ? `${id}-error` : undefined}
+        className={cn(
+          invalid && "border-destructive text-destructive focus-visible:ring-destructive",
+        )}
       />
+      {prev && (
+        <p className="text-[11px] leading-tight text-muted-foreground">
+          pop. {prev}
+        </p>
+      )}
+      {invalid && (
+        <p id={`${id}-error`} className="text-xs text-destructive">
+          {NUM_FIELD_ERROR}
+        </p>
+      )}
     </div>
   );
 }
+
+/**
+ * Czy którekolwiek z pól liczbowych formularza jest niepoprawne.
+ *
+ * Stan `fields` każdego z tych formularzy trzyma WYŁĄCZNIE pola liczbowe
+ * (teksty — uwagi, spółka — mają własne `useState`), więc wystarczy przejść po
+ * wartościach. Blokada jest konieczna, bo `fieldToNum` zwraca `null` i dla
+ * pustego pola, i dla śmiecia: bez niej „12h” zapisywałoby się jako brak kwoty.
+ */
+const hasInvalidNums = (fields: Record<string, string>): boolean =>
+  Object.values(fields).some((v) => !isNumFieldValid(v));
+
+/** Komunikat pod przyciskiem „Zapisz”, gdy formularz ma niepoprawną liczbę. */
+const INVALID_NUMS_ERROR =
+  "Popraw pola oznaczone na czerwono — wpisz liczbę (np. 3 200,00 albo 3200.50)";
 
 // ==================== PRACOWNIK ====================
 
@@ -117,24 +199,54 @@ export function HrEmployeeForm({
   departments: HrDepartment[];
 }) {
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  /**
+   * Dział obiektowy (`hasObjects`, u nas OFI) — do niego należą wszyscy
+   * pracownicy ochrony, więc NOWA kartoteka ochrony startuje z nim wpisanym.
+   * To podpowiedź przy zakładaniu, nie reguła: pole zostaje do zmiany, a osób
+   * już istniejących nie ruszamy (ich dział ustalono kiedyś świadomie).
+   * Dopóki backend nie odda flagi, rozpoznajemy dział po nazwie „OFI".
+   */
+  const objectDept = departments.find(
+    (d) => d.hasObjects === true || (d.hasObjects == null && d.name === "OFI"),
+  );
   const [formData, setFormData] = useState<HrEmployeeInput>({
     fullName: employee?.fullName || "",
     code: employee?.code || "",
     kind: employee?.kind || "ochrona",
-    departmentId: employee?.departmentId ?? null,
+    departmentId:
+      employee?.departmentId ?? (employee ? null : (objectDept?.id ?? null)),
     notes: employee?.notes || "",
     active: employee?.active ?? true,
   });
   const deptChoices = departmentOptions(departments, employee?.departmentId);
 
+  /**
+   * Przełączenie rodzaju na „ochrona" przy PUSTYM dziale podpowiada dział
+   * obiektowy; przełączenie na „biuro" zdejmuje tę podpowiedź (biuro nie
+   * rozlicza się na obiektach), ale nie rusza działu wybranego ręcznie.
+   */
+  const handleKindChange = (kind: HrEmployeeKind) =>
+    setFormData((p) => ({
+      ...p,
+      kind,
+      departmentId:
+        kind === "ochrona"
+          ? (p.departmentId ?? objectDept?.id ?? null)
+          : p.departmentId === objectDept?.id
+            ? null
+            : p.departmentId,
+    }));
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
+    setError(null);
     try {
       await onSubmit(formData);
       onClose();
-    } catch (error) {
-      alert(error instanceof Error ? error.message : "Błąd zapisu pracownika");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Błąd zapisu pracownika");
     } finally {
       setLoading(false);
     }
@@ -164,7 +276,7 @@ export function HrEmployeeForm({
           <div className="space-y-2">
             <Label
               htmlFor="hre-kind"
-              title="Ochrona rozlicza się z umów kadrowych; biuro — z zestawienia biura w Wynagrodzeniach"
+              {...tip("Ochrona rozlicza się z umów kadrowych; biuro — z zestawienia biura w Wynagrodzeniach")}
               className="cursor-help"
             >
               Rodzaj rozliczenia
@@ -172,12 +284,7 @@ export function HrEmployeeForm({
             <select
               id="hre-kind"
               value={formData.kind || "ochrona"}
-              onChange={(e) =>
-                setFormData((p) => ({
-                  ...p,
-                  kind: e.target.value as HrEmployeeKind,
-                }))
-              }
+              onChange={(e) => handleKindChange(e.target.value as HrEmployeeKind)}
               className={SELECT_CLS}
             >
               <option value="ochrona">Ochrona (umowy)</option>
@@ -187,7 +294,7 @@ export function HrEmployeeForm({
           <div className="space-y-2">
             <Label
               htmlFor="hre-dept"
-              title="Macierzysty dział pracownika — podpowiadany przy nowym wpisie godzin"
+              {...tip("Macierzysty dział pracownika — podpowiadany przy nowym wpisie godzin")}
               className="cursor-help"
             >
               Dział
@@ -214,6 +321,12 @@ export function HrEmployeeForm({
                 </option>
               ))}
             </select>
+            {!employee && formData.kind === "ochrona" && objectDept && (
+              <FieldHint>
+                Ochrona rozlicza się na obiektach, a te istnieją w dziale{" "}
+                {objectDept.label} — dlatego jest podpowiedziany. Możesz zmienić.
+              </FieldHint>
+            )}
           </div>
           <div className="space-y-2">
             <Label htmlFor="hre-code">Kod (status)</Label>
@@ -242,6 +355,14 @@ export function HrEmployeeForm({
               rows={2}
             />
           </div>
+          {employee && (
+            <EntityHistory
+              variant="section"
+              entityType="hr_employee"
+              entityId={employee.id}
+              title={employee.fullName}
+            />
+          )}
           <label className="flex items-center gap-2 text-sm font-medium">
             <input
               type="checkbox"
@@ -253,6 +374,7 @@ export function HrEmployeeForm({
             />
             Aktywny
           </label>
+          <FormError message={error} />
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose}>
               Anuluj
@@ -289,19 +411,26 @@ export function HrHoursForm({
   entry?: HrHoursEntry | null;
   employees: HrEmployee[];
   objects: HrObject[];
-  /** Działy do drugiej grupy w selekcie przypisania. */
+  /** Działy — pierwszy wybór wpisu; obiekt jest dostępny tylko w dziale obiektowym. */
   departments: HrDepartment[];
   year: number;
   month: number;
 }) {
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [employeeId, setEmployeeId] = useState(
     entry ? String(entry.employeeId) : "",
   );
-  // Jeden stan na obiekt i dział — pola są rozłączne, więc trzymanie dwóch
-  // niezależnych selectów pozwalałoby wypełnić oba i dostać 400 przy zapisie.
-  const [assignment, setAssignment] = useState(
-    entry ? formatAssignment(entry) : "",
+  /**
+   * Dział i obiekt to dwa pola z JEDNĄ zależnością: obiekt (posterunek) istnieje
+   * wyłącznie w dziale obiektowym — u nas OFI, bo tam należą wszyscy pracownicy
+   * obiektowi. Dział bez obiektów rozlicza pracę działową i blokuje drugie pole.
+   */
+  const [departmentId, setDepartmentId] = useState(
+    entry?.departmentId == null ? "" : String(entry.departmentId),
+  );
+  const [objectId, setObjectId] = useState(
+    entry?.objectId == null ? "" : String(entry.objectId),
   );
   const [fields, setFields] = useState({
     nightHours: numToField(entry?.nightHours),
@@ -318,35 +447,77 @@ export function HrHoursForm({
     setFields((p) => ({ ...p, [k]: v }));
 
   /**
-   * Wybór pracownika PODPOWIADA jego macierzysty dział z kartoteki — to tylko
-   * podpowiedź, nie reguła: człowiek z działu technicznego bywa rozliczany na
-   * konkretnym obiekcie, a wtedy dział byłby błędem. Dlatego podstawiamy go
-   * wyłącznie przy NOWYM wpisie i tylko gdy przypisanie jest jeszcze puste —
-   * nigdy nie nadpisujemy tego, co użytkownik już wybrał, ani istniejącego
-   * wiersza (tam dział ustalono kiedyś świadomie).
+   * Godziny z POPRZEDNIEGO MIESIĄCA (ta sama osoba, to samo przypisanie) —
+   * backend dokłada je do wpisu jako `prev`. Ten sam punkt odniesienia, co
+   * kolumna „pop." w tabeli Godzin: formularz i tabela mają mówić to samo,
+   * niezależnie od tego, którędy ktoś wpisuje miesiąc. Nowy wpis nie ma czego
+   * porównywać (nie wiadomo jeszcze, kogo dotyczy), więc tam podpowiedzi nie ma.
+   */
+  const prevHours = (
+    field: "workedHours" | "uwHours" | "l4Hours" | "nightHours",
+  ): string | undefined => {
+    const v = entry?.prev?.[field];
+    return v == null ? undefined : hrs(v);
+  };
+
+  /** Dział obiektowy (`hasObjects`); zanim backend odda flagę — dział „OFI". */
+  const isObjectDept = (d: HrDepartment | undefined) =>
+    d != null && (d.hasObjects === true || (d.hasObjects == null && d.name === "OFI"));
+  const objectDepartments = departments.filter(isObjectDept);
+  const currentDept = departments.find((d) => String(d.id) === departmentId);
+  const objectsAllowed = isObjectDept(currentDept);
+
+  /**
+   * Wybór pracownika PODPOWIADA dział: macierzysty z kartoteki, a przy ochronie
+   * bez działu — dział obiektowy (OFI), bo tam siedzą wszyscy pracownicy
+   * obiektowi. To tylko podpowiedź przy NOWYM wpisie i tylko na puste pole:
+   * istniejącego wiersza nie ruszamy, bo tam dział ustalono kiedyś świadomie.
    */
   const handleEmployeeChange = (value: string) => {
     setEmployeeId(value);
     if (entry) return;
     const emp = employees.find((e) => String(e.id) === value);
-    const deptId = emp?.departmentId ?? null;
-    // Dział zarchiwizowany nie ma opcji w selekcie — podstawiony token
-    // pokazałby puste pole, więc podpowiadamy tylko to, co da się wybrać.
-    if (deptId == null || !departments.some((d) => d.id === deptId)) return;
-    setAssignment((prev) => (prev === "" ? `d:${deptId}` : prev));
+    const own = emp?.departmentId ?? null;
+    const suggested =
+      own != null && departments.some((d) => d.id === own)
+        ? own
+        : emp?.kind === "ochrona" && objectDepartments.length === 1
+          ? objectDepartments[0].id
+          : null;
+    if (suggested == null) return;
+    setDepartmentId((prev) => (prev === "" ? String(suggested) : prev));
+  };
+
+  /** Zmiana działu: dział bez obiektów nie może ciągnąć za sobą posterunku. */
+  const handleDepartmentChange = (value: string) => {
+    setDepartmentId(value);
+    const dept = departments.find((d) => String(d.id) === value);
+    if (!isObjectDept(dept)) setObjectId("");
+  };
+
+  /** Obiekt bez działu podstawia dział obiektowy — tak samo jak backend. */
+  const handleObjectChange = (value: string) => {
+    setObjectId(value);
+    if (value !== "" && departmentId === "" && objectDepartments.length === 1) {
+      setDepartmentId(String(objectDepartments[0].id));
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (hasInvalidNums(fields)) {
+      setError(INVALID_NUMS_ERROR);
+      return;
+    }
     setLoading(true);
+    setError(null);
     try {
-      // Oba id lecą zawsze (jedno null): zapis nadpisuje cały wiersz, więc
-      // przełączenie obiekt→dział musi jawnie wyzerować poprzednie pole.
-      const { objectId, departmentId } = parseAssignment(assignment);
+      // Oba id lecą zawsze (jedno bywa null): zapis nadpisuje cały wiersz, więc
+      // zdjęcie obiektu musi jawnie wyzerować pole.
       await onSubmit({
         employeeId,
-        objectId,
-        departmentId,
+        objectId: objectId === "" ? null : Number(objectId),
+        departmentId: departmentId === "" ? null : Number(departmentId),
         year: entry?.year ?? year,
         month: entry?.month ?? month,
         nightHours: fieldToNum(fields.nightHours),
@@ -359,8 +530,8 @@ export function HrHoursForm({
         notes,
       });
       onClose();
-    } catch (error) {
-      alert(error instanceof Error ? error.message : "Błąd zapisu godzin");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Błąd zapisu godzin");
     } finally {
       setLoading(false);
     }
@@ -378,48 +549,68 @@ export function HrHoursForm({
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
               <Label htmlFor="hrh-emp">Pracownik *</Label>
-              <select
+              {/* Kartoteka to ~150 osób — natywna lista wymagała przewijania,
+                  więc pole jest wyszukiwarką (wpisz fragment nazwiska). */}
+              <EmployeePicker
                 id="hrh-emp"
+                employees={employees}
                 value={employeeId}
-                onChange={(e) => handleEmployeeChange(e.target.value)}
-                className={SELECT_CLS}
+                onChange={handleEmployeeChange}
                 required
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="hrh-dept">Dział</Label>
+              <select
+                id="hrh-dept"
+                value={departmentId}
+                onChange={(e) => handleDepartmentChange(e.target.value)}
+                className={SELECT_CLS}
               >
-                <option value="">— wybierz —</option>
-                {employees.map((e) => (
-                  <option key={e.id} value={e.id}>
-                    {e.fullName}
+                <option value="">— brak —</option>
+                {departments.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.label}
                   </option>
                 ))}
               </select>
+              <FieldHint>
+                Dział, w którym rozlicza się wpis. Obiekty (posterunki) są tylko
+                w dziale obiektowym{objectDepartments.length === 1
+                  ? ` (${objectDepartments[0].label})`
+                  : ""}.
+              </FieldHint>
             </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
-              <Label htmlFor="hrh-obj">Obiekt / dział</Label>
-              {/* Dwa słowniki w jednym natywnym selekcie: wartością opcji jest
-                  token `o:`/`d:`, bo obie tabele numerują się od 1 i samo id
-                  nie odróżniłoby obiektu od działu. */}
+              <Label htmlFor="hrh-obj">Obiekt</Label>
               <select
                 id="hrh-obj"
-                value={assignment}
-                onChange={(e) => setAssignment(e.target.value)}
-                className={SELECT_CLS}
+                value={objectsAllowed ? objectId : ""}
+                disabled={!objectsAllowed}
+                onChange={(e) => handleObjectChange(e.target.value)}
+                className={cnSelect(!objectsAllowed)}
               >
-                <option value="">—</option>
-                <optgroup label="Obiekty">
-                  {objects.map((o) => (
-                    <option key={o.id} value={`o:${o.id}`}>
-                      {o.name}
-                    </option>
-                  ))}
-                </optgroup>
-                <optgroup label="Działy">
-                  {departments.map((d) => (
-                    <option key={d.id} value={`d:${d.id}`}>
-                      {d.label}
-                    </option>
-                  ))}
-                </optgroup>
+                <option value="">— brak —</option>
+                {objects.map((o) => (
+                  <option key={o.id} value={o.id}>
+                    {o.name}
+                  </option>
+                ))}
               </select>
+              {!objectsAllowed ? (
+                <FieldHint>
+                  Wybierz najpierw dział obiektowy — w pozostałych działach
+                  godziny są kosztem ogólnym firmy i obiektu się nie wskazuje.
+                </FieldHint>
+              ) : (
+                <FieldHint>
+                  Posterunek, na którym przepracowano godziny. Możesz zostawić
+                  pusty — wtedy wpis jest pracą działową bez obiektu.
+                </FieldHint>
+              )}
               {entry?.objectUncertain && (
                 <p className="text-xs text-amber-600">
                   Przypisanie przeniesione z poprzedniego miesiąca — potwierdź
@@ -434,6 +625,7 @@ export function HrHoursForm({
               label="Wypracowane"
               value={fields.workedHours}
               onChange={set("workedHours")}
+              prev={prevHours("workedHours")}
               hint="Godziny wypracowane na obiekcie albo w dziale w miesiącu"
             />
             <NumField
@@ -441,6 +633,7 @@ export function HrHoursForm({
               label="Nocne"
               value={fields.nightHours}
               onChange={set("nightHours")}
+              prev={prevHours("nightHours")}
               hint="Godziny nocne — informacyjne, nie wchodzą do kalkulacji wypłaty"
             />
             <NumField
@@ -455,6 +648,7 @@ export function HrHoursForm({
               label="UW"
               value={fields.uwHours}
               onChange={set("uwHours")}
+              prev={prevHours("uwHours")}
               hint="Urlop wypoczynkowy (godziny) — wlicza się do godzin rozliczanych"
             />
             <NumField
@@ -462,6 +656,7 @@ export function HrHoursForm({
               label="L4"
               value={fields.l4Hours}
               onChange={set("l4Hours")}
+              prev={prevHours("l4Hours")}
               hint="Chorobowe (godziny) — wlicza się do godzin przy umowie o pracę"
             />
           </div>
@@ -469,17 +664,17 @@ export function HrHoursForm({
           <div className="grid grid-cols-2 gap-4">
             <NumField
               id="hrh-ded"
-              label="Potrącenia (zł)"
+              label="Potrącenia netto (zł)"
               value={fields.deductions}
               onChange={set("deductions")}
-              hint="Kwota potrąceń — pomniejsza premię/potrącenie w wynagrodzeniu"
+              hint="Kwota potrąceń NETTO — pomniejsza premię/potrącenie w wynagrodzeniu"
             />
             <NumField
               id="hrh-bon"
-              label="Dodatki / premie (zł)"
+              label="Dodatki / premie netto (zł)"
               value={fields.bonuses}
               onChange={set("bonuses")}
-              hint="Kwota premii — powiększa premię/potrącenie w wynagrodzeniu"
+              hint="Kwota premii NETTO — powiększa premię/potrącenie w wynagrodzeniu"
             />
           </div>
 
@@ -492,7 +687,17 @@ export function HrHoursForm({
               rows={2}
             />
           </div>
+          {entry && (
+            <EntityHistory
+              variant="section"
+              entityType="hr_hours"
+              entityId={entry.id}
+              period={ymKey(entry.year, entry.month)}
+              title={entry.employeeName}
+            />
+          )}
 
+          <FormError message={error} />
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose}>
               Anuluj
@@ -524,6 +729,7 @@ export function HrContractForm({
   employees,
   companies,
   defaultEmployeeId,
+  supersede,
 }: {
   open: boolean;
   onClose: () => void;
@@ -534,35 +740,55 @@ export function HrContractForm({
   companies: Company[];
   /** Pracownik podstawiany w nowej umowie (dodawanie z wiersza kartoteki). */
   defaultEmployeeId?: number;
+  /**
+   * ZMIANA WARUNKÓW: umowa, którą nowa ma zastąpić. Formularz startuje z jej
+   * danymi, wymaga daty „obowiązuje od”, a zapis idzie przez
+   * `POST /hr/contracts/:id/supersede` — poprzednia dostaje w tej samej
+   * transakcji datę zakończenia dzień wcześniej.
+   */
+  supersede?: HrContract | null;
 }) {
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // Przy zmianie warunków wzorem jest umowa zastępowana; pusty zostaje wyłącznie
+  // okres — to jedyna rzecz, którą trzeba podjąć świadomie.
+  const base = contract ?? supersede ?? null;
   const [formData, setFormData] = useState<HrContractInput>({
-    employeeId: contract
-      ? String(contract.employeeId)
+    employeeId: base
+      ? String(base.employeeId)
       : defaultEmployeeId
         ? String(defaultEmployeeId)
         : "",
-    company: contract?.company || "",
-    contractType: contract?.contractType || "zlecenie",
-    chor: contract?.chor ?? false,
-    zua: contract?.zua || "",
-    zza: contract?.zza || "",
-    zwua: contract?.zwua || "",
-    objectName: contract?.objectName || "",
-    mainChannel: contract?.mainChannel || "przelew",
-    bonusType: contract?.bonusType || "brak",
-    active: contract?.active ?? true,
-    notes: contract?.notes || "",
+    company: base?.company || "",
+    contractType: base?.contractType || "zlecenie",
+    chor: base?.chor ?? false,
+    zua: base?.zua || "",
+    zza: base?.zza || "",
+    zwua: base?.zwua || "",
+    objectName: base?.objectName || "",
+    mainChannel: base?.mainChannel || "przelew",
+    bonusType: base?.bonusType || "brak",
+    validFrom: supersede ? "" : contract?.validFrom || "",
+    validTo: supersede ? "" : contract?.validTo || "",
+    active: supersede ? true : contract?.active ?? true,
+    notes: base?.notes || "",
   });
+
+  /** Data zakończenia, którą dostanie umowa zastępowana (podgląd w oknie). */
+  const cutoff =
+    supersede && formData.validFrom
+      ? shiftIsoDate(formData.validFrom, -1)
+      : "";
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
+    setError(null);
     try {
       await onSubmit(formData);
       onClose();
-    } catch (error) {
-      alert(error instanceof Error ? error.message : "Błąd zapisu umowy");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Błąd zapisu umowy");
     } finally {
       setLoading(false);
     }
@@ -572,33 +798,44 @@ export function HrContractForm({
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle>{contract ? "Edytuj umowę" : "Nowa umowa"}</DialogTitle>
+          <DialogTitle>
+            {supersede
+              ? `Zmiana warunków — nowa umowa (${supersede.company})`
+              : contract
+                ? "Edytuj umowę"
+                : "Nowa umowa"}
+          </DialogTitle>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4">
+          {supersede && (
+            // Co się stanie po zapisie — powiedziane ZANIM, bo operacja rusza
+            // dwie umowy naraz, a widać tylko formularz jednej.
+            <div
+              className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-200"
+              data-testid="hrc-supersede-note"
+            >
+              Nowa umowa przejmuje dane bieżącej ({supersede.company},{" "}
+              {supersede.contractType === "praca" ? "praca" : "zlecenie"}).
+              Bieżąca umowa dostanie datę zakończenia{" "}
+              <strong>{cutoff ? datePl(cutoff) : "dzień przed startem nowej"}</strong>
+              {" — "}w jednym zapisie, z dwoma wpisami w dzienniku zmian.
+            </div>
+          )}
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
               <Label htmlFor="hrc-emp">Pracownik *</Label>
-              <select
+              <EmployeePicker
                 id="hrc-emp"
+                employees={employees}
                 value={String(formData.employeeId)}
-                onChange={(e) =>
-                  setFormData((p) => ({ ...p, employeeId: e.target.value }))
-                }
-                className={SELECT_CLS}
+                onChange={(v) => setFormData((p) => ({ ...p, employeeId: v }))}
                 required
-              >
-                <option value="">— wybierz —</option>
-                {employees.map((e) => (
-                  <option key={e.id} value={e.id}>
-                    {e.fullName}
-                  </option>
-                ))}
-              </select>
+              />
             </div>
             <div className="space-y-2">
               <Label
                 htmlFor="hrc-company"
-                title="Spółka zatrudniająca ze słownika (zakładka Spółki) — nazwa wiąże umowę ze spółką w zestawieniach"
+                {...tip("Spółka zatrudniająca ze słownika (zakładka Spółki) — nazwa wiąże umowę ze spółką w zestawieniach")}
                 className="cursor-help"
               >
                 Spółka *
@@ -631,7 +868,7 @@ export function HrContractForm({
             <div className="space-y-2">
               <Label
                 htmlFor="hrc-type"
-                title="Praca: godziny + UW + L4, norma UoP; Zlecenie: godziny + UW, norma zlecenia"
+                {...tip("Praca: godziny + UW + L4, norma UoP; Zlecenie: godziny + UW, norma zlecenia")}
                 className="cursor-help"
               >
                 Umowa
@@ -654,7 +891,7 @@ export function HrContractForm({
             <div className="space-y-2">
               <Label
                 htmlFor="hrc-zua"
-                title="Zgłoszenie ZUA (umowa główna) — wpisz 'tak' lub datę; niepuste włącza rozliczanie godzin do maks"
+                {...tip("Zgłoszenie ZUA (umowa główna) — wpisz 'tak' lub datę; niepuste włącza rozliczanie godzin do maks")}
                 className="cursor-help"
               >
                 ZUA
@@ -667,11 +904,17 @@ export function HrContractForm({
                 }
                 placeholder="tak / 01.06.2026"
               />
+              {/* Pole jest tekstowe, bo w kartotece siedzą i „tak", i daty
+                  zgłoszenia — liczy się wyłącznie to, czy jest NIEPUSTE. */}
+              <FieldHint>
+                Wpisz <strong>tak</strong> albo datę zgłoszenia. Niepuste =
+                umowa główna: godziny liczą się do limitu „maks".
+              </FieldHint>
             </div>
             <div className="space-y-2">
               <Label
                 htmlFor="hrc-zza"
-                title="Zgłoszenie ZZA (druga spółka) — wiersz dostaje nadwyżkę godzin ponad normę umowy głównej"
+                {...tip("Zgłoszenie ZZA (druga spółka) — wiersz dostaje nadwyżkę godzin ponad normę umowy głównej")}
                 className="cursor-help"
               >
                 ZZA
@@ -684,6 +927,11 @@ export function HrContractForm({
                 }
                 placeholder="tak / 01.06.2026"
               />
+              <FieldHint>
+                Wpisz <strong>tak</strong> albo datę. Działa tylko przy PUSTYM
+                ZUA: wtedy umowa dostaje nadwyżkę godzin ponad normę umowy
+                głównej. Oba pola puste = godziny nierozliczane.
+              </FieldHint>
             </div>
           </div>
 
@@ -691,7 +939,7 @@ export function HrContractForm({
             <div className="space-y-2">
               <Label
                 htmlFor="hrc-main"
-                title="Kanał wypłaty głównej (kwoty NETTO od księgowości)"
+                {...tip("Kanał wypłaty głównej (kwoty NETTO od księgowości)")}
                 className="cursor-help"
               >
                 Wypłata główna
@@ -714,7 +962,7 @@ export function HrContractForm({
             <div className="space-y-2">
               <Label
                 htmlFor="hrc-bonus"
-                title="Rodzaj dodatku decyduje o liczeniu godzin nadwyżki i kanale ich wypłaty; 'brak' = premie idą kanałem wypłaty głównej"
+                {...tip("Rodzaj dodatku decyduje o liczeniu godzin nadwyżki i kanale ich wypłaty; 'brak' = premie idą kanałem wypłaty głównej")}
                 className="cursor-help"
               >
                 Dodatek
@@ -749,9 +997,62 @@ export function HrContractForm({
             </div>
           </div>
 
+          {/* OKRES OBOWIĄZYWANIA — decyduje, w których MIESIĄCACH umowa się
+              liczy. Pola natywne `type="date"`, jak w Historii i w oknie norm. */}
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
-              <Label htmlFor="hrc-zwua" title="Wyrejestrowanie — informacyjne">
+              <Label
+                htmlFor="hrc-valid-from"
+                {...tip(
+                  "Od kiedy umowa obowiązuje. Miesiąc jest najmniejszą jednostką rozliczenia: umowa od 15.09 liczy się we wrześniu w całości.",
+                )}
+                className="cursor-help"
+              >
+                Obowiązuje od{supersede ? " *" : ""}
+              </Label>
+              <Input
+                id="hrc-valid-from"
+                type="date"
+                data-testid="hrc-valid-from"
+                value={formData.validFrom || ""}
+                onChange={(e) =>
+                  setFormData((p) => ({ ...p, validFrom: e.target.value }))
+                }
+                required={!!supersede}
+              />
+              <FieldHint>
+                Puste = <strong>bezterminowo</strong> (umowa obowiązuje od zawsze).
+              </FieldHint>
+            </div>
+            <div className="space-y-2">
+              <Label
+                htmlFor="hrc-valid-to"
+                {...tip(
+                  "Do kiedy umowa obowiązuje. Po tej dacie nie wchodzi do kolejnych miesięcy, a w Wynagrodzeniach pojawi się przypomnienie „umowy do przedłużenia”.",
+                )}
+                className="cursor-help"
+              >
+                Obowiązuje do
+              </Label>
+              <Input
+                id="hrc-valid-to"
+                type="date"
+                data-testid="hrc-valid-to"
+                value={formData.validTo || ""}
+                onChange={(e) =>
+                  setFormData((p) => ({ ...p, validTo: e.target.value }))
+                }
+                min={formData.validFrom || undefined}
+              />
+              <FieldHint>
+                Puste = <strong>bezterminowo</strong> (do odwołania).
+              </FieldHint>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <Label htmlFor="hrc-zwua" {...tip("Wyrejestrowanie — informacyjne")}>
                 ZWUA
               </Label>
               <Input
@@ -799,18 +1100,39 @@ export function HrContractForm({
               rows={2}
             />
           </div>
+          {contract && (
+            <EntityHistory
+              variant="section"
+              entityType="hr_contract"
+              entityId={contract.id}
+              title={`${contract.employeeName} — ${contract.company}`}
+            />
+          )}
 
+          <FormError message={error} />
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose}>
               Anuluj
             </Button>
             <Button
               type="submit"
+              data-testid="hrc-submit"
               disabled={
-                loading || !formData.employeeId || !formData.company.trim()
+                loading ||
+                !formData.employeeId ||
+                !formData.company.trim() ||
+                // Zmiana warunków bez daty startu nie miałaby czym zamknąć
+                // umowy poprzedniej.
+                (!!supersede && !formData.validFrom)
               }
             >
-              {loading ? "Zapisywanie…" : contract ? "Zapisz zmiany" : "Dodaj"}
+              {loading
+                ? "Zapisywanie…"
+                : supersede
+                  ? "Zapisz zmianę warunków"
+                  : contract
+                    ? "Zapisz zmiany"
+                    : "Dodaj"}
             </Button>
           </DialogFooter>
         </form>
@@ -821,6 +1143,30 @@ export function HrContractForm({
 
 // ==================== DANE PŁACOWE MIESIĄCA ====================
 
+/** Jedna pozycja panelu kontekstu — etykieta u góry, wartość pod nią. */
+function ContextItem({
+  label,
+  value,
+  hint,
+  strong,
+}: {
+  label: string;
+  value: string;
+  hint?: string;
+  strong?: boolean;
+}) {
+  return (
+    <div {...(hint ? tip(hint) : {})} className={hint ? "cursor-help" : undefined}>
+      <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+        {label}
+      </p>
+      <p className={strong ? "font-semibold tabular-nums" : "tabular-nums"}>
+        {value}
+      </p>
+    </div>
+  );
+}
+
 export function HrPayrollForm({
   open,
   onClose,
@@ -828,6 +1174,10 @@ export function HrPayrollForm({
   row,
   year,
   month,
+  onNavigate,
+  hasPrev,
+  hasNext,
+  position,
 }: {
   open: boolean;
   onClose: () => void;
@@ -835,8 +1185,15 @@ export function HrPayrollForm({
   row: HrPayrollRow;
   year: number;
   month: number;
+  /** Przejście do sąsiedniego wiersza listy (zapis, jeśli coś zmieniono). */
+  onNavigate?: (dir: -1 | 1) => void;
+  hasPrev?: boolean;
+  hasNext?: boolean;
+  /** „12 z 147" — bez tego nawigacja po liście gubi poczucie, gdzie się jest. */
+  position?: { index: number; total: number };
 }) {
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [fields, setFields] = useState({
     mainAmount: numToField(row.inputs.mainAmount),
     bonusRate: numToField(row.inputs.bonusRate),
@@ -847,36 +1204,105 @@ export function HrPayrollForm({
   });
   const [pending, setPending] = useState(row.inputs.bonusRatePending);
   const [notes, setNotes] = useState(row.inputs.notes);
+  /**
+   * Podgląd kalkulacji dla WPISYWANYCH wartości — liczy backend (`/hr/payroll/
+   * preview`) tą samą funkcją, co przy zapisie. Odwzorowanie wzorów w formularzu
+   * rozjechałoby się z kalkulacją przy pierwszej zmianie reguły, a reguł jest tu
+   * kilkanaście (maks, ZZA, kanały, premia).
+   */
+  const [preview, setPreview] = useState<HrPayrollRow | null>(null);
+  const previewSeq = useRef(0);
 
   const set = (k: keyof typeof fields) => (v: string) =>
     setFields((p) => ({ ...p, [k]: v }));
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const payload = (): HrPayrollSaveInput => ({
+    contractId: row.contractId,
+    year,
+    month,
+    mainAmount: fieldToNum(fields.mainAmount),
+    bonusRate: fieldToNum(fields.bonusRate),
+    bonusRatePending: pending,
+    rateAdjustment: fieldToNum(fields.rateAdjustment),
+    maxHoursOverride: fieldToNum(fields.maxHoursOverride),
+    actualHoursOverride: fieldToNum(fields.actualHoursOverride),
+    bonusAmountOverride: fieldToNum(fields.bonusAmountOverride),
+    notes,
+  });
+
+  const dirty =
+    fieldToNum(fields.mainAmount) !== row.inputs.mainAmount ||
+    fieldToNum(fields.bonusRate) !== row.inputs.bonusRate ||
+    fieldToNum(fields.rateAdjustment) !== row.inputs.rateAdjustment ||
+    fieldToNum(fields.maxHoursOverride) !== row.inputs.maxHoursOverride ||
+    fieldToNum(fields.actualHoursOverride) !== row.inputs.actualHoursOverride ||
+    fieldToNum(fields.bonusAmountOverride) !== row.inputs.bonusAmountOverride ||
+    pending !== row.inputs.bonusRatePending ||
+    notes !== row.inputs.notes;
+
+  // Podgląd po chwili bezruchu (nie po każdej cyfrze) i tylko gdy coś zmieniono
+  // — przy otwartym, nieruszonym wierszu liczby z tabeli są już aktualne.
+  useEffect(() => {
+    // Niepoprawna liczba w polu → żadnego podglądu: `fieldToNum` zwróciłby
+    // `null`, czyli policzylibyśmy wypłatę „bez tej kwoty” i pokazali ją jako
+    // wynik tego, co ktoś właśnie wpisuje.
+    if (!dirty || hasInvalidNums(fields)) {
+      setPreview(null);
+      return;
+    }
+    const seq = ++previewSeq.current;
+    const t = window.setTimeout(() => {
+      previewHrPayroll(payload())
+        .then((res) => {
+          // Odpowiedź starszego żądania nie ma nadpisywać nowszej.
+          if (seq === previewSeq.current && res.data) setPreview(res.data);
+        })
+        .catch(() => {
+          // Podgląd jest wygodą, nie zapisem — błąd zostawia stare liczby.
+        });
+    }, 400);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fields, pending, notes, dirty]);
+
+  const save = async (): Promise<boolean> => {
+    if (hasInvalidNums(fields)) {
+      setError(INVALID_NUMS_ERROR);
+      return false;
+    }
     setLoading(true);
+    setError(null);
     try {
-      await onSubmit({
-        contractId: row.contractId,
-        year,
-        month,
-        mainAmount: fieldToNum(fields.mainAmount),
-        bonusRate: fieldToNum(fields.bonusRate),
-        bonusRatePending: pending,
-        rateAdjustment: fieldToNum(fields.rateAdjustment),
-        maxHoursOverride: fieldToNum(fields.maxHoursOverride),
-        actualHoursOverride: fieldToNum(fields.actualHoursOverride),
-        bonusAmountOverride: fieldToNum(fields.bonusAmountOverride),
-        notes,
-      });
-      onClose();
-    } catch (error) {
-      alert(
-        error instanceof Error ? error.message : "Błąd zapisu danych płacowych",
+      await onSubmit(payload());
+      return true;
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Błąd zapisu danych płacowych",
       );
+      return false;
     } finally {
       setLoading(false);
     }
   };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (await save()) onClose();
+  };
+
+  /** Zapisz (jeśli trzeba) i przejdź dalej — zapis nieudany zostawia okno. */
+  const go = async (dir: -1 | 1) => {
+    if (dirty && !(await save())) return;
+    onNavigate?.(dir);
+  };
+
+  const shown = preview ?? row;
+  const maxSourceHint =
+    row.maxHoursSource === "override"
+      ? "Nadpisane ręcznie w tym oknie"
+      : row.maxHoursSource === "individual"
+        ? "Indywidualne GODZINY MAKS z wpisów godzin"
+        : "Norma miesiąca z zakładki Normy";
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
@@ -885,20 +1311,81 @@ export function HrPayrollForm({
           <DialogTitle>
             {row.employeeName} — {row.company} (
             {row.contractType === "praca" ? "Praca" : "Zlecenie"})
+            {position && (
+              <span className="ml-2 text-sm font-normal text-muted-foreground">
+                {position.index + 1} z {position.total}
+              </span>
+            )}
           </DialogTitle>
         </DialogHeader>
-        <form onSubmit={handleSubmit} className="space-y-4">
+
+        {/* Kontekst wiersza: liczby, z których bierze się kwota do wpisania.
+            Bez nich trzeba było zamknąć okno, spojrzeć w tabelę i otworzyć
+            je z powrotem. */}
+        <div className="grid grid-cols-3 gap-3 rounded-md border bg-muted/30 p-3 text-sm sm:grid-cols-4">
+          <ContextItem
+            label="Fakt godz."
+            value={hrs(row.faktGodziny)}
+            hint="Godziny do rozliczenia — dzielnik stawki netto"
+            strong
+          />
+          <ContextItem
+            label="Maks godz."
+            value={`${hrs(row.maksGodziny)}${row.maxHoursSource !== "norm" ? "*" : ""}`}
+            hint={maxSourceHint}
+          />
+          <ContextItem
+            label="Godz. dodatku"
+            value={row.godzinyDodatek ? hrs(row.godzinyDodatek) : "—"}
+            hint="Nadwyżka ponad maks — liczona tylko przy ustawionym dodatku"
+          />
+          <ContextItem
+            label="Rej."
+            value={(row.registration ?? "—").toUpperCase()}
+            hint="ZUA = umowa główna, ZZA = nadwyżka ponad normę umowy głównej"
+          />
+          <ContextItem
+            label="Stawka netto"
+            value={shown.stawkaNetto != null ? `${hrs(shown.stawkaNetto)} zł/h` : "—"}
+            hint="Kwota główna netto ÷ faktyczne godziny"
+            strong
+          />
+          <ContextItem label="Przelew" value={money(shown.przelew)} />
+          <ContextItem label="Gotówka" value={money(shown.gotowka)} />
+          <ContextItem label="Wypłata" value={money(shown.wyplata)} strong />
+        </div>
+        {preview && (
+          <p className="-mt-2 text-xs text-emerald-700">
+            Podgląd po zapisaniu: stawka{" "}
+            {preview.stawkaNetto != null ? `${hrs(preview.stawkaNetto)} zł/h` : "—"}{" "}
+            · wypłata {money(preview.wyplata)}
+            {preview.bonusPending && " · dodatek czeka na stawkę"}
+          </p>
+        )}
+
+        <form
+          onSubmit={handleSubmit}
+          className="space-y-4"
+          onKeyDown={(e) => {
+            // Ctrl/Cmd+Enter: zapisz i od razu następna umowa — kwoty wpisuje
+            // się seriami, więc ręka nie musi wracać do myszy.
+            if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+              e.preventDefault();
+              void go(1);
+            }
+          }}
+        >
           <div className="grid grid-cols-3 gap-4">
             <NumField
               id="hrp-main"
-              label="Kwota główna NETTO (zł)"
+              label="Kwota główna netto (zł)"
               value={fields.mainAmount}
               onChange={set("mainAmount")}
-              hint="Kwota wypłaty głównej od księgowości — z niej liczona jest stawka netto (kwota ÷ fakt godziny)"
+              hint="Kwota wypłaty głównej NETTO (na rękę) od księgowości — z niej liczy się stawka netto (kwota ÷ faktyczne godziny). Kadry nie operują kwotami brutto."
             />
             <NumField
               id="hrp-rate"
-              label="Stawka dodatku (zł/h)"
+              label="Stawka dodatku netto (zł/h)"
               value={fields.bonusRate}
               onChange={set("bonusRate")}
               hint="Stawka netto za godziny dodatku; pusta → używana stawka netto z wypłaty głównej"
@@ -914,7 +1401,7 @@ export function HrPayrollForm({
 
           <label
             className="flex items-center gap-2 text-sm font-medium"
-            title="Zaznacz, gdy stawka dodatku czeka na przeliczenie — wiersz będzie oznaczony, dodatek nie wejdzie do wypłaty"
+            {...tip("Zaznacz, gdy stawka dodatku czeka na przeliczenie — wiersz będzie oznaczony, dodatek nie wejdzie do wypłaty")}
           >
             <input
               type="checkbox"
@@ -928,7 +1415,7 @@ export function HrPayrollForm({
           <div className="rounded-md border border-dashed p-3">
             <p
               className="mb-3 text-xs text-muted-foreground"
-              title="Wypełnij tylko wyjątkowo — puste pola liczą się automatycznie z godzin i norm"
+              {...tip("Wypełnij tylko wyjątkowo — puste pola liczą się automatycznie z godzin i norm")}
             >
               Ręczne nadpisania (puste = liczone automatycznie)
             </p>
@@ -966,14 +1453,56 @@ export function HrPayrollForm({
               rows={2}
             />
           </div>
+          {/* Wypłaty: encją jest UMOWA, a wpisy są per miesiąc — stąd `period`. */}
+          <EntityHistory
+            variant="section"
+            entityType="hr_payroll"
+            entityId={row.contractId}
+            period={ymKey(year, month)}
+            title={row.employeeName}
+          />
 
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={onClose}>
-              Anuluj
-            </Button>
-            <Button type="submit" disabled={loading}>
-              {loading ? "Zapisywanie…" : "Zapisz"}
-            </Button>
+          <FormError message={error} />
+          {/* Kwoty od księgowości przychodzą listą po kolei, więc okno musi
+              umieć przejść do następnej umowy bez zamykania i szukania
+              wiersza w tabeli. Ctrl+Enter = zapisz i dalej. */}
+          <DialogFooter className="sm:justify-between">
+            {onNavigate ? (
+              <div className="flex gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={loading || !hasPrev}
+                  onClick={() => void go(-1)}
+                  data-testid="kadry-wynagrodzenia-dialog-prev"
+                >
+                  ← Poprzedni
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={loading || !hasNext}
+                  onClick={() => void go(1)}
+                  data-testid="kadry-wynagrodzenia-dialog-next"
+                >
+                  Następny →
+                </Button>
+              </div>
+            ) : (
+              <span />
+            )}
+            <div className="flex gap-2">
+              <Button type="button" variant="outline" onClick={onClose}>
+                Anuluj
+              </Button>
+              <Button
+                type="submit"
+                disabled={loading}
+                {...tip("Ctrl+Enter — zapisz i przejdź do następnej umowy")}
+              >
+                {loading ? "Zapisywanie…" : "Zapisz"}
+              </Button>
+            </div>
           </DialogFooter>
         </form>
       </DialogContent>
@@ -1006,6 +1535,7 @@ export function HrOfficeForm({
   month: number;
 }) {
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [employeeId, setEmployeeId] = useState(
     row ? String(row.employeeId) : defaultEmployeeId ? String(defaultEmployeeId) : "",
   );
@@ -1028,10 +1558,20 @@ export function HrOfficeForm({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (hasInvalidNums(fields)) {
+      setError(INVALID_NUMS_ERROR);
+      return;
+    }
     setLoading(true);
+    setError(null);
     try {
       await onSubmit({
         employeeId,
+        // Optymistyczna kontrola współbieżności: zapis przejdzie tylko, gdy
+        // wiersz nie zmienił się od wczytania (backend odbija 409). Rezerwacja
+        // listy jest per UŻYTKOWNIK, więc bez tego dwie karty TEJ SAMEJ osoby
+        // dalej gubiły zmianę — w godzinach ten znacznik był od początku.
+        expectedUpdatedAt: row?.updatedAt,
         year: row?.year ?? year,
         month: row?.month ?? month,
         company,
@@ -1047,8 +1587,8 @@ export function HrOfficeForm({
         notes,
       });
       onClose();
-    } catch (error) {
-      alert(error instanceof Error ? error.message : "Błąd zapisu wpisu biura");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Błąd zapisu wpisu biura");
     } finally {
       setLoading(false);
     }
@@ -1066,20 +1606,13 @@ export function HrOfficeForm({
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
               <Label htmlFor="hro-emp">Pracownik *</Label>
-              <select
+              <EmployeePicker
                 id="hro-emp"
+                employees={employees}
                 value={employeeId}
-                onChange={(e) => setEmployeeId(e.target.value)}
-                className={SELECT_CLS}
+                onChange={setEmployeeId}
                 required
-              >
-                <option value="">— wybierz —</option>
-                {employees.map((e) => (
-                  <option key={e.id} value={e.id}>
-                    {e.fullName}
-                  </option>
-                ))}
-              </select>
+              />
             </div>
             <div className="space-y-2">
               {/* Biuro rozlicza się na spółce razem z formą zatrudnienia
@@ -1087,7 +1620,7 @@ export function HrOfficeForm({
                   spółek, więc pole jest zwykłym wyborem z listy. */}
               <Label
                 htmlFor="hro-company"
-                title="Spółka / forma zatrudnienia ze słownika (zakładka Spółki)"
+                {...tip("Spółka / forma zatrudnienia ze słownika (zakładka Spółki)")}
                 className="cursor-help"
               >
                 Spółka / forma
@@ -1131,10 +1664,10 @@ export function HrOfficeForm({
             />
             <NumField
               id="hro-rate"
-              label="Stawka (zł/h)"
+              label="Stawka netto (zł/h)"
               value={fields.rate}
               onChange={set("rate")}
-              hint="Stawka godzinowa — używana z godzinami do księgowej"
+              hint="Stawka godzinowa NETTO — używana z godzinami do księgowej"
             />
             <NumField
               id="hro-ded"
@@ -1144,7 +1677,7 @@ export function HrOfficeForm({
             />
             <NumField
               id="hro-bon"
-              label="Dodatki (zł)"
+              label="Dodatki netto (zł)"
               value={fields.bonuses}
               onChange={set("bonuses")}
             />
@@ -1153,24 +1686,24 @@ export function HrOfficeForm({
           <div className="grid grid-cols-3 gap-4">
             <NumField
               id="hro-amount"
-              label="Kwota (zł)"
+              label="Kwota netto (zł)"
               value={fields.amount}
               onChange={set("amount")}
-              hint="Pełna kwota wypłaty; pusta → liczona jako godziny do księgowej × stawka"
+              hint="Pełna kwota wypłaty NETTO; pusta → liczona jako godziny do księgowej × stawka netto"
             />
             <NumField
               id="hro-ror"
-              label="Podstawa ROR (zł)"
+              label="Podstawa ROR netto (zł)"
               value={fields.rorBase}
               onChange={set("rorBase")}
-              hint="Część wypłaty na przelew (podaje księgowość)"
+              hint="Część kwoty netto idąca przelewem na rachunek (podaje księgowość)"
             />
             <NumField
               id="hro-cash"
-              label="Delegacje / gotówka (zł)"
+              label="Delegacje / gotówka netto (zł)"
               value={fields.cashOverride}
               onChange={set("cashOverride")}
-              hint="Pusta → liczona jako kwota − podstawa ROR (gdy dodatnia)"
+              hint="Pusta → liczona jako kwota netto − podstawa ROR (gdy dodatnia)"
             />
           </div>
 
@@ -1183,7 +1716,17 @@ export function HrOfficeForm({
               rows={2}
             />
           </div>
+          {row && (
+            <EntityHistory
+              variant="section"
+              entityType="hr_office"
+              entityId={row.id}
+              period={ymKey(row.year, row.month)}
+              title={`${row.employeeName} — ${row.company}`}
+            />
+          )}
 
+          <FormError message={error} />
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose}>
               Anuluj

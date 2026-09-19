@@ -32,15 +32,20 @@ export const TABS: TabDef[] = [
   { key: "analityka/obiekty", label: "Obiekty", group: "Analityka" },
   { key: "analityka/handlowcy", label: "Handlowcy", group: "Analityka" },
   // Kadry
-  { key: "kadry/wynagrodzenia", label: "Wynagrodzenia", group: "Kadry" },
-  { key: "kadry/godziny", label: "Godziny", group: "Kadry" },
+  // Kolejność jak w menu: od danych ustawianych RAZ (normy, słowniki) do
+  // roboty comiesięcznej (godziny → wynagrodzenia).
+  { key: "kadry/normy", label: "Normy", group: "Kadry" },
+  // Słownik działów firmy (handlowy, księgowość, CMA…) — rodzeństwo Obiektów.
+  { key: "kadry/dzialy", label: "Działy", group: "Kadry" },
+  { key: "kadry/obiekty", label: "Obiekty", group: "Kadry" },
   // Pracownicy = kartoteka osób razem z ich umowami (dawna podzakładka
   // "kadry/umowy"); rozliczenie biura siedzi w Wynagrodzeniach.
   { key: "kadry/pracownicy", label: "Pracownicy", group: "Kadry" },
-  { key: "kadry/obiekty", label: "Obiekty", group: "Kadry" },
-  // Słownik działów firmy (handlowy, księgowość, CMA…) — rodzeństwo Obiektów.
-  { key: "kadry/dzialy", label: "Działy", group: "Kadry" },
-  { key: "kadry/normy", label: "Normy", group: "Kadry" },
+  { key: "kadry/godziny", label: "Godziny", group: "Kadry" },
+  { key: "kadry/wynagrodzenia", label: "Wynagrodzenia", group: "Kadry" },
+  // Dziennik zmian Kadr (kto, kiedy, co zmienił). Osobny klucz: wpisy streszczają
+  // kwoty wynagrodzeń wszystkich osób, więc nadaje się go węziej niż same Godziny.
+  { key: "kadry/historia", label: "Historia", group: "Kadry" },
   // Handlowy — moduł pracy handlowca (lejek szans, jego kalendarz i aktywności).
   // Klucz `handlowcy` z grupy „Ogólne” to co innego: SŁOWNIK opiekunów handlowych
   // (stawki, prowizje, przypisania) i zostaje bez zmian.
@@ -49,6 +54,16 @@ export const TABS: TabDef[] = [
   { key: "handlowy/kontakty", label: "Kontakty", group: "Handlowy" },
   { key: "handlowy/aktywnosci", label: "Aktywności", group: "Handlowy" },
   { key: "handlowy/kalendarz", label: "Kalendarz", group: "Handlowy" },
+  /*
+   * „GODZINY DZIAŁU” — mini-Kadry sekcji (patrz src/lib/hr-scope.ts).
+   *
+   * Cztery osobne klucze, po jednym na sekcję sidebara, bo to cztery różne
+   * zestawy wierszy i cztery różne osoby: kierownik CMA wypełnia godziny CMA
+   * i nie ma oglądać ochrony obiektowej. Klucz NIE otwiera Kadr — daje wgląd
+   * (i edycję) wyłącznie we wpisy działów swojej sekcji, w słownik jej działów
+   * i w listę jej pracowników. Pełne `kadry/godziny` widzi jak dotąd wszystko.
+   */
+  { key: "handlowy/godziny", label: "Godziny działu", group: "Handlowy" },
   // CMA
   { key: "cma/raporty", label: "Raporty", group: "CMA" },
   { key: "cma/trendy", label: "Trendy", group: "CMA" },
@@ -61,6 +76,8 @@ export const TABS: TabDef[] = [
   // (stawki, umowy), a nie kolejny raport z monitoringu.
   { key: "cma/grupy-interwencyjne", label: "Grupy interwencyjne", group: "CMA" },
   { key: "cma/ustawienia", label: "Ustawienia", group: "CMA" },
+  // Mini-Kadry sekcji CMA — patrz komentarz przy „handlowy/godziny”.
+  { key: "cma/godziny", label: "Godziny działu", group: "CMA" },
   // Techniczny
   { key: "technical/realizacje", label: "Realizacje", group: "Techniczny" },
   { key: "technical/protokoly", label: "Protokoły", group: "Techniczny" },
@@ -90,8 +107,16 @@ export const TABS: TabDef[] = [
   // Biblioteka instrukcji i dokumentacji sprzętu oraz usług (/technical/manuale).
   { key: "technical/manuale", label: "Manuale", group: "Techniczny" },
   { key: "technical/kalendarz", label: "Kalendarz", group: "Techniczny" },
+  // Mini-Kadry sekcji Techniczny — patrz komentarz przy „handlowy/godziny”.
+  { key: "technical/godziny", label: "Godziny działu", group: "Techniczny" },
   // OFI
   { key: "ofi", label: "OFI", group: "OFI" },
+  /*
+   * Pierwsza realna podzakładka OFI. Sekcja obejmuje DWA działy (OFI
+   * i Operacyjny — oba z portalem `ofi`), więc jako jedyna pokazuje kolumnę
+   * „Dział” i posterunki (dział obiektowy siedzi właśnie tutaj).
+   */
+  { key: "ofi/godziny", label: "Godziny działu", group: "OFI" },
   /*
    * Panel technika (/technik) — osobna, bardzo prosta aplikacja na tablet:
    * technik albo podwykonawca widzi WYŁĄCZNIE swoje zlecenia i wypełnia protokół

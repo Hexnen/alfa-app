@@ -1,6 +1,6 @@
 {
   "name": "alfa-app",
-  "version": "1.16.0",
+  "version": "1.17.0",
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",

@@ -4188,6 +4188,25 @@ export interface HrDepartment {
    * pilnuje, żeby taki dział był co najwyżej jeden.
    */
   isCmaPool: boolean;
+  /**
+   * Dział OBIEKTOWY (w praktyce OFI): wpis godzin może wskazać obiekt tylko
+   * w takim dziale. Pracownicy obiektowi należą do niego, więc godzina na
+   * posterunku to godzina tego działu rozliczona na konkretnym obiekcie.
+   */
+  hasObjects: boolean;
+  /**
+   * Kolor pigułki działu — nazwa tonu z palety kalendarza (`PillTone`:
+   * sky/violet/emerald/…), nie kod HEX. Dzięki temu dział wygląda wszędzie tak
+   * samo i ma gotowy wariant ciemny. `null` = bez koloru (neutralna pigułka).
+   */
+  color: string | null;
+  /**
+   * PORTAL DZIAŁOWY (`hr_departments.portal`) — sekcja Kadr, która wypełnia
+   * swoje godziny sama (np. `ofi`). Rezerwacja listy idzie po tej wartości:
+   * wiersze działu, którego portal trzyma ktoś inny, są w tabeli wyszarzone
+   * i nie da się ich zapisać. `null` = dział bez portalu (tylko pełne Kadry).
+   */
+  portal: string | null;
   sortOrder: number;
   active: boolean;
   /** Suma godzin z CAŁEJ historii — waga działu w zestawieniu. */
@@ -4207,6 +4226,15 @@ export interface HrDepartment {
 export interface HrDepartmentInput {
   name?: string;
   isCmaPool?: boolean;
+  hasObjects?: boolean;
+  /** Ton pigułki (`PillTone`) albo `null` = bez koloru. Backend waliduje listę. */
+  color?: string | null;
+  /**
+   * Sekcja z własną mini-wersją Kadr („Godziny działu”): `cma`, `ofi`,
+   * `handlowy`, `technical` albo `null` = dział wyłącznie dla pełnych Kadr.
+   * Backend waliduje listę (src/lib/hr-scope.ts).
+   */
+  portal?: HrPortalKey | null;
   sortOrder?: number;
   active?: boolean;
 }
@@ -4217,6 +4245,8 @@ export interface HrEmployeeRef {
   fullName: string;
   kind: HrEmployeeKind;
   active: boolean;
+  /** KOD z listy pracowników (Emeryt / Student…) — po nim też szuka picker. */
+  code?: string;
 }
 
 export interface HrMonthNorm {
@@ -4225,6 +4255,18 @@ export interface HrMonthNorm {
   month: number;
   workNorm: number;
   contractNorm: number;
+}
+
+/**
+ * Godziny TEJ SAMEJ osoby na TYM SAMYM przypisaniu (dział + obiekt) w miesiącu
+ * poprzednim — kolumna „pop.” w tabeli Godzin i źródło dla „Skopiuj
+ * z poprzedniego miesiąca”. `null`, gdy takiego wiersza wtedy nie było.
+ */
+export interface HrHoursPrev {
+  workedHours: number | null;
+  uwHours: number | null;
+  l4Hours: number | null;
+  nightHours: number | null;
 }
 
 export interface HrHoursEntry {
@@ -4254,6 +4296,8 @@ export interface HrHoursEntry {
   // Znacznik ostatniego zapisu — edycja inline odsyła go jako
   // `expectedUpdatedAt`, żeby nie nadpisać zmiany zrobionej w innej karcie (409).
   updatedAt: string;
+  /** Poprzedni miesiąc tej samej pary (pracownik, przypisanie) — patrz `HrHoursPrev`. */
+  prev?: HrHoursPrev | null;
 }
 
 export interface HrHoursInput {
@@ -4281,6 +4325,16 @@ export type HrBonusType =
   | "delegacja_przelew"
   | "delegacja_gotowka";
 
+/**
+ * Status umowy liczony przez SERWER względem dnia dzisiejszego (migracja 0112).
+ * „nieaktywna” to ręczny wyłącznik i ma pierwszeństwo przed datami.
+ */
+export type HrContractStatus =
+  | "przyszła"
+  | "aktywna"
+  | "zakończona"
+  | "nieaktywna";
+
 export interface HrContract {
   id: number;
   employeeId: number;
@@ -4293,9 +4347,13 @@ export interface HrContract {
   objectName: string;
   mainChannel: HrChannel;
   bonusType: HrBonusType;
+  /** Okres obowiązywania „RRRR-MM-DD”; null = bezterminowo z tej strony. */
+  validFrom: string | null;
+  validTo: string | null;
   active: boolean;
   notes: string;
   employeeName: string;
+  status: HrContractStatus;
 }
 
 export interface HrContractInput {
@@ -4309,8 +4367,29 @@ export interface HrContractInput {
   objectName?: string;
   mainChannel: HrChannel;
   bonusType: HrBonusType;
+  /** Puste pole = bezterminowo (backend zapisuje NULL). */
+  validFrom?: string | null;
+  validTo?: string | null;
   active?: boolean;
   notes?: string;
+}
+
+/** Wiersz listy „umowy do przedłużenia” (`GET /hr/contracts/expiring`). */
+export interface HrExpiringContract extends HrContract {
+  /** Dni do końca umowy; ujemne = skończyła się tyle dni temu. */
+  daysLeft: number;
+  /** `konczaca` = kończy się w oknie N dni, `zakonczona` = już po terminie. */
+  reason: "konczaca" | "zakonczona";
+  hasSuccessor: boolean;
+  /** Okres słownie: „od 15.09.2026 do 31.12.2026”. */
+  periodLabel: string;
+}
+
+export interface HrExpiringMeta {
+  days: number;
+  today: string;
+  konczace: number;
+  zakonczone: number;
 }
 
 export interface HrPayrollInputs {
@@ -4341,6 +4420,16 @@ export interface HrPayrollRow {
   maxHoursSource: "override" | "individual" | "norm";
   maksGodziny: number;
   faktGodziny: number | null;
+  /**
+   * Wartości SPRZED ręcznego nadpisania (`src/utils/hr-calc.ts`). Tabela wypłat
+   * koloruje nadpisaną liczbę i podaje w dymku obie: „nadpisane ręcznie: 168 h ·
+   * wyliczone: 176 h (norma miesiąca)”. Bez nich front musiałby powtarzać
+   * u siebie reguły płacowe, żeby zgadnąć wartość wyliczoną.
+   */
+  computedMaksGodziny: number;
+  computedMaxHoursSource: "individual" | "norm";
+  computedFaktGodziny: number | null;
+  computedKwotaDodatku: number | null;
   godzinyDodatek: number;
   stawkaNetto: number | null;
   kwotaGlowna: number | null;
@@ -4382,12 +4471,21 @@ export interface HrOfficeRow {
   amountComputed: number | null;
   cash: number | null;
   total: number;
+  /** Znacznik wersji wiersza — wraca w `expectedUpdatedAt` przy zapisie. */
+  updatedAt: string;
 }
 
 export interface HrOfficeInput {
   employeeId: number | string;
   year: number;
   month: number;
+  /**
+   * Optymistyczna kontrola współbieżności (jak w godzinach): `updatedAt`
+   * wiersza sprzed edycji. Backend zapisuje tylko, gdy wiersz od tego czasu się
+   * nie zmienił — inaczej 409. Rezerwacja listy jest per UŻYTKOWNIK, więc bez
+   * tego dwie karty tej samej osoby nadpisywały się nawzajem.
+   */
+  expectedUpdatedAt?: string;
   company?: string;
   etatHours?: number | string | null;
   uwL4?: number | string | null;
@@ -4417,6 +4515,50 @@ export interface HrSummary {
   gaps: number;
   officeTotal: number;
   officeCount: number;
+  /** Lista kontrolna miesiąca — to samo, co zwraca `getHrMonthStatus`. */
+  checklist?: HrMonthChecklist;
+}
+
+/**
+ * Sumy POPRZEDNIEGO miesiąca — punkt odniesienia dla różnicy pod kaflem.
+ * Bez listy kontrolnej: z zeszłego miesiąca liczą się sumy, nie braki.
+ */
+export interface HrPrevSummary {
+  year: number;
+  month: number;
+  employeesWithHours: number;
+  hoursEntries: number;
+  totalHours: number;
+  contractsCount: number;
+  przelew: number;
+  gotowka: number;
+  wyplaty: number;
+  officeTotal: number;
+  officeCount: number;
+  /**
+   * Czy poprzedni miesiąc ma czego szukać — osobno dla godzin, wypłat i biura.
+   * Miesiąc z godzinami, ale bez ani jednej kwoty od księgowości, dałby przy
+   * kaflu „Przelewy" spadek o 100%; to nie spadek, tylko miesiąc nierozliczony,
+   * i tak się go nazywa („brak danych za lipiec").
+   */
+  hasHours: boolean;
+  hasPayroll: boolean;
+  hasOffice: boolean;
+  /**
+   * Czy księgowość podała za tamten miesiąc choć jedną kwotę główną. Bez tego
+   * wypłaty są samymi premiami i wyrównaniami — porównanie ma sens, ale trzeba
+   * przy nim napisać, na czym stoi.
+   */
+  payrollSettled: boolean;
+}
+
+/** Wypłata poprzedniego miesiąca per umowa — dla „Największych zmian". */
+export interface HrPrevPayrollRow {
+  contractId: number;
+  employeeId: number;
+  employeeName: string;
+  company: string;
+  wyplata: number;
 }
 
 export const getHrEmployees = (onlyActive = false) =>
@@ -4436,9 +4578,9 @@ export const updateHrEmployee = (id: number, data: HrEmployeeInput) =>
 export const deleteHrEmployee = (id: number) =>
   request<ApiResponse<null>>(`/hr/employees/${id}`, { method: "DELETE" });
 
-export const getHrObjects = (onlyActive = false) =>
+export const getHrObjects = (onlyActive = false, portal?: HrPortalKey | null) =>
   request<ApiResponse<HrObject[]>>(
-    `/hr/objects${onlyActive ? "?active=true" : ""}`,
+    `/hr/objects${onlyActive ? "?active=true" : ""}${portalQuery(portal, onlyActive ? "&" : "?")}`,
   );
 export const createHrObject = (data: { name: string; active?: boolean }) =>
   request<ApiResponse<HrObject>>("/hr/objects", {
@@ -4456,9 +4598,9 @@ export const updateHrObject = (
 export const deleteHrObject = (id: number) =>
   request<ApiResponse<null>>(`/hr/objects/${id}`, { method: "DELETE" });
 
-export const getHrDepartments = (onlyActive = false) =>
+export const getHrDepartments = (onlyActive = false, portal?: HrPortalKey | null) =>
   request<ApiResponse<HrDepartment[]>>(
-    `/hr/departments${onlyActive ? "?active=true" : ""}`,
+    `/hr/departments${onlyActive ? "?active=true" : ""}${portalQuery(portal, onlyActive ? "&" : "?")}`,
   );
 export const createHrDepartment = (data: HrDepartmentInput) =>
   request<ApiResponse<HrDepartment>>("/hr/departments", {
@@ -4497,9 +4639,9 @@ export const getHrObjectCatalog = () =>
   request<ApiResponse<HrObjectRef[]>>("/hr/object-catalog");
 
 /** Skrócona lista pracowników kadr — do powiązania handlowca / technika z listą płac. */
-export const getHrEmployeeDirectory = (onlyActive = false) =>
+export const getHrEmployeeDirectory = (onlyActive = false, portal?: HrPortalKey | null) =>
   request<ApiResponse<HrEmployeeRef[]>>(
-    `/hr/directory/employees${onlyActive ? "?active=true" : ""}`,
+    `/hr/directory/employees${onlyActive ? "?active=true" : ""}${portalQuery(portal, onlyActive ? "&" : "?")}`,
   );
 
 export const getHrNorms = (year: number) =>
@@ -4515,10 +4657,98 @@ export const saveHrNorm = (data: {
     body: JSON.stringify(data),
   });
 
-export const getHrHours = (year: number, month: number) =>
-  request<ApiResponse<HrHoursEntry[]>>(`/hr/hours?year=${year}&month=${month}`);
-export const createHrHours = (data: HrHoursInput) =>
-  request<ApiResponse<HrHoursEntry>>("/hr/hours", {
+// --- Normy z Kodeksu pracy + słownik dni wolnych (backend: src/routes/hr-norms.ts) ---
+
+/**
+ * Dzień ustawowo wolny. `source` odróżnia wpisy z ustawy (zasiane algorytmem
+ * przy pierwszym otwarciu roku) od dopisanych ręcznie — kasować wolno tylko te
+ * drugie. `reduces` = false wyłącznie dla świąt wypadających w niedzielę: one
+ * nie obniżają wymiaru czasu pracy (art. 130 § 2 k.p.).
+ */
+export interface HrHoliday {
+  id: number;
+  /** „2026-12-24”. */
+  date: string;
+  name: string;
+  source: "statutory" | "custom";
+  /** 0 = niedziela … 6 = sobota. */
+  dayOfWeek: number;
+  dayName: string;
+  reduces: boolean;
+}
+
+/** Jeden miesiąc porównania „wpisana norma vs wymiar z Kodeksu pracy”. */
+export interface HrComputedNormRow {
+  month: number;
+  computed: number;
+  /** Norma zapisana w bazie albo null — miesiąc leci wtedy na domyślnych 160 h. */
+  current: number | null;
+  diff: number | null;
+  /** Jest co zapisać (inna wartość albo brak wiersza). */
+  differs: boolean;
+  /** Miesiąc zamknięty — zapis go pominie. */
+  closed: boolean;
+  fullWeeks: number;
+  extraWorkdays: number;
+  /** 40 h × tygodnie + 8 h × dni wystające, jeszcze przed odjęciem świąt. */
+  baseHours: number;
+  /** Daty świąt, które obniżyły wymiar tego miesiąca. */
+  holidays: string[];
+}
+
+export interface HrComputedNorms {
+  year: number;
+  months: HrComputedNormRow[];
+  holidays: HrHoliday[];
+}
+
+/** Odpowiedź zapisu — to samo porównanie, już po zmianie, plus co się stało. */
+export interface HrAppliedNorms extends HrComputedNorms {
+  saved: number[];
+  skippedClosed: number[];
+  unchanged: number[];
+}
+
+/** Rok bez ani jednego wpisu backend zasiewa świętami ustawowymi i od razu je zwraca. */
+export const getHrHolidays = (year: number) =>
+  request<ApiResponse<HrHoliday[]>>(`/hr/holidays?year=${year}`);
+export const createHrHoliday = (data: { date: string; name: string }) =>
+  request<ApiResponse<HrHoliday>>("/hr/holidays", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+export const deleteHrHoliday = (id: number) =>
+  request<ApiResponse<null>>(`/hr/holidays/${id}`, { method: "DELETE" });
+
+export const getHrComputedNorms = (year: number) =>
+  request<ApiResponse<HrComputedNorms>>(`/hr/norms/computed?year=${year}`);
+/** Brak `months` = zapisz wszystkie miesiące, które się różnią. Norma zlecenia zostaje nietknięta. */
+export const applyHrComputedNorms = (data: { year: number; months?: number[] }) =>
+  request<ApiResponse<HrAppliedNorms>>("/hr/norms/apply-computed", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+
+/**
+ * SEKCJA DZIAŁOWA („Godziny działu”, backend: src/lib/hr-scope.ts).
+ *
+ * `portal` = klucz sekcji sidebara (`cma`, `ofi`, `handlowy`, `technical`)
+ * albo `null` dla pełnych Kadr. Leci w query stringu przy KAŻDEJ trasie godzin
+ * — także przy zapisach, bo to on rozstrzyga, w czyim imieniu piszemy (konto
+ * sekcji bez tego parametru dostaje 403, a nie cichą całość).
+ */
+export type HrPortalKey = "cma" | "ofi" | "handlowy" | "technical";
+
+/** `?portal=cma` albo pusty ogon — jedno miejsce zamiast dziesięciu sklejek. */
+const portalQuery = (portal?: HrPortalKey | null, sep: "?" | "&" = "?"): string =>
+  portal ? `${sep}portal=${portal}` : "";
+
+export const getHrHours = (year: number, month: number, portal?: HrPortalKey | null) =>
+  request<ApiResponse<HrHoursEntry[]>>(
+    `/hr/hours?year=${year}&month=${month}${portalQuery(portal, "&")}`,
+  );
+export const createHrHours = (data: HrHoursInput, portal?: HrPortalKey | null) =>
+  request<ApiResponse<HrHoursEntry>>(`/hr/hours${portalQuery(portal)}`, {
     method: "POST",
     body: JSON.stringify(data),
   });
@@ -4527,19 +4757,51 @@ export const createHrHours = (data: HrHoursInput) =>
 export const updateHrHours = (
   id: number,
   data: HrHoursInput & { expectedUpdatedAt?: string },
+  portal?: HrPortalKey | null,
 ) =>
-  request<ApiResponse<HrHoursEntry>>(`/hr/hours/${id}`, {
+  request<ApiResponse<HrHoursEntry>>(`/hr/hours/${id}${portalQuery(portal)}`, {
     method: "PUT",
     body: JSON.stringify(data),
   });
-export const deleteHrHours = (id: number) =>
-  request<ApiResponse<null>>(`/hr/hours/${id}`, { method: "DELETE" });
+export const deleteHrHours = (id: number, portal?: HrPortalKey | null) =>
+  request<ApiResponse<null>>(`/hr/hours/${id}${portalQuery(portal)}`, { method: "DELETE" });
 // Przeniesienie aktywnych pracowników z poprzedniego miesiąca (puste wpisy
 // z flagą objectUncertain); idempotentne — zwraca liczbę dodanych wierszy
-export const carryOverHrHours = (year: number, month: number) =>
-  request<ApiResponse<{ inserted: number }>>("/hr/hours/carry-over", {
-    method: "POST",
-    body: JSON.stringify({ year, month }),
+export const carryOverHrHours = (
+  year: number,
+  month: number,
+  portal?: HrPortalKey | null,
+) =>
+  request<ApiResponse<{ inserted: number }>>(
+    `/hr/hours/carry-over${portalQuery(portal)}`,
+    { method: "POST", body: JSON.stringify({ year, month }) },
+  );
+
+/**
+ * ZBIORCZY ZAPIS GODZIN — „Skopiuj z poprzedniego miesiąca” i „Wklej z arkusza”.
+ * Jedna transakcja, maks. 500 wierszy. Pole pominięte w wierszu zostaje
+ * nietknięte (wklejka z samą kolumną „wypracowane” nie czyści urlopu i L4).
+ * `expected` (id → `updatedAt`) działa jak `expectedUpdatedAt` przy zapisie
+ * pojedynczym, tyle że na całą paczkę: rozjazd na jednym wierszu odrzuca całość.
+ */
+export const bulkSaveHrHours = (
+  data: {
+    year: number;
+    month: number;
+    rows: Array<{
+      id: number;
+      workedHours?: number | null;
+      uwHours?: number | null;
+      l4Hours?: number | null;
+      nightHours?: number | null;
+    }>;
+    expected?: Record<number, string>;
+  },
+  portal?: HrPortalKey | null,
+) =>
+  request<ApiResponse<{ saved: number }>>(`/hr/hours/bulk${portalQuery(portal)}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
   });
 
 export const getHrContracts = (onlyActive = false) =>
@@ -4558,16 +4820,81 @@ export const updateHrContract = (id: number, data: HrContractInput) =>
   });
 export const deleteHrContract = (id: number) =>
   request<ApiResponse<null>>(`/hr/contracts/${id}`, { method: "DELETE" });
+/**
+ * Umowy do przedłużenia: kończące się w ciągu `days` dni + już zakończone,
+ * którym nikt nie podpisał następnej (ta sama osoba i spółka).
+ */
+export const getHrExpiringContracts = (days = 30) =>
+  request<ApiResponse<HrExpiringContract[]> & { meta: HrExpiringMeta }>(
+    `/hr/contracts/expiring?days=${days}`,
+  );
+/**
+ * Zmiana warunków: bieżąca umowa dostaje `valid_to` = dzień przed `validFrom`,
+ * nowa powstaje z jej danymi (nadpisanymi tym, co w `data`). Jedna transakcja,
+ * dwa wpisy w dzienniku.
+ */
+export const supersedeHrContract = (
+  id: number,
+  data: HrContractInput & { validFrom: string },
+) =>
+  request<ApiResponse<{ previous: HrContract; created: HrContract }>>(
+    `/hr/contracts/${id}/supersede`,
+    { method: "POST", body: JSON.stringify(data) },
+  );
 
 export const getHrPayroll = (year: number, month: number) =>
   request<ApiResponse<HrPayrollRow[]>>(
     `/hr/payroll?year=${year}&month=${month}`,
   );
+/**
+ * Zapis wejść płacowych umowy. Odpowiedzią jest PRZELICZONY wiersz (ten sam
+ * kształt, co w `getHrPayroll`) — tabela wypłat wpisuje kwoty komórka po
+ * komórce i podmienia wiersz na miejscu, zamiast ciągnąć cały miesiąc.
+ */
 export const saveHrPayroll = (data: HrPayrollSaveInput) =>
-  request<ApiResponse<unknown>>("/hr/payroll", {
+  request<ApiResponse<HrPayrollRow>>("/hr/payroll", {
     method: "PUT",
     body: JSON.stringify(data),
   });
+
+/**
+ * Zbiorczy zapis kwot głównych („Wklej z arkusza”). Dotyka wyłącznie kwoty
+ * głównej wskazanych umów; w odpowiedzi wraca przeliczony cały miesiąc.
+ */
+export const bulkSaveHrPayroll = (data: {
+  year: number;
+  month: number;
+  rows: Array<{ contractId: number; mainAmount: number | null }>;
+}) =>
+  request<ApiResponse<{ saved: number; rows: HrPayrollRow[] }>>(
+    "/hr/payroll/bulk",
+    { method: "PUT", body: JSON.stringify(data) },
+  );
+
+/**
+ * Podgląd kalkulacji BEZ zapisu — dialog wypłaty pokazuje wyliczoną stawkę
+ * netto i szacowaną wypłatę w trakcie wpisywania kwoty. Liczy backend tą samą
+ * funkcją, co przy zapisie, więc podgląd nie rozjeżdża się z wynikiem.
+ */
+export const previewHrPayroll = (data: HrPayrollSaveInput) =>
+  request<ApiResponse<HrPayrollRow>>("/hr/payroll/preview", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+
+/**
+ * Zbiorcze potwierdzenie przypisań przeniesionych przez carry-over godzin
+ * (zdejmuje pytajnik „?" z obiektu/działu). Idempotentne — zwraca liczbę
+ * wierszy, które faktycznie zmieniły stan.
+ */
+export const confirmHrHoursAssignments = (
+  ids: number[],
+  portal?: HrPortalKey | null,
+) =>
+  request<ApiResponse<{ confirmed: number }>>(
+    `/hr/hours/confirm-assignments${portalQuery(portal)}`,
+    { method: "POST", body: JSON.stringify({ ids }) },
+  );
 
 export const getHrOffice = (year: number, month: number) =>
   request<ApiResponse<HrOfficeRow[]>>(`/hr/office?year=${year}&month=${month}`);
@@ -4583,9 +4910,209 @@ export const updateHrOffice = (id: number, data: HrOfficeInput) =>
   });
 export const deleteHrOffice = (id: number) =>
   request<ApiResponse<null>>(`/hr/office/${id}`, { method: "DELETE" });
+/**
+ * Przeniesienie szkieletu wpisów biura z poprzedniego miesiąca (pracownik,
+ * spółka, etat, stawka — bez kwot). Idempotentne: para (pracownik, spółka)
+ * obecna już w miesiącu jest pomijana.
+ */
+export const carryOverHrOffice = (year: number, month: number) =>
+  request<ApiResponse<{ inserted: number }>>("/hr/office/carry-over", {
+    method: "POST",
+    body: JSON.stringify({ year, month }),
+  });
 
 export const getHrSummary = (year: number, month: number) =>
   request<ApiResponse<HrSummary>>(`/hr/summary?year=${year}&month=${month}`);
+
+// ---------------------------------------------------------------------------
+// Kadry -> stan miesiąca (zamknięcie okresu; backend: src/routes/hr-month.ts)
+// ---------------------------------------------------------------------------
+
+/** Lista kontrolna miesiąca — te same liczby, co pasek „Postęp miesiąca". */
+export interface HrMonthChecklist {
+  hoursEntries: number;
+  hoursFilled: number;
+  uncertainAssignments: number;
+  contractsWithHours: number;
+  contractsWithAmount: number;
+  pendingBonus: number;
+  missingMain: number;
+  officeEntries: number;
+  /** Wpisy biura w POPRZEDNIM miesiącu — punkt odniesienia dla pustego biura. */
+  prevOfficeEntries: number;
+}
+
+export interface HrMonthStatus {
+  year: number;
+  month: number;
+  status: "open" | "closed";
+  /** Data ostatniego zamknięcia — zostaje też po ponownym otwarciu. */
+  closedAt: string | null;
+  closedBy: string | null;
+  /** Ostatni powód ponownego otwarcia (historia — w dzienniku zmian). */
+  reopenReason: string | null;
+  checklist: HrMonthChecklist;
+}
+
+export const getHrMonthStatus = (year: number, month: number) =>
+  request<ApiResponse<HrMonthStatus>>(
+    `/hr/month-status?year=${year}&month=${month}`,
+  );
+
+/**
+ * KOMPLET DANYCH MIESIĄCA jednym żądaniem (backend: `GET /hr/month`).
+ *
+ * Ekran Kadr potrzebuje sześciu rzeczy naraz, a wołane osobno kosztowały trzy
+ * pełne przebiegi kalkulacji płac (kafle liczą je od nowa, poprzedni miesiąc —
+ * jeszcze raz). Tutaj backend liczy je RAZ. Stare, pojedyncze endpointy
+ * zostają — używają ich wydruki i dialogi.
+ */
+export interface HrMonthBundle {
+  summary: HrSummary;
+  payroll: HrPayrollRow[];
+  hours: HrHoursEntry[];
+  office: HrOfficeRow[];
+  monthStatus: HrMonthStatus;
+  /** Kwoty główne poprzedniego miesiąca (podpowiedź „jak ostatnio"). */
+  prevAmounts: { contractId: number; mainAmount: number }[];
+  /** Sumy poprzedniego miesiąca — różnica pod wartością na kaflach. */
+  prevSummary: HrPrevSummary;
+  /** Wypłaty poprzedniego miesiąca per umowa — sekcja „Największe zmiany". */
+  prevPayroll: HrPrevPayrollRow[];
+}
+
+export const getHrMonth = (year: number, month: number) =>
+  request<ApiResponse<HrMonthBundle>>(`/hr/month?year=${year}&month=${month}`);
+
+/**
+ * Zamknięcie miesiąca. Bez `force` backend odmawia (409), gdy zostały braki
+ * (umowy bez kwoty, niepotwierdzone przypisania) — komunikat błędu je wylicza.
+ */
+export const closeHrMonth = (year: number, month: number, force = false) =>
+  request<ApiResponse<HrMonthStatus>>("/hr/month-status/close", {
+    method: "POST",
+    body: JSON.stringify({ year, month, force }),
+  });
+
+/** Ponowne otwarcie — powód jest wymagany i ląduje w dzienniku zmian. */
+export const reopenHrMonth = (year: number, month: number, reason: string) =>
+  request<ApiResponse<HrMonthStatus>>("/hr/month-status/reopen", {
+    method: "POST",
+    body: JSON.stringify({ year, month, reason }),
+  });
+
+// ---------------------------------------------------------------------------
+// Kadry -> Historia (dziennik zmian; backend: src/routes/hr-activity.ts)
+// ---------------------------------------------------------------------------
+
+/** Typ encji kadrowej w dzienniku — ten sam zestaw, co `HR_ENTITY_TYPES`. */
+export type HrActivityEntityType =
+  | "hr_employee"
+  | "hr_contract"
+  | "hr_hours"
+  | "hr_payroll"
+  | "hr_office"
+  | "hr_object"
+  | "hr_department"
+  | "hr_norm"
+  /** Zamknięcie / ponowne otwarcie miesiąca (entityId = rok*100 + miesiąc). */
+  | "hr_month"
+  /** Dzień ustawowo wolny; wpis zasiewu całego roku ma entityId = rok. */
+  | "hr_holiday";
+
+/** Wpis dziennika Kadr = wpis activity_log + pracownik i okres rozwiązane na serwerze. */
+export interface HrActivityEntry extends ActivityEntry {
+  /** Pracownik, którego dotyczy wpis (null dla słowników i wierszy już usuniętych). */
+  employee: { id: number; fullName: string } | null;
+  /** Okres danych miesięcznych w formacie „2026-09” (null dla danych bezokresowych). */
+  period: string | null;
+}
+
+export interface HrActivityPage {
+  items: HrActivityEntry[];
+  /** Kursor następnej strony (`created_at|id`) albo null — to już koniec. */
+  nextCursor: string | null;
+}
+
+export interface HrActivityParams {
+  limit?: number;
+  cursor?: string | null;
+  entityType?: HrActivityEntityType | "";
+  userId?: number | null;
+  employeeId?: number | null;
+  q?: string;
+  /** Daty w formacie „2026-09-01”. */
+  from?: string;
+  to?: string;
+}
+
+function hrActivityQuery(p: HrActivityParams): string {
+  const qs = new URLSearchParams();
+  if (p.limit) qs.set("limit", String(p.limit));
+  if (p.cursor) qs.set("cursor", p.cursor);
+  if (p.entityType) qs.set("entityType", p.entityType);
+  if (p.userId) qs.set("userId", String(p.userId));
+  if (p.employeeId) qs.set("employeeId", String(p.employeeId));
+  if (p.q?.trim()) qs.set("q", p.q.trim());
+  if (p.from) qs.set("from", p.from);
+  if (p.to) qs.set("to", p.to);
+  const s = qs.toString();
+  return s ? `?${s}` : "";
+}
+
+/** Oś czasu całego modułu Kadry (strona + kursor). */
+export const getHrActivity = (params: HrActivityParams = {}) =>
+  request<ApiResponse<HrActivityPage>>(`/hr/activity${hrActivityQuery(params)}`);
+
+/** Autorzy obecni w dzienniku — do selecta filtra „użytkownik”. */
+export const getHrActivityUsers = () =>
+  request<ApiResponse<{ id: number; label: string }[]>>("/hr/activity/users");
+
+/** Historia jednego pracownika (jego umowy, godziny, wypłaty i wpisy biura). */
+export const getHrEmployeeActivity = (id: number, limit = 100) =>
+  request<ApiResponse<HrActivityPage>>(`/hr/employees/${id}/activity?limit=${limit}`);
+
+/**
+ * Historia pracownika WIDZIANA Z SEKCJI („Godziny działu”): wyłącznie jego
+ * wpisy godzin z działów tej sekcji — bez umów, wypłat i biura. Osobny adres
+ * od kartotekowego wyżej, bo to inny zakres i inne uprawnienie.
+ */
+export const getHrPortalEmployeeActivity = (
+  id: number,
+  portal: HrPortalKey,
+  limit = 100,
+) =>
+  request<ApiResponse<HrActivityPage>>(
+    `/hr/activity/employee/${id}?portal=${portal}&limit=${limit}`,
+  );
+
+/**
+ * Historia JEDNEGO wpisu — pod ikonę „Historia zmian” w wierszu tabeli i sekcję
+ * w dialogu edycji. `period` („2026-09”) zawęża do miesiąca; potrzebne dla
+ * wypłat, gdzie entityId to umowa, a wpisy są per miesiąc.
+ */
+export const getHrEntityActivity = (
+  entityType: HrActivityEntityType,
+  entityId: number,
+  opts: {
+    period?: string | null;
+    limit?: number;
+    cursor?: string | null;
+    /** Sekcja działowa — bez niej konto „Godzin działu” dostanie 403. */
+    portal?: HrPortalKey | null;
+  } = {},
+) => {
+  const qs = new URLSearchParams();
+  qs.set("limit", String(opts.limit ?? 100));
+  if (opts.period) qs.set("period", opts.period);
+  if (opts.portal) qs.set("portal", opts.portal);
+  // Kolejna strona („Pokaż więcej") — przy filtrze okresu serwer przewija
+  // dziennik dalej, więc kursor jest jedyną drogą do starszych wpisów.
+  if (opts.cursor) qs.set("cursor", opts.cursor);
+  return request<ApiResponse<HrActivityPage>>(
+    `/hr/activity/entity/${entityType}/${entityId}?${qs.toString()}`,
+  );
+};
 
 // ---------------------------------------------------------------------------
 // Magazyn (Techniczny -> Magazyn) — towary, magazyny, dokumenty, ruchy

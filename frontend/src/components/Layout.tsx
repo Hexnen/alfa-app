@@ -176,16 +176,24 @@ const sections: NavItem[] = [
     icon: IdCard,
     desc: "Godziny, wynagrodzenia i zestawienia dla księgowości",
     children: [
-      { name: "Wynagrodzenia", href: "/kadry/wynagrodzenia" },
-      { name: "Godziny", href: "/kadry/godziny" },
-      { name: "Pracownicy", href: "/kadry/pracownicy" },
-      { name: "Obiekty", href: "/kadry/obiekty" },
+      // Kolejność odzwierciedla przebieg pracy: normy i słowniki ustawia się
+      // raz, godziny i wynagrodzenia wypełnia co miesiąc — więc to one stoją
+      // na dole, najbliżej miejsca, w którym kadrowa spędza czas.
+      { name: "Normy", href: "/kadry/normy" },
       {
         name: "Działy",
         href: "/kadry/dzialy",
         desc: "Słownik działów firmy do wpisów godzin",
       },
-      { name: "Normy", href: "/kadry/normy" },
+      { name: "Obiekty", href: "/kadry/obiekty" },
+      { name: "Pracownicy", href: "/kadry/pracownicy" },
+      { name: "Godziny", href: "/kadry/godziny" },
+      { name: "Wynagrodzenia", href: "/kadry/wynagrodzenia" },
+      {
+        name: "Historia",
+        href: "/kadry/historia",
+        desc: "Dziennik zmian: kto, kiedy i co zmienił w Kadrach",
+      },
     ],
   },
   {
@@ -218,6 +226,11 @@ const sections: NavItem[] = [
         name: "Kontakty",
         href: "/handlowy/kontakty",
         desc: "Osoby kontaktowe u kontrahentów i w szansach",
+      },
+      {
+        name: "Godziny",
+        href: "/handlowy/godziny",
+        desc: "Godziny pracowników tego działu — mini-wersja Kadr dla kierownika",
       },
       // Skróty do zakładek spoza sekcji — chowają się same, gdy użytkownik
       // nie ma do nich uprawnień (filterNav liczy klucz z href). Aktywności
@@ -253,6 +266,11 @@ const sections: NavItem[] = [
         desc: "Firmy interwencyjne, warunki i rejestr podjazdów",
       },
       { name: "Ustawienia", href: "/cma/ustawienia", desc: "Ustawienia poczty i importu raportów" },
+      {
+        name: "Godziny",
+        href: "/cma/godziny",
+        desc: "Godziny pracowników tego działu — mini-wersja Kadr dla kierownika",
+      },
     ],
   },
   {
@@ -278,13 +296,37 @@ const sections: NavItem[] = [
       { name: "Manuale", href: "/technical/manuale", desc: "Instrukcje i dokumentacja sprzętu oraz usług" },
       { name: "Projekty", href: "/technical/projekty", desc: "Projekty i oferty systemów CCTV" },
       { name: "Szablony", href: "/technical/szablony", desc: "Modele kamer i szablony wyposażenia" },
+      {
+        name: "Godziny",
+        href: "/technical/godziny",
+        desc: "Godziny pracowników tego działu — mini-wersja Kadr dla kierownika",
+      },
     ],
   },
   {
+    // OFI przestało być samym placeholderem: „Godziny” to jego pierwsza realna
+    // podzakładka (godziny ochrony obiektowej wpisuje kierownik OFI, a nie
+    // księgowość). Sama strona /ofi wciąż jest zapowiedzią reszty sekcji.
     name: "OFI",
     href: "/ofi",
     icon: FolderKanban,
-    desc: "Obszary funkcjonalne — sekcja w przygotowaniu",
+    desc: "Obszary funkcjonalne — godziny działu i reszta w przygotowaniu",
+    children: [
+      // Zapowiedź reszty sekcji zostaje jako osobna pozycja — bez niej konto
+      // z samym kluczem „ofi" straciłoby sekcję z menu (grupa bez ANI JEDNEJ
+      // widocznej podzakładki znika, patrz `filterNav`).
+      {
+        name: "Przegląd",
+        href: "/ofi",
+        desc: "Obszary funkcjonalne — sekcja w przygotowaniu",
+        isActive: (p) => p === "/ofi",
+      },
+      {
+        name: "Godziny",
+        href: "/ofi/godziny",
+        desc: "Godziny pracowników tego działu — mini-wersja Kadr dla kierownika",
+      },
+    ],
   },
 ];
 

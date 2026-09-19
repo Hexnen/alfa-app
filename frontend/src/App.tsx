@@ -97,6 +97,11 @@ const AnalitykaRedirect = lazy(() =>
   import("./pages/Analityka").then((m) => ({ default: m.AnalitykaRedirect })),
 );
 const Ofi = lazy(() => import("./pages/Ofi").then((m) => ({ default: m.Ofi })));
+// „Godziny działu” — jeden komponent na cztery sekcje (CMA, OFI, Handlowy,
+// Techniczny); różni je wyłącznie propem `portal` (src/lib/hr-scope.ts).
+const DeptHours = lazy(() =>
+  import("./pages/DeptHours").then((m) => ({ default: m.DeptHours })),
+);
 const HandlowyPulpit = lazy(() =>
   import("./pages/HandlowyPulpit").then((m) => ({ default: m.HandlowyPulpit })),
 );
@@ -267,6 +272,9 @@ function AuthedApp() {
           <Route path="/technical/oferty" element={<Oferty />} />
           {/* Oferta ma własny adres z numeru: /technical/oferty/of202608014 */}
           <Route path="/technical/oferty/:slug" element={<Oferty />} />
+          {/* MUSI stać przed „/technical/:tab": inaczej catch-all zjadłby ten
+              adres i pokazał pustą zakładkę Technicznego. */}
+          <Route path="/technical/godziny" element={<DeptHours portal="technical" />} />
           <Route path="/technical/:tab" element={<Technical />} />
           {/* Legacy paths → new locations under Techniczny */}
           <Route
@@ -287,6 +295,8 @@ function AuthedApp() {
           <Route path="/analityka" element={<AnalitykaRedirect />} />
           <Route path="/analityka/:tab" element={<Analityka />} />
           <Route path="/ofi" element={<Ofi />} />
+          {/* Pierwsza realna podzakładka OFI — reszta sekcji to wciąż placeholder. */}
+          <Route path="/ofi/godziny" element={<DeptHours portal="ofi" />} />
           {/* Handlowy: strona na zakładkę (wzorzec CMA), bez wspólnego routera. */}
           <Route path="/handlowy" element={<Navigate to="/handlowy/pulpit" replace />} />
           <Route path="/handlowy/pulpit" element={<HandlowyPulpit />} />
@@ -295,6 +305,7 @@ function AuthedApp() {
           <Route path="/handlowy/kalendarz" element={<HandlowyKalendarz />} />
           <Route path="/handlowy/aktywnosci" element={<HandlowyAktywnosci />} />
           <Route path="/handlowy/kontakty" element={<HandlowyKontakty />} />
+          <Route path="/handlowy/godziny" element={<DeptHours portal="handlowy" />} />
           <Route path="/cma" element={<Navigate to="/cma/raporty" replace />} />
           <Route path="/cma/raporty" element={<CmaReports />} />
           <Route path="/cma/raporty/:id" element={<CmaReportDetails />} />
@@ -303,6 +314,7 @@ function AuthedApp() {
           <Route path="/cma/obiekty" element={<CmaObjects />} />
           <Route path="/cma/grupy-interwencyjne" element={<CmaInterventionGroups />} />
           <Route path="/cma/ustawienia" element={<CmaSettings />} />
+          <Route path="/cma/godziny" element={<DeptHours portal="cma" />} />
           <Route path="/admin/users" element={<AdminUsers />} />
           <Route path="/admin/asystent" element={<AdminAssistant />} />
           <Route path="/admin/kalendarz" element={<AdminCalendar />} />

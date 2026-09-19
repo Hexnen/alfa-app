@@ -1498,6 +1498,32 @@ export const hrDepartments = sqliteTable("hr_departments", {
    * a rozpoznawanie po nazwie zepsułoby wtedy po cichu alokację kosztów.
    */
   isCmaPool: integer("is_cma_pool", { mode: "boolean" }).default(false).notNull(),
+  /**
+   * Dział, w którym rozliczają się OBIEKTY (posterunki). W praktyce jeden:
+   * OFI — wszyscy pracownicy obiektowi należą do niego, więc godzina na
+   * posterunku jest godziną tego działu przypisaną do konkretnego obiektu.
+   * Wpis godzin może mieć obiekt TYLKO w takim dziale (patrz `parseHours`),
+   * a dział bez flagi rozlicza wyłącznie pracę działową.
+   */
+  hasObjects: integer("has_objects", { mode: "boolean" }).default(false).notNull(),
+  /**
+   * Kolor pigułki działu — NAZWA TONU z palety kalendarza (`PillTone`:
+   * sky/violet/emerald/amber/rose/…), nie kod HEX. Dzięki temu dział wygląda
+   * jak każdy inny badge aplikacji i ma gotowy wariant jasny i ciemny; HEX
+   * z pola tekstowego dawałby kolory nie do odczytania w trybie ciemnym.
+   * NULL = dział bez koloru (neutralna, szara pigułka).
+   */
+  color: text("color"),
+  /**
+   * PORTAL DZIAŁOWY (migracja 0109) — sekcja Kadr, która sama wypełnia swoje
+   * godziny (np. `ofi`, `cma`). Rezerwacja listy (`hr_edit_locks.portal`) idzie
+   * po tej wartości: portal blokuje WYŁĄCZNIE wiersze swoich działów, a pełne
+   * Kadry biorą całość z wyłączeniem działów już zajętych.
+   *
+   * NULL = dział bez portalu: jego wiersze należą tylko do pełnych Kadr.
+   * Kilka działów może wskazywać jeden portal (OFI i Operacyjny → `ofi`).
+   */
+  portal: text("portal"),
   sortOrder: integer("sort_order").default(0).notNull(), // kolejność na liście wyboru
   active: integer("active", { mode: "boolean" }).default(true).notNull(),
   createdAt: text("created_at")
@@ -1529,6 +1555,137 @@ export const hrMonthNorms = sqliteTable("hr_month_norms", {
 export type HrMonthNorm = typeof hrMonthNorms.$inferSelect;
 export type NewHrMonthNorm = typeof hrMonthNorms.$inferInsert;
 
+/**
+ * Dni ustawowo wolne od pracy — jedyna zmienna w art. 130 k.p. (migracja 0108).
+ *
+ * Słownik, a nie stała w kodzie: gdy w trakcie roku dochodzi nowe święto (tak
+ * było w 2025 z Wigilią), wystarczy dopisać wiersz i przeliczyć normy.
+ * `source` = 'statutory' (zasiane algorytmem z ustawy) albo 'custom' (dopisane
+ * ręcznie) — kasować wolno tylko własne. Rok wynika z daty, osobnej kolumny
+ * nie ma; `date` jest UNIQUE, bo dwa wpisy na jeden dzień odjęłyby 16 h.
+ */
+export const hrHolidays = sqliteTable("hr_holidays", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  date: text("date").notNull().unique(), // YYYY-MM-DD
+  name: text("name").notNull(),
+  source: text("source", { enum: ["statutory", "custom"] })
+    .default("statutory")
+    .notNull(),
+  createdAt: text("created_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+  updatedAt: text("updated_at")
+    .default(sql`(datetime('now'))`)
+    .notNull(),
+});
+
+export type HrHoliday = typeof hrHolidays.$inferSelect;
+export type NewHrHoliday = typeof hrHolidays.$inferInsert;
+
+/**
+ * Stan miesiąca rozliczeniowego — „otwarty" (wolno wpisywać) albo „zamknięty"
+ * (dane miesiąca tylko do odczytu; zapis wraca z 423).
+ *
+ * BRAK WIERSZA = miesiąc otwarty. Wiersz powstaje dopiero przy pierwszym
+ * zamknięciu, więc historia wstecz nie wymaga zakładania rekordów, a nowy
+ * miesiąc jest otwarty z definicji, nie przez zadanie cykliczne.
+ *
+ * `closedByLabel` obok `closedByUserId` — konto wolno skasować, a podpis pod
+ * zamknięciem ma zostać czytelny (ten sam wzorzec, co w `activity_log`).
+ * `reopenReason` to OSTATNI powód ponownego otwarcia (pasek miesiąca); pełna
+ * historia zamknięć i otwarć jest w `activity_log` pod `hr_month`.
+ */
+export const hrMonthStatus = sqliteTable(
+  "hr_month_status",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    year: integer("year").notNull(),
+    month: integer("month").notNull(), // 1-12
+    status: text("status").default("open").notNull(), // open | closed
+    closedAt: text("closed_at"),
+    closedByUserId: integer("closed_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    closedByLabel: text("closed_by_label"),
+    reopenReason: text("reopen_reason"),
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+    updatedAt: text("updated_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+  },
+  (t) => ({
+    // Jeden stan na okres — dwa równoległe „Zamknij miesiąc" z dwóch kart nie
+    // mogą zostawić dwóch sprzecznych wierszy tego samego miesiąca.
+    yearMonthUidx: uniqueIndex("hr_month_status_ym_uidx").on(t.year, t.month),
+  }),
+);
+
+export type HrMonthStatusRow = typeof hrMonthStatus.$inferSelect;
+export type NewHrMonthStatusRow = typeof hrMonthStatus.$inferInsert;
+
+/**
+ * Rezerwacja listy Kadr do edycji (migracja 0109) — „Podgląd → Edycja” bierze
+ * listę na 15 minut, żeby druga osoba nie pisała w te same komórki.
+ *
+ * `scope`: 'payroll' | 'hours' | 'office' — trzy listy miesiąca. Słowniki
+ * (pracownicy, umowy, obiekty, działy, normy) rezerwacji nie mają.
+ *
+ * Czasy są ISO 8601 UTC pisanym przez APLIKACJĘ (`new Date().toISOString()`) —
+ * nigdy `datetime('now')`, bo formaty się nie porównują (patrz komentarz
+ * w 0109_hr_edit_locks.sql). Wiersz po `expires_at` jest martwy: wolno go
+ * przejąć, a kasuje go leniwie pierwsze `acquire`/odczyt stanu.
+ */
+export const hrEditLocks = sqliteTable(
+  "hr_edit_locks",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    scope: text("scope").notNull(), // payroll | hours | office
+    year: integer("year").notNull(),
+    month: integer("month").notNull(), // 1-12
+    /**
+     * Część listy objęta rezerwacją; dziś zawsze `""` = CAŁA lista. Miejsce
+     * pod „portale" godzin (dział), żeby dwie osoby wypełniające dwa różne
+     * działy nie czekały na siebie — bez kolejnej migracji.
+     *
+     * `""`, a nie NULL: w SQLite dwa NULL-e są w UNIQUE różne, więc unikat
+     * (scope, rok, miesiąc, portal) przestałby pilnować jedyności rezerwacji
+     * całej listy.
+     */
+    portal: text("portal").default("").notNull(),
+    userId: integer("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    /** Podpis właściciela — zostaje czytelny także po skasowaniu konta. */
+    userLabel: text("user_label"),
+    /** Karta przeglądarki (`X-Alfa-Client`) — tylko do diagnostyki sygnałów SSE. */
+    clientId: text("client_id"),
+    acquiredAt: text("acquired_at").notNull(),
+    expiresAt: text("expires_at").notNull(),
+    lastSeenAt: text("last_seen_at").notNull(),
+    /** Prośba o zwolnienie (jedna na rezerwację, znika razem z nią). */
+    requestedByUserId: integer("requested_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    requestedByLabel: text("requested_by_label"),
+    requestedAt: text("requested_at"),
+    requestMessage: text("request_message"),
+  },
+  (t) => ({
+    // Jedna rezerwacja na (lista, rok, miesiąc) — dwa równoległe „Edycja”
+    // muszą rozstrzygnąć się na unikacie, a nie zostawić dwóch właścicieli.
+    scopeYearMonthUidx: uniqueIndex("hr_edit_locks_scope_ym_uidx").on(
+      t.scope,
+      t.year,
+      t.month,
+    ),
+  }),
+);
+
+export type HrEditLockRow = typeof hrEditLocks.$inferSelect;
+export type NewHrEditLockRow = typeof hrEditLocks.$inferInsert;
+
 // Wypracowane godziny — wpis miesięczny pracownik×(obiekt albo dział)
 // (arkusz "Wypracowane godziny"; może być kilka wpisów na osobę w miesiącu)
 export const hrHours = sqliteTable("hr_hours", {
@@ -1537,10 +1694,13 @@ export const hrHours = sqliteTable("hr_hours", {
     .notNull()
     .references(() => hrEmployees.id, { onDelete: "cascade" }),
   /**
-   * Przypisanie wpisu. `objectId` i `departmentId` WYKLUCZAJĄ SIĘ: wiersz wskazuje
-   * obiekt albo dział, albo nic (praca nieprzypisana). Rozłączności pilnuje
-   * `parseHours` w src/routes/hr.ts (400 przy obu naraz) i asercja w
-   * scripts/test-object-identity.ts — SQLite CHECK wymagałby przebudowy tabeli.
+   * Przypisanie wpisu: DZIAŁ, a w dziale obiektowym (`hr_departments.has_objects`,
+   * w praktyce OFI) dodatkowo OBIEKT. Wcześniej pola wykluczały się wzajemnie,
+   * ale to nie odpowiadało firmie: pracownicy obiektowi należą do OFI, więc
+   * godzina na posterunku jest godziną tego działu rozliczoną na obiekcie.
+   * Reguły pilnuje `parseHours` w src/routes/hr.ts: obiekt tylko przy dziale
+   * z flagą, dział bez flagi → `objectId` musi być puste (SQLite CHECK
+   * wymagałby przebudowy tabeli).
    */
   objectId: integer("object_id").references(() => hrObjects.id, {
     onDelete: "set null",
@@ -1610,6 +1770,17 @@ export const hrContracts = sqliteTable("hr_contracts", {
   })
     .default("brak")
     .notNull(),
+  /*
+   * OKRES OBOWIĄZYWANIA (migracja 0112) — daty „YYYY-MM-DD”, obie opcjonalne.
+   * NULL = bezterminowo z tej strony („od zawsze” / „do odwołania”), więc umowy
+   * sprzed migracji liczą się w każdym miesiącu tak jak wcześniej.
+   * Miesiąc rozliczeniowy bierze umowę, gdy okres PRZECINA ten miesiąc —
+   * reguła mieszka w `contractCoversMonth()` (src/utils/hr-calc.ts).
+   */
+  validFrom: text("valid_from"),
+  validTo: text("valid_to"),
+  // Ręczny wyłącznik — niezależny od okresu. Okres mówi „od kiedy do kiedy”,
+  // flaga „czy w ogóle liczyć” (np. umowa wpisana omyłkowo).
   active: integer("active", { mode: "boolean" }).default(true).notNull(),
   notes: text("notes").default("").notNull(),
   createdAt: text("created_at")
@@ -1618,7 +1789,11 @@ export const hrContracts = sqliteTable("hr_contracts", {
   updatedAt: text("updated_at")
     .default(sql`(datetime('now'))`)
     .notNull(),
-});
+},
+(t) => ({
+  // `GET /hr/contracts/expiring` pyta wyłącznie o `valid_to`.
+  validToIdx: index("hr_contracts_valid_to_idx").on(t.validTo),
+}));
 
 export type HrContract = typeof hrContracts.$inferSelect;
 export type NewHrContract = typeof hrContracts.$inferInsert;

@@ -63,6 +63,68 @@ export interface VersionUpdate {
  */
 export const UPDATES_CURRENT: VersionUpdate[] = [
   {
+    version: "1.17.0",
+    date: "2026-09-19",
+    title: "Kadry: miesiąc prowadzony od godzin do wypłat",
+    entries: [
+      {
+        text: "Kwoty od księgowości wpisuje się prosto w tabeli wynagrodzeń albo wkleja z arkusza, zamiast otwierać okno dla każdej ze stu kilkudziesięciu umów",
+        type: "feat",
+        module: "kadry",
+      },
+      {
+        text: "Godziny nowego miesiąca pokazują poprzedni miesiąc obok pustego pola, da się je skopiować lub wkleić z grafiku, a wiersze z podejrzaną liczbą godzin dostają ostrzeżenie",
+        type: "feat",
+        module: "kadry",
+      },
+      {
+        text: "Wynagrodzenia mają listy „Godzinowe” i „Stałe”, widok po osobach z rozbiciem na spółki, porównanie z poprzednim miesiącem i listę największych zmian przed zamknięciem",
+        type: "feat",
+        module: "kadry",
+      },
+      {
+        text: "Miesiąc można zamknąć: po zamknięciu nikt nie zmieni godzin ani kwot, a ponowne otwarcie wymaga podania powodu",
+        type: "feat",
+        module: "kadry",
+      },
+      {
+        text: "Zmiany innych osób widać w Kadrach od razu, a wejście w edycję rezerwuje listę na 15 minut; kto trafi na zajętą, może poprosić o zwolnienie",
+        type: "feat",
+        module: "kadry",
+      },
+      {
+        text: "Każda zmiana w Kadrach trafia do historii: kto, kiedy, co było i co jest, z podglądem przy każdym wpisie i pracowniku",
+        type: "feat",
+        module: "kadry",
+      },
+      {
+        text: "Działy CMA, OFI, Handlowy i Techniczny dostały własną zakładkę „Godziny” tylko ze swoimi ludźmi; obiekty rozlicza dział OFI, a działy mają kolory",
+        type: "feat",
+        module: "ogolne",
+      },
+      {
+        text: "Normy miesięczne liczą się z Kodeksu pracy i listy świąt, do której można dopisać nowe święto",
+        type: "feat",
+        module: "kadry",
+      },
+      {
+        text: "Umowy mają okres obowiązywania, zmianę warunków od wybranego dnia i przypomnienie o kończących się",
+        type: "feat",
+        module: "kadry",
+      },
+      {
+        text: "Nowe wydruki: lista wypłat gotówkowych z miejscem na podpis i lista przelewów z plikiem dla banku; wszystkie kwoty opisane jako netto",
+        type: "feat",
+        module: "kadry",
+      },
+      {
+        text: "Tabele Kadr wyglądają jak kalendarz: pełne nazwy kolumn, ikony akcji po najechaniu, legenda pod znakiem zapytania i nowa kolejność zakładek",
+        type: "style",
+        module: "kadry",
+      },
+    ],
+  },
+  {
     version: "1.16.0",
     date: "2026-09-18",
     entries: [

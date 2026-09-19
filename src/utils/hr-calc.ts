@@ -14,6 +14,10 @@
 //    nie-ZZA) — w Excelu formuła per wiersz mogła ją zdublować.
 
 import type { HrContract, HrHours, HrPayroll } from "../db/schema.js";
+import {
+  contractCoversMonth,
+  periodLabelPl,
+} from "../lib/hr-contract-period.js";
 
 export interface HoursAggregate {
   worked: number; // suma godzin wypracowanych
@@ -33,6 +37,20 @@ export interface PayrollComputed {
   maxHoursSource: "override" | "individual" | "norm";
   maksGodziny: number; // limit godzin
   faktGodziny: number | null; // godziny do rozliczenia (null = brak ZUA/ZZA)
+  /*
+   * Wartości SPRZED ręcznego nadpisania. Tabela wypłat koloruje nadpisane
+   * liczby zamiast stawiać przy nich gwiazdkę, a w dymku pokazuje obie:
+   * „nadpisane ręcznie: 168 h · wyliczone: 176 h (norma miesiąca)”. Bez tego
+   * front musiałby powtarzać u siebie reguły płacowe, żeby zgadnąć, co
+   * aplikacja policzyłaby sama — a reguły mieszkają wyłącznie tutaj.
+   *
+   * Są wypełnione ZAWSZE, także gdy nadpisania nie ma (wtedy równe wartości
+   * użytej) — pole „jest tylko czasem" wymuszałoby u wołającego drugi warunek.
+   */
+  computedMaksGodziny: number;
+  computedMaxHoursSource: "individual" | "norm";
+  computedFaktGodziny: number | null;
+  computedKwotaDodatku: number | null;
   godzinyDodatek: number; // nadwyżka ponad maks (tylko gdy umowa ma dodatek)
   stawkaNetto: number | null; // kwota główna / fakt godziny
   kwotaGlowna: number | null; // od księgowości (wejście)
@@ -90,6 +108,15 @@ export interface PayrollInput {
   hoursByEmployee: Map<number, HoursAggregate>;
   workNorm: number; // norma godzin UoP w miesiącu
   contractNorm: number; // norma godzin zlecenia
+  /*
+   * Miesiąc rozliczeniowy — potrzebny WYŁĄCZNIE do ostrzeżenia o okresie
+   * obowiązywania umowy (`valid_from` / `valid_to`, migracja 0112). Kwot nie
+   * zmienia: wiersz umowy spoza okresu, który trafił do miesiąca (bo ma
+   * zapisane dane płacowe), liczy się normalnie — tylko mówi o tym w `warnings`.
+   * Opcjonalny, żeby stare wywołania bez miesiąca dalej się kompilowały.
+   */
+  year?: number;
+  month?: number;
 }
 
 /** Liczy pełny miesiąc wynagrodzeń — jeden przebieg po umowach. */
@@ -118,17 +145,21 @@ export function computePayroll(input: PayrollInput): PayrollComputed[] {
       c.contractType === "praca" ? input.workNorm : input.contractNorm;
 
     // --- maks godziny: override > indywidualny limit (UoP) > norma miesiąca
+    // Najpierw wartość, którą aplikacja policzyłaby SAMA (bez nadpisania) —
+    // trafia do dymka obok wartości użytej; dopiero potem nadpisanie.
+    const autoMaks =
+      c.contractType === "praca" && agg?.maxHours != null ? agg.maxHours : norm;
+    const autoMaxSource: PayrollComputed["computedMaxHoursSource"] =
+      c.contractType === "praca" && agg?.maxHours != null ? "individual" : "norm";
+
     let maksGodziny: number;
     let maxHoursSource: PayrollComputed["maxHoursSource"];
     if (p?.maxHoursOverride != null) {
       maksGodziny = p.maxHoursOverride;
       maxHoursSource = "override";
-    } else if (c.contractType === "praca" && agg?.maxHours != null) {
-      maksGodziny = agg.maxHours;
-      maxHoursSource = "individual";
     } else {
-      maksGodziny = norm;
-      maxHoursSource = "norm";
+      maksGodziny = autoMaks;
+      maxHoursSource = autoMaxSource;
     }
 
     // --- godziny bazowe: wypracowane + UW (+ L4 przy umowie o pracę)
@@ -136,6 +167,22 @@ export function computePayroll(input: PayrollInput): PayrollComputed[] {
     const uw = agg?.uw ?? 0;
     const l4 = agg?.l4 ?? 0;
     const baseHours = worked + uw + (c.contractType === "praca" ? l4 : 0);
+
+    // --- okres obowiązywania: ostrzeżenie, nie blokada
+    // Wiersz spoza okresu w ogóle tu nie trafia, chyba że ma zapisane dane
+    // płacowe tego miesiąca (historii nie chowamy) — wtedy niesie ostrzeżenie,
+    // a jeśli w miesiącu są jeszcze jego godziny, mówi i o tym.
+    if (
+      input.year != null &&
+      input.month != null &&
+      !contractCoversMonth(c, input.year, input.month)
+    ) {
+      warnings.push(
+        agg && agg.entryCount > 0
+          ? `Umowa poza okresem obowiązywania (${periodLabelPl(c)}) — a w tym miesiącu są godziny`
+          : `Umowa poza okresem obowiązywania (${periodLabelPl(c)})`,
+      );
+    }
 
     // --- rejestracja: ZUA (umowa główna) czy ZZA (nadwyżka w innej spółce)
     const registration: PayrollComputed["registration"] = c.zua.trim()
@@ -146,20 +193,22 @@ export function computePayroll(input: PayrollInput): PayrollComputed[] {
     if (!registration) warnings.push("Brak ZUA/ZZA — godziny nierozliczane");
 
     // --- fakt godziny
-    let faktGodziny: number | null = null;
-    if (p?.actualHoursOverride != null) {
-      faktGodziny = p.actualHoursOverride;
-    } else if (registration === "zua") {
+    // Gałąź wyliczana liczy się zawsze — także przy nadpisaniu, bo to ona
+    // stoi w dymku jako „wyliczone".
+    let autoFakt: number | null = null;
+    if (registration === "zua") {
       // umowa główna: godziny capowane do maks
-      faktGodziny = Math.min(Math.max(0, baseHours), maksGodziny);
+      autoFakt = Math.min(Math.max(0, baseHours), maksGodziny);
     } else if (registration === "zza") {
       // ZZA dostaje nadwyżkę ponad normę umowy głównej: jeśli pracownik ma
       // gdziekolwiek UoP — ponad normę UoP, inaczej ponad maks tego wiersza
       const threshold = hasPraca.has(c.employeeId)
         ? input.workNorm
         : maksGodziny;
-      faktGodziny = Math.max(0, baseHours - threshold);
+      autoFakt = Math.max(0, baseHours - threshold);
     }
+    const faktGodziny: number | null =
+      p?.actualHoursOverride != null ? p.actualHoursOverride : autoFakt;
 
     // --- godziny dodatku: nadwyżka ponad maks (tylko gdy umowa ma dodatek).
     // L4 wlicza się do nadwyżki przy UoP oraz przy zleceniu w spółce ALFA
@@ -185,18 +234,27 @@ export function computePayroll(input: PayrollInput): PayrollComputed[] {
         ? round2(p.rateAdjustment * faktGodziny)
         : null;
 
-    // kwota dodatku: ręczna > godziny dodatku × (stawka dodatku lub główna)
+    // kwota dodatku: ręczna > godziny dodatku × (stawka dodatku lub główna).
+    // `autoKwotaDodatku` liczy się niezależnie od nadpisania (dymek „wyliczone"),
+    // ale `bonusPending` zapala się WYŁĄCZNIE wtedy, gdy naprawdę brakuje kwoty:
+    // wpisana ręcznie kwota dodatku zamyka sprawę, choćby stawki nadal nie było.
+    const bonusRateForAuto = p?.bonusRate ?? stawkaNetto;
+    const bonusRateMissing = !!p?.bonusRatePending || bonusRateForAuto == null;
+    const autoKwotaDodatku =
+      godzinyDodatek > 0 && !bonusRateMissing
+        ? round2(godzinyDodatek * (bonusRateForAuto as number))
+        : null;
+
     let kwotaDodatku: number | null = null;
     let bonusPending = false;
     if (p?.bonusAmountOverride != null) {
       kwotaDodatku = p.bonusAmountOverride;
     } else if (godzinyDodatek > 0) {
-      const rate = p?.bonusRate ?? stawkaNetto;
-      if (p?.bonusRatePending || rate == null) {
+      if (bonusRateMissing) {
         bonusPending = true;
         warnings.push("Dodatek do przeliczenia — brak stawki");
       } else {
-        kwotaDodatku = round2(godzinyDodatek * rate);
+        kwotaDodatku = autoKwotaDodatku;
       }
     }
 
@@ -242,6 +300,10 @@ export function computePayroll(input: PayrollInput): PayrollComputed[] {
       maxHoursSource,
       maksGodziny,
       faktGodziny,
+      computedMaksGodziny: autoMaks,
+      computedMaxHoursSource: autoMaxSource,
+      computedFaktGodziny: autoFakt,
+      computedKwotaDodatku: autoKwotaDodatku,
       godzinyDodatek: round2(godzinyDodatek),
       stawkaNetto: stawkaNetto != null ? round2(stawkaNetto) : null,
       kwotaGlowna,

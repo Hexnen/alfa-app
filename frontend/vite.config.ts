@@ -5,12 +5,15 @@ import path from 'path'
 export default defineConfig({
   plugins: [react()],
   server: {
+    // Port dev-serwera i backendu, na który proxy'uje, da się podmienić przez
+    // ALFA_WEB_PORT / ALFA_API_PORT — druga para (np. 4010 → 4012) pozwala
+    // testować zmiany na KOPII bazy, nie ruszając instancji na 4000/4001.
     host: '0.0.0.0',
-    port: 4000,
+    port: Number(process.env.ALFA_WEB_PORT) || 4000,
     allowedHosts: ['ts150.korat-egret.ts.net'],
     proxy: {
       '/api': {
-        target: 'http://localhost:4001',
+        target: `http://localhost:${Number(process.env.ALFA_API_PORT) || 4001}`,
         changeOrigin: true,
         // changeOrigin przepisuje Host na :4001 i gubi Origin, więc backend nie
         // wie, spod jakiego adresu przyszło żądanie — a składa z niego absolutne

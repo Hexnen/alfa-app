@@ -1,0 +1,32 @@
+-- ---------------------------------------------------------------------------
+-- OKRES OBOWIĄZYWANIA UMOWY (valid_from / valid_to)
+--
+-- Umowa kadrowa miała dotąd jedną flagę `active` — czyli wiedzę „obowiązuje
+-- albo nie” w czasie teraźniejszym. Rzeczywistość kadrowa jest datowana:
+-- zlecenie podpisuje się od 15. dnia miesiąca, aneks zmienia stawkę od
+-- 1 stycznia, a umowa na czas określony kończy się 31 grudnia i ktoś musi
+-- o tym pamiętać ZANIM się skończy. Ręczne przestawianie `active` w dniu
+-- wejścia w życie robiło z kalkulacji miesiąca funkcję tego, kiedy ktoś
+-- kliknął — wsteczne przeliczenie sierpnia po wyłączeniu umowy we wrześniu
+-- kasowało ją także z sierpnia.
+--
+-- NULL = bezterminowo z tej strony: pusty `valid_from` to „od zawsze”, pusty
+-- `valid_to` to „do odwołania”. Dlatego BEZ backfillu — wszystkie umowy
+-- sprzed tej zmiany są bezterminowe i liczą się w każdym miesiącu dokładnie
+-- tak, jak liczyły się wczoraj.
+--
+-- Format tekstowy „YYYY-MM-DD” (jak `hr_holidays.date`): porównania dat są
+-- wtedy zwykłymi porównaniami napisów, a miesiąc rozliczeniowy sprowadza się
+-- do przedziału ['YYYY-MM-01', 'YYYY-MM-<ostatni>'].
+--
+-- `active` ZOSTAJE jako ręczny wyłącznik — okres mówi „od kiedy do kiedy
+-- umowa obowiązuje”, flaga „czy w ogóle ją liczyć”. Umowa poza okresem, ale
+-- z zapisanymi danymi płacowymi miesiąca, nadal pokazuje się w wypłatach
+-- (z ostrzeżeniem) — historii nie chowamy.
+ALTER TABLE hr_contracts ADD COLUMN valid_from TEXT;
+--> statement-breakpoint
+ALTER TABLE hr_contracts ADD COLUMN valid_to TEXT;
+--> statement-breakpoint
+-- Umowy do przedłużenia (`GET /hr/contracts/expiring`) pytają wyłącznie
+-- o `valid_to`, a kartoteka umów rośnie z każdym rokiem.
+CREATE INDEX IF NOT EXISTS hr_contracts_valid_to_idx ON hr_contracts (valid_to);

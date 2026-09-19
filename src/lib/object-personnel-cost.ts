@@ -74,6 +74,8 @@ import { db, schema } from "../db/index.js";
 import { sql } from "drizzle-orm";
 import type { HrContract, HrHours, HrPayroll } from "../db/schema.js";
 import { buildHoursAggregates, computePayroll } from "../utils/hr-calc.js";
+// Okres obowiązywania umowy (migracja 0112) — ta sama reguła, co w Kadrach.
+import { contractCoversMonth } from "./hr-contract-period.js";
 import { getCompanyConfig } from "./company-config.js";
 import { officeRowTotals } from "./hr-office-total.js";
 import {
@@ -670,9 +672,14 @@ function computeWindow(window: CostWindow, now = new Date()): WindowComputation 
     const payrollByContract = new Map(monthPayroll.map((p) => [p.contractId, p]));
 
     // Ten sam dobór umów, co `computeMonth()` w src/routes/hr.ts: aktywne
-    // + nieaktywne, które mają wpis płacowy w tym miesiącu (historia).
+    // i obowiązujące w tym miesiącu (okres `valid_from` / `valid_to`, migracja
+    // 0112) + wszystkie z wpisem płacowym w tym miesiącu (historia). Okno liczy
+    // kilka miesięcy wstecz, więc bez warunku okresu umowa zakończona w sierpniu
+    // dokładałaby się do kosztu września — tu i w wynagrodzeniach inaczej.
     const relevant: HrContract[] = contracts.filter(
-      (c) => c.active || payrollByContract.has(c.id),
+      (c) =>
+        (c.active && contractCoversMonth(c, m.year, m.month)) ||
+        payrollByContract.has(c.id),
     );
     const norms = normByMonth.get(key);
 
@@ -683,6 +690,8 @@ function computeWindow(window: CostWindow, now = new Date()): WindowComputation 
       // Domyślne normy identyczne jak `getNorms()` w src/routes/hr.ts.
       workNorm: norms?.workNorm ?? 160,
       contractNorm: norms?.contractNorm ?? 158,
+      year: m.year,
+      month: m.month,
     });
 
     // --- koszt pracownika w tym miesiącu (umowy ochrony + rozliczenie biura)
@@ -764,7 +773,23 @@ function computeWindow(window: CostWindow, now = new Date()): WindowComputation 
        */
       entry.total += worked;
       allHours += worked;
-      if (h.departmentId != null) {
+      // OBIEKT WYGRYWA NAD DZIAŁEM. Odkąd posterunki rozliczają się w dziale
+      // obiektowym (`hr_departments.has_objects`, w praktyce OFI), wpis z
+      // posterunku ma WYPEŁNIONE OBA pola — a godzina na posterunku należy do
+      // obiektu. Gdyby rozstrzygał tu dział, wszystkie godziny obiektowe
+      // wpadłyby w gałąź „koszt ogólny" i alokacja obiektowa spadłaby do zera.
+      // Puli CMA to nie dotyczy: dział-pula nie jest działem obiektowym, więc
+      // jego wpisy nie mają obiektu i idą gałęzią niżej jak dotąd.
+      //
+      // ZAŁOŻENIE, NA KTÓRYM TO STOI: `is_cma_pool` i `has_objects` WYKLUCZAJĄ
+      // SIĘ. Pilnuje tego zapis działu (`POOL_NOT_OBJECT` w src/routes/hr.ts —
+      // 400 przy próbie ustawienia obu flag, także przez PUT częściowy). Gdyby
+      // ten niezmiennik padł, wpisy puli miałyby `objectId` i przestałyby
+      // wpadać w gałąź niżej: `cmaHours` zeszłoby do zera, a koszt centrum
+      // monitorowania rozszedłby się po pojedynczych obiektach — cicho, bez
+      // błędu i bez śladu w raporcie. Jeśli kiedyś trzeba będzie to poluzować,
+      // najpierw zmień TĘ gałąź, nie tamtą walidację.
+      if (h.objectId == null && h.departmentId != null) {
         if (cmaPoolIds.has(h.departmentId)) {
           // Godziny centrum monitorowania — nie wiadomo jeszcze, na które obiekty
           // pójdą, bo to zależy od podziału po jednostkach. Zbieramy do puli.

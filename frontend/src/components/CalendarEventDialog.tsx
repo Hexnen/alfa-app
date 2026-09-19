@@ -104,12 +104,10 @@ import {
   type WeatherBrief,
 } from "@/lib/api";
 import {
-  ACTIVITY_FIELD_LABELS,
   BILLING_META,
   BILLING_ORDER,
   EVENT_STATUS_META,
   EVENT_TYPE_UI,
-  activityIcon,
   fmtDuration,
   fmtMinutes,
   fmtRelative,
@@ -123,12 +121,9 @@ import {
   billingApplies,
   billingBadgeClass,
   billingTip,
-  describeActivity,
-  eventStatusLabel,
   eventTypeLabel,
   fmtLong,
   fmtRange,
-  fmtShort,
   fmtTimestamp,
   isNoteEvent,
   noteEventTitle,
@@ -168,6 +163,7 @@ import { CalendarEventNotes, MailNoteHeader, type CalendarEventNotesHandle } fro
 import { ContactPicker } from "@/components/sales/ContactPicker";
 import { LeadPicker, type LeadRef } from "@/components/sales/LeadPicker";
 import { WeatherSection } from "@/components/CalendarWeather";
+import { ActivityTimeline } from "@/components/ActivityTimeline";
 import { tip } from "@/components/ui/tooltip";
 import { RichText } from "@/components/RichText";
 import { looksLikeMailNote } from "@/lib/richtext";
@@ -1537,160 +1533,6 @@ function SourceNoteCard({
         >
           <ExternalLink className="mr-1 h-3.5 w-3.5" /> Otwórz wydarzenie źródłowe
         </Button>
-      )}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Historia (oś czasu)
-// — agregacja wpisów z jednej operacji, grupowanie po dniu
-// ---------------------------------------------------------------------------
-
-interface HistoryGroup {
-  key: string;
-  at: string;
-  user: string;
-  action: string;
-  entries: ActivityEntry[];
-}
-
-function groupHistory(entries: ActivityEntry[]): HistoryGroup[] {
-  const groups: HistoryGroup[] = [];
-  for (const e of entries) {
-    const last = groups[groups.length - 1];
-    const sameOp =
-      last &&
-      last.at === e.createdAt &&
-      last.user === (e.userLabel ?? "") &&
-      last.action === "updated" &&
-      e.action === "updated";
-    if (sameOp) last.entries.push(e);
-    else
-      groups.push({
-        key: `g-${e.id}`,
-        at: e.createdAt,
-        user: e.userLabel ?? "",
-        action: e.action,
-        entries: [e],
-      });
-  }
-  return groups;
-}
-
-const fieldVal = (field: string | null, v: string | null): string => {
-  if (v == null || v === "") return "(puste)";
-  switch (field) {
-    case "type":
-      return eventTypeLabel(v);
-    case "status":
-      return eventStatusLabel(v);
-    case "start_at":
-    case "startAt":
-    case "end_at":
-    case "endAt":
-      return fmtShort(v);
-    case "all_day":
-    case "allDay":
-      return v === "1" || v === "true" ? "tak" : "nie";
-    default:
-      return v.length > 40 ? `${v.slice(0, 40)}…` : v;
-  }
-};
-
-function HistoryTimeline({ entries }: { entries: ActivityEntry[] }) {
-  const [limit, setLimit] = useState(10);
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-  const groups = useMemo(() => groupHistory(entries), [entries]);
-  const visible = groups.slice(0, limit);
-
-  // Nagłówki dnia
-  let lastDay = "";
-  return (
-    <div className="space-y-1">
-      {visible.map((g) => {
-        const day = fmtTimestamp(g.at).slice(0, 10);
-        const showDay = day !== lastDay;
-        lastDay = day;
-        const first = g.entries[0];
-        const Icon = activityIcon(g.action);
-        const who = g.user || "System";
-        const multi = g.entries.length > 1;
-        const isOpen = !!expanded[g.key];
-        return (
-          <div key={g.key}>
-            {showDay && (
-              <div className="mb-1 mt-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground first:mt-0">
-                {day}
-              </div>
-            )}
-            <div className="flex gap-2.5 py-1">
-              <div className="flex flex-col items-center">
-                <Avatar name={who} />
-                <div className="mt-1 w-px flex-1 bg-border" />
-              </div>
-              <div className="min-w-0 flex-1 pb-1">
-                <div className="flex items-start justify-between gap-2 text-sm">
-                  <div className="min-w-0">
-                    <span className="inline-flex items-center gap-1.5">
-                      <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                      {multi ? (
-                        <span>
-                          <span className="font-medium">{who}</span> zmienił(a){" "}
-                          {g.entries.length}{" "}
-                          {plural(g.entries.length, "pole", "pola", "pól")}
-                        </span>
-                      ) : (
-                        <span>{describeActivity(first)}</span>
-                      )}
-                    </span>
-                    {multi && (
-                      <ul className="mt-1 space-y-0.5 text-xs text-muted-foreground">
-                        {(isOpen ? g.entries : g.entries.slice(0, 3)).map((e) => (
-                          <li key={e.id}>
-                            <span className="text-foreground/80">
-                              {e.field ? ACTIVITY_FIELD_LABELS[e.field] ?? e.field : "pole"}
-                            </span>
-                            : {fieldVal(e.field, e.oldValue)} → {fieldVal(e.field, e.newValue)}
-                          </li>
-                        ))}
-                        {g.entries.length > 3 && (
-                          <li>
-                            <button
-                              type="button"
-                              className="text-primary hover:underline"
-                              onClick={() =>
-                                setExpanded((m) => ({ ...m, [g.key]: !isOpen }))
-                              }
-                            >
-                              {isOpen ? "Zwiń" : `Pokaż wszystkie (${g.entries.length})`}
-                            </button>
-                          </li>
-                        )}
-                      </ul>
-                    )}
-                  </div>
-                  <time
-                    dateTime={g.at}
-                    {...tip(fmtTimestamp(g.at))}
-                    className="shrink-0 whitespace-nowrap text-xs text-muted-foreground"
-                  >
-                    {fmtRelative(g.at)}
-                  </time>
-                </div>
-              </div>
-            </div>
-          </div>
-        );
-      })}
-      {groups.length > limit && (
-        <button
-          type="button"
-          onClick={() => setLimit((l) => l + 20)}
-          className="w-full rounded-md border border-dashed py-1.5 text-xs text-muted-foreground hover:bg-muted"
-        >
-          Pokaż więcej ({groups.length - limit})
-        </button>
       )}
     </div>
   );
@@ -4819,7 +4661,9 @@ export function CalendarEventDialog({
         {history.length === 0 ? (
           <p className="text-xs text-muted-foreground">Brak wpisów.</p>
         ) : (
-          <HistoryTimeline entries={history} />
+          // Oś czasu wyjęta do współdzielonego komponentu — tego samego używa
+          // dziennik zmian Kadr (frontend/src/components/ActivityTimeline.tsx).
+          <ActivityTimeline entries={history} />
         )}
       </Section>
     </div>

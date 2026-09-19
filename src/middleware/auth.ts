@@ -85,6 +85,40 @@ export function getUserId(c: Context): number {
 // kontrahenta), ODCZYT wolno z każdej wypisanej zakładki, ale ZAPIS wyłącznie
 // z tych w `writeTabs`. Bez tego maxLevel() z „objects: edit" dawał prawo
 // edycji spółek i handlowców komuś, kto ma edytować tylko obiekty.
+/**
+ * Klucze modułu Kadry (odczyt) i te z nich, które dają ZAPIS.
+ *
+ * Wyciągnięte do stałych, bo powtarzają się w kilku wpisach mapy niżej
+ * (`/hr`, `/hr/departments`, `/hr/objects`) i rozjazd między kopiami byłby
+ * dziurą, a nie literówką: `maxLevel()` liczy najwyższy poziom z listy.
+ *
+ * `kadry/historia` jest w `tabs`, ale NIE w `writeTabs` — ten klucz nadaje się
+ * po to, żeby ktoś mógł czytać dziennik, a nie pisać po całym module.
+ */
+const HR_WRITE_TABS = [
+  "kadry/wynagrodzenia",
+  "kadry/godziny",
+  "kadry/pracownicy",
+  "kadry/obiekty",
+  "kadry/dzialy",
+  "kadry/normy",
+];
+const HR_TABS = [...HR_WRITE_TABS, "kadry/historia"];
+
+/**
+ * Klucze podzakładek „Godziny działu” (mini-Kadry sekcji, src/lib/hr-scope.ts).
+ * Osobno od `kadry/godziny`, bo to one otwierają trasy godzin komuś, kto nie ma
+ * ANI JEDNEGO klucza Kadr — zawężenie do własnych wierszy robi `?portal=`.
+ */
+const HOURS_PORTAL_TABS = [
+  "cma/godziny",
+  "ofi/godziny",
+  "handlowy/godziny",
+  "technical/godziny",
+];
+/** Pełne Kadry + sekcje — komplet kont, które mają wstęp na trasy godzin. */
+const HOURS_TABS = ["kadry/godziny", ...HOURS_PORTAL_TABS];
+
 const API_TAB_MAP: { prefix: string; tabs: string[]; writeTabs?: string[] }[] = [
   // Słownik kontrahentów do selecta (GET /contractors/catalog: id + nazwa + NIP).
   // MUSI stać PRZED szerszym "/contractors": find() bierze pierwsze dopasowanie,
@@ -138,20 +172,71 @@ const API_TAB_MAP: { prefix: string; tabs: string[]; writeTabs?: string[] }[] = 
   // wpis kadrowy przykryłby ten węższy i handlowiec-edytor dostałby 403.
   {
     prefix: "/hr/directory",
-    tabs: ["kadry/pracownicy", "handlowcy", "technical/technicy"],
+    tabs: [
+      "kadry/pracownicy",
+      "handlowcy",
+      "technical/technicy",
+      // Sekcje działowe („Godziny działu”) wybierają z tej listy pracownika do
+      // wpisu godzin. Odpowiedź zawęża do własnego działu `src/lib/hr-scope.ts`
+      // (parametr `?portal=`), więc kierownik CMA nie zobaczy tu ochrony.
+      ...HOURS_PORTAL_TABS,
+    ],
   },
+  // Dziennik zmian Kadr (/hr/activity/*) — WŁASNY wpis, koniecznie PRZED "/hr":
+  // find() bierze pierwsze dopasowanie. Trasa jest wyłącznie do odczytu i wydaje
+  // streszczenia z kwotami wynagrodzeń WSZYSTKICH osób, więc stoi pod jednym
+  // kluczem „kadry/historia", a nie pod sumą kluczy Kadr (ten sam warunek
+  // powtarza jawnie `guard()` w src/routes/hr-activity.ts — także dla historii
+  // pracownika, która z adresu należy do /hr/employees). `writeTabs: []` domyka
+  // ją na zapis: nikt nie ma prawa pisać pod tym prefiksem.
+  // Sekcje działowe czytają stąd historię SWOICH wpisów godzin i swoich ludzi
+  // (`guard()` w hr-activity.ts zawęża je do encji `hr_hours` własnego działu).
+  { prefix: "/hr/activity", tabs: ["kadry/historia", ...HOURS_PORTAL_TABS], writeTabs: [] },
+  /*
+   * MINI-KADRY SEKCJI („Godziny działu”, src/lib/hr-scope.ts).
+   *
+   * Konto z samym `cma/godziny` nie ma ŻADNEGO klucza `kadry/*`, więc szeroki
+   * wpis „/hr” niżej odbiłby je 403 na całym module. Te wpisy otwierają mu
+   * dokładnie tyle, ile potrzebuje ekran „Godziny działu” — a nie Kadry:
+   * wypłaty, biuro, normy, kartoteka i CRUD słowników zostają pod „/hr”.
+   * Każdy MUSI stać przed „/hr”: `find()` bierze pierwsze dopasowanie.
+   *
+   * Co zawęża WIERSZE, a czego ta mapa nie umie: `?portal=` i kontrola per
+   * wiersz w `src/lib/hr-scope.ts`, wołana z każdej trasy godzin. Bez niej ten
+   * wpis dawałby kierownikowi CMA całą listę godzin firmy.
+   */
+  { prefix: "/hr/hours", tabs: HOURS_TABS, writeTabs: HOURS_TABS },
+  // Rezerwacja listy do edycji — sekcja bierze WYŁĄCZNIE swój portal
+  // (`canLockWholeList` w hr-locks.ts pilnuje, że nie weźmie całości).
+  { prefix: "/hr/locks", tabs: HOURS_TABS, writeTabs: HOURS_TABS },
+  // Strumień SSE: sam sygnał „coś się zmieniło”, bez danych.
+  { prefix: "/hr/live", tabs: HOURS_TABS, writeTabs: [] },
+  // Stan miesiąca — dla sekcji TYLKO do odczytu (pasek „miesiąc zamknięty”).
+  // Zamknięcie i otwarcie i tak wymaga `kadry/wynagrodzenia` (hr-month.ts).
+  {
+    prefix: "/hr/month-status",
+    tabs: [...HOURS_TABS, "kadry/wynagrodzenia", "kadry/pracownicy", "kadry/historia"],
+    writeTabs: ["kadry/wynagrodzenia"],
+  },
+  // Słownik działów i posterunków: sekcja CZYTA (zawężony `?portal=`), ale
+  // zakładanie i kasowanie zostaje przy pełnych Kadrach.
+  { prefix: "/hr/departments", tabs: [...HR_TABS, ...HOURS_PORTAL_TABS], writeTabs: HR_WRITE_TABS },
+  { prefix: "/hr/objects", tabs: [...HR_TABS, ...HOURS_PORTAL_TABS], writeTabs: HR_WRITE_TABS },
   // Kadry — jedno API dla wszystkich podzakładek; kontrola per-podzakładka
   // (ukrywanie + read-only) odbywa się na froncie, backend pilnuje modułu.
+  //
+  // `writeTabs` BEZ „kadry/historia": ten klucz nadaje się po to, żeby ktoś
+  // mógł CZYTAĆ dziennik (i historię pracownika pod /hr/employees/:id/activity),
+  // więc musi zostać w `tabs`. Gdyby został też w prawie zapisu, `maxLevel()`
+  // liczony po wszystkich kluczach otwierałby posiadaczowi „kadry/historia: edit"
+  // zapis w całym module, łącznie z kwotami wypłat.
   {
     prefix: "/hr",
-    tabs: [
-      "kadry/wynagrodzenia",
-      "kadry/godziny",
-      "kadry/pracownicy",
-      "kadry/obiekty",
-      "kadry/dzialy",
-      "kadry/normy",
-    ],
+    // `HR_TABS` niesie też „kadry/historia” (historia pracownika mieszka pod
+    // /hr/employees/:id/activity) — bez niego ktoś z samą „Historią” dostawałby
+    // 403 na całym /hr. Do zapisu służy węższe `HR_WRITE_TABS`.
+    tabs: HR_TABS,
+    writeTabs: HR_WRITE_TABS,
   },
   { prefix: "/cma/mail", tabs: ["cma/ustawienia"] },
   // Grupy interwencyjne mają WŁASNY klucz i MUSZĄ stać przed szerszym "/cma":
