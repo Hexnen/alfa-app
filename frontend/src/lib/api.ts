@@ -1567,6 +1567,16 @@ export interface CmaMailSettings {
   lastCheckAt: string | null;
   lastCheckStatus: string | null;
   lastCheckError: string | null;
+  // Raporty z podjazdów — własne ustawienia skanu (migracja 0116)
+  patrolEnabled: boolean;
+  /** Foldery po przecinku; '' = te same co raporty kamer (`folder`). */
+  patrolFolder: string;
+  patrolSubjectFilter: string | null;
+  patrolFromFilter: string | null;
+  patrolLookbackDays: number;
+  patrolLastCheckAt: string | null;
+  patrolLastCheckStatus: string | null;
+  patrolLastCheckError: string | null;
   updatedAt: string;
 }
 
@@ -1589,6 +1599,11 @@ export interface CmaMailSettingsInput {
   recipients?: string;
   sendMode?: "after_import" | "scheduled";
   sendTimes?: string;
+  patrolEnabled?: boolean;
+  patrolFolder?: string;
+  patrolSubjectFilter?: string;
+  patrolFromFilter?: string;
+  patrolLookbackDays?: number;
 }
 
 export interface CmaMailFolderMatch {
@@ -1604,12 +1619,83 @@ export interface CmaMailTestImapResult {
   matchedPerFolder: CmaMailFolderMatch[];
 }
 
+export interface CmaMailPatrolCounts {
+  matched: number;
+  imported: number;
+  skipped: number;
+  errors: number;
+}
+
 export interface CmaMailCheckNowResult {
   checked: number;
   matched: number;
   imported: number;
   skipped: number;
   errors: number;
+  /** Część dotycząca raportów z podjazdów (wliczona też w pola ogólne). */
+  patrol?: CmaMailPatrolCounts;
+}
+
+export interface CmaMailPatrolFolderScan {
+  folder: string;
+  scanned: number;
+  matched: number;
+  error?: string;
+}
+
+export interface CmaMailPatrolPreviewMessage {
+  folder: string;
+  uid: number;
+  subject: string;
+  from: string;
+  date: string | null;
+  attachments: string[];
+  seen: boolean;
+  /** imported = już w bazie; poller = nieprzeczytany, weźmie go najbliższe sprawdzenie; fetch = tylko „Pobierz teraz”. */
+  status: "imported" | "poller" | "fetch";
+}
+
+export interface CmaMailPatrolPreview {
+  days: number;
+  since: string;
+  folders: CmaMailPatrolFolderScan[];
+  matched: number;
+  alreadyImported: number;
+  withoutAttachment: number;
+  messages: CmaMailPatrolPreviewMessage[];
+}
+
+export interface CmaMailPatrolFetchResult extends CmaMailPatrolCounts {
+  days: number;
+  folders: CmaMailPatrolFolderScan[];
+  alreadyImported: number;
+}
+
+export interface CmaMailPatrolStatus {
+  lastReport: {
+    id: number;
+    fileName: string;
+    source: "mail" | "upload";
+    receivedAt: string;
+    eventsTotal: number;
+    createdAt: string;
+  } | null;
+  recent: {
+    id: number;
+    subject: string | null;
+    fileName: string | null;
+    status: "ok" | "skipped" | "error";
+    detail: string | null;
+    createdAt: string;
+  }[];
+}
+
+/** Niezapisane filtry z formularza do podglądu skrzynki. */
+export interface CmaMailPatrolPreviewInput {
+  patrolFolder?: string;
+  patrolSubjectFilter?: string;
+  patrolFromFilter?: string;
+  days?: number;
 }
 
 export interface CmaMailLogEntry {
@@ -1699,6 +1785,26 @@ export const cmaMailApi = {
     return request<ApiResponse<null>>("/cma/mail/send-latest", {
       method: "POST",
     });
+  },
+
+  /** Podjazdy: podgląd skrzynki (read-only) — można podać niezapisane filtry. */
+  async patrolPreview(data?: CmaMailPatrolPreviewInput) {
+    return request<ApiResponse<CmaMailPatrolPreview>>("/cma/mail/patrol-preview", {
+      method: "POST",
+      body: JSON.stringify(data ?? {}),
+    });
+  },
+
+  /** Podjazdy: import wsteczny z zapisanymi filtrami. */
+  async patrolFetch(days?: number) {
+    return request<ApiResponse<CmaMailPatrolFetchResult>>("/cma/mail/patrol-fetch", {
+      method: "POST",
+      body: JSON.stringify(days ? { days } : {}),
+    });
+  },
+
+  async patrolStatus() {
+    return request<ApiResponse<CmaMailPatrolStatus>>("/cma/mail/patrol-status");
   },
 };
 
@@ -11110,5 +11216,280 @@ export const technikApi = {
       method: "DELETE",
       body: JSON.stringify({ endpoint }),
     });
+  },
+};
+
+// ============================================================================
+// CMA → Podjazdy (raporty z podjazdów z systemu monitoringu)
+// Kontrakt: docs/PODJAZDY-RAPORTY.md, backend src/routes/patrol-events.ts,
+// prefiks /api/cma/podjazdy, klucz uprawnień `cma/podjazdy`.
+// ============================================================================
+
+/** Rodzaj kroku obsługi — wnioskowany przez backend z treści wiersza „Obsługa”. */
+export type PatrolStepKind =
+  | "start"
+  | "dispatch"
+  | "arrived"
+  | "left"
+  | "contact"
+  | "ai"
+  | "note"
+  | "end";
+
+/**
+ * Rodzaj zdarzenia (backend v2, migracja 0115): `patrol` — podjazd z danych
+ * (Załoga / „Wysłano PI”), `patrol_hint` — możliwy podjazd (wzmianka w notatce
+ * operatora, NIE dane), `video_patrol` — automatyczny wideopatrol AI, `alarm` —
+ * reszta (bez wyjazdu).
+ */
+export type PatrolEventKind = "patrol" | "patrol_hint" | "video_patrol" | "alarm";
+
+export const PATROL_EVENT_KINDS: PatrolEventKind[] = ["patrol", "patrol_hint", "alarm", "video_patrol"];
+
+/** Jedno zdarzenie z raportu (podjazd albo zdarzenie „bez wyjazdu”). Daty ISO `YYYY-MM-DDTHH:MM:SS`. */
+export interface PatrolEventRow {
+  id: number;
+  eventRef: string;
+  reportId: number | null;
+  objectId: number | null;
+  /** Nazwa obiektu Z RAPORTU (nie z kartoteki — ta siedzi w `object` szczegółów). */
+  objectName: string | null;
+  /** Nazwa dopasowanego obiektu z kartoteki, jeśli backend ją dołącza do wiersza. */
+  linkedObjectName?: string | null;
+  street: string | null;
+  no: string | null;
+  postal: string | null;
+  city: string | null;
+  groups: string | null;
+  alarmText: string | null;
+  classification: string | null;
+  eventType: string | null;
+  manual: number | boolean | null;
+  serviceType: string | null;
+  startedAt: string | null;
+  endedAt: string | null;
+  dayPart: string | null;
+  hasPatrol: number | boolean;
+  crew: string | null;
+  departedAt: string | null;
+  arrivedAt: string | null;
+  leftAt: string | null;
+  maxTravelMin: number | null;
+  travelMin: number | null;
+  delayMin: number | null;
+  travelStatus: string | null;
+  delayBucket: string | null;
+  /** Werdykt backendu (spóźnienie z raportu albo wyliczone z dojazdu vs limit). */
+  late?: boolean;
+  operator: string | null;
+  anomalies: string[];
+  interventionId: number | null;
+  createdAt?: string;
+  updatedAt?: string;
+  /** Rodzaj zdarzenia (v2). Brak = stary backend → wyliczamy z `hasPatrol`. */
+  eventKind?: PatrolEventKind;
+  /** Załoga wspomniana w notatce operatora (domysł, nie dane). */
+  hintCrew?: string | null;
+  /** Przyjazd wg notatki (ISO), tylko gdy `arrivedAt` puste. */
+  hintArrivedAt?: string | null;
+  /** Zdanie źródłowe z notatki, z którego wzięła się podpowiedź. */
+  hintText?: string | null;
+}
+
+/** Inne zdarzenie na tym samym obiekcie w oknie ±90 min (burze alarmów). */
+export interface PatrolRelatedEvent {
+  id: number;
+  eventRef: string;
+  startedAt: string | null;
+  endedAt: string | null;
+  eventType: string | null;
+  eventKind: PatrolEventKind;
+  hasPatrol: boolean | number;
+  stepsCount: number;
+  /** Opis alarmu (Zdarzenie). */
+  alarmText?: string | null;
+  /** Start względem bieżącego zdarzenia w minutach (ujemna = wcześniej). */
+  offsetMin?: number | null;
+  crew?: string | null;
+}
+
+export interface PatrolEventStep {
+  id: number;
+  at: string | null;
+  text: string;
+  operator: string | null;
+  kind: PatrolStepKind;
+  seq: number;
+}
+
+export interface PatrolEventDetail extends PatrolEventRow {
+  steps: PatrolEventStep[];
+  report: { id: number; fileName: string; receivedAt: string | null; source?: "mail" | "upload" } | null;
+  object: { id: number; name: string } | null;
+  /** Inne zdarzenia na obiekcie ±90 min (najbliższe pierwsze, max 30). */
+  related?: PatrolRelatedEvent[];
+}
+
+export interface PatrolStats {
+  count: number;
+  late: number;
+  avgTravelMin: number | null;
+  crews: { crew: string; count: number }[];
+  /** Liczniki per rodzaj (v2) — backend wysyła `stats.byKind`, liczone BEZ filtra `kind`
+   *  (chip pokazuje, ile czeka w niezaznaczonym rodzaju); `list()` przepisuje je tutaj. */
+  kinds?: Partial<Record<PatrolEventKind, number>>;
+}
+
+export interface PatrolListResponse {
+  items: PatrolEventRow[];
+  total: number;
+  stats: PatrolStats;
+}
+
+export interface PatrolImportResult {
+  reportId: number;
+  eventsTotal: number;
+  eventsNew: number;
+  eventsUpdated: number;
+  patrols: number;
+}
+
+export interface PatrolReportImport {
+  id: number;
+  source: "mail" | "upload" | string;
+  fileName: string;
+  receivedAt: string | null;
+  eventsTotal: number;
+  eventsNew: number;
+  eventsUpdated: number;
+  createdAt: string;
+}
+
+/** Klucze sortowania listy podjazdów — lustro SORT_COLUMNS w src/routes/patrol-events.ts. */
+export type PatrolSortKey =
+  | "startedAt"
+  | "objectName"
+  | "crew"
+  | "travelMin"
+  | "delayMin"
+  | "arrivedAt"
+  | "city"
+  | "operator";
+
+export interface PatrolListParams {
+  from?: string;
+  to?: string;
+  q?: string;
+  objectId?: number;
+  crew?: string;
+  status?: "all" | "late" | "ontime";
+  withoutPatrol?: boolean;
+  /** Rodzaje zdarzeń (v2, `kind=a,b`); domyślnie backend daje patrol,patrol_hint. */
+  kinds?: PatrolEventKind[];
+  matched?: "all" | "yes" | "no";
+  sort?: PatrolSortKey;
+  dir?: "asc" | "desc";
+  page?: number;
+  pageSize?: number;
+}
+
+const PATROL_BASE = "/cma/podjazdy";
+
+/**
+ * Backend zwraca `{ success, data: {...} }`; gdyby pola wyszły na wierzch
+ * (`{ success, items, total }`), też je weźmiemy — kontrakt powstawał równolegle.
+ */
+function patrolUnwrap<T>(res: ApiResponse<T> & Partial<T>): T {
+  return (res.data ?? (res as unknown as T)) as T;
+}
+
+/** Liczniki per rodzaj: przyjmujemy obiekt `{patrol: 3}` albo listę `[{kind, count}]`. */
+function patrolKindCounts(raw: unknown): Partial<Record<PatrolEventKind, number>> | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  if (Array.isArray(raw)) {
+    const out: Partial<Record<PatrolEventKind, number>> = {};
+    for (const it of raw as { kind?: string; eventKind?: string; count?: number }[]) {
+      const k = (it.kind ?? it.eventKind) as PatrolEventKind | undefined;
+      if (k) out[k] = Number(it.count) || 0;
+    }
+    return out;
+  }
+  return raw as Partial<Record<PatrolEventKind, number>>;
+}
+
+export const patrolsApi = {
+  async list(params: PatrolListParams): Promise<PatrolListResponse> {
+    const res = await request<ApiResponse<PatrolListResponse> & Partial<PatrolListResponse>>(
+      `${PATROL_BASE}${igQuery({
+        from: params.from,
+        to: params.to,
+        q: params.q,
+        objectId: params.objectId,
+        crew: params.crew,
+        status: params.status && params.status !== "all" ? params.status : undefined,
+        withoutPatrol: params.withoutPatrol ? 1 : undefined,
+        kind: params.kinds?.length ? params.kinds.join(",") : undefined,
+        matched: params.matched && params.matched !== "all" ? params.matched : undefined,
+        sort: params.sort,
+        dir: params.dir,
+        page: params.page,
+        pageSize: params.pageSize,
+      })}`
+    );
+    const data = patrolUnwrap(res);
+    const stats = data.stats ?? { count: 0, late: 0, avgTravelMin: null, crews: [] };
+    const rawStats = stats as PatrolStats & { byKind?: unknown };
+    return {
+      items: data.items ?? [],
+      total: data.total ?? 0,
+      stats: { ...stats, kinds: patrolKindCounts(rawStats.kinds ?? rawStats.byKind) },
+    };
+  },
+
+  async get(id: number): Promise<PatrolEventDetail> {
+    const res = await request<ApiResponse<PatrolEventDetail> & Partial<PatrolEventDetail>>(
+      `${PATROL_BASE}/${id}`
+    );
+    return patrolUnwrap(res);
+  },
+
+  async assignObject(id: number, objectId: number | null) {
+    return request<ApiResponse<PatrolEventRow>>(`${PATROL_BASE}/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ objectId }),
+    });
+  },
+
+  async importFile(file: File): Promise<PatrolImportResult> {
+    const fd = new FormData();
+    fd.append("file", file);
+    const res = await requestMultipart<ApiResponse<PatrolImportResult> & Partial<PatrolImportResult>>(
+      `${PATROL_BASE}/import`,
+      fd
+    );
+    return patrolUnwrap(res);
+  },
+
+  async reports(): Promise<PatrolReportImport[]> {
+    const res = await request<
+      ApiResponse<{ items: PatrolReportImport[] } | PatrolReportImport[]> & { items?: PatrolReportImport[] }
+    >(`${PATROL_BASE}/reports`);
+    const data = res.data ?? res.items ?? [];
+    return Array.isArray(data) ? data : (data.items ?? []);
+  },
+
+  async createIntervention(id: number) {
+    return request<ApiResponse<{ interventionId: number }>>(`${PATROL_BASE}/${id}/intervention`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+  },
+
+  /** Picker obiektów modułu (własny endpoint — nie wymaga dostępu do kartoteki). */
+  async pickObjects(q: string): Promise<InterventionPickObject[]> {
+    const res = await request<ApiResponse<{ items: InterventionPickObject[] }>>(
+      `${PATROL_BASE}/pick/objects${igQuery({ q })}`
+    );
+    return res.data?.items ?? [];
   },
 };

@@ -502,6 +502,18 @@ export const cmaMailSettings = sqliteTable("cma_mail_settings", {
   lastCheckAt: text("last_check_at"),
   lastCheckStatus: text("last_check_status"),
   lastCheckError: text("last_check_error"),
+  // Raporty z podjazdów (migracja 0116, docs/PODJAZDY-RAPORTY.md) — własny skan:
+  // foldery ('' = jak `folder`), filtry tematu/nadawcy (NULL = dowolny), zakres wsteczny.
+  patrolEnabled: integer("patrol_enabled", { mode: "boolean" })
+    .default(true)
+    .notNull(),
+  patrolFolder: text("patrol_folder").default("").notNull(),
+  patrolSubjectFilter: text("patrol_subject_filter"),
+  patrolFromFilter: text("patrol_from_filter"),
+  patrolLookbackDays: integer("patrol_lookback_days").default(30).notNull(),
+  patrolLastCheckAt: text("patrol_last_check_at"),
+  patrolLastCheckStatus: text("patrol_last_check_status"),
+  patrolLastCheckError: text("patrol_last_check_error"),
   updatedAt: text("updated_at")
     .default(sql`(datetime('now'))`)
     .notNull(),
@@ -4125,3 +4137,131 @@ export const pushSubscriptions = sqliteTable(
 
 export type PushSubscriptionRow = typeof pushSubscriptions.$inferSelect;
 export type NewPushSubscriptionRow = typeof pushSubscriptions.$inferInsert;
+
+// ---------------------------------------------------------------------------
+// RAPORTY Z PODJAZDÓW (CMA → „Podjazdy”) — dziennik zdarzeń z systemu
+// monitoringu, przychodzący mailem jako `raport_z_podjazdow_*.xlsx`.
+// Kontrakt: docs/PODJAZDY-RAPORTY.md. Parser: src/lib/patrol-report.ts,
+// import: src/utils/patrol-import.ts, API: src/routes/patrol-events.ts.
+// ---------------------------------------------------------------------------
+
+/** Jeden zaimportowany plik raportu. Dedup po `file_hash` (sha256 treści). */
+export const patrolReports = sqliteTable(
+  "patrol_reports",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    source: text("source", { enum: ["mail", "upload"] }).notNull(),
+    fileName: text("file_name").notNull(),
+    fileHash: text("file_hash").notNull(),
+    mailMessageId: text("mail_message_id"),
+    receivedAt: text("received_at").notNull(),
+    eventsTotal: integer("events_total").default(0).notNull(),
+    eventsNew: integer("events_new").default(0).notNull(),
+    eventsUpdated: integer("events_updated").default(0).notNull(),
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+  },
+  (t) => ({
+    hashIdx: uniqueIndex("patrol_reports_file_hash_uidx").on(t.fileHash),
+  })
+);
+
+export type PatrolReport = typeof patrolReports.$inferSelect;
+export type NewPatrolReport = typeof patrolReports.$inferInsert;
+
+/** patrol = Załoga / „Wysłano PI”; patrol_hint = wzmianka o patrolu w notatce; video_patrol = wideopatrol AI. */
+export const PATROL_EVENT_KINDS = ["patrol", "patrol_hint", "video_patrol", "alarm"] as const;
+export type PatrolEventKind = (typeof PATROL_EVENT_KINDS)[number];
+
+/**
+ * Jedno zdarzenie z raportu (grupa wierszy o tym samym „Identyfikator zdarzenia”).
+ * `event_ref` UNIQUE — to samo zdarzenie z kolejnego raportu to upsert, nie duplikat.
+ * Czasy ISO lokalne `YYYY-MM-DDTHH:MM:SS` (bez strefy, jak w raporcie).
+ */
+export const patrolEvents = sqliteTable(
+  "patrol_events",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    eventRef: text("event_ref").notNull(),
+    reportId: integer("report_id").references(() => patrolReports.id, { onDelete: "set null" }),
+    objectId: integer("object_id").references(() => objects.id, { onDelete: "set null" }),
+    objectName: text("object_name").notNull(),
+    street: text("street"),
+    no: text("no"),
+    postal: text("postal"),
+    city: text("city"),
+    groups: text("groups"),
+    alarmText: text("alarm_text"),
+    classification: text("classification"),
+    eventType: text("event_type"),
+    manual: integer("manual", { mode: "boolean" }).default(false).notNull(),
+    serviceType: text("service_type"),
+    startedAt: text("started_at"),
+    endedAt: text("ended_at"),
+    dayPart: text("day_part"),
+    hasPatrol: integer("has_patrol", { mode: "boolean" }).default(false).notNull(),
+    crew: text("crew"),
+    departedAt: text("departed_at"),
+    arrivedAt: text("arrived_at"),
+    leftAt: text("left_at"),
+    maxTravelMin: integer("max_travel_min"),
+    travelMin: integer("travel_min"),
+    delayMin: integer("delay_min"),
+    travelStatus: text("travel_status"),
+    delayBucket: text("delay_bucket"),
+    /** Wyliczone przy imporcie: spóźniony dojazd (patrz `isLate` w parserze). */
+    late: integer("late", { mode: "boolean" }).default(false).notNull(),
+    operator: text("operator"),
+    /** JSON array stringów (komunikaty po polsku). */
+    anomalies: text("anomalies").default("[]").notNull(),
+    interventionId: integer("intervention_id").references(() => interventions.id, { onDelete: "set null" }),
+    /** Rodzaj zdarzenia (migracja 0115), wyliczany przy imporcie — patrz `eventKind` w parserze. */
+    eventKind: text("event_kind", { enum: PATROL_EVENT_KINDS }).default("alarm").notNull(),
+    /** Załoga z notatki operatora (tylko gdy `crew` puste). */
+    hintCrew: text("hint_crew"),
+    /** Przyjazd wg notatki („01:24 patrol na miejscu”), tylko gdy `arrived_at` puste. ISO lokalne. */
+    hintArrivedAt: text("hint_arrived_at"),
+    /** Zdanie(a) źródłowe podpowiedzi (linie rozdzielone \n). */
+    hintText: text("hint_text"),
+    createdAt: text("created_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+    updatedAt: text("updated_at")
+      .default(sql`(datetime('now'))`)
+      .notNull(),
+  },
+  (t) => ({
+    refIdx: uniqueIndex("patrol_events_event_ref_uidx").on(t.eventRef),
+    startedIdx: index("patrol_events_started_idx").on(t.hasPatrol, t.startedAt),
+    objectIdx: index("patrol_events_object_idx").on(t.objectId),
+    kindIdx: index("patrol_events_kind_idx").on(t.eventKind, t.startedAt),
+  })
+);
+
+export type PatrolEvent = typeof patrolEvents.$inferSelect;
+export type NewPatrolEvent = typeof patrolEvents.$inferInsert;
+
+export const PATROL_STEP_KINDS = ["start", "dispatch", "arrived", "left", "contact", "ai", "note", "end"] as const;
+export type PatrolStepKind = (typeof PATROL_STEP_KINDS)[number];
+
+/** Kroki obsługi zdarzenia; przy ponownym imporcie zdarzenia — zastępowane w całości. */
+export const patrolEventSteps = sqliteTable(
+  "patrol_event_steps",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    eventId: integer("event_id")
+      .notNull()
+      .references(() => patrolEvents.id, { onDelete: "cascade" }),
+    at: text("at"),
+    text: text("text").notNull(),
+    operator: text("operator"),
+    kind: text("kind", { enum: PATROL_STEP_KINDS }).notNull(),
+    seq: integer("seq").notNull(),
+  },
+  (t) => ({
+    eventIdx: index("patrol_event_steps_event_idx").on(t.eventId, t.seq),
+  })
+);
+
+export type PatrolEventStep = typeof patrolEventSteps.$inferSelect;

@@ -75,6 +75,8 @@ export const TABS: TabDef[] = [
   // (/cma/grupy-interwencyjne). Własny klucz: to dane handlowe podwykonawców
   // (stawki, umowy), a nie kolejny raport z monitoringu.
   { key: "cma/grupy-interwencyjne", label: "Grupy interwencyjne", group: "CMA" },
+  // Raporty z podjazdów z systemu monitoringu (/cma/podjazdy), docs/PODJAZDY-RAPORTY.md.
+  { key: "cma/podjazdy", label: "Podjazdy", group: "CMA" },
   { key: "cma/ustawienia", label: "Ustawienia", group: "CMA" },
   // Mini-Kadry sekcji CMA — patrz komentarz przy „handlowy/godziny”.
   { key: "cma/godziny", label: "Godziny działu", group: "CMA" },

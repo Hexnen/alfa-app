@@ -61,6 +61,9 @@ export const TABS: TabDef[] = [
   // osobny klucz, bo dane widzi też karta obiektu (4. sekcja) i nie ma ich
   // dostawać każdy, kto czyta raporty CMA.
   { key: "cma/grupy-interwencyjne", label: "Grupy interwencyjne", group: "CMA" },
+  // Raporty z podjazdów z systemu monitoringu (mail/upload) — lustro wpisu w
+  // src/lib/auth/permissions.ts; „Utwórz rozliczenie” dopisuje do Grup interwencyjnych.
+  { key: "cma/podjazdy", label: "Podjazdy", group: "CMA" },
   { key: "cma/ustawienia", label: "Ustawienia", group: "CMA" },
   { key: "cma/godziny", label: "Godziny działu", group: "CMA" },
   { key: "technical/realizacje", label: "Realizacje", group: "Techniczny" },

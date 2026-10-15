@@ -799,6 +799,27 @@
       "when": 1789300020500,
       "tag": "0113_note_attachment_photo_meta",
       "breakpoints": true
+    },
+    {
+      "idx": 114,
+      "version": "6",
+      "when": 1789300021000,
+      "tag": "0114_patrol_reports",
+      "breakpoints": true
+    },
+    {
+      "idx": 115,
+      "version": "6",
+      "when": 1789300022000,
+      "tag": "0115_patrol_event_kind",
+      "breakpoints": true
+    },
+    {
+      "idx": 116,
+      "version": "6",
+      "when": 1789300023000,
+      "tag": "0116_patrol_mail_settings",
+      "breakpoints": true
     }
   ]
 }

@@ -57,6 +57,12 @@ import {
 } from "@/lib/api";
 import { usePerms } from "@/auth/permissions";
 import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
+import { PatrolMailCard } from "@/components/cma-mail/PatrolMailCard";
+import {
+  patrolFormFrom,
+  patrolLookbackValue,
+  type PatrolMailForm,
+} from "@/components/cma-mail/patrolMailForm";
 
 const LOG_PAGE_SIZE = 20;
 
@@ -80,7 +86,7 @@ function formatMailDateTime(value: string | null): string {
   return `${d}.${m}.${y}${time ? ` ${time}` : ""}`;
 }
 
-interface MailForm {
+interface MailForm extends PatrolMailForm {
   email: string;
   password: string;
   imapHost: string;
@@ -119,6 +125,7 @@ function toForm(s: CmaMailSettings): MailForm {
     recipients: s.recipients ?? "",
     sendMode: s.sendMode,
     sendTimes: s.sendTimes ?? "",
+    ...patrolFormFrom(s),
   };
 }
 
@@ -233,8 +240,11 @@ export function CmaSettings() {
   const [logSort, setLogSort] = useState<CmaMailLogSortKey>("createdAt");
   const [logDir, setLogDir] = useState<"asc" | "desc">("desc");
 
+  // Akcje karty „Raporty z podjazdów” (foldery, podgląd, import wsteczny)
+  const [patrolBusy, setPatrolBusy] = useState(false);
+
   const anyActionRunning =
-    saving || imapTesting || checking || smtpTesting || sendingLatest;
+    saving || imapTesting || checking || smtpTesting || sendingLatest || patrolBusy;
 
   useEffect(() => {
     let cancelled = false;
@@ -405,6 +415,11 @@ export function CmaSettings() {
         recipients: form.recipients,
         sendMode: form.sendMode,
         sendTimes: form.sendTimes,
+        patrolEnabled: form.patrolEnabled,
+        patrolFolder: form.patrolFolder,
+        patrolSubjectFilter: form.patrolSubjectFilter,
+        patrolFromFilter: form.patrolFromFilter,
+        patrolLookbackDays: patrolLookbackValue(form.patrolLookbackDays),
       };
       if (form.password !== "") {
         payload.password = form.password;
@@ -460,7 +475,10 @@ export function CmaSettings() {
       if (res.data) {
         const d = res.data;
         setCheckResult(
-          `Sprawdzono ${d.checked}, pasujących ${d.matched}, zaimportowano ${d.imported}, pominięto ${d.skipped}, błędów ${d.errors}`
+          `Sprawdzono ${d.checked}, pasujących ${d.matched}, zaimportowano ${d.imported}, pominięto ${d.skipped}, błędów ${d.errors}` +
+            (d.patrol && d.patrol.matched > 0
+              ? ` (w tym raporty z podjazdów: ${d.patrol.matched}, zaimportowano ${d.patrol.imported})`
+              : "")
         );
       }
       await refreshServerSnapshot();
@@ -728,7 +746,7 @@ export function CmaSettings() {
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <MailCheck className="h-5 w-5 text-indigo-600" />
-                Automatyczny import raportów
+                Automatyczny import raportów kamer
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -742,7 +760,7 @@ export function CmaSettings() {
                   disabled={!editable}
                 />
                 <Label htmlFor="import-enabled" className="font-normal">
-                  Włącz automatyczny import raportów z poczty
+                  Włącz automatyczny import raportów kamer z poczty
                 </Label>
               </div>
 
@@ -927,6 +945,22 @@ export function CmaSettings() {
               )}
             </CardContent>
           </Card>
+
+          {/* Raporty z podjazdów — własne foldery i filtry */}
+          <PatrolMailCard
+            form={form}
+            onChange={update}
+            cameraFolder={form.folder}
+            settings={settings}
+            editable={editable}
+            dirty={dirty}
+            busy={saving || imapTesting || checking || smtpTesting || sendingLatest}
+            onBusyChange={setPatrolBusy}
+            onImported={() => {
+              void refreshServerSnapshot();
+              fetchLog();
+            }}
+          />
 
           {/* Sending camera issues */}
           <Card>

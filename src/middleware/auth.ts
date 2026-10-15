@@ -243,6 +243,8 @@ const API_TAB_MAP: { prefix: string; tabs: string[]; writeTabs?: string[] }[] = 
   // find() bierze pierwsze dopasowanie, więc bez tego właściciel klucza dostawałby
   // 403, a ktoś z samymi „cma/raporty" czytałby warunki i stawki podwykonawców.
   { prefix: "/cma/intervention-groups", tabs: ["cma/grupy-interwencyjne"] },
+  // Raporty z podjazdów (docs/PODJAZDY-RAPORTY.md) — własny klucz, przed "/cma".
+  { prefix: "/cma/podjazdy", tabs: ["cma/podjazdy"] },
   { prefix: "/cma", tabs: ["cma/raporty", "cma/trendy", "cma/braki-kamer"] },
   { prefix: "/realizations", tabs: ["technical/realizacje"] },
   { prefix: "/protocols", tabs: ["technical/protokoly"] },

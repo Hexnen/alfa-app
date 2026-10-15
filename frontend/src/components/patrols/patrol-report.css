@@ -1,0 +1,123 @@
+/*
+ * Raport z podjazdu (panel boczny v3). Panel to portal bezpośrednio w <body>
+ * (`.patrol-print-root`), więc przy druku chowamy WSZYSTKO poza nim (lista, menu)
+ * i zdejmujemy z panelu fixed/szerokość/własne przewijanie oraz sticky nagłówka —
+ * inaczej wydruk to jedna ucięta strona. Druk zawsze w jednej kolumnie.
+ */
+.patrol-report {
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
+}
+
+.patrol-report .tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Telefon / wąski ekran: panel jako arkusz wysuwany z prawej. */
+@keyframes patrol-sheet-in {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: none;
+  }
+}
+@media (max-width: 1023.98px) {
+  .patrol-panel {
+    animation: patrol-sheet-in 0.22s ease-out;
+  }
+}
+
+@media print {
+  @page {
+    size: A4;
+    margin: 14mm 12mm;
+  }
+
+  html,
+  body {
+    overflow: visible !important;
+    height: auto !important;
+    background: #fff !important;
+  }
+
+  /* Tailwind liczy w rem — mniejszy rem na papierze skaluje cały raport (~88%). */
+  html:has(.patrol-print-root) {
+    font-size: 14px !important;
+  }
+
+  /* Panel to portal — bezpośrednie dziecko <body>, a `:has()` nie dopasowuje
+     samego elementu — stąd oba warunki (lista i menu aplikacji znikają). */
+  body:has(.patrol-print-root) > *:not(.patrol-print-root):not(:has(.patrol-print-root)) {
+    display: none !important;
+  }
+
+  /* Gdyby portal jednak owijał panel w <div>: rodzeństwo też precz. */
+  body:has(.patrol-print-root) > :has(> .patrol-print-root) > *:not(.patrol-print-root) {
+    display: none !important;
+  }
+
+  .patrol-print-root {
+    position: static !important;
+    transform: none !important;
+    inset: auto !important;
+    max-height: none !important;
+    height: auto !important;
+    max-width: none !important;
+    width: 100% !important;
+    overflow: visible !important;
+    box-shadow: none !important;
+    border: 0 !important;
+    padding: 0 !important;
+    animation: none !important;
+  }
+
+  .patrol-print-scroll {
+    overflow: visible !important;
+    padding: 0 !important;
+  }
+
+  /* Lepki nagłówek panelu → zwykły blok na górze pierwszej strony. */
+  .patrol-print-root .patrol-panel-head {
+    position: static !important;
+    padding: 0 0 0.6rem !important;
+    backdrop-filter: none !important;
+    background: #fff !important;
+  }
+
+  /* Zwinięte na ekranie sekcje (uwagi, szczegóły) i ucięte cytaty — na papierze w całości. */
+  .patrol-report .patrol-print-open {
+    display: block !important;
+  }
+  .patrol-report .patrol-clamp {
+    display: block !important;
+    -webkit-line-clamp: unset !important;
+    overflow: visible !important;
+  }
+
+  .patrol-noprint {
+    display: none !important;
+  }
+
+  .patrol-report li,
+  .patrol-report .patrol-avoid-break {
+    break-inside: avoid;
+  }
+
+  /* Ciaśniej między sekcjami, stopka trzyma się poprzedniej treści. */
+  .patrol-report > section {
+    margin-top: 0.5rem !important;
+  }
+  .patrol-report .patrol-summary {
+    break-inside: avoid;
+  }
+  .patrol-report > footer {
+    margin-top: 1rem !important;
+    break-before: avoid;
+    break-inside: avoid;
+  }
+
+  .patrol-report {
+    font-size: 11px;
+  }
+}

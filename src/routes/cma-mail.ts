@@ -12,10 +12,51 @@ import {
   testSmtpConnection,
   sendIssuesEmail,
   parseSendTimes,
+  previewPatrolMail,
+  fetchPatrolMailShared,
+  clampLookbackDays,
   type MailSettingsPatch,
+  type PatrolMailFilterOverrides,
 } from "../services/cma-mail.js";
 
 const app = new Hono();
+
+/** „a, ,b ” → „a, b”; puste → null. Wspólne dla folderów i fraz tematu. */
+function normalizeCommaList(value: unknown): string | null {
+  const parts = String(value ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  return parts.length > 0 ? [...new Set(parts)].join(", ") : null;
+}
+
+function normalizeContains(value: unknown): string | null {
+  const trimmed = String(value ?? "").trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+/** Filtry podjazdów z ciała żądania (podgląd na niezapisanych ustawieniach). */
+function patrolOverridesFromBody(body: Record<string, unknown>): PatrolMailFilterOverrides {
+  const overrides: PatrolMailFilterOverrides = {};
+  if (body.patrolFolder !== undefined) overrides.patrolFolder = normalizeCommaList(body.patrolFolder) ?? "";
+  if (body.patrolSubjectFilter !== undefined) {
+    overrides.patrolSubjectFilter = normalizeCommaList(body.patrolSubjectFilter);
+  }
+  if (body.patrolFromFilter !== undefined) overrides.patrolFromFilter = normalizeContains(body.patrolFromFilter);
+  if (body.days !== undefined && body.days !== null && body.days !== "") {
+    overrides.days = clampLookbackDays(body.days);
+  }
+  return overrides;
+}
+
+async function optionalJson(c: { req: { json: () => Promise<unknown> } }): Promise<Record<string, unknown>> {
+  try {
+    const body = await c.req.json();
+    return body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
 
 // Normalize a comma-separated recipients value: trim entries, drop empties
 function normalizeRecipients(value: unknown): string | null {
@@ -66,7 +107,7 @@ app.put("/settings", async (c) => {
   };
 
   const boolField = (
-    key: "imapSecure" | "smtpSecure" | "importEnabled" | "sendEnabled"
+    key: "imapSecure" | "smtpSecure" | "importEnabled" | "sendEnabled" | "patrolEnabled"
   ): boolean | undefined => {
     const value = body[key];
     if (value === undefined || value === null) return undefined;
@@ -106,6 +147,7 @@ app.put("/settings", async (c) => {
     "smtpSecure",
     "importEnabled",
     "sendEnabled",
+    "patrolEnabled",
   ] as const) {
     const value = boolField(key);
     if (value !== undefined) patch[key] = value;
@@ -164,6 +206,27 @@ app.put("/settings", async (c) => {
 
   if (body.recipients !== undefined) {
     patch.recipients = normalizeRecipients(body.recipients);
+  }
+
+  // Raporty z podjazdów (docs/PODJAZDY-RAPORTY.md): '' w folderze = jak folder raportów kamer.
+  if (body.patrolFolder !== undefined) {
+    patch.patrolFolder = normalizeCommaList(body.patrolFolder) ?? "";
+  }
+  if (body.patrolSubjectFilter !== undefined) {
+    patch.patrolSubjectFilter = normalizeCommaList(body.patrolSubjectFilter);
+  }
+  if (body.patrolFromFilter !== undefined) {
+    patch.patrolFromFilter = normalizeContains(body.patrolFromFilter);
+  }
+  if (body.patrolLookbackDays !== undefined && body.patrolLookbackDays !== null && body.patrolLookbackDays !== "") {
+    const days = Number(body.patrolLookbackDays);
+    if (!Number.isInteger(days) || days < 1 || days > 365) {
+      return c.json<ApiResponse<null>>(
+        { success: false, error: "Zakres wstecz dla podjazdów musi być liczbą dni od 1 do 365." },
+        400
+      );
+    }
+    patch.patrolLookbackDays = days;
   }
 
   if (typeof body.password === "string" && body.password.length > 0) {
@@ -243,6 +306,76 @@ app.post("/check-now", async (c) => {
       400
     );
   }
+});
+
+// Podjazdy: podgląd skrzynki (read-only, bez oznaczania jako przeczytane).
+// Ciało opcjonalne: {patrolFolder, patrolSubjectFilter, patrolFromFilter, days} — niezapisane wartości z formularza.
+app.post("/patrol-preview", async (c) => {
+  const body = await optionalJson(c);
+  try {
+    const data = await previewPatrolMail(patrolOverridesFromBody(body));
+    return c.json({ success: true, data });
+  } catch (error) {
+    return c.json<ApiResponse<null>>(
+      {
+        success: false,
+        error: error instanceof Error ? error.message : "Nie udało się sprawdzić skrzynki.",
+      },
+      400
+    );
+  }
+});
+
+// Podjazdy: import wsteczny z zapisanymi filtrami. Ciało opcjonalne: {days}.
+app.post("/patrol-fetch", async (c) => {
+  const body = await optionalJson(c);
+  const days =
+    body.days !== undefined && body.days !== null && body.days !== ""
+      ? clampLookbackDays(body.days)
+      : undefined;
+  try {
+    const data = await fetchPatrolMailShared(days);
+    return c.json({ success: true, data });
+  } catch (error) {
+    return c.json<ApiResponse<null>>(
+      {
+        success: false,
+        error: error instanceof Error ? error.message : "Nie udało się pobrać raportów z podjazdów.",
+      },
+      400
+    );
+  }
+});
+
+// Podjazdy: ostatni raport z poczty + 5 ostatnich wpisów dziennika dla raport_z_podjazd*.
+app.get("/patrol-status", async (c) => {
+  const lastReport = await db
+    .select({
+      id: schema.patrolReports.id,
+      fileName: schema.patrolReports.fileName,
+      source: schema.patrolReports.source,
+      receivedAt: schema.patrolReports.receivedAt,
+      eventsTotal: schema.patrolReports.eventsTotal,
+      createdAt: schema.patrolReports.createdAt,
+    })
+    .from(schema.patrolReports)
+    .where(eq(schema.patrolReports.source, "mail"))
+    .orderBy(desc(schema.patrolReports.id))
+    .limit(1);
+  const recent = await db
+    .select({
+      id: schema.cmaMailLog.id,
+      subject: schema.cmaMailLog.subject,
+      fileName: schema.cmaMailLog.fileName,
+      status: schema.cmaMailLog.status,
+      detail: schema.cmaMailLog.detail,
+      createdAt: schema.cmaMailLog.createdAt,
+    })
+    .from(schema.cmaMailLog)
+    .where(like(schema.cmaMailLog.fileName, "raport_z_podjazd%"))
+    .orderBy(desc(schema.cmaMailLog.id))
+    .limit(5);
+  return c.json({ success: true, data: { lastReport: lastReport[0] ?? null, recent } });
 });
 
 /** Dozwolone wartości kolumn `status` i `direction` (enumy ze schematu cma_mail_log). */

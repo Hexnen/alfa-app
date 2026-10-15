@@ -142,6 +142,9 @@ const CmaInterventionGroups = lazy(() =>
     default: m.CmaInterventionGroups,
   })),
 );
+const CmaPatrols = lazy(() =>
+  import("./pages/CmaPatrols").then((m) => ({ default: m.CmaPatrols })),
+);
 const CmaSettings = lazy(() =>
   import("./pages/CmaSettings").then((m) => ({ default: m.CmaSettings })),
 );
@@ -313,6 +316,7 @@ function AuthedApp() {
           <Route path="/cma/braki-kamer" element={<CmaCameraOutages />} />
           <Route path="/cma/obiekty" element={<CmaObjects />} />
           <Route path="/cma/grupy-interwencyjne" element={<CmaInterventionGroups />} />
+          <Route path="/cma/podjazdy" element={<CmaPatrols />} />
           <Route path="/cma/ustawienia" element={<CmaSettings />} />
           <Route path="/cma/godziny" element={<DeptHours portal="cma" />} />
           <Route path="/admin/users" element={<AdminUsers />} />

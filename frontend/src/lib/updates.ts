@@ -63,6 +63,28 @@ export interface VersionUpdate {
  */
 export const UPDATES_CURRENT: VersionUpdate[] = [
   {
+    version: "1.19.0",
+    date: "2026-10-15",
+    title: "CMA: raporty z podjazdów",
+    entries: [
+      {
+        text: "Raporty z podjazdów trafiają z maila do zakładki Podjazdy w CMA, z osobnym raportem dla każdego podjazdu, zamiast przeglądania arkusza z dziennikiem zdarzeń",
+        type: "feat",
+        module: "cma",
+      },
+      {
+        text: "Raport podjazdu otwiera się z boku listy i można przeskakiwać między podjazdami strzałkami, bez zamykania okna po każdym",
+        type: "feat",
+        module: "cma",
+      },
+      {
+        text: "W ustawieniach poczty jest osobna karta dla raportów z podjazdów: wybór folderu z listy i podgląd pasujących maili przed importem",
+        type: "feat",
+        module: "cma",
+      },
+    ],
+  },
+  {
     version: "1.17.0–1.18.0",
     date: "2026-09-19",
     title: "Kadry: miesiąc prowadzony od godzin do wypłat",

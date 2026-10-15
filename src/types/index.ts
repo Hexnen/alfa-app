@@ -325,3 +325,92 @@ export interface WorkflowTransition {
   newDepartment: Department;
   description?: string;
 }
+
+// --- Raporty z podjazdów (CMA → „Podjazdy”), kontrakt: docs/PODJAZDY-RAPORTY.md ---
+
+export type PatrolStepKindDto = "start" | "dispatch" | "arrived" | "left" | "contact" | "ai" | "note" | "end";
+
+/** patrol = podjazd (Załoga / „Wysłano PI”), patrol_hint = możliwy podjazd (wzmianka w notatce),
+ *  video_patrol = automatyczny wideopatrol AI, alarm = reszta (bez wyjazdu). */
+export type PatrolEventKindDto = "patrol" | "patrol_hint" | "video_patrol" | "alarm";
+
+/** Wiersz listy GET /api/cma/podjazdy. Czasy lokalne ISO `YYYY-MM-DDTHH:MM:SS`. */
+export interface PatrolEventRow {
+  id: number;
+  eventRef: string;
+  reportId: number | null;
+  objectId: number | null;
+  /** Nazwa obiektu z raportu (system monitoringu). */
+  objectName: string;
+  /** Nazwa dopasowanego obiektu z kartoteki (gdy objectId). */
+  linkedObjectName: string | null;
+  street: string | null;
+  no: string | null;
+  postal: string | null;
+  city: string | null;
+  groups: string | null;
+  alarmText: string | null;
+  classification: string | null;
+  eventType: string | null;
+  manual: boolean;
+  serviceType: string | null;
+  startedAt: string | null;
+  endedAt: string | null;
+  dayPart: string | null;
+  hasPatrol: boolean;
+  crew: string | null;
+  departedAt: string | null;
+  arrivedAt: string | null;
+  leftAt: string | null;
+  maxTravelMin: number | null;
+  travelMin: number | null;
+  delayMin: number | null;
+  travelStatus: string | null;
+  delayBucket: string | null;
+  late: boolean;
+  operator: string | null;
+  anomalies: string[];
+  interventionId: number | null;
+  /** v2 (migracja 0115). */
+  eventKind: PatrolEventKindDto;
+  /** Załoga wg notatki operatora (domysł; tylko gdy `crew` puste). */
+  hintCrew: string | null;
+  /** Przyjazd wg notatki, ISO lokalne (domysł; tylko gdy `arrivedAt` puste). */
+  hintArrivedAt: string | null;
+  /** Zdanie(a) źródłowe z notatki, linie rozdzielone \n. */
+  hintText: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PatrolEventStepDto {
+  id: number;
+  at: string | null;
+  text: string;
+  operator: string | null;
+  kind: PatrolStepKindDto;
+  seq: number;
+}
+
+/** Inne zdarzenie na tym samym obiekcie ±90 min (sekcja „Inne zdarzenia na obiekcie”). */
+export interface PatrolRelatedEventDto {
+  id: number;
+  eventRef: string;
+  startedAt: string | null;
+  endedAt: string | null;
+  eventType: string | null;
+  eventKind: PatrolEventKindDto;
+  hasPatrol: boolean;
+  stepsCount: number;
+  /** Opis alarmu (Zdarzenie) — do grupowania „+17 podobnych alarmów”. */
+  alarmText: string | null;
+  /** Różnica startu względem bieżącego zdarzenia w minutach (ujemna = wcześniej). */
+  offsetMin: number | null;
+}
+
+export interface PatrolEventDetail extends PatrolEventRow {
+  steps: PatrolEventStepDto[];
+  report: { id: number; fileName: string; receivedAt: string; source: "mail" | "upload" } | null;
+  object: { id: number; name: string } | null;
+  related: PatrolRelatedEventDto[];
+}

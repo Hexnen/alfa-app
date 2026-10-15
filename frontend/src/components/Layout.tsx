@@ -265,6 +265,11 @@ const sections: NavItem[] = [
         href: "/cma/grupy-interwencyjne",
         desc: "Firmy interwencyjne, warunki i rejestr podjazdów",
       },
+      {
+        name: "Podjazdy",
+        href: "/cma/podjazdy",
+        desc: "Raporty z podjazdów patroli — czas dojazdu, przebieg obsługi, rozliczenie",
+      },
       { name: "Ustawienia", href: "/cma/ustawienia", desc: "Ustawienia poczty i importu raportów" },
       {
         name: "Godziny",

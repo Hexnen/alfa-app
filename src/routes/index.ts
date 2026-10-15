@@ -27,6 +27,7 @@ import warehousePluginRoutes from "./warehouse-plugin.js";
 import pluginRoutes from "./plugin.js";
 import manualsRoutes from "./manuals.js";
 import interventionGroupsRoutes from "./intervention-groups.js";
+import patrolEventsRoutes from "./patrol-events.js";
 import authRoutes from "./auth.js";
 import publicRoutes from "./public.js";
 import adminRoutes from "./admin.js";
@@ -115,7 +116,7 @@ function bodyLimitFor(path: string, method: string): number {
   if (/^\/contracts\/drafts\/\d+\/attachments$/.test(path) && method === "POST") {
     return BODY_LIMIT_MANUAL_ATTACHMENTS;
   }
-  if (path === "/cma/reports/import" || path === "/monitored-objects/import") {
+  if (path === "/cma/reports/import" || path === "/cma/podjazdy/import" || path === "/monitored-objects/import") {
     return BODY_LIMIT_XLS_IMPORT;
   }
   // Zapisana strona produktu ze sklepu dostawcy (multipart albo JSON z pluginu).
@@ -337,6 +338,8 @@ api.route("/offers", offersRoutes);
 // rejestracji, więc szerszy prefiks /cma przykryłby tę zakładkę (403 dla
 // właściciela klucza `cma/grupy-interwencyjne`).
 api.route("/cma/intervention-groups", interventionGroupsRoutes);
+// Raporty z podjazdów — też własny klucz (`cma/podjazdy`), więc też PRZED /cma.
+api.route("/cma/podjazdy", patrolEventsRoutes);
 api.route("/cma/mail", cmaMailRoutes);
 api.route("/cma", cmaRoutes);
 api.route("/monitoring", monitoringRoutes);

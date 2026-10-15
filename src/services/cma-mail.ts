@@ -17,6 +17,11 @@ import {
   CmaDuplicateError,
   type CameraIssuesResult,
 } from "../utils/cma-import.js";
+import {
+  importPatrolReportBuffer,
+  PatrolDuplicateError,
+  PatrolParseError,
+} from "../utils/patrol-import.js";
 
 // Raw SQLite instance for simple synchronous lookups
 const sqlite = (db as any).$client as Database.Database;
@@ -285,7 +290,7 @@ type EnvelopeAddress = { name?: string; address?: string };
  * the envelope from addresses (both address and display name).
  * An empty filter matches everyone.
  */
-function matchesFromFilter(
+export function matchesFromFilter(
   from: EnvelopeAddress[] | undefined,
   filterLower: string
 ): boolean {
@@ -295,6 +300,146 @@ function matchesFromFilter(
       (entry.address ?? "").toLowerCase().includes(filterLower) ||
       (entry.name ?? "").toLowerCase().includes(filterLower)
   );
+}
+
+// ---------------------------------------------------------------------------
+// Raporty z podjazdów — własne filtry skanu (docs/PODJAZDY-RAPORTY.md,
+// „Ustawienia podjazdów — stan”). Czyste funkcje, testowane w
+// scripts/test-patrol-mail-settings.ts.
+// ---------------------------------------------------------------------------
+
+/** Foldery skanu podjazdów: własna lista albo (puste pole) te same co raporty kamer. */
+export function patrolFolderList(
+  settings: Pick<CmaMailSettings, "folder" | "patrolFolder">
+): string[] {
+  return (settings.patrolFolder ?? "").trim()
+    ? parseFolderList(settings.patrolFolder)
+    : parseFolderList(settings.folder);
+}
+
+/** Załącznik raportu z podjazdów: `raport_z_podjazd*.xls(x)` — twardy warunek niezależny od filtrów. */
+export function isPatrolAttachmentName(fileName: string | null | undefined): boolean {
+  const name = (fileName ?? "").trim();
+  return isPatrolReportFileName(name) && /\.xlsx?$/i.test(name);
+}
+
+type BodyStructureNode = {
+  disposition?: string;
+  dispositionParameters?: Record<string, string>;
+  parameters?: Record<string, string>;
+  childNodes?: BodyStructureNode[];
+};
+
+/**
+ * Nazwy plików z BODYSTRUCTURE (bez pobierania treści maila) — imapflow
+ * dekoduje już RFC 2231 / encoded-words. Nazwa z `filename` (Content-Disposition)
+ * albo `name` (Content-Type).
+ */
+export function attachmentNamesFromStructure(
+  node: BodyStructureNode | null | undefined
+): string[] {
+  const names: string[] = [];
+  const walk = (n: BodyStructureNode | null | undefined) => {
+    if (!n) return;
+    const name = n.dispositionParameters?.filename || n.parameters?.name;
+    if (name && !names.includes(name)) names.push(name);
+    for (const child of n.childNodes ?? []) walk(child);
+  };
+  walk(node);
+  return names;
+}
+
+export interface MailScanConfig {
+  cameraEnabled: boolean;
+  cameraFolders: string[];
+  cameraPhrases: string[];
+  cameraFrom: string;
+  patrolEnabled: boolean;
+  patrolFolders: string[];
+  patrolPhrases: string[];
+  patrolFrom: string;
+}
+
+export function buildScanConfig(
+  settings: Pick<
+    CmaMailSettings,
+    | "importEnabled"
+    | "folder"
+    | "subjectFilter"
+    | "fromFilter"
+    | "patrolEnabled"
+    | "patrolFolder"
+    | "patrolSubjectFilter"
+    | "patrolFromFilter"
+  >
+): MailScanConfig {
+  return {
+    cameraEnabled: Boolean(settings.importEnabled),
+    cameraFolders: parseFolderList(settings.folder),
+    cameraPhrases: parseSubjectPhrases(settings.subjectFilter),
+    cameraFrom: (settings.fromFilter ?? "").trim().toLowerCase(),
+    patrolEnabled: Boolean(settings.patrolEnabled),
+    patrolFolders: patrolFolderList(settings),
+    patrolPhrases: parseSubjectPhrases(settings.patrolSubjectFilter),
+    patrolFrom: (settings.patrolFromFilter ?? "").trim().toLowerCase(),
+  };
+}
+
+export interface ScanMessageInfo {
+  folder: string;
+  subject: string | null | undefined;
+  from: EnvelopeAddress[] | undefined;
+  attachmentNames: string[];
+}
+
+/** Czy wiadomość spełnia filtry podjazdów (temat, nadawca) i ma załącznik raportu. Bez sprawdzania folderu. */
+export function matchesPatrolMessage(
+  msg: Omit<ScanMessageInfo, "folder">,
+  cfg: Pick<MailScanConfig, "patrolPhrases" | "patrolFrom">
+): boolean {
+  return (
+    msg.attachmentNames.some(isPatrolAttachmentName) &&
+    matchesSubjectFilter(msg.subject, cfg.patrolPhrases) &&
+    matchesFromFilter(msg.from, cfg.patrolFrom)
+  );
+}
+
+/**
+ * Do którego potoku trafia nieprzeczytana wiadomość: raporty kamer (filtry
+ * kamer, bez zmian) i/lub podjazdy (własne filtry + załącznik raport_z_podjazd*).
+ * Filtry kamer NIE obejmują już podjazdów.
+ */
+export function classifyScanMessage(
+  msg: ScanMessageInfo,
+  cfg: MailScanConfig
+): { camera: boolean; patrol: boolean } {
+  const camera =
+    cfg.cameraEnabled &&
+    cfg.cameraFolders.includes(msg.folder) &&
+    matchesSubjectFilter(msg.subject, cfg.cameraPhrases) &&
+    matchesFromFilter(msg.from, cfg.cameraFrom);
+  const patrol =
+    cfg.patrolEnabled &&
+    cfg.patrolFolders.includes(msg.folder) &&
+    matchesPatrolMessage(msg, cfg);
+  return { camera, patrol };
+}
+
+/** Foldery do otwarcia w jednym skanie (bez duplikatów, tylko włączone potoki). */
+export function scanFolders(cfg: MailScanConfig): string[] {
+  return [
+    ...new Set([
+      ...(cfg.cameraEnabled ? cfg.cameraFolders : []),
+      ...(cfg.patrolEnabled ? cfg.patrolFolders : []),
+    ]),
+  ];
+}
+
+/** Liczba dni wstecz dla podglądu/pobrania podjazdów: 1–365, domyślnie 30. */
+export function clampLookbackDays(value: unknown, fallback = 30): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.min(365, Math.max(1, Math.round(n)));
 }
 
 // ---------------------------------------------------------------------------
@@ -463,12 +608,43 @@ export async function downloadReportFromLink(
 // Mailbox check (IMAP import)
 // ---------------------------------------------------------------------------
 
+export interface PatrolScanCounts {
+  matched: number;
+  imported: number;
+  skipped: number;
+  errors: number;
+}
+
 export interface MailCheckSummary {
   checked: number;
   matched: number;
   imported: number;
   skipped: number;
   errors: number;
+  /** Część dotycząca raportów z podjazdów (wliczona też w pola ogólne). */
+  patrol: PatrolScanCounts;
+}
+
+function emptyPatrolCounts(): PatrolScanCounts {
+  return { matched: 0, imported: 0, skipped: 0, errors: 0 };
+}
+
+async function updatePatrolLastCheck(
+  status: "ok" | "error",
+  errorMessage: string | null
+): Promise<void> {
+  try {
+    await db
+      .update(schema.cmaMailSettings)
+      .set({
+        patrolLastCheckAt: sql`(datetime('now'))`,
+        patrolLastCheckStatus: status,
+        patrolLastCheckError: errorMessage,
+      })
+      .where(eq(schema.cmaMailSettings.id, 1));
+  } catch (error) {
+    console.error("[cma-mail] Nie udało się zapisać stanu skanu podjazdów:", error);
+  }
 }
 
 export async function checkMailbox(): Promise<MailCheckSummary> {
@@ -483,10 +659,13 @@ export async function checkMailbox(): Promise<MailCheckSummary> {
     imported: 0,
     skipped: 0,
     errors: 0,
+    patrol: emptyPatrolCounts(),
   };
 
-  const folders = parseFolderList(settings.folder);
+  const cfg = buildScanConfig(settings);
+  const folders = scanFolders(cfg);
   const folderErrors: string[] = [];
+  const patrolFolderErrors: string[] = [];
 
   const client = createImapClient(settings);
   try {
@@ -495,14 +674,13 @@ export async function checkMailbox(): Promise<MailCheckSummary> {
     const message = describeMailError(error, "imap");
     await updateLastCheck("error", message);
     await closeImapClient(client);
+    if (cfg.patrolEnabled) await updatePatrolLastCheck("error", message);
     throw new Error(message);
   }
 
-  const subjectPhrases = parseSubjectPhrases(settings.subjectFilter);
-  const fromFilter = (settings.fromFilter ?? "").trim().toLowerCase();
-
   // Process every folder from the list; an error in one folder
-  // (e.g. non-existent mailbox) must not stop the remaining ones
+  // (e.g. non-existent mailbox) must not stop the remaining ones.
+  // Foldery = suma folderów raportów kamer i podjazdów (każdy potok ma swoje filtry).
   for (const folder of folders) {
     try {
       const lock = await client.getMailboxLock(folder);
@@ -514,17 +692,29 @@ export async function checkMailbox(): Promise<MailCheckSummary> {
 
           const meta = await client.fetchOne(
             String(uid),
-            { envelope: true },
+            { envelope: true, bodyStructure: true },
             { uid: true }
           );
           if (!meta) continue;
           const subject = meta.envelope?.subject ?? "";
 
-          if (!matchesSubjectFilter(subject, subjectPhrases)) continue;
-          if (!matchesFromFilter(meta.envelope?.from, fromFilter)) continue;
+          const scope = classifyScanMessage(
+            {
+              folder,
+              subject,
+              from: meta.envelope?.from,
+              attachmentNames: attachmentNamesFromStructure(
+                meta.bodyStructure as BodyStructureNode | undefined
+              ),
+            },
+            cfg
+          );
+          // Nic nie pasuje — wiadomość zostaje nieprzeczytana.
+          if (!scope.camera && !scope.patrol) continue;
           summary.matched++;
+          if (scope.patrol) summary.patrol.matched++;
 
-          await processImportMessage(client, uid, subject, settings, summary);
+          await processImportMessage(client, uid, subject, settings, summary, scope);
 
           // Mark as seen regardless of the outcome so the message
           // is not re-processed on every poll
@@ -543,9 +733,11 @@ export async function checkMailbox(): Promise<MailCheckSummary> {
         lock.release();
       }
     } catch (error) {
-      folderErrors.push(
-        `Folder "${folder}": ${describeMailError(error, "imap")}`
-      );
+      const message = `Folder "${folder}": ${describeMailError(error, "imap")}`;
+      folderErrors.push(message);
+      if (cfg.patrolEnabled && cfg.patrolFolders.includes(folder)) {
+        patrolFolderErrors.push(message);
+      }
     }
   }
 
@@ -559,7 +751,27 @@ export async function checkMailbox(): Promise<MailCheckSummary> {
     errorParts.length > 0 ? "error" : "ok",
     errorParts.length > 0 ? errorParts.join("; ") : null
   );
+  if (cfg.patrolEnabled) {
+    const patrolParts = [...patrolFolderErrors];
+    if (summary.patrol.errors > 0) {
+      patrolParts.push(`Błędy importu podjazdów: ${summary.patrol.errors}`);
+    }
+    await updatePatrolLastCheck(
+      patrolParts.length > 0 ? "error" : "ok",
+      patrolParts.length > 0 ? patrolParts.join("; ") : null
+    );
+  }
   return summary;
+}
+
+// Wszystkie operacje zmieniające skrzynkę (skan, import wsteczny podjazdów)
+// idą po kolei — równoległe sesje IMAP pobierałyby i oznaczały te same maile.
+let imapChain: Promise<unknown> = Promise.resolve();
+
+function runImapExclusive<T>(fn: () => Promise<T>): Promise<T> {
+  const run = imapChain.then(fn, fn);
+  imapChain = run.catch(() => undefined);
+  return run;
 }
 
 // Shared in-flight mailbox scan. The manual /check-now route, the poll
@@ -572,10 +784,352 @@ let inFlightMailboxCheck: Promise<MailCheckSummary> | null = null;
 
 export function checkMailboxShared(): Promise<MailCheckSummary> {
   if (inFlightMailboxCheck) return inFlightMailboxCheck;
-  const run = checkMailbox().finally(() => {
+  const run = runImapExclusive(checkMailbox).finally(() => {
     inFlightMailboxCheck = null;
   });
   inFlightMailboxCheck = run;
+  return run;
+}
+
+// ---------------------------------------------------------------------------
+// Raporty z podjazdów — podgląd skrzynki (read-only) i import wsteczny
+// ---------------------------------------------------------------------------
+
+export interface PatrolMailFilterOverrides {
+  /** Foldery po przecinku; '' = jak folder raportów kamer. */
+  patrolFolder?: string;
+  patrolSubjectFilter?: string | null;
+  patrolFromFilter?: string | null;
+  days?: number;
+}
+
+export type PatrolPreviewStatus = "imported" | "poller" | "fetch";
+
+export interface PatrolPreviewMessage {
+  folder: string;
+  uid: number;
+  subject: string;
+  from: string;
+  date: string | null;
+  attachments: string[];
+  seen: boolean;
+  /** imported = już w bazie; poller = nieprzeczytany, weźmie go najbliższe sprawdzenie; fetch = tylko „Pobierz teraz”. */
+  status: PatrolPreviewStatus;
+}
+
+export interface PatrolFolderScan {
+  folder: string;
+  scanned: number;
+  matched: number;
+  error?: string;
+}
+
+export interface PatrolPreviewResult {
+  days: number;
+  since: string;
+  folders: PatrolFolderScan[];
+  /** Maile w zakresie dat spełniające filtry tematu/nadawcy i z załącznikiem raportu. */
+  matched: number;
+  alreadyImported: number;
+  /** Maile spełniające filtry tematu/nadawcy, ale bez załącznika raport_z_podjazd*. */
+  withoutAttachment: number;
+  /** 10 najnowszych dopasowanych. */
+  messages: PatrolPreviewMessage[];
+}
+
+export interface PatrolFetchResult extends PatrolScanCounts {
+  days: number;
+  folders: PatrolFolderScan[];
+  alreadyImported: number;
+}
+
+interface PatrolCandidate {
+  folder: string;
+  uid: number;
+  subject: string;
+  from: string;
+  date: Date | null;
+  attachments: string[];
+  seen: boolean;
+  messageId: string | null;
+  imported: boolean;
+  /** Spełnia też filtry raportów kamer — nie zmieniamy mu flagi \Seen. */
+  cameraMatch: boolean;
+}
+
+/** Ile najnowszych wiadomości z zakresu dat przeglądamy w jednym folderze. */
+const PATROL_SCAN_MAX_PER_FOLDER = 1000;
+
+function formatFrom(from: EnvelopeAddress[] | undefined): string {
+  return (from ?? [])
+    .map((entry) =>
+      entry.name && entry.address
+        ? `${entry.name} <${entry.address}>`
+        : entry.address || entry.name || ""
+    )
+    .filter(Boolean)
+    .join(", ");
+}
+
+/** Raport podjazdów już w bazie: ten sam Message-ID albo ta sama nazwa pliku (nazwy mają hash). */
+export function loadImportedPatrolKeys(): { messageIds: Set<string>; fileNames: Set<string> } {
+  const rows = sqlite
+    .prepare(`SELECT file_name AS fileName, mail_message_id AS messageId FROM patrol_reports`)
+    .all() as { fileName: string; messageId: string | null }[];
+  return {
+    messageIds: new Set(rows.map((r) => r.messageId).filter((v): v is string => Boolean(v))),
+    fileNames: new Set(rows.map((r) => r.fileName.trim().toLowerCase())),
+  };
+}
+
+export function isPatrolMessageImported(
+  messageId: string | null | undefined,
+  attachments: string[],
+  keys: { messageIds: Set<string>; fileNames: Set<string> }
+): boolean {
+  if (messageId && keys.messageIds.has(messageId)) return true;
+  const reports = attachments.filter(isPatrolAttachmentName);
+  return reports.length > 0 && reports.every((name) => keys.fileNames.has(name.trim().toLowerCase()));
+}
+
+function mergePatrolOverrides(
+  settings: CmaMailSettings,
+  overrides: PatrolMailFilterOverrides
+): CmaMailSettings {
+  return {
+    ...settings,
+    patrolFolder:
+      overrides.patrolFolder !== undefined ? overrides.patrolFolder : settings.patrolFolder,
+    patrolSubjectFilter:
+      overrides.patrolSubjectFilter !== undefined
+        ? overrides.patrolSubjectFilter
+        : settings.patrolSubjectFilter,
+    patrolFromFilter:
+      overrides.patrolFromFilter !== undefined
+        ? overrides.patrolFromFilter
+        : settings.patrolFromFilter,
+  };
+}
+
+/**
+ * Przegląda foldery podjazdów od `since` (przeczytane i nieprzeczytane),
+ * samymi nagłówkami + BODYSTRUCTURE — bez pobierania treści i bez zmiany flag.
+ */
+async function scanPatrolCandidates(
+  client: ImapFlow,
+  settings: CmaMailSettings,
+  since: Date
+): Promise<{ folders: PatrolFolderScan[]; candidates: PatrolCandidate[]; withoutAttachment: number }> {
+  const cfg = buildScanConfig(settings);
+  const keys = loadImportedPatrolKeys();
+  const folders: PatrolFolderScan[] = [];
+  const candidates: PatrolCandidate[] = [];
+  let withoutAttachment = 0;
+
+  for (const folder of cfg.patrolFolders) {
+    const scan: PatrolFolderScan = { folder, scanned: 0, matched: 0 };
+    try {
+      const lock = await client.getMailboxLock(folder, { readOnly: true });
+      try {
+        const found = ((await client.search({ since }, { uid: true })) || []) as number[];
+        const uids = [...found].sort((a, b) => b - a).slice(0, PATROL_SCAN_MAX_PER_FOLDER);
+        if (uids.length > 0) {
+          for await (const message of client.fetch(
+            uids.join(","),
+            { envelope: true, bodyStructure: true, flags: true, internalDate: true },
+            { uid: true }
+          )) {
+            scan.scanned++;
+            const subject = message.envelope?.subject ?? "";
+            const from = message.envelope?.from;
+            const attachments = attachmentNamesFromStructure(
+              message.bodyStructure as BodyStructureNode | undefined
+            );
+            const filtersOk =
+              matchesSubjectFilter(subject, cfg.patrolPhrases) &&
+              matchesFromFilter(from, cfg.patrolFrom);
+            if (!filtersOk) continue;
+            if (!matchesPatrolMessage({ subject, from, attachmentNames: attachments }, cfg)) {
+              withoutAttachment++;
+              continue;
+            }
+            scan.matched++;
+            const messageId = message.envelope?.messageId ?? null;
+            const rawDate = message.envelope?.date ?? message.internalDate ?? null;
+            const date = rawDate ? new Date(rawDate) : null;
+            candidates.push({
+              folder,
+              uid: message.uid,
+              subject,
+              from: formatFrom(from),
+              date: date && !Number.isNaN(date.getTime()) ? date : null,
+              attachments: attachments.filter(isPatrolAttachmentName),
+              seen: message.flags?.has("\\Seen") ?? false,
+              messageId,
+              imported: isPatrolMessageImported(messageId, attachments, keys),
+              cameraMatch:
+                cfg.cameraEnabled &&
+                cfg.cameraFolders.includes(folder) &&
+                matchesSubjectFilter(subject, cfg.cameraPhrases) &&
+                matchesFromFilter(from, cfg.cameraFrom),
+            });
+          }
+        }
+      } finally {
+        lock.release();
+      }
+    } catch (error) {
+      scan.error = describeMailError(error, "imap");
+    }
+    folders.push(scan);
+  }
+
+  candidates.sort((a, b) => (b.date?.getTime() ?? 0) - (a.date?.getTime() ?? 0));
+  return { folders, candidates, withoutAttachment };
+}
+
+function sinceDate(days: number): Date {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - days);
+  return d;
+}
+
+/**
+ * „Sprawdź skrzynkę” dla podjazdów: ile maili pasuje do filtrów (także
+ * niezapisanych — `overrides`) i 10 ostatnich. Read-only: folder otwierany
+ * w trybie EXAMINE, bez pobierania treści i bez oznaczania jako przeczytane.
+ */
+export async function previewPatrolMail(
+  overrides: PatrolMailFilterOverrides = {}
+): Promise<PatrolPreviewResult> {
+  const saved = await getSettings();
+  if (!saved.email || !saved.password) throw new Error(NO_CONFIG_ERROR);
+  const settings = mergePatrolOverrides(saved, overrides);
+  const days = clampLookbackDays(overrides.days ?? settings.patrolLookbackDays);
+  const since = sinceDate(days);
+
+  const client = createImapClient(settings);
+  try {
+    await client.connect();
+    const { folders, candidates, withoutAttachment } = await scanPatrolCandidates(client, settings, since);
+    return {
+      days,
+      since: since.toISOString(),
+      folders,
+      matched: candidates.length,
+      alreadyImported: candidates.filter((c) => c.imported).length,
+      withoutAttachment,
+      messages: candidates.slice(0, 10).map((c) => ({
+        folder: c.folder,
+        uid: c.uid,
+        subject: c.subject,
+        from: c.from,
+        date: c.date ? c.date.toISOString() : null,
+        attachments: c.attachments,
+        seen: c.seen,
+        status: c.imported ? "imported" : !c.seen && settings.patrolEnabled ? "poller" : "fetch",
+      })),
+    };
+  } catch (error) {
+    throw new Error(describeMailError(error, "imap"));
+  } finally {
+    await closeImapClient(client);
+  }
+}
+
+/**
+ * „Pobierz teraz”: import wsteczny raportów z podjazdów z ostatnich `days`
+ * dni (zapisane filtry podjazdów, przeczytane i nieprzeczytane). Już
+ * zaimportowane (Message-ID / nazwa pliku) pomijamy bez pobierania; reszta
+ * przez zwykły potok importu (dedup po hashu pliku zostaje). Nieprzeczytane
+ * oznaczamy jako przeczytane, chyba że mail pasuje też do filtrów kamer.
+ */
+async function fetchPatrolMail(daysInput?: number): Promise<PatrolFetchResult> {
+  const settings = await getSettings();
+  if (!settings.email || !settings.password) throw new Error(NO_CONFIG_ERROR);
+  const days = clampLookbackDays(daysInput ?? settings.patrolLookbackDays);
+  const since = sinceDate(days);
+  const summary: MailCheckSummary = {
+    checked: 0,
+    matched: 0,
+    imported: 0,
+    skipped: 0,
+    errors: 0,
+    patrol: emptyPatrolCounts(),
+  };
+
+  const client = createImapClient(settings);
+  try {
+    await client.connect();
+  } catch (error) {
+    const message = describeMailError(error, "imap");
+    await updatePatrolLastCheck("error", message);
+    await closeImapClient(client);
+    throw new Error(message);
+  }
+
+  let folders: PatrolFolderScan[] = [];
+  let alreadyImported = 0;
+  try {
+    const scan = await scanPatrolCandidates(client, settings, since);
+    folders = scan.folders;
+    // Najstarsze najpierw — kolejne raporty nadpisują zdarzenia nowszymi danymi.
+    const todo = scan.candidates.filter((c) => !c.imported).reverse();
+    alreadyImported = scan.candidates.length - todo.length;
+
+    for (const folder of [...new Set(todo.map((c) => c.folder))]) {
+      try {
+        const lock = await client.getMailboxLock(folder);
+        try {
+          for (const c of todo.filter((t) => t.folder === folder)) {
+            summary.patrol.matched++;
+            await processImportMessage(client, c.uid, c.subject, settings, summary, {
+              camera: false,
+              patrol: true,
+            });
+            if (!c.seen && !c.cameraMatch) {
+              try {
+                await client.messageFlagsAdd(String(c.uid), ["\\Seen"], { uid: true });
+              } catch (error) {
+                console.error(
+                  `[cma-mail] Nie udało się oznaczyć wiadomości ${c.uid} jako przeczytanej:`,
+                  error
+                );
+              }
+            }
+          }
+        } finally {
+          lock.release();
+        }
+      } catch (error) {
+        const entry = folders.find((f) => f.folder === folder);
+        if (entry) entry.error = describeMailError(error, "imap");
+      }
+    }
+  } finally {
+    await closeImapClient(client);
+  }
+
+  const errorParts = folders.filter((f) => f.error).map((f) => `Folder "${f.folder}": ${f.error}`);
+  if (summary.patrol.errors > 0) errorParts.push(`Błędy importu podjazdów: ${summary.patrol.errors}`);
+  await updatePatrolLastCheck(
+    errorParts.length > 0 ? "error" : "ok",
+    errorParts.length > 0 ? errorParts.join("; ") : null
+  );
+
+  return { days, folders, alreadyImported, ...summary.patrol };
+}
+
+let inFlightPatrolFetch: Promise<PatrolFetchResult> | null = null;
+
+/** Import wsteczny podjazdów — jeden naraz, w kolejce ze zwykłym skanem skrzynki. */
+export function fetchPatrolMailShared(days?: number): Promise<PatrolFetchResult> {
+  if (inFlightPatrolFetch) return inFlightPatrolFetch;
+  const run = runImapExclusive(() => fetchPatrolMail(days)).finally(() => {
+    inFlightPatrolFetch = null;
+  });
+  inFlightPatrolFetch = run;
   return run;
 }
 
@@ -655,14 +1209,78 @@ async function importReportForMessage(
   }
 }
 
+/** Załącznik `raport_z_podjazdow_*.xlsx` — raport z podjazdów, nie raport kamer. */
+export function isPatrolReportFileName(fileName: string): boolean {
+  return /^raport_z_podjazd/i.test(fileName.trim());
+}
+
+/**
+ * Import raportu z podjazdów z załącznika. `cma_mail_log.report_id` wskazuje
+ * na `cma_reports`, więc id raportu podjazdów trafia tylko do `detail`.
+ */
+async function importPatrolForMessage(
+  buffer: Buffer,
+  fileName: string,
+  messageId: string | null,
+  uid: number,
+  subject: string,
+  summary: MailCheckSummary
+): Promise<void> {
+  try {
+    const r = importPatrolReportBuffer(buffer, fileName, { source: "mail", mailMessageId: messageId });
+    summary.imported++;
+    summary.patrol.imported++;
+    await logMail({
+      direction: "import",
+      messageUid: uid,
+      subject,
+      fileName,
+      status: "ok",
+      detail: `Zaimportowano raport z podjazdów #${r.reportId}: ${r.eventsTotal} zdarzeń (${r.patrols} podjazdów; nowe ${r.eventsNew}, zaktualizowane ${r.eventsUpdated}).`,
+    });
+  } catch (error) {
+    if (error instanceof PatrolDuplicateError) {
+      summary.skipped++;
+      summary.patrol.skipped++;
+      await logMail({
+        direction: "import",
+        messageUid: uid,
+        subject,
+        fileName,
+        status: "skipped",
+        detail: `${error.message} (raport podjazdów #${error.existingId}).`,
+      });
+      return;
+    }
+    summary.errors++;
+    summary.patrol.errors++;
+    await logMail({
+      direction: "import",
+      messageUid: uid,
+      subject,
+      fileName,
+      status: "error",
+      detail:
+        error instanceof PatrolParseError
+          ? `Raport z podjazdów: ${error.message}`
+          : `Nie udało się zaimportować raportu z podjazdów: ${error instanceof Error ? error.message : String(error)}`,
+    });
+  }
+}
+
 async function processImportMessage(
   client: ImapFlow,
   uid: number,
   subject: string,
   settings: CmaMailSettings,
-  summary: MailCheckSummary
+  summary: MailCheckSummary,
+  /** Które potoki obsługują ten mail (classifyScanMessage) — filtry kamer nie obejmują podjazdów. */
+  scope: { camera: boolean; patrol: boolean }
 ): Promise<void> {
   let attachments: { filename: string; content: Buffer }[];
+  // Raporty z podjazdów (docs/PODJAZDY-RAPORTY.md) — osobny parser, rozpoznawane po nazwie.
+  let patrolAttachments: { filename: string; content: Buffer }[] = [];
+  let messageId: string | null = null;
   let bodyHtml: string | null = null;
   let bodyText: string | null = null;
   try {
@@ -675,16 +1293,20 @@ async function processImportMessage(
       throw new Error("Nie udało się pobrać treści wiadomości.");
     }
     const mail = await simpleParser(full.source);
-    attachments = (mail.attachments ?? [])
+    const spreadsheets = (mail.attachments ?? [])
       .filter((att) => /\.(xls|xlsx)$/i.test(att.filename ?? ""))
       .map((att) => ({
         filename: att.filename!,
         content: att.content as Buffer,
       }));
+    patrolAttachments = spreadsheets.filter((att) => isPatrolReportFileName(att.filename));
+    attachments = spreadsheets.filter((att) => !isPatrolReportFileName(att.filename));
+    messageId = mail.messageId ?? null;
     bodyHtml = typeof mail.html === "string" ? mail.html : null;
     bodyText = typeof mail.text === "string" ? mail.text : null;
   } catch (error) {
     summary.errors++;
+    if (scope.patrol) summary.patrol.errors++;
     await logMail({
       direction: "import",
       messageUid: uid,
@@ -698,8 +1320,29 @@ async function processImportMessage(
     return;
   }
 
+  if (scope.patrol) {
+    for (const attachment of patrolAttachments) {
+      await importPatrolForMessage(attachment.content, attachment.filename, messageId, uid, subject, summary);
+    }
+  } else if (patrolAttachments.length > 0) {
+    // Mail złapany filtrami kamer, ale nie filtrami podjazdów — nie importujemy go jako podjazdów.
+    summary.skipped++;
+    await logMail({
+      direction: "import",
+      messageUid: uid,
+      subject,
+      fileName: patrolAttachments.map((a) => a.filename).join(", "),
+      status: "skipped",
+      detail:
+        "Raport z podjazdów pominięty: wiadomość nie pasuje do ustawień podjazdów (folder/temat/nadawca) albo ich import jest wyłączony.",
+    });
+  }
+
+  if (!scope.camera) return;
+
   // Attachments take precedence; report links in the body are used
   // only when the message carries no XLS/XLSX attachment
+  if (attachments.length === 0 && patrolAttachments.length > 0) return;
   if (attachments.length > 0) {
     for (const attachment of attachments) {
       await importReportForMessage(
@@ -1325,8 +1968,8 @@ export async function startMailPoller(): Promise<void> {
     state.schedulerTimer = null;
   }
 
-  // IMAP import poller
-  if (settings.importEnabled && settings.email && settings.password) {
+  // IMAP import poller — raporty kamer i/lub podjazdy (każdy potok ma swój włącznik)
+  if ((settings.importEnabled || settings.patrolEnabled) && settings.email && settings.password) {
     const minutes =
       Number.isFinite(settings.pollMinutes) && settings.pollMinutes > 0
         ? settings.pollMinutes
