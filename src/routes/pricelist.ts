@@ -463,6 +463,27 @@ app.delete("/lists/:id", async (c) => {
   });
 });
 
+/**
+ * Słownik techników do przypisywania cennika (AssignTechniciansDialog) pod
+ * kluczem Cennika — pełne `/technicians` stoi pod kluczami Techników
+ * i Kalendarza (docs/AUDYT-UPRAWNIEN-A.md #11). Bez telefonów, e-maili i NIP-u.
+ */
+app.get("/technicians", (c) => {
+  const rows = db
+    .select({
+      id: schema.technicians.id,
+      firstName: schema.technicians.firstName,
+      lastName: schema.technicians.lastName,
+      company: schema.technicians.company,
+      active: schema.technicians.active,
+      priceListId: schema.technicians.priceListId,
+    })
+    .from(schema.technicians)
+    .orderBy(asc(schema.technicians.lastName), asc(schema.technicians.firstName))
+    .all();
+  return c.json({ success: true, data: rows });
+});
+
 // Technicy przypisani do cennika
 app.get("/lists/:id/technicians", async (c) => {
   const id = parseInt(c.req.param("id"));

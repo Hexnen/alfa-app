@@ -19,12 +19,12 @@ import {
   SelectValue,
 } from "./ui/select";
 import { NIPField } from "./NIPField";
-import { getSalespeople, salespersonName } from "@/lib/api";
+import { getSalespeopleCatalog, salespersonName } from "@/lib/api";
 import type {
   CompanyData,
   Contractor,
   ContractorInput,
-  Salesperson,
+  SalespersonCatalogEntry,
 } from "@/lib/api";
 
 interface ContractorFormProps {
@@ -57,11 +57,11 @@ export function ContractorForm({
     vatCheckedAt: contractor?.vatCheckedAt || "",
     salespersonId: contractor?.salespersonId ?? null,
   });
-  const [salespeople, setSalespeople] = useState<Salesperson[]>([]);
+  const [salespeople, setSalespeople] = useState<SalespersonCatalogEntry[]>([]);
 
   useEffect(() => {
     if (!open) return;
-    getSalespeople()
+    getSalespeopleCatalog()
       .then((res) => setSalespeople(res.data ?? []))
       .catch(() => setSalespeople([]));
   }, [open]);

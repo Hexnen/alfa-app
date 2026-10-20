@@ -45,7 +45,6 @@ import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
 import { usePerms } from "@/auth/permissions";
 import { ContactDialog } from "@/components/sales/ContactDialog";
 import {
-  calendarApi,
   contactsApi,
   getContractorCatalog,
   type CalendarEvent,
@@ -171,16 +170,18 @@ export function HandlowyKontakty() {
     }
     let cancelled = false;
     setPanelLoading(true);
-    calendarApi
-      .getEvents({
-        contactId: selected.id,
-        department: "handlowy",
-        from: shift(-365),
-        to: shift(365),
-      })
+    // Karta kontaktu niesie jego wydarzenia (odsiane po działach wglądu) —
+    // `/calendar/events` wymagało klucza kalendarza, a sam klucz Kontaktów
+    // dostawał 403 i panel mylnie pisał „brak wydarzeń”.
+    const from = shift(-365);
+    const to = shift(365);
+    contactsApi
+      .get(selected.id)
       .then((res) => {
         if (cancelled) return;
-        const list = [...(res.data ?? [])].sort((a, b) => b.startAt.localeCompare(a.startAt));
+        const list = [...(res.data?.events ?? [])]
+          .filter((ev) => ev.department === "handlowy" && ev.startAt.slice(0, 10) >= from && ev.startAt.slice(0, 10) <= to)
+          .sort((a, b) => b.startAt.localeCompare(a.startAt));
         setPanelEvents(list);
       })
       .catch(() => {

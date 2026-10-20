@@ -743,6 +743,53 @@ function writePackageItemsSync(tx: Tx, packageId: number, items: PackageItemInpu
   });
 }
 
+/*
+ * Słowniki edytora ofert pod kluczem OFERT. Pełne `/warehouse/items` i
+ * `/warehouse/stock` stoją pod `technical/magazyn` i niosą ceny zakupu,
+ * marże, dokumenty — handlowiec z samymi Ofertami dostawał 403 i nie mógł
+ * dodać sprzętu. Tu jedzie wyłącznie to, czego potrzebuje wyszukiwarka
+ * pozycji (OfferItemPicker): nazwa, kody, jednostka, cena sprzedaży, stan.
+ * Cena zakupu NIGDY nie wychodzi — koszt pozycji liczy backend przy dodaniu.
+ */
+app.get("/catalog/items", (c) => {
+  const { values } = getCompanyConfig();
+  const rows = db
+    .select({
+      id: schema.warehouseItems.id,
+      sku: schema.warehouseItems.sku,
+      name: schema.warehouseItems.name,
+      category: schema.warehouseItems.category,
+      manufacturer: schema.warehouseItems.manufacturer,
+      unit: schema.warehouseItems.unit,
+      isArchived: schema.warehouseItems.isArchived,
+      purchasePrice: schema.warehouseItems.purchasePrice,
+      salePrice: schema.warehouseItems.salePrice,
+    })
+    .from(schema.warehouseItems)
+    .where(eq(schema.warehouseItems.isArchived, false))
+    .orderBy(asc(schema.warehouseItems.name))
+    .all();
+  const data = rows.map(({ purchasePrice, salePrice, ...r }) => ({
+    ...r,
+    effectiveSalePrice: effectiveSalePrice({ purchasePrice, salePrice }, values.warehouseMarkup),
+  }));
+  return c.json({ success: true, data });
+});
+
+/** Stany magazynowe zsumowane po towarze (bez podziału na magazyny). */
+app.get("/catalog/stock", (c) => {
+  const rows = db
+    .select({
+      itemId: schema.warehouseStock.itemId,
+      quantity: sql<number>`sum(${schema.warehouseStock.quantity})`,
+    })
+    .from(schema.warehouseStock)
+    .groupBy(schema.warehouseStock.itemId)
+    .all()
+    .filter((r) => Math.abs(r.quantity ?? 0) > 1e-9);
+  return c.json({ success: true, data: rows });
+});
+
 /**
  * Parametry, których edytor potrzebuje do podpowiedzi i ostrzeżeń.
  *

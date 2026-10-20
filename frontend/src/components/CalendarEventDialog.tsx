@@ -70,12 +70,8 @@ import {
 import {
   availabilityAssigneeId,
   calendarApi,
-  contactsApi,
-  getObjects,
+  getObjectCatalog,
   leadsApi,
-  getProtocols,
-  getQuotes,
-  getRealizations,
   type ActivityEntry,
   type CalendarBilling,
   type CalendarConflict,
@@ -94,13 +90,13 @@ import {
   type ParsedMsgAttachmentMeta,
   type CalendarSeriesFreq,
   type CalendarSeriesScope,
-  type ObjectWithContractor,
-  type Protocol,
-  type Quote,
-  type Realization,
+  type ObjectCatalogItem,
+  type CalendarPickProtocol,
+  type CalendarPickQuote,
+  type CalendarPickRealization,
   type CalendarAvailability,
-  type Contact,
-  type Lead,
+  type CalendarPickContact,
+  type LeadPickItem,
   type WeatherBrief,
 } from "@/lib/api";
 import {
@@ -658,7 +654,7 @@ function ObjectPicker({
   fallbackName,
   inputId,
 }: {
-  objects: ObjectWithContractor[];
+  objects: ObjectCatalogItem[];
   value: string;
   onChange: (id: string) => void;
   fallbackName?: string | null;
@@ -794,15 +790,15 @@ function ObjectPicker({
 }
 
 /** Skrót protokołu z pełnego rekordu (lista /protocols) → podgląd w dialogu. */
-function toEventProtocol(p: Protocol): CalendarEventProtocol {
+function toEventProtocol(p: CalendarPickProtocol): CalendarEventProtocol {
   return { id: p.id, number: p.number, status: p.status, signedAt: p.signedAt ?? null, workDate: p.workDate };
 }
 
 /** Wybór protokołu z listy (szukajka z debounce ~250 ms; bez filtra — ostatnie 50). */
-function ProtocolPicker({ onPick, disabled }: { onPick: (p: Protocol) => void; disabled?: boolean }) {
+function ProtocolPicker({ onPick, disabled }: { onPick: (p: CalendarPickProtocol) => void; disabled?: boolean }) {
   const [openList, setOpenList] = useState(false);
   const [q, setQ] = useState("");
-  const [items, setItems] = useState<Protocol[]>([]);
+  const [items, setItems] = useState<CalendarPickProtocol[]>([]);
   const [loading, setLoading] = useState(false);
   const [active, setActive] = useState(0);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -813,7 +809,8 @@ function ProtocolPicker({ onPick, disabled }: { onPick: (p: Protocol) => void; d
     let cancelled = false;
     setLoading(true);
     const t = window.setTimeout(() => {
-      getProtocols(undefined, undefined, { q: q.trim() || undefined, limit: 50 })
+      calendarApi
+        .pickProtocols({ q: q.trim() || undefined, limit: 50 })
         .then((res) => {
           if (cancelled) return;
           setItems(res.data || []);
@@ -842,7 +839,7 @@ function ProtocolPicker({ onPick, disabled }: { onPick: (p: Protocol) => void; d
     return () => document.removeEventListener("mousedown", onDoc);
   }, [openList]);
 
-  const pick = (p: Protocol) => {
+  const pick = (p: CalendarPickProtocol) => {
     onPick(p);
     setOpenList(false);
     setQ("");
@@ -945,7 +942,7 @@ function ProtocolPicker({ onPick, disabled }: { onPick: (p: Protocol) => void; d
 }
 
 /** Pełny rekord realizacji (`/realizations`) → skrót używany w dialogu. */
-function toEventRealization(r: Realization): CalendarEventRealization {
+function toEventRealization(r: CalendarPickRealization): CalendarEventRealization {
   return { id: r.id, date: r.date, site: r.site, kind: r.kind, invoiced: r.invoiced, total: r.total };
 }
 
@@ -962,7 +959,7 @@ function RealizationPicker({
 }: {
   dateHint: string;
   siteHint?: string;
-  onPick: (r: Realization) => void;
+  onPick: (r: CalendarPickRealization) => void;
   disabled?: boolean;
 }) {
   const hint = /^\d{4}-\d{2}/.test(dateHint) ? dateHint : toDateStr(new Date());
@@ -973,7 +970,7 @@ function RealizationPicker({
   }));
   const [q, setQ] = useState("");
   /** Wynik ostatniego pobrania wraz z kluczem miesiąca — `loading` jest z niego wyliczane. */
-  const [loaded, setLoaded] = useState<{ key: string; items: Realization[] } | null>(null);
+  const [loaded, setLoaded] = useState<{ key: string; items: CalendarPickRealization[] } | null>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -985,7 +982,8 @@ function RealizationPicker({
     if (!openList) return;
     let cancelled = false;
     const key = `${ym.y}-${ym.m}`;
-    getRealizations(ym.y, ym.m)
+    calendarApi
+      .pickRealizations(ym.y, ym.m)
       .then((res) => {
         if (!cancelled) setLoaded({ key, items: res.data || [] });
       })
@@ -1114,19 +1112,15 @@ function RealizationPicker({
 }
 
 /** Pełny rekord wyceny (`/quotes`) → skrót używany w dialogu. */
-function toEventQuote(q: Quote): CalendarEventQuote {
-  const filledItems = q.items.filter((i) => {
-    const n = parseFloat(String(i.qty).replace(",", "."));
-    return Number.isFinite(n) && n > 0;
-  }).length;
-  return { id: q.id, number: q.number, date: q.date, total: q.total, filledItems };
+function toEventQuote(q: CalendarPickQuote): CalendarEventQuote {
+  return { id: q.id, number: q.number, date: q.date, total: q.total, filledItems: q.filledItems };
 }
 
 /** Wybór wyceny z listy (szukajka z debounce ~250 ms; bez filtra — ostatnie 50). */
-function QuotePicker({ onPick, disabled }: { onPick: (q: Quote) => void; disabled?: boolean }) {
+function QuotePicker({ onPick, disabled }: { onPick: (q: CalendarPickQuote) => void; disabled?: boolean }) {
   const [openList, setOpenList] = useState(false);
   const [q, setQ] = useState("");
-  const [items, setItems] = useState<Quote[]>([]);
+  const [items, setItems] = useState<CalendarPickQuote[]>([]);
   const [loading, setLoading] = useState(false);
   const [active, setActive] = useState(0);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -1137,7 +1131,8 @@ function QuotePicker({ onPick, disabled }: { onPick: (q: Quote) => void; disable
     let cancelled = false;
     setLoading(true);
     const t = window.setTimeout(() => {
-      getQuotes(undefined, undefined, { q: q.trim() || undefined, limit: 50 })
+      calendarApi
+        .pickQuotes({ q: q.trim() || undefined, limit: 50 })
         .then((res) => {
           if (cancelled) return;
           setItems(res.data || []);
@@ -1166,7 +1161,7 @@ function QuotePicker({ onPick, disabled }: { onPick: (q: Quote) => void; disable
     return () => document.removeEventListener("mousedown", onDoc);
   }, [openList]);
 
-  const pick = (item: Quote) => {
+  const pick = (item: CalendarPickQuote) => {
     onPick(item);
     setOpenList(false);
     setQ("");
@@ -1987,10 +1982,10 @@ export function CalendarEventDialog({
   /** Technicy albo handlowcy — kto, decyduje `cfg.assignees.load()`. */
   const [assignees, setAssignees] = useState<AssigneeRef[]>([]);
   /** Dział handlowy: szansa wybrana w tej sesji (podgląd zanim zapis wróci). */
-  const [pickedLead, setPickedLead] = useState<Lead | null>(null);
+  const [pickedLead, setPickedLead] = useState<LeadPickItem | null>(null);
   /** Osoby kontaktowe szansy i jej kontrahenta (zawężone przez `LeadPicker`). */
-  const [leadContacts, setLeadContacts] = useState<Contact[]>([]);
-  const [objects, setObjects] = useState<ObjectWithContractor[]>([]);
+  const [leadContacts, setLeadContacts] = useState<CalendarPickContact[]>([]);
+  const [objects, setObjects] = useState<ObjectCatalogItem[]>([]);
   const [history, setHistory] = useState<ActivityEntry[]>([]);
   const [conflicts, setConflicts] = useState<CalendarConflict[]>([]);
   const [availability, setAvailability] = useState<CalendarAvailability[]>([]);
@@ -2126,17 +2121,27 @@ export function CalendarEventDialog({
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
-    // Kartotekę obiektów ciągniemy tylko tam, gdzie jest picker — w dziale bez
-    // niego to byłoby tysiąc wierszy pobranych po nic.
-    Promise.all([cfg.assignees.load(), cfg.features.objectPicker ? getObjects({ pageSize: 1000 }) : null])
-      .then(([aRows, oRes]) => {
-        if (cancelled) return;
-        setAssignees(aRows || []);
-        setObjects(oRes?.data || []);
+    // Dwa NIEZALEŻNE słowniki: wspólny Promise.all sprawiał, że 403 na obiektach
+    // zerował też listę techników/handlowców (docs/AUDYT-UPRAWNIEN-A.md #1, B #1).
+    cfg.assignees
+      .load()
+      .then((aRows) => {
+        if (!cancelled) setAssignees(aRows || []);
       })
       .catch(() => {
-        /* słowniki opcjonalne — formularz działa bez nich */
+        /* słownik opcjonalny — formularz działa bez niego */
       });
+    // Kartotekę obiektów ciągniemy tylko tam, gdzie jest picker — z wąskiego
+    // katalogu (bez kwot), otwartego dla kluczy kalendarza.
+    if (cfg.features.objectPicker) {
+      getObjectCatalog()
+        .then((res) => {
+          if (!cancelled) setObjects(res.data || []);
+        })
+        .catch(() => {
+          /* bez kartoteki zostaje wolny tekst lokalizacji */
+        });
+    }
     return () => {
       cancelled = true;
     };
@@ -2251,9 +2256,10 @@ export function CalendarEventDialog({
     if (pickedLead?.id === form.leadId) return;
     let cancelled = false;
     leadsApi
-      .get(form.leadId)
+      .pick({ id: form.leadId, includeClosed: true })
       .then((res) => {
-        if (!cancelled && res.data) setPickedLead(res.data);
+        const lead = res.data?.[0];
+        if (!cancelled && lead) setPickedLead(lead);
       })
       .catch(() => {
         /* brak dostępu do karty szansy nie blokuje edycji wydarzenia */
@@ -2265,8 +2271,8 @@ export function CalendarEventDialog({
 
   /**
    * Kontakty szansy ORAZ jej kontrahenta — dokładnie ten zbiór, który backend
-   * przyjmuje w `contactId` (src/lib/calendar-mutations.ts). Dwa zapytania zamiast
-   * jednego, bo kontakt bywa podpięty pod klienta, a nie pod samą szansę.
+   * przyjmuje w `contactId` (src/lib/calendar-mutations.ts). Backend składa oba
+   * zbiory sam (kontakt bywa podpięty pod klienta, a nie pod samą szansę).
    */
   useEffect(() => {
     if (!open || !cfg.features.contactPicker || form.leadId == null) {
@@ -2275,16 +2281,12 @@ export function CalendarEventDialog({
     }
     let cancelled = false;
     const leadId = form.leadId;
-    const contractorId = pickedLead?.id === leadId ? pickedLead.contractorId : null;
-    Promise.all([
-      contactsApi.list({ leadId, pageSize: 200 }),
-      contractorId != null ? contactsApi.list({ contractorId, pageSize: 200 }) : null,
-    ])
-      .then(([byLead, byContractor]) => {
-        if (cancelled) return;
-        const merged = new Map<number, Contact>();
-        for (const c of [...(byLead.data ?? []), ...(byContractor?.data ?? [])]) merged.set(c.id, c);
-        setLeadContacts([...merged.values()]);
+    // Jedno zapytanie pod `/calendar` (kontakty szansy + jej kontrahenta) —
+    // `/contacts` jest zamknięty dla samego kalendarza handlowego (AUDYT B #5).
+    calendarApi
+      .pickContacts(leadId)
+      .then((res) => {
+        if (!cancelled) setLeadContacts(res.data ?? []);
       })
       .catch(() => {
         if (!cancelled) setLeadContacts([]);
@@ -2292,7 +2294,7 @@ export function CalendarEventDialog({
     return () => {
       cancelled = true;
     };
-  }, [open, cfg.features.contactPicker, form.leadId, pickedLead]);
+  }, [open, cfg.features.contactPicker, form.leadId]);
 
   const selectedContact = useMemo(
     () => (form.contactId == null ? null : (leadContacts.find((c) => c.id === form.contactId) ?? null)),

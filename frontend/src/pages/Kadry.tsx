@@ -495,7 +495,10 @@ export function Kadry() {
   }, [year, month, hoursEditable]);
 
   const loadDictionaries = useCallback(async () => {
-    const [e, o, c, comp, cat, dep, exp] = await Promise.all([
+    // `allSettled`, a nie `all`: każdy słownik idzie pod inną bramkę (spółki to
+    // osobny prefiks /companies), więc jedno 403 nie może wyzerować reszty —
+    // wcześniej brak dostępu do spółek czyścił pracowników, umowy i działy.
+    const [e, o, c, comp, cat, dep, exp] = await Promise.allSettled([
       getHrEmployees(),
       getHrObjects(),
       getHrContracts(),
@@ -506,13 +509,15 @@ export function Kadry() {
       // więc jedzie razem ze słownikami — jedno odświeżenie po każdym zapisie.
       getHrExpiringContracts(EXPIRING_DAYS),
     ]);
-    setEmployees(e.data ?? []);
-    setObjects(o.data ?? []);
-    setContracts(c.data ?? []);
-    setCompanies(comp.data ?? []);
-    setObjectCatalog(cat.data ?? []);
-    setDepartments(dep.data ?? []);
-    setExpiring(exp.data ?? []);
+    const rows = <T,>(r: PromiseSettledResult<{ data?: T[] }>): T[] =>
+      r.status === "fulfilled" ? (r.value.data ?? []) : [];
+    setEmployees(rows(e));
+    setObjects(rows(o));
+    setContracts(rows(c));
+    setCompanies(rows(comp));
+    setObjectCatalog(rows(cat));
+    setDepartments(rows(dep));
+    setExpiring(rows(exp));
   }, []);
 
   const loadNorms = useCallback(async () => {

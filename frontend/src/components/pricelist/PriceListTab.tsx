@@ -30,7 +30,6 @@ import {
   createPriceItem,
   deletePriceItem,
   getPriceList,
-  getTechnicians,
   priceItemKind,
   priceListsApi,
   updatePriceItem,
@@ -40,7 +39,7 @@ import {
   type PriceItemKind,
   type PriceListGroup,
   type PriceListGroupInput,
-  type Technician,
+  type PriceListTechnician,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { pillClass, type PillTone } from "@/lib/calendar-labels";
@@ -52,7 +51,7 @@ const pln = new Intl.NumberFormat("pl-PL", {
 });
 const money = (v: number | null | undefined) => pln.format(Number(v || 0));
 
-const techName = (t: Technician) =>
+const techName = (t: PriceListTechnician) =>
   `${t.firstName} ${t.lastName}`.trim() || `#${t.id}`;
 
 /** Filtr rodzaju nad tabelą pozycji. */
@@ -113,8 +112,8 @@ export function PriceListTab({ editable }: PriceListTabProps) {
   const [deleteTarget, setDeleteTarget] = useState<PriceListGroup | null>(null);
   const [deleting, setDeleting] = useState(false);
 
-  const [technicians, setTechnicians] = useState<Technician[]>([]);
-  const [assigned, setAssigned] = useState<Technician[]>([]);
+  const [technicians, setTechnicians] = useState<PriceListTechnician[]>([]);
+  const [assigned, setAssigned] = useState<PriceListTechnician[]>([]);
   const [assignOpen, setAssignOpen] = useState(false);
 
   const [copyOpen, setCopyOpen] = useState(false);
@@ -151,7 +150,8 @@ export function PriceListTab({ editable }: PriceListTabProps) {
 
   const loadTechnicians = useCallback(async () => {
     try {
-      const res = await getTechnicians();
+      // Słownik pod kluczem Cennika — pełne /technicians wymaga Techników.
+      const res = await priceListsApi.allTechnicians();
       setTechnicians(res.data || []);
     } catch (error) {
       console.error("Error loading technicians:", error);

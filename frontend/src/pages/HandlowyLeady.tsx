@@ -48,7 +48,7 @@ import { LeadLostDialog } from "@/components/sales/LeadLostDialog";
 import { SalesScopeToggle, useSalesScope } from "@/components/sales/SalesScopeToggle";
 import { usePerms } from "@/auth/permissions";
 import {
-  getSalespeople,
+  getSalespeopleCatalog,
   leadsApi,
   salespersonName,
   type Lead,
@@ -59,7 +59,7 @@ import {
   type LeadSource,
   type LeadStage,
   type LeadsSummary,
-  type Salesperson,
+  type SalespersonCatalogEntry,
 } from "@/lib/api";
 import {
   LEAD_SERVICES,
@@ -131,7 +131,7 @@ export function HandlowyLeady() {
   );
 
   const [error, setError] = useState<string | null>(null);
-  const [salespeople, setSalespeople] = useState<Salesperson[]>([]);
+  const [salespeople, setSalespeople] = useState<SalespersonCatalogEntry[]>([]);
 
   // --- filtry (wspólne dla obu widoków tam, gdzie backend je przyjmuje) ---
   const [searchInput, setSearchInput] = useState("");
@@ -172,7 +172,7 @@ export function HandlowyLeady() {
   useEffect(() => writeStored(VIEW_KEY, view), [view]);
 
   useEffect(() => {
-    getSalespeople(true)
+    getSalespeopleCatalog(true)
       .then((res) => setSalespeople(res.data ?? []))
       .catch(() => setSalespeople([]));
   }, []);

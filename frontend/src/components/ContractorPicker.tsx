@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 import { Building2, Loader2, Search } from "lucide-react";
-import { getContractors, type Contractor } from "@/lib/api";
+import { pickContractors, type ContractorPick } from "@/lib/api";
 import { formatNIP } from "@/lib/nip";
 
 interface ContractorPickerProps {
@@ -11,7 +11,7 @@ interface ContractorPickerProps {
   /** Każda zmiana tekstu (wpisanie ręczne również). */
   onChange: (value: string) => void;
   /** Wybór kontrahenta z listy — formularz decyduje, które pola uzupełnić. */
-  onSelect: (contractor: Contractor) => void;
+  onSelect: (contractor: ContractorPick) => void;
   label?: string;
   placeholder?: string;
   required?: boolean;
@@ -38,7 +38,7 @@ export function ContractorPicker({
   inputClassName,
 }: ContractorPickerProps) {
   const [query, setQuery] = useState("");
-  const [results, setResults] = useState<Contractor[]>([]);
+  const [results, setResults] = useState<ContractorPick[]>([]);
   const [loading, setLoading] = useState(false);
   const [open, setOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -72,7 +72,10 @@ export function ContractorPicker({
       setLoading(true);
       setError(null);
       try {
-        const res = await getContractors({ search: term, pageSize: 8 });
+        // Wąska wyszukiwarka `/contractors/pick` (dane rejestrowe, bez kwot)
+        // otwarta też dla Ofert, Protokołów i Wycen — pełne `/contractors`
+        // wymaga klucza Kontrahentów i dawało tu 403.
+        const res = await pickContractors(term, 8);
         if (!cancelled) {
           setResults(res.data || []);
           setHighlight(0);
@@ -107,7 +110,7 @@ export function ContractorPicker({
     return null;
   }, [loading, error, query, results.length]);
 
-  const choose = (contractor: Contractor) => {
+  const choose = (contractor: ContractorPick) => {
     onSelect(contractor);
     onChange(contractor.name);
     setQuery(contractor.name);

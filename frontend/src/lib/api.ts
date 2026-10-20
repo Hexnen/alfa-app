@@ -308,6 +308,27 @@ export interface ObjectsResponse extends PaginatedResponse<ObjectWithContractor>
   endingSoonRevenue?: number;
 }
 
+/**
+ * Pozycja wąskiego słownika obiektów (`GET /objects/catalog`) — bez kwot i kosztów.
+ * `contractor` ma ten sam kształt co w `ObjectWithContractor`, więc pickery czytają
+ * `o.contractor?.name` niezależnie od źródła. Otwarty dla kalendarzy, umów, zleceń,
+ * realizacji i kontrahentów (docs/AUDYT-UPRAWNIEN-A.md).
+ */
+export interface ObjectCatalogItem {
+  id: number;
+  name: string;
+  address: string | null;
+  city: string | null;
+  status: string;
+  contractorId: number;
+  contractor: { id: number; name: string } | null;
+}
+
+export async function getObjectCatalog(params: { contractorId?: number } = {}) {
+  const q = params.contractorId != null ? `?contractorId=${params.contractorId}` : "";
+  return request<ApiResponse<ObjectCatalogItem[]>>(`/objects/catalog${q}`);
+}
+
 export async function getObjects(params?: {
   search?: string;
   status?: string;
@@ -1063,6 +1084,43 @@ export async function checkContractorByNIP(nip: string) {
 // Get contractor objects with history
 export async function getContractorObjects(contractorId: number) {
   return request<ApiResponse<Array<ObjectRecord & { latestAction: ObjectHistoryRecord | null }>>>(`/contractors/${contractorId}/objects`);
+}
+
+/** Obiekt płatnika w formularzu zlecenia (`GET /orders/payer-objects/:id`) — bez kwot. */
+export interface OrderPayerObject {
+  id: number;
+  name: string;
+  address: string | null;
+  city: string | null;
+  status: ObjectRecord["status"];
+  contractorId: number;
+}
+
+/** Obiekty płatnika dla formularza zlecenia — wystarczy klucz „orders”. */
+export async function getOrderPayerObjects(contractorId: number) {
+  return request<ApiResponse<OrderPayerObject[]>>(`/orders/payer-objects/${contractorId}`);
+}
+
+/** Okresy usług obiektu (podgląd w formularzu zlecenia) — wystarczy klucz „orders”. */
+export async function getOrderObjectServices(objectId: number) {
+  return request<ApiResponse<ObjectService[]>>(`/orders/object-services/${objectId}`);
+}
+
+/** Kontrahent z wyszukiwarki dokumentów (`GET /contractors/pick`) — dane rejestrowe. */
+export interface ContractorPick {
+  id: number;
+  name: string;
+  nip: string;
+  address: string | null;
+  city: string | null;
+  postalCode: string | null;
+  active: boolean;
+}
+
+/** Wyszukiwarka kontrahentów dla Ofert/Protokołów/Wycen (od 2 znaków). */
+export async function pickContractors(q: string, limit = 8) {
+  const params = new URLSearchParams({ q, limit: String(limit) });
+  return request<ApiResponse<ContractorPick[]>>(`/contractors/pick?${params}`);
 }
 
 /** Klucze sortowania listy zleceń — te same, co SORT_COLUMNS w src/routes/orders.ts. */
@@ -2102,6 +2160,11 @@ export async function getRealizations(
   return request<ApiResponse<Realization[]>>(`/realizations?${params.toString()}`);
 }
 
+/** Nazwiska aktywnych techników (podpowiedzi formularza realizacji) — klucz Realizacji. */
+export async function getRealizationTechnicianNames() {
+  return request<ApiResponse<string[]>>("/realizations/technician-names");
+}
+
 export async function getRealizationSummary(year: number, month: number) {
   return request<ApiResponse<RealizationSummary>>(
     `/realizations/summary?year=${year}&month=${month}`
@@ -2194,6 +2257,12 @@ export async function createRealizationProtocol(id: number) {
 // ---------------------------------------------------------------------------
 
 export type TechnicianType = "internal" | "external";
+
+/** Technik w słowniku Cennika (`GET /pricelist/technicians`). */
+export type PriceListTechnician = Pick<
+  Technician,
+  "id" | "firstName" | "lastName" | "company" | "active" | "priceListId"
+>;
 
 export interface Technician {
   id: number;
@@ -2336,9 +2405,30 @@ export interface SalespersonRef {
   inherited?: boolean;
 }
 
-export function salespersonName(s: SalespersonRef | Salesperson | null | undefined): string {
+export function salespersonName(
+  s: SalespersonRef | Salesperson | SalespersonCatalogEntry | null | undefined
+): string {
   if (!s) return "—";
   return `${s.firstName} ${s.lastName}`.trim();
+}
+
+/** Słownik handlowców (`GET /salespeople/catalog`) — same nazwiska, bez prowizji i portfela. */
+export interface SalespersonCatalogEntry {
+  id: number;
+  firstName: string;
+  lastName: string;
+  active: boolean;
+  userId: number | null;
+}
+
+/**
+ * Lista handlowców do selectów i filtrów. Pełne `getSalespeople()` (prowizje,
+ * koszt, portfel) jest wyłącznie dla zakładki „Handlowcy” (klucz `handlowcy`).
+ */
+export async function getSalespeopleCatalog(onlyActive = false) {
+  return request<ApiResponse<SalespersonCatalogEntry[]>>(
+    `/salespeople/catalog${onlyActive ? "?active=true" : ""}`
+  );
 }
 
 export async function getSalespeople(onlyActive = false) {
@@ -2587,6 +2677,9 @@ export const priceListsApi = {
 
   technicians: (id: number) =>
     request<ApiResponse<Technician[]>>(`/pricelist/lists/${id}/technicians`),
+
+  /** Słownik techników pod kluczem Cennika (bez danych kontaktowych). */
+  allTechnicians: () => request<ApiResponse<PriceListTechnician[]>>("/pricelist/technicians"),
 
   /** Ustawia dokładny zbiór techników korzystających z cennika. */
   setTechnicians: (id: number, technicianIds: number[]) =>
@@ -3473,6 +3566,16 @@ export const offersApi = {
     return request<ApiResponse<{ minMarginPct: number; leaseAnnualRate: number }>>(
       "/offers/config"
     );
+  },
+
+  /** Towary do wyszukiwarki pozycji — pod kluczem ofert, bez cen zakupu. */
+  async catalogItems() {
+    return request<ApiResponse<OfferCatalogItem[]>>("/offers/catalog/items");
+  },
+
+  /** Stany zsumowane po towarze — pod kluczem ofert. */
+  async catalogStock() {
+    return request<ApiResponse<OfferCatalogStock[]>>("/offers/catalog/stock");
   },
 
   async create(data: Partial<OfferInput> = {}) {
@@ -5367,6 +5470,15 @@ export interface StockEntry {
   quantity: number;
 }
 
+/** Towar w słowniku edytora ofert (`GET /offers/catalog/items`) — bez cen zakupu. */
+export type OfferCatalogItem = Pick<
+  WarehouseItem,
+  "id" | "sku" | "name" | "category" | "manufacturer" | "unit" | "isArchived" | "effectiveSalePrice"
+>;
+
+/** Stan towaru zsumowany po magazynach (`GET /offers/catalog/stock`). */
+export type OfferCatalogStock = Pick<StockEntry, "itemId" | "quantity">;
+
 export type WarehouseDocType = "PZ" | "WZ" | "RW" | "MM";
 export type WarehouseDocStatus = "draft" | "confirmed" | "cancelled";
 
@@ -6716,7 +6828,76 @@ export const WEATHER_BATCH_MAX = 200;
 const scopeQuery = (scope?: CalendarSeriesScope) =>
   scope && scope !== "this" ? `?scope=${scope}` : "";
 
+/** Protokół w kształcie pickera kalendarza (`GET /calendar/pick/protocols`). */
+export interface CalendarPickProtocol {
+  id: number;
+  number: string;
+  status: "draft" | "final";
+  signedAt: string | null;
+  workDate: string;
+  clientName: string | null;
+  clientCity: string | null;
+  site: string | null;
+}
+
+/** Wycena w kształcie pickera kalendarza (`GET /calendar/pick/quotes`). */
+export interface CalendarPickQuote {
+  id: number;
+  number: string;
+  date: string;
+  site: string | null;
+  address: string | null;
+  total: number;
+  filledItems: number;
+}
+
+/** Realizacja w kształcie pickera kalendarza (`GET /calendar/pick/realizations`). */
+export interface CalendarPickRealization {
+  id: number;
+  date: string;
+  site: string;
+  kind: RealizationKind;
+  invoiced: boolean;
+  total: number;
+  note: string | null;
+}
+
 export const calendarApi = {
+  /**
+   * Kontakty szansy i jej kontrahenta do pickera w dialogu wydarzenia handlowego
+   * (`/contacts` jest zamknięty dla samego kalendarza handlowego).
+   */
+  async pickContacts(leadId: number) {
+    return request<ApiResponse<CalendarPickContact[]>>(`/calendar/pick/contacts?leadId=${leadId}`);
+  },
+
+  /**
+   * Pickery „podepnij protokół / wycenę / realizację” w dialogu kalendarza
+   * technicznego — wąskie skróty pod `/calendar`, bo pełne `/protocols`, `/quotes`
+   * i `/realizations` wymagają kluczy tych modułów (i niosą koszty).
+   */
+  async pickProtocols(params: { q?: string; limit?: number } = {}) {
+    const sp = new URLSearchParams();
+    if (params.q) sp.set("q", params.q);
+    if (params.limit) sp.set("limit", String(params.limit));
+    const q = sp.toString();
+    return request<ApiResponse<CalendarPickProtocol[]>>(`/calendar/pick/protocols${q ? `?${q}` : ""}`);
+  },
+
+  async pickQuotes(params: { q?: string; limit?: number } = {}) {
+    const sp = new URLSearchParams();
+    if (params.q) sp.set("q", params.q);
+    if (params.limit) sp.set("limit", String(params.limit));
+    const q = sp.toString();
+    return request<ApiResponse<CalendarPickQuote[]>>(`/calendar/pick/quotes${q ? `?${q}` : ""}`);
+  },
+
+  async pickRealizations(year: number, month: number) {
+    return request<ApiResponse<CalendarPickRealization[]>>(
+      `/calendar/pick/realizations?year=${year}&month=${month}`
+    );
+  },
+
   async getEvents(params: CalendarEventsQuery) {
     const sp = new URLSearchParams();
     sp.set("from", params.from);
@@ -7140,9 +7321,11 @@ export const activityApi = {
     );
   },
 
-  async recent(limit = 50) {
+  /** Ostatnie wpisy wydarzeń kalendarza; `department` zawęża do jednego działu. */
+  async recent(limit = 50, department?: string) {
+    const dep = department ? `&department=${encodeURIComponent(department)}` : "";
     return request<ApiResponse<ActivityEntry[]>>(
-      `/activity/recent?limit=${limit}`
+      `/activity/recent?limit=${limit}${dep}`
     );
   },
 };
@@ -10090,6 +10273,33 @@ const leadsQuery = (p: LeadsQuery = {}): string => {
   return q ? `?${q}` : "";
 };
 
+/** Szansa w kształcie pickera (`GET /leads/pick`). */
+export interface LeadPickItem {
+  id: number;
+  title: string;
+  stage: LeadStage;
+  clientLabel: string | null;
+  contractorId: number | null;
+  objectId: number | null;
+  salespersonId: number | null;
+  salespersonName: string | null;
+}
+
+/** Osoba kontaktowa w kształcie pickera kalendarza (`GET /calendar/pick/contacts`). */
+export interface CalendarPickContact {
+  id: number;
+  firstName: string;
+  lastName: string;
+  fullName: string;
+  role: string | null;
+  phone: string | null;
+  email: string | null;
+  isPrimary: boolean;
+  active: boolean;
+  leadId: number | null;
+  contractorId: number | null;
+}
+
 export const leadsApi = {
   /** Lista z paginacją po stronie backendu (wzorzec `Objects.tsx`). */
   async list(params: LeadsQuery = {}) {
@@ -10109,6 +10319,21 @@ export const leadsApi = {
 
   async get(id: number) {
     return request<ApiResponse<LeadDetail>>(`/leads/${id}`);
+  },
+
+  /**
+   * Wąska wyszukiwarka szans do pickerów (`GET /leads/pick`) — bez wartości
+   * szans i ofert; otwarta też dla kalendarza handlowego, Aktywności i Kontaktów.
+   * `id` = dociągnięcie jednej szansy po id.
+   */
+  async pick(params: { q?: string; includeClosed?: boolean; limit?: number; id?: number } = {}) {
+    const sp = new URLSearchParams();
+    if (params.q) sp.set("q", params.q);
+    if (params.includeClosed) sp.set("includeClosed", "1");
+    if (params.limit) sp.set("limit", String(params.limit));
+    if (params.id != null) sp.set("id", String(params.id));
+    const q = sp.toString();
+    return request<ApiResponse<LeadPickItem[]>>(`/leads/pick${q ? `?${q}` : ""}`);
   },
 
   async create(data: LeadInput) {

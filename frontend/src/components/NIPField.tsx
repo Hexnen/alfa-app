@@ -207,6 +207,9 @@ export function NIPField({
         setStatus("error");
         setError("Błąd sprawdzania NIP");
         emitChange(normalized, null);
+        // Błąd bazy (np. brak uprawnień) nie powinien blokować wykazu MF —
+        // dane płatnika nadal da się wstawić z rejestru.
+        if (lookupRegistry && autoLookup) void fetchCompany(normalized);
       }
     },
     [checkExisting, lookupRegistry, autoLookup, fetchCompany, resetRegistry, emitChange]

@@ -135,10 +135,44 @@ const API_TAB_MAP: { prefix: string; tabs: string[]; writeTabs?: string[] }[] = 
       "handlowy/kontakty",
       "handlowy/kalendarz",
       "orders",
+      // Umowy: filtr „Kontrahent” (docs/AUDYT-UPRAWNIEN-A.md #4).
+      "contracts",
     ],
     writeTabs: ["contractors"],
   },
+  // Sprawdzenie NIP-u płatnika w formularzu zlecenia (Zlecenia + formularz
+  // przyjęcia). Bez klucza „contractors” trasa zwraca ZAWĘŻONY rekord (dane
+  // rejestrowe), patrz src/routes/contractors.ts. Przed szerszym "/contractors".
+  { prefix: "/contractors/by-nip", tabs: ["contractors", "orders"], writeTabs: ["contractors"] },
+  // Wyszukiwarka kontrahenta w dokumentach (ContractorPicker: Oferty,
+  // Protokoły, Wyceny) — same dane rejestrowe, bez kwot. Przed "/contractors".
+  {
+    prefix: "/contractors/pick",
+    tabs: ["contractors", "technical/oferty", "technical/protokoly", "technical/wyceny"],
+    writeTabs: ["contractors"],
+  },
   { prefix: "/contractors", tabs: ["contractors"] },
+  // Wąski słownik obiektów do pickerów (id, nazwa, adres, miasto, status,
+  // kontrahent) — BEZ kwot. Moduły, które wybierają obiekt, dostają ten
+  // endpoint zamiast klucza do pełnego `/objects` (kwoty abonamentów, koszty,
+  // wartości umów). MUSI stać PRZED "/objects": find() bierze pierwsze
+  // dopasowanie. docs/AUDYT-UPRAWNIEN-A.md #1, #4, #10, #12; B #1.
+  {
+    prefix: "/objects/catalog",
+    tabs: [
+      "objects",
+      "technical/kalendarz",
+      "handlowy/kalendarz",
+      "handlowy/leady",
+      "handlowy/pulpit",
+      "handlowy/aktywnosci",
+      "contracts",
+      "orders",
+      "technical/realizacje",
+      "contractors",
+    ],
+    writeTabs: ["objects"],
+  },
   { prefix: "/objects", tabs: ["objects"] },
   // Historia zmian obiektu (stare/nowe wartości pól, w tym kwoty umów) — to
   // rekordy obiektów i kontrahentów, więc widzi ją ten, kto widzi obiekty.
@@ -146,7 +180,8 @@ const API_TAB_MAP: { prefix: string; tabs: string[]; writeTabs?: string[] }[] = 
   // bez tych uprawnień — 403 wywalałoby cały Dashboard w Promise.all.
   { prefix: "/history/object", tabs: ["objects", "contractors"] },
   // Dziennik aktywności obiektu — jak wyżej; globalny /activity/recent ma
-  // własną bramkę (technical/kalendarz) w src/routes/activity.ts.
+  // własną bramkę w src/routes/activity.ts (dowolny kalendarz, tylko wpisy
+  // wydarzeń z działów, które użytkownik ogląda).
   { prefix: "/activity/object", tabs: ["objects"] },
   // Dojazd biuro → obiekt wołają tylko dialog i dymki kalendarza
   // (frontend/src/lib/travel.ts, Calendar.tsx). /company/office (znacznik
@@ -208,14 +243,20 @@ const API_TAB_MAP: { prefix: string; tabs: string[]; writeTabs?: string[] }[] = 
   { prefix: "/hr/hours", tabs: HOURS_TABS, writeTabs: HOURS_TABS },
   // Rezerwacja listy do edycji — sekcja bierze WYŁĄCZNIE swój portal
   // (`canLockWholeList` w hr-locks.ts pilnuje, że nie weźmie całości).
-  { prefix: "/hr/locks", tabs: HOURS_TABS, writeTabs: HOURS_TABS },
-  // Strumień SSE: sam sygnał „coś się zmieniło”, bez danych.
-  { prefix: "/hr/live", tabs: HOURS_TABS, writeTabs: [] },
+  // `kadry/wynagrodzenia` też tu jest: Wynagrodzenia rezerwują listy `payroll`
+  // i `office` (bez rezerwacji nie ma trybu edycji). Który scope komu wolno,
+  // rozstrzyga `canLockWholeList` (FULL_SCOPE_TAB) — płace nie wezmą godzin.
+  { prefix: "/hr/locks", tabs: [...HOURS_TABS, "kadry/wynagrodzenia"], writeTabs: [...HOURS_TABS, "kadry/wynagrodzenia"] },
+  // Strumień SSE: sam sygnał „coś się zmieniło”, bez danych — otwarty dla
+  // każdej zakładki Kadr (inaczej SSE ponawia połączenie i zbiera 403).
+  { prefix: "/hr/live", tabs: [...HR_TABS, ...HOURS_PORTAL_TABS], writeTabs: [] },
   // Stan miesiąca — dla sekcji TYLKO do odczytu (pasek „miesiąc zamknięty”).
   // Zamknięcie i otwarcie i tak wymaga `kadry/wynagrodzenia` (hr-month.ts).
   {
     prefix: "/hr/month-status",
-    tabs: [...HOURS_TABS, "kadry/wynagrodzenia", "kadry/pracownicy", "kadry/historia"],
+    // Cały komplet Kadr do odczytu: pasek stanu miesiąca rysuje się na każdej
+    // podzakładce (Działy, Obiekty, Normy też), a sam status nie niesie kwot.
+    tabs: [...HR_TABS, ...HOURS_PORTAL_TABS],
     writeTabs: ["kadry/wynagrodzenia"],
   },
   // Słownik działów i posterunków: sekcja CZYTA (zawężony `?portal=`), ale
@@ -238,6 +279,15 @@ const API_TAB_MAP: { prefix: string; tabs: string[]; writeTabs?: string[] }[] = 
     tabs: HR_TABS,
     writeTabs: HR_WRITE_TABS,
   },
+  // Wysyłka zestawienia braków z raportu (przycisk w CmaReportDetails przy
+  // `cma/raporty: edit`). Idzie do adresatów z ustawień — własny `to` trasa
+  // przepuszcza tylko z `cma/ustawienia: edit`. Przed "/cma/mail".
+  // docs/AUDYT-UPRAWNIEN-B.md #9.
+  {
+    prefix: "/cma/mail/send-issues",
+    tabs: ["cma/raporty", "cma/ustawienia"],
+    writeTabs: ["cma/raporty", "cma/ustawienia"],
+  },
   { prefix: "/cma/mail", tabs: ["cma/ustawienia"] },
   // Grupy interwencyjne mają WŁASNY klucz i MUSZĄ stać przed szerszym "/cma":
   // find() bierze pierwsze dopasowanie, więc bez tego właściciel klucza dostawałby
@@ -245,10 +295,17 @@ const API_TAB_MAP: { prefix: string; tabs: string[]; writeTabs?: string[] }[] = 
   { prefix: "/cma/intervention-groups", tabs: ["cma/grupy-interwencyjne"] },
   // Raporty z podjazdów (docs/PODJAZDY-RAPORTY.md) — własny klucz, przed "/cma".
   { prefix: "/cma/podjazdy", tabs: ["cma/podjazdy"] },
-  { prefix: "/cma", tabs: ["cma/raporty", "cma/trendy", "cma/braki-kamer"] },
+  // Odczyt wspólny dla trzech widoków raportów, ale jedyne zapisy (import
+  // i kasowanie raportu) należą do „cma/raporty” — bez `writeTabs` maxLevel
+  // dawał je też `cma/trendy: edit`. docs/AUDYT-UPRAWNIEN-B.md #12.
+  { prefix: "/cma", tabs: ["cma/raporty", "cma/trendy", "cma/braki-kamer"], writeTabs: ["cma/raporty"] },
   { prefix: "/realizations", tabs: ["technical/realizacje"] },
   { prefix: "/protocols", tabs: ["technical/protokoly"] },
   { prefix: "/quotes", tabs: ["technical/wyceny"] },
+  // Nazwy cenników (bez pozycji i cen) czyta też zakładka Techników: kolumna
+  // „Cennik” i select w formularzu technika. Zapis tylko z Cennika.
+  // Przed "/pricelist". docs/AUDYT-UPRAWNIEN-A.md #15.
+  { prefix: "/pricelist/lists", tabs: ["technical/cennik", "technical/technicy"], writeTabs: ["technical/cennik"] },
   { prefix: "/pricelist", tabs: ["technical/cennik"] },
   // Katalog usług czyta nie tylko własna zakładka, ale i edytor ofert —
   // bez tego handlowiec z dostępem wyłącznie do ofert nie doda robocizny.
@@ -257,9 +314,32 @@ const API_TAB_MAP: { prefix: string; tabs: string[]; writeTabs?: string[] }[] = 
   // otwiera ani nie zamyka tras, tylko decyduje, czy w odpowiedzi zostają pola
   // kosztowe (redactCosts w src/routes/offers.ts).
   { prefix: "/offers", tabs: ["technical/oferty"] },
-  { prefix: "/technicians", tabs: ["technical/technicy", "technical/kalendarz"] },
+  // Słownik techników czyta też kalendarz (przypisania), ale ZAPIS (tworzenie,
+  // edycja, powiązanie z kontem panelu technika) — wyłącznie „technical/technicy".
+  // Bez writeTabs `technical/kalendarz: edit` pozwalał na CRUD techników
+  // (docs/AUDYT-UPRAWNIEN-A.md S1).
+  {
+    prefix: "/technicians",
+    tabs: ["technical/technicy", "technical/kalendarz"],
+    writeTabs: ["technical/technicy"],
+  },
   // Szanse sprzedaży (lejek). Pulpit czyta tę samą listę, ale zapisuje wyłącznie
   // właściciel klucza „handlowy/leady".
+  // Wąska wyszukiwarka szans do pickerów (id, tytuł, etap, klient, handlowiec —
+  // bez wartości szans i ofert). Kalendarz handlowy, Aktywności i Kontakty
+  // podpinają szansę, choć nie mają listy szans. PRZED "/leads".
+  // docs/AUDYT-UPRAWNIEN-B.md #4, #7.
+  {
+    prefix: "/leads/pick",
+    tabs: [
+      "handlowy/leady",
+      "handlowy/pulpit",
+      "handlowy/kalendarz",
+      "handlowy/aktywnosci",
+      "handlowy/kontakty",
+    ],
+    writeTabs: [],
+  },
   { prefix: "/leads", tabs: ["handlowy/leady", "handlowy/pulpit"], writeTabs: ["handlowy/leady"] },
   // Osoby kontaktowe: własna zakładka, ale kartoteki kontrahenta i obiektu też je
   // pokazują. Zapis — z Kontaktów albo z Leadów (kontakt zakłada się przy szansie).
@@ -268,11 +348,13 @@ const API_TAB_MAP: { prefix: string; tabs: string[]; writeTabs?: string[] }[] = 
     tabs: ["handlowy/kontakty", "handlowy/leady", "contractors", "objects"],
     writeTabs: ["handlowy/kontakty", "handlowy/leady"],
   },
-  // Handlowcy: własna zakładka, ale listę czytają też formularze kontrahenta
-  // i obiektu oraz cały moduł handlowy (filtr „Moje”, przypisania w kalendarzu).
-  // Zapis (stawki, prowizje, przypisania) — tylko z „handlowcy".
+  // Handlowcy — słownik nazwisk (id, imię, nazwisko, active, userId) dla
+  // formularzy kontrahenta i obiektu, modułu handlowego, zleceń i ofert. Pełna
+  // lista niesie prowizje, koszt własny i agregaty portfela (dane z poziomu
+  // „analityka/handlowcy”), więc zostaje wyłącznie przy „handlowcy”.
+  // PRZED "/salespeople". docs/AUDYT-UPRAWNIEN-B.md #3, A #7, #14.
   {
-    prefix: "/salespeople",
+    prefix: "/salespeople/catalog",
     tabs: [
       "handlowcy",
       "contractors",
@@ -281,14 +363,21 @@ const API_TAB_MAP: { prefix: string; tabs: string[]; writeTabs?: string[] }[] = 
       "handlowy/kalendarz",
       "handlowy/pulpit",
       "handlowy/aktywnosci",
+      "orders",
+      "technical/oferty",
     ],
     writeTabs: ["handlowcy"],
   },
-  // Spółki: własna zakładka; słownik czytają też formularz obiektu i kadry
-  // (umowa/biuro wybierają spółkę z listy). Zapis — tylko z „spolki".
+  // Zapis (stawki, prowizje, przypisania) — tylko z „handlowcy".
+  { prefix: "/salespeople", tabs: ["handlowcy"], writeTabs: ["handlowcy"] },
+  // Spółki: własna zakładka; słownik czytają też formularz obiektu, wszystkie
+  // podzakładki Kadr (słowniki ładowane razem z pracownikami), Oferty (stopka
+  // z NIP-em na wydruku) i Kontrahenci (filtr „Spółka”). To dane WŁASNYCH
+  // spółek (NIP, adres, narzuty składek) — bez danych osobowych i bez kwot
+  // wypłat, więc szeroki odczyt jest bezpieczny. Zapis — tylko z „spolki".
   {
     prefix: "/companies",
-    tabs: ["spolki", "objects", "kadry/wynagrodzenia", "kadry/pracownicy"],
+    tabs: ["spolki", "objects", ...HR_TABS, "technical/oferty", "contractors"],
     writeTabs: ["spolki"],
   },
   // Import raportu obiektów nadpisuje CAŁY rejestr — zostaje wyłącznie przy

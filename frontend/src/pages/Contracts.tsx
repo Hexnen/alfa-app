@@ -38,7 +38,7 @@ import {
 } from "lucide-react";
 import {
   getContracts,
-  getObjects,
+  getObjectCatalog,
   getContractorCatalog,
   createContract,
   updateContract,
@@ -52,7 +52,7 @@ import {
   type ContractWithDetails,
   type Contract,
   type ContractInput,
-  type ObjectWithContractor,
+  type ObjectCatalogItem,
 } from "@/lib/api";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn, contractStatusLabels, formatCurrency, formatDate } from "@/lib/utils";
@@ -107,7 +107,7 @@ function ContractsRegisterPanel() {
   const { canEdit } = usePerms();
   const editable = canEdit("contracts");
   const [contracts, setContracts] = useState<ContractWithDetails[]>([]);
-  const [objects, setObjects] = useState<ObjectWithContractor[]>([]);
+  const [objects, setObjects] = useState<ObjectCatalogItem[]>([]);
   const [contractors, setContractors] = useState<ContractorCatalogEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [summary, setSummary] = useState({ total: 0, value: 0, withValue: 0 });
@@ -267,8 +267,10 @@ function ContractsRegisterPanel() {
 
   const loadObjects = useCallback(async () => {
     try {
-      const res = await getObjects({ pageSize: 1000 });
-      setObjects(res.data);
+      // Wąski katalog (bez kwot) — otwarty dla klucza `contracts`; pełne
+      // `/objects` wymaga klucza Obiekty (docs/AUDYT-UPRAWNIEN-A.md #4).
+      const res = await getObjectCatalog();
+      setObjects(res.data ?? []);
     } catch (error) {
       console.error("Error loading objects:", error);
     }

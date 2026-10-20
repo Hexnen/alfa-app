@@ -69,7 +69,7 @@ import {
   type OfferPackageMode,
   type OfferSectionCategory,
   type Service,
-  type WarehouseItem,
+  type OfferCatalogItem,
 } from "@/lib/api";
 import { OfferItemPicker } from "./OfferItemPicker";
 import { ChoiceButton, ValueChip } from "./offersUi";
@@ -84,7 +84,7 @@ import {
 interface PackageEditorProps {
   /** Pakiet do edycji; null = nowy. */
   pkg: OfferPackageDetail | null;
-  warehouseItems: WarehouseItem[];
+  warehouseItems: OfferCatalogItem[];
   services: Service[];
   onSubmit: (data: OfferPackageInput) => Promise<void>;
   onBack: () => void;

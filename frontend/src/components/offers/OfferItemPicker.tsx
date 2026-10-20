@@ -10,7 +10,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Package, Wrench } from "lucide-react";
 import { Input } from "@/components/ui/input";
-import type { Service, WarehouseItem } from "@/lib/api";
+import type { Service, OfferCatalogItem } from "@/lib/api";
 import { fmtPln, fmtQty } from "./offersShared";
 
 export interface PickedItem {
@@ -22,7 +22,7 @@ export interface PickedItem {
 }
 
 interface OfferItemPickerProps {
-  items: WarehouseItem[];
+  items: OfferCatalogItem[];
   services: Service[];
   /** Stany magazynowe (suma po magazynach) — podpowiedź „na stanie N". */
   stockByItem: Map<number, number>;

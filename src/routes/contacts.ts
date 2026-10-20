@@ -19,6 +19,8 @@ import { Hono, type Context } from "hono";
 import { and, asc, desc, eq, inArray, like, ne, or, sql, type SQL } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
 import { getUser } from "../middleware/auth.js";
+import { canView } from "../lib/auth/permissions.js";
+import { viewableDepartments } from "../lib/calendar-scope.js";
 import { ApiError } from "../lib/calendar-labels.js";
 import { logActivity } from "../lib/activity-log.js";
 import { loadEvents } from "../lib/calendar-queries.js";
@@ -197,14 +199,30 @@ app.get("/:id{[0-9]+}", async (c) => {
     const id = idParam(c);
     const row = db.select().from(schema.contacts).where(eq(schema.contacts.id, id)).get();
     if (!row) throw new ApiError(404, "Kontakt nie istnieje");
-    const eventIds = db
-      .select({ id: schema.calendarEvents.id })
-      .from(schema.calendarEvents)
-      .where(and(eq(schema.calendarEvents.contactId, id), sql`${schema.calendarEvents.deletedAt} is null`))
-      .orderBy(desc(schema.calendarEvents.startAt))
-      .limit(50)
-      .all()
-      .map((r) => r.id);
+    // Wydarzenia z tą osobą — tylko z działów, które użytkownik ogląda w
+    // kalendarzu, plus handlowe dla właściciela Kontaktów (historia rozmów
+    // z osobą jest częścią karty kontaktu). Kartoteki kontrahenta/obiektu też
+    // czytają tę trasę, a nie mogą przy okazji dostać grafiku techników.
+    // docs/AUDYT-UPRAWNIEN-B.md #6.
+    const user = getUser(c);
+    const departments = new Set<string>(viewableDepartments(user));
+    if (canView(user, "handlowy/kontakty")) departments.add("handlowy");
+    const eventIds = departments.size
+      ? db
+          .select({ id: schema.calendarEvents.id })
+          .from(schema.calendarEvents)
+          .where(
+            and(
+              eq(schema.calendarEvents.contactId, id),
+              sql`${schema.calendarEvents.deletedAt} is null`,
+              inArray(schema.calendarEvents.department, [...departments] as ("technical" | "handlowy")[])
+            )
+          )
+          .orderBy(desc(schema.calendarEvents.startAt))
+          .limit(50)
+          .all()
+          .map((r) => r.id)
+      : [];
     const events = eventIds.length ? loadEvents(db, eventIds) : [];
     return c.json({ success: true, data: { ...withNames([row])[0], events } });
   } catch (error) {

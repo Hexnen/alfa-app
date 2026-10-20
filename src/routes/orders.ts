@@ -22,6 +22,7 @@ import {
 import { sendMail } from "../services/mail-sender.js";
 import { logActivity } from "../lib/activity-log.js";
 import { getUser } from "../middleware/auth.js";
+import { readObjectServices } from "../lib/object-services.js";
 
 const app = new Hono();
 
@@ -254,6 +255,44 @@ app.get("/", async (c) => {
       cancelled: statusRows[0].cancelled ?? 0,
     },
   });
+});
+
+/*
+ * Słowniki formularza zlecenia dla kogoś, kto ma klucz „orders”, ale NIE ma
+ * „objects” (pełne `/objects` i `/contractors/:id/objects` niosą kwoty
+ * abonamentów, koszty i wartości umów — tam kluczy nie dopisujemy).
+ * Obie trasy MUSZĄ stać przed `GET /:id`.
+ */
+
+/** Obiekty płatnika do wyboru w formularzu: id, nazwa, adres, status. */
+app.get("/payer-objects/:contractorId", (c) => {
+  const contractorId = Number(c.req.param("contractorId"));
+  if (!Number.isInteger(contractorId) || contractorId <= 0) {
+    return c.json<ApiResponse<null>>({ success: false, error: "Nieprawidłowy kontrahent" }, 400);
+  }
+  const rows = db
+    .select({
+      id: schema.objects.id,
+      name: schema.objects.name,
+      address: schema.objects.address,
+      city: schema.objects.city,
+      status: schema.objects.status,
+      contractorId: schema.objects.contractorId,
+    })
+    .from(schema.objects)
+    .where(eq(schema.objects.contractorId, contractorId))
+    .orderBy(asc(sql`lower(${schema.objects.name})`))
+    .all();
+  return c.json({ success: true, data: rows });
+});
+
+/** Okresy usług obiektu (podgląd tylko do odczytu w formularzu) — bez kwot. */
+app.get("/object-services/:objectId", (c) => {
+  const objectId = Number(c.req.param("objectId"));
+  if (!Number.isInteger(objectId) || objectId <= 0) {
+    return c.json<ApiResponse<null>>({ success: false, error: "Nieprawidłowy obiekt" }, 400);
+  }
+  return c.json({ success: true, data: readObjectServices(db, objectId) });
 });
 
 // Get order by ID

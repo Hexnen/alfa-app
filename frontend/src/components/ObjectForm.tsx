@@ -64,11 +64,11 @@ import {
   adminCompanyApi,
   errStatus,
   getContractorCatalog,
-  getSalespeople,
+  getSalespeopleCatalog,
   salespersonName,
   getCompanies,
   type Company,
-  type Salesperson,
+  type SalespersonCatalogEntry,
   type ContractorCatalogEntry,
   type ObjectRecord,
   type ObjectInput,
@@ -234,7 +234,7 @@ export function ObjectForm({
 }: ObjectFormProps) {
   const [loading, setLoading] = useState(false);
   const [contractors, setContractors] = useState<ContractorCatalogEntry[]>([]);
-  const [salespeople, setSalespeople] = useState<Salesperson[]>([]);
+  const [salespeople, setSalespeople] = useState<SalespersonCatalogEntry[]>([]);
   const [companies, setCompanies] = useState<Company[]>([]);
   const [formData, setFormData] = useState<ObjectFormState>(() =>
     initialState(object, preselectedContractorId)
@@ -263,7 +263,7 @@ export function ObjectForm({
         .then((res) => setContractors(res.data ?? []))
         .catch(() => setContractors([]));
       // Archiwalnych nie proponujemy, ale zostawiamy tego, który już jest przypisany.
-      getSalespeople()
+      getSalespeopleCatalog()
         .then((res) => setSalespeople(res.data ?? []))
         .catch(() => setSalespeople([]));
       getCompanies()

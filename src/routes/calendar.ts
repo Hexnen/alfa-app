@@ -24,10 +24,11 @@ import { randomBytes } from "crypto";
 import { createReadStream, statSync } from "node:fs";
 import { Readable } from "node:stream";
 import { db, schema } from "../db/index.js";
-import { eq, and, desc, asc, isNull, inArray, sql, lt, gt, gte, ne } from "drizzle-orm";
+import { eq, and, or, desc, asc, isNull, inArray, sql, lt, gt, gte, ne } from "drizzle-orm";
 import { CALENDAR_DEPARTMENTS, CALENDAR_NOTE_MAX, type CalendarEventType, type CalendarEventStatus, type CalendarBilling, type CalendarDepartment, type User } from "../db/schema.js";
 import { getUser } from "../middleware/auth.js";
 import { describeRule } from "../lib/calendar-recurrence.js";
+import { pickProtocols, pickQuotes, pickRealizations } from "../lib/calendar-doc-pick.js";
 import {
   conflictEventIds,
   findSalespersonForUser,
@@ -43,6 +44,7 @@ import {
   asDepartment,
   assertEventAccess,
   canEditDepartment,
+  canViewDepartment,
   departmentsFromQuery,
   requestDepartments,
   viewableDepartments,
@@ -1100,6 +1102,103 @@ app.get("/objects/:objectId/events", (c) => {
     return c.json({ success: true, data: loadEvents(db, ids) });
   } catch (error) {
     return handleError(c, error, "pobierania wydarzeń obiektu");
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /pick/protocols|quotes|realizations — pickery dokumentów (kalendarz techniczny)
+// ---------------------------------------------------------------------------
+
+/** Pickery dokumentów są wyłącznie w dialogu kalendarza technicznego. */
+function assertTechnicalView(c: Context) {
+  if (!canViewDepartment(getUser(c), "technical")) {
+    throw new ApiError(403, "Brak dostępu do kalendarza technicznego");
+  }
+}
+
+app.get("/pick/protocols", (c) => {
+  try {
+    assertTechnicalView(c);
+    return c.json({ success: true, data: pickProtocols(c.req.query("q"), c.req.query("limit")) });
+  } catch (error) {
+    return handleError(c, error, "pobierania protokołów");
+  }
+});
+
+app.get("/pick/quotes", (c) => {
+  try {
+    assertTechnicalView(c);
+    return c.json({ success: true, data: pickQuotes(c.req.query("q"), c.req.query("limit")) });
+  } catch (error) {
+    return handleError(c, error, "pobierania wycen");
+  }
+});
+
+app.get("/pick/realizations", (c) => {
+  try {
+    assertTechnicalView(c);
+    const y = Number(c.req.query("year"));
+    const m = Number(c.req.query("month"));
+    if (!Number.isInteger(y) || !Number.isInteger(m) || m < 1 || m > 12 || y < 2000 || y > 2100) {
+      throw new ApiError(400, "Wymagane parametry: year, month");
+    }
+    return c.json({ success: true, data: pickRealizations(y, m) });
+  } catch (error) {
+    return handleError(c, error, "pobierania realizacji");
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /pick/contacts?leadId= — osoby kontaktowe szansy do pickera w dialogu
+// ---------------------------------------------------------------------------
+
+/**
+ * Kontakty szansy ORAZ jej kontrahenta — dokładnie zbiór, który backend przyjmuje
+ * w `contactId` (src/lib/calendar-mutations.ts). Osobna trasa pod `/calendar`,
+ * bo `/contacts` jest zamknięty dla `handlowy/kalendarz|pulpit|aktywnosci`, a jego
+ * otwarcie wystawiłoby całą bazę kontaktów (docs/AUDYT-UPRAWNIEN-B.md #5).
+ * Tylko dla kogoś, kto widzi kalendarz handlowy; pola bez notatek i metadanych.
+ */
+app.get("/pick/contacts", (c) => {
+  try {
+    const user = getUser(c);
+    if (!canViewDepartment(user, "handlowy")) {
+      throw new ApiError(403, "Brak dostępu do kalendarza handlowego");
+    }
+    const leadId = Number(c.req.query("leadId"));
+    if (!Number.isInteger(leadId) || leadId <= 0) throw new ApiError(400, "Nieprawidłowe id szansy");
+    const lead = db
+      .select({ id: schema.leads.id, contractorId: schema.leads.contractorId })
+      .from(schema.leads)
+      .where(and(eq(schema.leads.id, leadId), isNull(schema.leads.deletedAt)))
+      .get();
+    if (!lead) throw new ApiError(404, "Szansa nie istnieje");
+    const k = schema.contacts;
+    const rows = db
+      .select({
+        id: k.id,
+        firstName: k.firstName,
+        lastName: k.lastName,
+        role: k.role,
+        phone: k.phone,
+        email: k.email,
+        isPrimary: k.isPrimary,
+        active: k.active,
+        leadId: k.leadId,
+        contractorId: k.contractorId,
+      })
+      .from(k)
+      .where(
+        lead.contractorId != null
+          ? or(eq(k.leadId, leadId), eq(k.contractorId, lead.contractorId))
+          : eq(k.leadId, leadId)
+      )
+      .orderBy(desc(k.isPrimary), asc(k.lastName), asc(k.firstName))
+      .all()
+      .map((r) => ({ ...r, fullName: `${r.firstName} ${r.lastName}`.trim() }));
+    return c.json({ success: true, data: rows });
+  } catch (error) {
+    return handleError(c, error, "pobierania kontaktów szansy");
   }
 });
 

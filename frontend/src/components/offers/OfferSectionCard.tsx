@@ -19,7 +19,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { tip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import type { OfferItem, OfferSection, Service, WarehouseItem } from "@/lib/api";
+import type { OfferItem, OfferSection, Service, OfferCatalogItem } from "@/lib/api";
 import { pillClass } from "@/lib/calendar-labels";
 import {
   PRICE_STALE_MONTHS,
@@ -45,7 +45,7 @@ interface OfferSectionCardProps {
   editable: boolean;
   showCosts: boolean;
   minMarginPct: number;
-  warehouseItems: WarehouseItem[];
+  warehouseItems: OfferCatalogItem[];
   services: Service[];
   stockByItem: Map<number, number>;
   /** Etykiety parametrów pakietu, z którego powstała sekcja („cameras" → „Liczba kamer"). */

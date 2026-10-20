@@ -313,6 +313,21 @@ app.get("/", async (c) => {
   });
 });
 
+/**
+ * Imiona i nazwiska aktywnych techników — podpowiedzi pól „Opiekun/Wykonawca”
+ * w formularzu realizacji dla kogoś bez klucza Techników/Kalendarza (pełne
+ * `/technicians` niesie telefony, e-maile, NIP). docs/AUDYT-UPRAWNIEN-A.md #16.
+ */
+app.get("/technician-names", (c) => {
+  const rows = db
+    .select({ firstName: schema.technicians.firstName, lastName: schema.technicians.lastName })
+    .from(schema.technicians)
+    .where(eq(schema.technicians.active, true))
+    .orderBy(asc(schema.technicians.lastName), asc(schema.technicians.firstName))
+    .all();
+  return c.json({ success: true, data: rows.map((t) => `${t.firstName} ${t.lastName}`.trim()) });
+});
+
 // Podsumowanie miesiąca + tabela roczna przychód/strata
 // (odpowiednik bloków podsumowań z arkusza)
 app.get("/summary", async (c) => {

@@ -13,7 +13,8 @@
  * kreska zamiast zera.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { useSearchParams } from "react-router-dom";
+import { PermLink } from "@/components/PermLink";
 import {
   Archive,
   ArchiveRestore,
@@ -1122,9 +1123,9 @@ function TermsPanel({
                             <span className="text-muted-foreground">↳</span>
                           ) : (
                             <>
-                              <Link to={`/objects/${t.objectId}`} className="font-medium text-primary hover:underline">
+                              <PermLink to={`/objects/${t.objectId}`} tab="objects" className="font-medium text-primary hover:underline">
                                 {t.objectName}
-                              </Link>
+                              </PermLink>
                               <span className="block text-xs text-muted-foreground">
                                 {[t.objectCity, t.contractorName].filter(Boolean).join(" · ") || DASH}
                               </span>
@@ -1480,9 +1481,9 @@ function InterventionsPanel({
                     <tr key={r.id} className="border-b last:border-0 hover:bg-muted/50" data-testid="interwencje-podjazdy-wiersz">
                       <td className="px-2 py-2 whitespace-nowrap tabular-nums">{fmtHappenedAt(r.happenedAt)}</td>
                       <td className="px-2 py-2">
-                        <Link to={`/objects/${r.objectId}`} className="text-primary hover:underline">
+                        <PermLink to={`/objects/${r.objectId}`} tab="objects" className="text-primary hover:underline">
                           {r.objectName}
-                        </Link>
+                        </PermLink>
                         {r.objectCity && <span className="block text-xs text-muted-foreground">{r.objectCity}</span>}
                       </td>
                       <td className="px-2 py-2">{r.companyName}</td>

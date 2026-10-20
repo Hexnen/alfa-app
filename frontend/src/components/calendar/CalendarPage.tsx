@@ -120,7 +120,7 @@ import {
   type CalendarFilterSetFilters,
   type CalendarSeriesScope,
   type CompanyTravel,
-  type Lead,
+  type LeadPickItem,
   type Technician,
   type WeatherBrief,
   WEATHER_BATCH_MAX,
@@ -774,7 +774,7 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
   const [realizationFilter, setRealizationFilter] = useState<RealizationFilterValue>(() => stored.realization);
   const [assignees, setAssignees] = useState<AssigneeRef[]>([]);
   /** Filtr szansy sprzedaży (tylko dział handlowy). */
-  const [leadFilter, setLeadFilter] = useState<Lead | null>(null);
+  const [leadFilter, setLeadFilter] = useState<LeadPickItem | null>(null);
   /**
    * „Moje / Wszyscy” (dział handlowy). „Moje” to po prostu filtr przypisanych
    * ustawiony na handlowca zalogowanego konta — backend i tak zawęża wierszowo.
@@ -2482,14 +2482,16 @@ export function CalendarPage({ config: cfg }: CalendarPageProps) {
   const loadActivity = useCallback(async () => {
     setActivityLoading(true);
     try {
-      const res = await activityApi.recent(50);
+      // Feed tego kalendarza: handlowy widzi aktywność handlową, techniczny techniczną
+      // (backend i tak odsiewa działy spoza wglądu, a inne moduły w ogóle).
+      const res = await activityApi.recent(50, cfg.department);
       setActivity(res.data || []);
     } catch (err) {
       notifyError(err, "Błąd wczytywania aktywności", () => void loadActivity());
     } finally {
       setActivityLoading(false);
     }
-  }, [notifyError]);
+  }, [notifyError, cfg.department]);
 
   useEffect(() => {
     if (activityOpen) loadActivity();
@@ -5137,7 +5139,7 @@ function IcsDialog({ open, onClose, notify }: { open: boolean; onClose: () => vo
 
 /**
  * Filtr szansy sprzedaży (dział handlowy) — prosty, wyszukujący select nad
- * `leadsApi.list`. Docelowo wymienny na `components/sales/LeadPicker` (P2.A);
+ * `leadsApi.pick` (wąski kształt — działa też z samym `handlowy/kalendarz`). Docelowo wymienny na `components/sales/LeadPicker` (P2.A);
  * tutaj świadomie minimalny, żeby fala 1 nie kolidowała z paczką P1.B.
  */
 function LeadFilter({
@@ -5145,13 +5147,13 @@ function LeadFilter({
   onChange,
   inline,
 }: {
-  value: Lead | null;
-  onChange: (lead: Lead | null) => void;
+  value: LeadPickItem | null;
+  onChange: (lead: LeadPickItem | null) => void;
   inline?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
-  const [items, setItems] = useState<Lead[]>([]);
+  const [items, setItems] = useState<LeadPickItem[]>([]);
   const [loading, setLoading] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -5185,9 +5187,9 @@ function LeadFilter({
     const t = window.setTimeout(() => {
       setLoading(true);
       leadsApi
-        .list({ q: q.trim() || undefined, pageSize: 20, sort: "lastActivityAt", dir: "desc" })
+        .pick({ q: q.trim() || undefined, limit: 20 })
         .then((res) => {
-          if (!cancelled) setItems(res.data?.items ?? []);
+          if (!cancelled) setItems(res.data ?? []);
         })
         .catch(() => {
           if (!cancelled) setItems([]);

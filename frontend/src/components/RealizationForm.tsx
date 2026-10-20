@@ -23,10 +23,10 @@ import {
 } from "@/lib/calendar-labels";
 import { tip } from "./ui/tooltip";
 import { cn } from "@/lib/utils";
-import { getObjects } from "@/lib/api";
+import { getObjectCatalog } from "@/lib/api";
 import type {
   AutofillSuggestion,
-  ObjectWithContractor,
+  ObjectCatalogItem,
   Realization,
   RealizationInput,
 } from "@/lib/api";
@@ -62,11 +62,11 @@ function ObjectPicker({
   onPick,
   onClear,
 }: {
-  objects: ObjectWithContractor[];
+  objects: ObjectCatalogItem[];
   loading: boolean;
   value: number | null;
   fallbackName: string;
-  onPick: (o: ObjectWithContractor) => void;
+  onPick: (o: ObjectCatalogItem) => void;
   onClear: () => void;
 }) {
   const [q, setQ] = useState("");
@@ -95,7 +95,7 @@ function ObjectPicker({
     return () => document.removeEventListener("mousedown", onDoc);
   }, [openList]);
 
-  const describe = (o: ObjectWithContractor) =>
+  const describe = (o: ObjectCatalogItem) =>
     [o.city, o.contractor?.name].filter(Boolean).join(" · ");
 
   if (value != null) {
@@ -202,7 +202,7 @@ export function RealizationForm({
   /** Sugestie automatu (po zastosowaniu) — źródło adnotacji pod polami. */
   const [hints, setHints] = useState<Partial<Record<string, AutofillSuggestion>>>({});
   /** Kartoteka obiektów do wyboru klucza — ten sam zaciąg, co w dialogu kalendarza. */
-  const [objects, setObjects] = useState<ObjectWithContractor[]>([]);
+  const [objects, setObjects] = useState<ObjectCatalogItem[]>([]);
   const [objectsLoading, setObjectsLoading] = useState(false);
   const [formData, setFormData] = useState<RealizationInput>({
     date: realization?.date || defaultDate,
@@ -231,7 +231,8 @@ export function RealizationForm({
     if (!open) return;
     let alive = true;
     setObjectsLoading(true);
-    getObjects({ pageSize: 1000 })
+    // Wąski katalog obiektów (bez kwot) — otwarty dla `technical/realizacje`.
+    getObjectCatalog()
       .then((res) => {
         if (alive) setObjects(res.data ?? []);
       })

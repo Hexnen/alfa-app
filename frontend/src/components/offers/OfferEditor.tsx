@@ -53,9 +53,9 @@ import {
   type OfferSectionCategory,
   type OfferText,
   type OfferTextBlock,
-  type Salesperson,
+  type SalespersonCatalogEntry,
   type Service,
-  type WarehouseItem,
+  type OfferCatalogItem,
 } from "@/lib/api";
 import { pillClass } from "@/lib/calendar-labels";
 import { hasClientContent, printOffer } from "@/lib/offerPrint";
@@ -90,9 +90,9 @@ interface OfferEditorProps {
    * a brak uprawnienia trafiłby w ciszę zamiast do bannera „nie masz dostępu".
    */
   texts: OfferText[];
-  warehouseItems: WarehouseItem[];
+  warehouseItems: OfferCatalogItem[];
   services: Service[];
-  salespeople: Salesperson[];
+  salespeople: SalespersonCatalogEntry[];
   companies: Company[];
   stockByItem: Map<number, number>;
   onChange: (next: OfferDetail) => void;

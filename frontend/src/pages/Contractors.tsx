@@ -42,11 +42,11 @@ import {
 import {
   getContractors,
   getObjects,
-  getSalespeople,
+  getSalespeopleCatalog,
   salespersonName,
   getCompanies,
   type Company,
-  type Salesperson,
+  type SalespersonCatalogEntry,
   createContractor,
   updateContractor,
   deleteContractor,
@@ -118,7 +118,7 @@ export function Contractors() {
 
   /** Zakładka: kontrahenci bieżący albo archiwalni (flaga `active`). */
   const [view, setView] = useState<"active" | "archived">("active");
-  const [salespeople, setSalespeople] = useState<Salesperson[]>([]);
+  const [salespeople, setSalespeople] = useState<SalespersonCatalogEntry[]>([]);
   const [companies, setCompanies] = useState<Company[]>([]);
   const [salespersonFilter, setSalespersonFilter] = useState<number | "none" | undefined>(undefined);
   const [companyFilter, setCompanyFilter] = useState<number | "none" | undefined>(undefined);
@@ -255,7 +255,7 @@ export function Contractors() {
   }, []);
 
   useEffect(() => {
-    getSalespeople()
+    getSalespeopleCatalog()
       .then((res) => setSalespeople(res.data ?? []))
       .catch(() => setSalespeople([]));
     getCompanies()
@@ -443,18 +443,23 @@ export function Contractors() {
           </SelectContent>
         </Select>
 
-        <label
-          className="flex cursor-pointer items-center gap-2 text-sm text-muted-foreground"
-          htmlFor="contractors-expanded"
-        >
-          <Switch
-            id="contractors-expanded"
-            checked={expanded}
-            onChange={setExpanded}
-            label="Pokaż obiekty i abonamenty"
-          />
-          <span>Widok rozwinięty</span>
-        </label>
+        {/* Rozwinięcie pokazuje obiekty z kwotami abonamentów, czyli pełne
+            `/objects` (klucz Obiekty). Bez niego każdy wiersz mówiłby mylnie
+            „Brak obiektów u tego kontrahenta”, więc przełącznika nie ma. */}
+        {canView("objects") && (
+          <label
+            className="flex cursor-pointer items-center gap-2 text-sm text-muted-foreground"
+            htmlFor="contractors-expanded"
+          >
+            <Switch
+              id="contractors-expanded"
+              checked={expanded}
+              onChange={setExpanded}
+              label="Pokaż obiekty i abonamenty"
+            />
+            <span>Widok rozwinięty</span>
+          </label>
+        )}
 
         {editable && (
           <Button className="ml-auto" onClick={() => setFormOpen(true)}>

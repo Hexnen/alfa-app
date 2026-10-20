@@ -31,11 +31,11 @@ import {
 import {
   getObjects,
   getContractorCatalog,
-  getSalespeople,
+  getSalespeopleCatalog,
   salespersonName,
   getCompanies,
   type Company,
-  type Salesperson,
+  type SalespersonCatalogEntry,
   createObject,
   updateObject,
   deleteObject,
@@ -128,7 +128,7 @@ export function Objects() {
     endingRevenue: 0,
   });
   const [contractors, setContractors] = useState<ContractorCatalogEntry[]>([]);
-  const [salespeople, setSalespeople] = useState<Salesperson[]>([]);
+  const [salespeople, setSalespeople] = useState<SalespersonCatalogEntry[]>([]);
   const [companies, setCompanies] = useState<Company[]>([]);
   const [loading, setLoading] = useState(true);
   /** Zakładki listy + liczniki z API (liczone przy bieżących filtrach). */
@@ -202,7 +202,7 @@ export function Objects() {
     getContractorCatalog()
       .then((res) => setContractors(res.data ?? []))
       .catch(() => setContractors([]));
-    getSalespeople()
+    getSalespeopleCatalog()
       .then((res) => setSalespeople(res.data ?? []))
       .catch(() => setSalespeople([]));
     getCompanies()

@@ -9,6 +9,9 @@
  */
 import { Users } from "lucide-react";
 import { type Contact } from "@/lib/api";
+
+/** Tyle pól wystarczy pickerowi — pełny `Contact` albo skrót z `/calendar/pick/contacts`. */
+type ContactOption = Pick<Contact, "id" | "firstName" | "lastName" | "fullName" | "role" | "active">;
 import { cn } from "@/lib/utils";
 
 export function ContactPicker({
@@ -19,7 +22,7 @@ export function ContactPicker({
   disabled,
   emptyLabel = "Bez osoby kontaktowej",
 }: {
-  contacts: Contact[];
+  contacts: ContactOption[];
   value: number | null;
   onChange: (id: number | null) => void;
   inputId: string;

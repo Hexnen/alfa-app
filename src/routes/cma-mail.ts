@@ -3,6 +3,8 @@ import { and, asc, desc, eq, like, or, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
 import type { ApiResponse } from "../types/index.js";
+import { getUser } from "../middleware/auth.js";
+import { canEdit } from "../lib/auth/permissions.js";
 import {
   getSettings,
   saveSettings,
@@ -560,6 +562,16 @@ app.post("/send-issues/:reportId", async (c) => {
     if (body && typeof body.to === "string") to = body.to;
   } catch {
     // body is optional
+  }
+
+  // Wysyłkę z raportu robi też `cma/raporty: edit` (API_TAB_MAP), ale wtedy
+  // WYŁĄCZNIE do adresatów z ustawień. Własny adres `to` to decyzja z poziomu
+  // ustawień poczty — inaczej raport dałoby się wysłać dokądkolwiek.
+  if (to && to.trim() && !canEdit(getUser(c), "cma/ustawienia")) {
+    return c.json<ApiResponse<null>>(
+      { success: false, error: "Własny adres odbiorcy wymaga prawa edycji ustawień CMA" },
+      403
+    );
   }
 
   try {

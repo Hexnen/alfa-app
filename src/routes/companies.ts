@@ -5,6 +5,8 @@ import { asc, eq, sql } from "drizzle-orm";
 import type { ApiResponse } from "../types/index.js";
 import { normalizeNIP, validateNIP } from "../utils/nip.js";
 import { isMfError, lookupCompanyByNip } from "../lib/mf-whitelist.js";
+import { getUser } from "../middleware/auth.js";
+import { canView } from "../lib/auth/permissions.js";
 
 const app = new Hono();
 
@@ -168,12 +170,17 @@ app.get("/", async (c) => {
     .from(schema.companies)
     .orderBy(asc(sql`lower(${schema.companies.name})`));
 
+  // Słownik czytają też Kadry, Oferty i Kontrahenci (API_TAB_MAP). Suma
+  // miesięcznych wartości obiektów to dane sprzedażowe — zostaje tylko dla
+  // tych, którzy i tak widzą kwoty obiektów (Spółki, Obiekty).
+  const user = getUser(c);
+  const seesValues = canView(user, "spolki") || canView(user, "objects");
   const data = rows
     .filter((r) => !onlyActive || r.company.active)
     .map((r) => ({
       ...r.company,
       objectsCount: r.objectsCount ?? 0,
-      objectsMonthlyValue: r.objectsMonthlyValue ?? 0,
+      ...(seesValues ? { objectsMonthlyValue: r.objectsMonthlyValue ?? 0 } : {}),
       contractsCount: r.contractsCount ?? 0,
     }));
 

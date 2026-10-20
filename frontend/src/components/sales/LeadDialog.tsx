@@ -44,7 +44,7 @@ import { Section } from "@/components/ui/section";
 import { LocationPicker } from "@/components/LocationPicker";
 import {
   getContractorCatalog,
-  getSalespeople,
+  getSalespeopleCatalog,
   leadsApi,
   salespersonName,
   type ContractorCatalogEntry,
@@ -53,7 +53,7 @@ import {
   type LeadService,
   type LeadSource,
   type LeadStage,
-  type Salesperson,
+  type SalespersonCatalogEntry,
 } from "@/lib/api";
 import { parseCoords } from "@/lib/maps-url";
 import { OBJECT_KINDS } from "@/lib/orderIntakeSteps";
@@ -132,7 +132,7 @@ export function LeadDialog({
   const [mapOpen, setMapOpen] = useState(false);
 
   const [catalog, setCatalog] = useState<ContractorCatalogEntry[]>([]);
-  const [salespeople, setSalespeople] = useState<Salesperson[]>([]);
+  const [salespeople, setSalespeople] = useState<SalespersonCatalogEntry[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -141,7 +141,7 @@ export function LeadDialog({
     getContractorCatalog()
       .then((res) => setCatalog(res.data ?? []))
       .catch(() => setCatalog([]));
-    getSalespeople(true)
+    getSalespeopleCatalog(true)
       .then((res) => setSalespeople(res.data ?? []))
       .catch(() => setSalespeople([]));
   }, [open]);

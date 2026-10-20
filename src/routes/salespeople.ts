@@ -150,6 +150,30 @@ function assignmentsOf(id: number) {
   return { contractors: contractors?.count ?? 0, objects: objects?.count ?? 0 };
 }
 
+/**
+ * Wąski słownik handlowców do selectów i filtrów (id, imię, nazwisko, active,
+ * userId) — BEZ prowizji, kosztu własnego, kontaktu i agregatów portfela.
+ * Otwarty w API_TAB_MAP dla formularzy kontrahenta/obiektu, modułu handlowego,
+ * zleceń i ofert; pełna lista `GET /` zostaje wyłącznie przy kluczu „handlowcy”
+ * (docs/AUDYT-UPRAWNIEN-B.md #3). `?active=true` — tylko bieżący.
+ */
+app.get("/catalog", (c) => {
+  const onlyActive = c.req.query("active") === "true";
+  const rows = db
+    .select({
+      id: schema.salespeople.id,
+      firstName: schema.salespeople.firstName,
+      lastName: schema.salespeople.lastName,
+      active: schema.salespeople.active,
+      userId: schema.salespeople.userId,
+    })
+    .from(schema.salespeople)
+    .where(onlyActive ? eq(schema.salespeople.active, true) : undefined)
+    .orderBy(asc(sql`lower(${schema.salespeople.lastName})`), asc(schema.salespeople.firstName))
+    .all();
+  return c.json({ success: true, data: rows });
+});
+
 // Lista handlowców (domyślnie wszyscy; ?active=true tylko bieżący)
 app.get("/", async (c) => {
   const onlyActive = c.req.query("active") === "true";

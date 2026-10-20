@@ -12,7 +12,7 @@
  * pola `assignees` — zamiast tego cztery helpery poniżej tłumaczą nazwę pola.
  */
 import {
-  getSalespeople,
+  getSalespeopleCatalog,
   getTechnicians,
   type CalendarDepartment,
   type CalendarEvent,
@@ -178,7 +178,7 @@ export const SALES_CALENDAR: CalendarConfig = {
     idsField: "salespersonIds",
     queryParam: "salespersonId",
     conflictParam: "salespersonIds",
-    load: async () => mapAssignees((await getSalespeople(true)).data ?? []),
+    load: async () => mapAssignees((await getSalespeopleCatalog(true)).data ?? []),
     labels: {
       one: "Handlowiec",
       many: "Handlowcy",

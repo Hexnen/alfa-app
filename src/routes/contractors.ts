@@ -5,6 +5,8 @@ import type { SQL } from "drizzle-orm";
 import type { ContractorInput, ApiResponse } from "../types/index.js";
 import { normalizeNIP, validateNIP } from "../utils/nip.js";
 import { monthlyValueOf } from "../lib/abonament-split.js";
+import { getUser } from "../middleware/auth.js";
+import { canView } from "../lib/auth/permissions.js";
 
 const app = new Hono();
 
@@ -41,6 +43,27 @@ app.get("/by-nip/:nip", async (c) => {
     });
   }
   
+  // Trasę czyta też formularz zlecenia (klucz „orders”, API_TAB_MAP). Kto nie
+  // widzi kartoteki kontrahentów, dostaje tylko dane rejestrowe potrzebne do
+  // rozpoznania płatnika — bez notatek, opiekuna, kontaktów i ustawień.
+  if (!canView(getUser(c), "contractors")) {
+    const k = contractor[0];
+    return c.json({
+      success: true,
+      data: {
+        id: k.id,
+        name: k.name,
+        nip: k.nip,
+        address: k.address,
+        city: k.city,
+        postalCode: k.postalCode,
+        active: k.active,
+        exists: true,
+        normalizedNip,
+      },
+    });
+  }
+
   return c.json<ApiResponse<typeof contractor[0] & { exists: boolean; normalizedNip: string }>>({
     success: true,
     data: {
@@ -310,6 +333,41 @@ app.get("/catalog", async (c) => {
     .from(schema.contractors)
     .orderBy(asc(sql`lower(${schema.contractors.name})`));
 
+  return c.json({ success: true, data: rows });
+});
+
+/**
+ * Wyszukiwarka kontrahentów do pickerów w dokumentach (Oferty, Protokoły,
+ * Wyceny — `ContractorPicker`). Tylko dane rejestrowe (nazwa, NIP, adres),
+ * bez agregatów kwot z `GET /` — dlatego ma własny, szerszy wpis w
+ * API_TAB_MAP (`/contractors/pick`). MUSI stać PRZED `GET /:id`.
+ */
+app.get("/pick", (c) => {
+  const q = (c.req.query("q") ?? "").trim();
+  const limit = Math.min(Math.max(Number(c.req.query("limit")) || 8, 1), 30);
+  if (q.length < 2) return c.json({ success: true, data: [] });
+  const pattern = `%${q.replace(/[%_\\]/g, (m) => `\\${m}`)}%`;
+  const digits = q.replace(/\D/g, "");
+  const conds: SQL[] = [
+    sql`${schema.contractors.name} LIKE ${pattern} ESCAPE '\\'`,
+    sql`${schema.contractors.city} LIKE ${pattern} ESCAPE '\\'`,
+  ];
+  if (digits.length >= 3) conds.push(like(schema.contractors.nip, `%${digits}%`));
+  const rows = db
+    .select({
+      id: schema.contractors.id,
+      name: schema.contractors.name,
+      nip: schema.contractors.nip,
+      address: schema.contractors.address,
+      city: schema.contractors.city,
+      postalCode: schema.contractors.postalCode,
+      active: schema.contractors.active,
+    })
+    .from(schema.contractors)
+    .where(or(...conds))
+    .orderBy(asc(sql`lower(${schema.contractors.name})`))
+    .limit(limit)
+    .all();
   return c.json({ success: true, data: rows });
 });
 

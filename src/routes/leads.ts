@@ -31,6 +31,7 @@ import {
   type User,
 } from "../db/schema.js";
 import { getUser } from "../middleware/auth.js";
+import { canSeeOfferCosts, redactOfferCosts } from "../lib/offer-costs.js";
 import { ApiError } from "../lib/calendar-labels.js";
 import { logActivity, logFieldDiffs, type DbOrTx } from "../lib/activity-log.js";
 import {
@@ -409,6 +410,63 @@ app.get("/", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /leads/pick — wąska wyszukiwarka szans do pickerów
+// ---------------------------------------------------------------------------
+
+/**
+ * Szanse do pickerów (kalendarz handlowy, dialog kontaktu, filtr szans) —
+ * otwarte w API_TAB_MAP także dla kluczy bez listy szans (`handlowy/kalendarz`,
+ * `handlowy/aktywnosci`, `handlowy/kontakty`; docs/AUDYT-UPRAWNIEN-B.md #4, #7).
+ * Dlatego zwraca WYŁĄCZNIE identyfikację: bez wartości szans (`estimated*`,
+ * `probability`), danych prospektu, notatek i ofert. Filtry jak lista
+ * (`q`, `includeClosed=1`, `salespersonId`), limit `?limit=` (max 50, dom. 10);
+ * `?id=` zwraca jedną szansę (dociągnięcie wybranej po id).
+ */
+app.get("/pick", async (c) => {
+  try {
+    const user = getUser(c);
+    const now = zonedNow();
+    const limit = Math.min(50, Math.max(1, parseInt(c.req.query("limit") || "10", 10) || 10));
+    let ids: number[];
+    const idRaw = c.req.query("id");
+    if (idRaw != null && idRaw !== "") {
+      const id = Number(idRaw);
+      if (!Number.isInteger(id) || id <= 0) throw new ApiError(400, "Nieprawidłowe id szansy");
+      ids = db
+        .select({ id: schema.leads.id })
+        .from(schema.leads)
+        .where(and(eq(schema.leads.id, id), isNull(schema.leads.deletedAt)))
+        .all()
+        .map((r) => r.id);
+    } else {
+      const { conditions, empty } = listFilters(c, user, now);
+      if (empty) return c.json({ success: true, data: [] });
+      ids = db
+        .select({ id: schema.leads.id })
+        .from(schema.leads)
+        .where(conditions.length ? and(...conditions) : undefined)
+        .orderBy(desc(schema.leads.lastActivityAt), desc(schema.leads.id))
+        .limit(limit)
+        .all()
+        .map((r) => r.id);
+    }
+    const data = loadLeads(db, ids, now).map((l) => ({
+      id: l.id,
+      title: l.title,
+      stage: l.stage,
+      clientLabel: l.clientLabel,
+      contractorId: l.contractorId,
+      objectId: l.objectId,
+      salespersonId: l.salespersonId,
+      salespersonName: l.salespersonName,
+    }));
+    return c.json({ success: true, data });
+  } catch (error) {
+    return handleError(c, error, "wyszukiwania szans");
+  }
+});
+
+// ---------------------------------------------------------------------------
 // GET /leads/board — kanban
 // ---------------------------------------------------------------------------
 
@@ -648,7 +706,9 @@ app.get("/:id{[0-9]+}", async (c) => {
       .map((r) => contactJson(r.contact, { contractorName: r.contractorName ?? null, leadTitle: lead.title }));
 
     // Oferty i zlecenia szansy: pełne wiersze (na karcie jest ich kilka, nie tysiące).
-    const offers = offerRows(id);
+    // Sumy ofert niosą koszty i marżę — te same pola, które /offers przycina bez
+    // klucza `technical/oferty-koszty` (docs/AUDYT-UPRAWNIEN-B.md #2).
+    const offers = canSeeOfferCosts(c) ? offerRows(id) : redactOfferCosts(offerRows(id));
     const orders = db
       .select()
       .from(schema.orders)

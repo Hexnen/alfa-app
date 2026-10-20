@@ -64,12 +64,12 @@ import type {
   Order,
   OrderInput,
   OrderSortKey,
-  Salesperson,
+  SalespersonCatalogEntry,
 } from "@/lib/api";
 import {
   getOrders,
   getContractorCatalog,
-  getSalespeople,
+  getSalespeopleCatalog,
   createOrder,
   updateOrder,
   deleteOrder,
@@ -128,7 +128,7 @@ export function Orders() {
   const [contractors, setContractors] = useState<ContractorCatalogEntry[]>([]);
   /** Filtr „Handlowiec” — słownik jest mały, więc ciągniemy go raz przy wejściu. */
   const [salespersonFilter, setSalespersonFilter] = useState<number | "none" | undefined>(undefined);
-  const [salespeople, setSalespeople] = useState<Salesperson[]>([]);
+  const [salespeople, setSalespeople] = useState<SalespersonCatalogEntry[]>([]);
 
   const [sort, setSort] = useState<OrderSortKey>("created");
   const [dir, setDir] = useState<"asc" | "desc">("desc");
@@ -177,7 +177,9 @@ export function Orders() {
       .catch(() => setContractors([]));
     // Brak uprawnienia do kartoteki handlowców nie może wywalić listy zleceń —
     // wtedy filtr po prostu nie ma czego pokazać (jak w module Ofert).
-    getSalespeople()
+    // Wąski słownik (same nazwiska) — klucz „orders” go otwiera, pełne
+    // `/salespeople` (prowizje, portfel) zostaje przy zakładce Handlowcy.
+    getSalespeopleCatalog()
       .then((res) => setSalespeople(res.data ?? []))
       .catch(() => setSalespeople([]));
   }, []);

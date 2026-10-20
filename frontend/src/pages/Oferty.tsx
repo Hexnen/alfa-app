@@ -37,11 +37,10 @@ import { ReadOnlyBanner } from "@/components/ReadOnlyBanner";
 import { tip } from "@/components/ui/tooltip";
 import {
   getCompanies,
-  getSalespeople,
+  getSalespeopleCatalog,
   offersApi,
   salespersonName,
   servicesApi,
-  warehouseApi,
   OFFER_KINDS,
   type Company,
   type OfferDetail,
@@ -51,10 +50,10 @@ import {
   type OfferPackageDetail,
   type OfferStatus,
   type OfferText,
-  type Salesperson,
+  type SalespersonCatalogEntry,
   type Service,
-  type StockEntry,
-  type WarehouseItem,
+  type OfferCatalogStock,
+  type OfferCatalogItem,
 } from "@/lib/api";
 import { fmtRelative, fmtTimestamp, pillClass } from "@/lib/calendar-labels";
 // Definicja marży mieszka w magazynie (tam się liczy) — oferta ma mówić to samo.
@@ -183,11 +182,11 @@ export function Oferty() {
   const [packages, setPackages] = useState<OfferPackage[]>([]);
   /** Biblioteka powtarzalnych opisów handlowych — działa jak pakiety, tylko tekstowa. */
   const [texts, setTexts] = useState<OfferText[]>([]);
-  const [warehouseItems, setWarehouseItems] = useState<WarehouseItem[]>([]);
+  const [warehouseItems, setWarehouseItems] = useState<OfferCatalogItem[]>([]);
   const [services, setServices] = useState<Service[]>([]);
-  const [salespeople, setSalespeople] = useState<Salesperson[]>([]);
+  const [salespeople, setSalespeople] = useState<SalespersonCatalogEntry[]>([]);
   const [companies, setCompanies] = useState<Company[]>([]);
-  const [stock, setStock] = useState<StockEntry[]>([]);
+  const [stock, setStock] = useState<OfferCatalogStock[]>([]);
   const [minMarginPct, setMinMarginPct] = useState(0);
   /** Domyślny procent roczny dzierżawy z ustawień firmy (fabrycznie 117%). */
   const [defaultLeaseRate, setDefaultLeaseRate] = useState(0);
@@ -239,11 +238,13 @@ export function Oferty() {
       const [pkgs, txts, items, svcs, sales, comps, stockRes, cfg] = await Promise.allSettled([
         offersApi.listPackages(),
         offersApi.listTexts(),
-        warehouseApi.getItems(),
+        // Słowniki magazynu z `/offers/catalog/*` (klucz ofert, bez cen zakupu) —
+        // pełny `/warehouse` wymaga klucza Magazynu.
+        offersApi.catalogItems(),
         servicesApi.list(),
-        getSalespeople(true),
+        getSalespeopleCatalog(true),
         getCompanies(true),
-        warehouseApi.getStock(),
+        offersApi.catalogStock(),
         offersApi.config(),
       ]);
       const failed: string[] = [];

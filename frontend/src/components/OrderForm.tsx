@@ -62,11 +62,10 @@ import type {
   Contractor,
   CompanyData,
   ObjectRecord,
-  ObjectHistoryRecord,
   ObjectService,
   ObjectServiceInput,
 } from "@/lib/api";
-import { getContractorObjects, getObject } from "@/lib/api";
+import { getOrderObjectServices, getOrderPayerObjects, type OrderPayerObject } from "@/lib/api";
 import { applyDefaultServiceStart, OBJECT_KINDS } from "@/lib/orderIntakeSteps";
 import { normalizeNIP, validateNIP } from "@/lib/nip";
 import {
@@ -111,9 +110,11 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
   const [showContractorForm, setShowContractorForm] = useState(!order);
   
   // Object state
-  const [contractorObjects, setContractorObjects] = useState<Array<ObjectRecord & { latestAction: ObjectHistoryRecord | null }>>([]);
+  // Wąski słownik `/orders/payer-objects` (bez kwot) — wystarcza klucz „orders”,
+  // pełne `/contractors/:id/objects` wymagało Kontrahentów.
+  const [contractorObjects, setContractorObjects] = useState<OrderPayerObject[]>([]);
   const [createObject, setCreateObject] = useState(!order);
-  const [selectedObject, setSelectedObject] = useState<ObjectRecord | null>(null);
+  const [selectedObject, setSelectedObject] = useState<Pick<ObjectRecord, "id" | "name"> | null>(null);
 
   /** Okresy usług zakładanego obiektu (pole `objectServices` zlecenia). */
   const [objectServices, setObjectServices] = useState<ObjectServiceInput[]>([]);
@@ -275,7 +276,7 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
 
   const loadContractorObjects = async (contractorId: number) => {
     try {
-      const response = await getContractorObjects(contractorId);
+      const response = await getOrderPayerObjects(contractorId);
       setContractorObjects(response.data || []);
     } catch (err) {
       console.error("Error loading contractor objects:", err);
@@ -368,7 +369,8 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
 
   /**
    * Okresy podpiętego obiektu — tylko do odczytu. Wiersz z listy kontrahenta
-   * (`getContractorObjects`) usług nie niesie, więc dociągamy kartotekę.
+   * usług nie niesie, więc dociągamy okresy wąską trasą `/orders/object-services`
+   * (pełna kartoteka `/objects/:id` wymaga klucza Obiektów i niesie kwoty).
    */
   const linkedObjectId = createObject ? null : formData.objectId ?? null;
   useEffect(() => {
@@ -378,9 +380,9 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
     }
     let cancelled = false;
     setLinkedLoading(true);
-    getObject(linkedObjectId)
+    getOrderObjectServices(linkedObjectId)
       .then((res) => {
-        if (!cancelled) setLinkedServices(res.data?.services ?? []);
+        if (!cancelled) setLinkedServices(res.data ?? []);
       })
       .catch(() => {
         // Brak usług w podglądzie nie może blokować zapisu zlecenia.
@@ -460,7 +462,7 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
   /** Czy pokazujemy edytor okresów (tylko przy zakładaniu nowego obiektu). */
   const showServicesEditor = createObject && !order;
 
-  const handleSelectObject = (obj: ObjectRecord) => {
+  const handleSelectObject = (obj: OrderPayerObject) => {
     setSelectedObject(obj);
     setCreateObject(false);
     setFormData((prev) => ({
@@ -826,11 +828,9 @@ export function OrderForm({ open, onClose, onSubmit, order }: OrderFormProps) {
                           <p className="text-sm text-slate-500">
                             {obj.city} {obj.address}
                           </p>
-                          {obj.latestAction && (
-                            <Badge variant="secondary" className="mt-1 text-xs">
-                              {statusLabels[obj.status] || obj.status}
-                            </Badge>
-                          )}
+                          <Badge variant="secondary" className="mt-1 text-xs">
+                            {statusLabels[obj.status] || obj.status}
+                          </Badge>
                         </button>
                       ))}
                     </div>

@@ -4,17 +4,16 @@
  *  - /activity/object/:id → wpis w API_TAB_MAP (zakładka `objects`): wpisy
  *    streszczają zmiany obiektu i jego wydarzenia, więc widzi je ten, kto
  *    widzi obiekty;
- *  - /activity/recent → własna bramka niżej (technical/kalendarz), bo globalny
- *    feed to głównie tytuły i terminy wydarzeń kalendarza.
+ *  - /activity/recent → własna bramka niżej: dowolny kalendarz, a w odpowiedzi
+ *    wyłącznie wpisy wydarzeń z działów, które użytkownik ogląda.
  * Wpisy dotyczące kalendarza dostają dołączony skrót wydarzenia (`event`).
  */
 import { Hono } from "hono";
 import { db, schema } from "../db/index.js";
-import { eq, desc, inArray } from "drizzle-orm";
+import { and, eq, desc, inArray } from "drizzle-orm";
 import type { ActivityLogEntry } from "../db/schema.js";
-import { isAdmin, maxLevel } from "../lib/auth/permissions.js";
 import { getUser } from "../middleware/auth.js";
-import { asDepartment, viewableDepartments } from "../lib/calendar-scope.js";
+import { viewableDepartments } from "../lib/calendar-scope.js";
 
 const app = new Hono();
 
@@ -80,29 +79,48 @@ app.get("/object/:objectId", (c) => {
   return c.json({ success: true, data: attachEvents(entries) });
 });
 
-// GET /activity/recent?limit=50 — ostatnie wpisy globalnie (panel "Aktywność")
+// GET /activity/recent?limit=50&department=technical — ostatnie wpisy kalendarza
+// (panel "Aktywność" w kalendarzu technicznym i handlowym).
+//
+// WYŁĄCZNIE wpisy `calendar_event` z działów, które użytkownik ogląda
+// (src/lib/calendar-scope.ts). Do activity_log logują też Kadry (`hr_payroll`,
+// `hr_contract` ze starymi/nowymi kwotami), Oferty, Zlecenia itd. — wcześniej
+// feed oddawał je każdemu z kluczem kalendarza, a `?entityType=` pozwalał je
+// wręcz wybrać (docs/AUDYT-UPRAWNIEN-B.md #8). Filtr idzie w SQL, żeby limit
+// liczył się po odsianiu, a nie przed.
 app.get("/recent", (c) => {
-  // Globalny feed zawiera tytuły/terminy eventów — wymaga wglądu w kalendarz.
   const user = getUser(c);
-  if (!isAdmin(user) && maxLevel(user, ["technical/kalendarz"]) === "none") {
+  const viewable = viewableDepartments(user);
+  if (viewable.length === 0) {
     return c.json({ success: false, error: "Brak dostępu do tej sekcji" }, 403);
   }
   const limit = parseLimit(c.req.query("limit"), 50, 500);
-  const entityType = c.req.query("entityType") || null;
+  const requested = c.req.query("department");
+  const departments = requested
+    ? viewable.filter((d) => d === requested)
+    : viewable;
+  if (departments.length === 0) {
+    return c.json({ success: false, error: "Brak dostępu do kalendarza tego działu" }, 403);
+  }
   const entries = db
     .select()
     .from(schema.activityLog)
-    .where(entityType ? eq(schema.activityLog.entityType, entityType) : undefined)
+    .where(
+      and(
+        eq(schema.activityLog.entityType, "calendar_event"),
+        inArray(
+          schema.activityLog.entityId,
+          db
+            .select({ id: schema.calendarEvents.id })
+            .from(schema.calendarEvents)
+            .where(inArray(schema.calendarEvents.department, departments))
+        )
+      )
+    )
     .orderBy(desc(schema.activityLog.createdAt), desc(schema.activityLog.id))
     .limit(limit)
     .all();
-  // Feed streszcza wydarzenia OBU działów, a wpuszcza go klucz technicznego kalendarza —
-  // wpisy z działu, którego użytkownik nie ogląda, wypadają (src/lib/calendar-scope.ts).
-  const departments = viewableDepartments(user);
-  const withEvents = attachEvents(entries).filter(
-    (e) => e.entityType !== "calendar_event" || e.event == null || departments.includes(asDepartment(e.event.department))
-  );
-  return c.json({ success: true, data: withEvents });
+  return c.json({ success: true, data: attachEvents(entries) });
 });
 
 export default app;

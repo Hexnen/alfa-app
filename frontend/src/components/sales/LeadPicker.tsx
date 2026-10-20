@@ -1,5 +1,7 @@
 /**
- * Wyszukiwarka szans sprzedaży — combobox z podpowiedziami z `GET /leads`.
+ * Wyszukiwarka szans sprzedaży — combobox z podpowiedziami z `GET /leads/pick`
+ * (wąski kształt bez wartości szans — otwarty też dla kalendarza handlowego,
+ * Aktywności i Kontaktów; docs/AUDYT-UPRAWNIEN-B.md #4, #7).
  *
  * Szans bywa więcej niż da się trzymać w pamięci ekranu, więc lista NIE jest
  * słownikiem ładowanym z góry (jak obiekty w kalendarzu): każde wpisanie frazy
@@ -13,7 +15,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Handshake, Search, X } from "lucide-react";
 import { Input } from "@/components/ui/input";
-import { leadsApi, type Lead, type LeadStage } from "@/lib/api";
+import { leadsApi, type LeadPickItem, type LeadStage } from "@/lib/api";
 import { LEAD_STAGE_META, stagePillClass } from "@/lib/sales-labels";
 import { cn } from "@/lib/utils";
 import { tip } from "@/components/ui/tooltip";
@@ -36,7 +38,7 @@ export function LeadPicker({
   placeholder = "Szukaj szansy…",
 }: {
   value: LeadRef | null;
-  onPick: (lead: Lead) => void;
+  onPick: (lead: LeadPickItem) => void;
   onClear: () => void;
   inputId: string;
   disabled?: boolean;
@@ -45,7 +47,7 @@ export function LeadPicker({
   placeholder?: string;
 }) {
   const [q, setQ] = useState("");
-  const [results, setResults] = useState<Lead[]>([]);
+  const [results, setResults] = useState<LeadPickItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [openList, setOpenList] = useState(false);
   const [active, setActive] = useState(0);
@@ -62,9 +64,9 @@ export function LeadPicker({
       if (cancelled) return;
       setLoading(true);
       leadsApi
-        .list({ q: q.trim() || undefined, includeClosed, pageSize: 10, sort: "lastActivityAt", dir: "desc" })
+        .pick({ q: q.trim() || undefined, includeClosed, limit: 10 })
         .then((res) => {
-          if (!cancelled) setResults(res.data?.items ?? []);
+          if (!cancelled) setResults(res.data ?? []);
         })
         .catch(() => {
           if (!cancelled) setResults([]);

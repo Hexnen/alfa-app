@@ -73,6 +73,7 @@ import {
   createRealizationProtocol,
   getRealizations,
   getRealizationSummary,
+  getRealizationTechnicianNames,
   createRealization,
   updateRealization,
   deleteRealization,
@@ -582,6 +583,15 @@ export function Technical() {
   useEffect(() => {
     loadTechnicians();
   }, [loadTechnicians]);
+
+  // Podpowiedzi „Opiekun/Wykonawca” w realizacji: pełna lista techników bywa
+  // niedostępna (klucz Techników/Kalendarza), więc osobny wąski słownik nazwisk.
+  const [realizationTechNames, setRealizationTechNames] = useState<string[]>([]);
+  useEffect(() => {
+    getRealizationTechnicianNames()
+      .then((res) => setRealizationTechNames(res.data ?? []))
+      .catch(() => setRealizationTechNames([]));
+  }, []);
 
   // Kartoteka kadrowa do pola „Pracownik w kadrach" w formularzu technika.
   // Brak uprawnień do Kadr nie może wywalić zakładki — lista zostaje pusta.
@@ -3505,9 +3515,11 @@ export function Technical() {
           onSubmit={editing ? handleUpdate : handleCreate}
           realization={editing}
           defaultDate={defaultDate}
-          technicians={technicians
-            .filter((t) => t.active)
-            .map((t) => `${t.firstName} ${t.lastName}`.trim())}
+          technicians={
+            technicians.length > 0
+              ? technicians.filter((t) => t.active).map((t) => `${t.firstName} ${t.lastName}`.trim())
+              : realizationTechNames
+          }
           onAutofilled={handleAutofilled}
         />
       )}

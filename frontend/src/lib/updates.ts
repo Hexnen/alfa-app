@@ -63,6 +63,32 @@ export interface VersionUpdate {
  */
 export const UPDATES_CURRENT: VersionUpdate[] = [
   {
+    version: "1.19.1",
+    date: "2026-10-20",
+    entries: [
+      {
+        text: "Kalendarz: osoby z wąskim dostępem widzą obiekty i techników (handlowców) do przypisania, zamiast pustych list",
+        type: "fix",
+        module: "techniczny",
+      },
+      {
+        text: "Zlecenia, umowy, oferty i cennik działają także bez dostępu do pełnych kartotek: wybór klienta, obiektu i towaru nie kończy się pustą listą",
+        type: "fix",
+        module: "ogolne",
+      },
+      {
+        text: "Kadry: wynagrodzenia można edytować bez dostępu do godzin, a jedna niedostępna lista nie blokuje reszty zakładek",
+        type: "fix",
+        module: "kadry",
+      },
+      {
+        text: "Dziennik aktywności w kalendarzu pokazuje tylko wydarzenia z działów, które oglądasz, bez wypłat i ofert; koszty ofert przy szansie widać tylko z uprawnieniem do kosztów",
+        type: "fix",
+        module: "ogolne",
+      },
+    ],
+  },
+  {
     version: "1.19.0",
     date: "2026-10-15",
     title: "CMA: raporty z podjazdów",

@@ -40,6 +40,7 @@ import {
 } from "../lib/object-notes.js";
 import { ApiError } from "../lib/calendar-labels.js";
 import { getUser } from "../middleware/auth.js";
+import { fetchObjectPickCatalog } from "../lib/object-catalog.js";
 
 const app = new Hono();
 
@@ -138,6 +139,25 @@ function abonamentPatch(
   const split = splitAbonament({ monthlyValue: body.monthlyValue ?? null, ...services });
   return { monthlyZdw: split.monthlyZdw, monthlyOfi: split.monthlyOfi };
 }
+
+/**
+ * Wąski słownik obiektów do pickerów (id, nazwa, adres, miasto, status,
+ * kontrahent) — BEZ kwot i kosztów. Otwarty w API_TAB_MAP dla modułów, które
+ * wybierają obiekt, ale nie mają klucza `objects` (kalendarze, umowy, zlecenia,
+ * realizacje, kontrahenci). MUSI stać przed `/:id`. `?contractorId=` zawęża do
+ * obiektów jednego kontrahenta (płatnik w zleceniu).
+ */
+app.get("/catalog", (c) => {
+  const raw = c.req.query("contractorId");
+  let contractorId: number | undefined;
+  if (raw != null && raw !== "") {
+    contractorId = Number(raw);
+    if (!Number.isInteger(contractorId) || contractorId <= 0) {
+      return c.json({ success: false, error: "Nieprawidłowy contractorId" }, 400);
+    }
+  }
+  return c.json({ success: true, data: fetchObjectPickCatalog({ contractorId }) });
+});
 
 // Get all objects with filtering
 app.get("/", async (c) => {

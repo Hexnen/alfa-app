@@ -8,7 +8,7 @@
  */
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
-import { Link } from "react-router-dom";
+import { PermLink } from "@/components/PermLink";
 import {
   ArrowLeft,
   Building2,
@@ -176,9 +176,9 @@ export function PatrolReportPanel({
         </div>
       ) : linked ? (
         <>
-          <Link to={`/objects/${linked.id}`} className="font-medium text-indigo-700 hover:underline">
+          <PermLink to={`/objects/${linked.id}`} tab="objects" className="font-medium text-indigo-700 hover:underline">
             {linked.name}
-          </Link>
+          </PermLink>
           {editable && !detail.interventionId && (
             <button
               type="button"
@@ -266,14 +266,15 @@ export function PatrolReportPanel({
                 </Button>
               )}
               {detail?.interventionId && (
-                <Link
+                <PermLink
                   to="/cma/grupy-interwencyjne?panel=interwencje"
+                  tab="cma/grupy-interwencyjne"
                   className="mr-1 inline-flex items-center gap-1 text-xs font-medium text-emerald-700 hover:underline"
                   data-testid="podjazdy-report-intervention-link"
                 >
                   <CheckCircle2 className="h-3.5 w-3.5" />
                   Rozliczony
-                </Link>
+                </PermLink>
               )}
               <button type="button" className={iconBtn} onClick={() => window.print()} disabled={!detail} title="Drukuj / PDF" aria-label="Drukuj / PDF" data-testid="podjazdy-report-print">
                 <Printer className="h-4 w-4" />

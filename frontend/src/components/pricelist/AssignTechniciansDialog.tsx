@@ -9,20 +9,20 @@ import {
   DialogDescription,
   DialogFooter,
 } from "@/components/ui/dialog";
-import type { PriceListGroup, Technician } from "@/lib/api";
+import type { PriceListGroup, PriceListTechnician } from "@/lib/api";
 
 interface AssignTechniciansDialogProps {
   open: boolean;
   onClose: () => void;
   list: PriceListGroup;
   /** Wszyscy technicy (z polem priceListId), do wyboru. */
-  technicians: Technician[];
+  technicians: PriceListTechnician[];
   /** Id techników już przypisanych do tego cennika. */
   assignedIds: number[];
   onSubmit: (technicianIds: number[]) => Promise<void>;
 }
 
-const techName = (t: Technician) =>
+const techName = (t: PriceListTechnician) =>
   `${t.firstName} ${t.lastName}`.trim() || `#${t.id}`;
 
 /**
