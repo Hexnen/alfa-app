@@ -158,8 +158,9 @@ export function KafleAkcji({
 /**
  * Jeden kafel: ikona, etykieta i podtytuł (adres / imię kontaktu). Wyłączony
  * wariant to `<div>`, a nie `<a>` — link bez celu na dotyku tylko myli.
+ * Eksportowany: te same kafle stoją pod notatkami (`KafleNotatki`).
  */
-function Kafel({
+export function Kafel({
   icon: Icon,
   label,
   sub,

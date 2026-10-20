@@ -2,9 +2,12 @@ import { useLayoutEffect, useRef, useState } from "react";
 import { ClipboardList } from "lucide-react";
 import type { TechnikJobDetails } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { RichText } from "@/components/RichText";
+import { RichTextProvider } from "@/components/RichTextProvider";
 import { Panel, ReadRow } from "../ui/panel";
 import { ChipGroup } from "../ui/chip";
 import { jobTypeMeta } from "../lib/jobs";
+import { KafleNotatki } from "./KafleNotatki";
 
 /**
  * CO DO ZROBIENIA — jedyna karta, którą technik czyta, zanim wysiądzie z auta.
@@ -13,9 +16,9 @@ import { jobTypeMeta } from "../lib/jobs";
  * ma twardy limit sześciu linii: elaborat z biura zepchnąłby resztę ekranu pod
  * scroll, a interesujące jest zwykle pierwsze zdanie. Reszta po „Pokaż więcej”.
  *
- * Panel technika nie ma edytora tekstu sformatowanego — opis idzie jako czysty
- * tekst z zachowanymi nowymi liniami (`whitespace-pre-wrap`), bo biuro wpisuje
- * tam listy „1. …, 2. …”.
+ * Opis renderuje ten sam `RichText` co CRM (listy „1. …”, pogrubienia,
+ * klikalne linki), bez kart podglądu; numery i mapy z opisu stają pod nim
+ * jako kafle (`KafleNotatki`).
  */
 export function CoDoZrobienia({
   job,
@@ -34,6 +37,13 @@ export function CoDoZrobienia({
     <Panel icon={ClipboardList} title="Co do zrobienia" data-testid="zlecenie-opis">
       {lead && <p className="text-sm font-semibold leading-snug">{lead}</p>}
       <Opis text={job.description} />
+      {/* Numery i mapy z opisu jako kafle — bez dubla tego, co już stoi
+          w „Nawiguj”/„Zadzwoń” nad kartą. */}
+      <KafleNotatki
+        text={job.description}
+        excludePhones={[job.contactPhone, ...(job.contacts ?? []).map((k) => k.phone)]}
+        excludeMapsUrls={[job.mapsUrl]}
+      />
 
       <dl className="space-y-1.5 border-t pt-2.5">
         <ReadRow label="Typ pracy" value={typeMeta?.label ?? job.typeLabel} />
@@ -56,7 +66,7 @@ export function CoDoZrobienia({
 
 /** Opis z limitem sześciu linii i przyciskiem rozwinięcia, gdy faktycznie się nie mieści. */
 function Opis({ text }: { text: string | null }) {
-  const ref = useRef<HTMLParagraphElement>(null);
+  const ref = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
   const [clipped, setClipped] = useState(false);
 
@@ -74,12 +84,12 @@ function Opis({ text }: { text: string | null }) {
 
   return (
     <div>
-      <p
-        ref={ref}
-        className={cn("whitespace-pre-wrap text-sm leading-relaxed", !open && "line-clamp-6")}
-      >
-        {text}
-      </p>
+      {/* Klamra na opakowaniu: RichText składa akapity i listy z kilku bloków. */}
+      <div ref={ref} className={cn("text-sm leading-relaxed", !open && "line-clamp-6")}>
+        <RichTextProvider shortLinks>
+          <RichText text={text} previews={false} testId="zlecenie-opis-tresc" />
+        </RichTextProvider>
+      </div>
       {(clipped || open) && (
         <button
           type="button"

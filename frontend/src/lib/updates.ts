@@ -63,9 +63,14 @@ export interface VersionUpdate {
  */
 export const UPDATES_CURRENT: VersionUpdate[] = [
   {
-    version: "1.19.1–1.20.1",
+    version: "1.19.1–1.20.2",
     date: "2026-10-20",
     entries: [
+      {
+        text: "Numery telefonów i linki do map w notatkach ze zlecenia otwierają się jednym dotknięciem, jako duże kafelki, zamiast przepisywać numer albo kopiować adres do mapy",
+        type: "feat",
+        module: "techniczny",
+      },
       {
         text: "Link do wydarzenia ma dwa niezależne przełączniki: jeden pozwala odbiorcy dodawać i edytować własne notatki oraz rozpoczynać i kończyć pracę, drugi pokazuje mu notatki pozostałych osób",
         type: "feat",
@@ -452,9 +457,14 @@ export const UPDATES: VersionUpdate[] = [...UPDATES_CURRENT, ...UPDATES_2026];
  */
 export const UPDATES_TECHNIK: VersionUpdate[] = [
   {
-    version: "1.11.0–1.11.1",
+    version: "1.11.0–1.11.2",
     date: "2026-10-20",
     entries: [
+      {
+        text: "Numer telefonu i link do mapy wpisane w notatce są kafelkami: dzwonisz albo nawigujesz jednym dotknięciem, bez przepisywania",
+        type: "feat",
+        module: "technik",
+      },
       {
         text: "Na zleceniu otwartym z linku widać notatki innych osób razem z podpisami, a edytować możesz tylko swoje",
         type: "feat",

@@ -21,6 +21,8 @@ import {
 } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { PhotoMetaInfo } from "@/components/PhotoMetaInfo";
+import { RichText } from "@/components/RichText";
+import { RichTextProvider } from "@/components/RichTextProvider";
 import {
   readPhotoMeta,
   takenAtEpoch,
@@ -33,6 +35,7 @@ import { ClearableTextarea } from "../ui/clearable-input";
 import { ConfirmDialog } from "../ui/confirm";
 import { Lightbox } from "../ui/lightbox";
 import { useToast } from "../ui/toast";
+import { KafleNotatki } from "./KafleNotatki";
 import { isImageLike, prepareForUpload } from "../lib/image";
 import { clockOf, parseStamp, photoTakenLabel } from "../lib/dates";
 
@@ -661,14 +664,21 @@ function Wpis({
           </div>
         </div>
       ) : body && (
-        <p
-          className={cn(
-            "whitespace-pre-wrap text-sm leading-snug",
-            system && "italic text-muted-foreground",
-          )}
-        >
-          {body}
-        </p>
+        <>
+          {/* Ten sam renderer co notatki w CRM (listy, pogrubienia, klikalne
+              linki/telefony), ale BEZ kart podglądu — te pytają `/api/links/*`,
+              do którego rola „technik” ani link `/u/:token` nie mają wstępu.
+              Zamiast nich kafle z numerami i mapami (`KafleNotatki`). */}
+          <RichTextProvider shortLinks>
+            <RichText
+              text={body}
+              previews={false}
+              testId="zlecenie-notatka-tresc"
+              className={cn("text-sm leading-snug", system && "italic text-muted-foreground")}
+            />
+          </RichTextProvider>
+          {!system && <KafleNotatki text={body} className="mt-2" />}
+        </>
       )}
 
       {protocolLink && (

@@ -9,10 +9,14 @@ import { RichTextContext, type RichTextContextValue } from "@/lib/richtext-conte
 
 export function RichTextProvider({
   objectId = null,
+  shortLinks = false,
   children,
 }: RichTextContextValue & { children: ReactNode }) {
   // Stabilna referencja — inaczej każdy render rodzica przerysowywałby wszystkie karty.
-  const value = useMemo<RichTextContextValue>(() => ({ objectId: objectId ?? null }), [objectId]);
+  const value = useMemo<RichTextContextValue>(
+    () => ({ objectId: objectId ?? null, shortLinks }),
+    [objectId, shortLinks],
+  );
   return <RichTextContext.Provider value={value}>{children}</RichTextContext.Provider>;
 }
 

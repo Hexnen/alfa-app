@@ -26,6 +26,7 @@ import { googleFavicon, hostOf, loadPreview, readSessionPreview } from "@/lib/li
 import { useInView } from "@/lib/use-in-view";
 import { looksLikeMapsLink } from "@/lib/maps-url";
 import { MapPreviewCard } from "@/components/MapPreviewCard";
+import { useRichTextContext } from "@/lib/richtext-context";
 import {
   parseInline,
   parseRichText,
@@ -186,7 +187,21 @@ export function LinkPreviewCard({ url, compact = false, className }: LinkPreview
 // Renderowanie tekstu
 // ---------------------------------------------------------------------------
 
+/** „https://www.google.com/maps/place/…” → „google.com/maps/…” (tryb `shortLinks`). */
+function shortUrl(href: string, display: string): string {
+  try {
+    const u = new URL(href);
+    const host = u.hostname.replace(/^www\./i, "");
+    const first = u.pathname.split("/").filter(Boolean)[0];
+    const rest = u.pathname.split("/").filter(Boolean).length > 1 || u.search || u.hash;
+    return `${host}${first ? `/${first}` : ""}${rest ? "/…" : ""}`;
+  } catch {
+    return display;
+  }
+}
+
 function Inline({ nodes }: { nodes: RichInline[] }) {
+  const { shortLinks } = useRichTextContext();
   return (
     <>
       {nodes.map((node, i) => {
@@ -216,12 +231,14 @@ function Inline({ nodes }: { nodes: RichInline[] }) {
             key={i}
             href={node.href}
             data-testid="rich-link"
-            className={LINK_CLASS}
+            // Numer telefonu nie może pęknąć w połowie („+4 / 8 600…”) — łamiemy przed nim.
+            className={node.kind === "phone" ? cn(LINK_CLASS, "whitespace-nowrap break-normal") : LINK_CLASS}
             {...(external ? { target: "_blank", rel: "noopener noreferrer" } : {})}
+            {...(external && shortLinks ? { title: node.href } : {})}
             // Notatka bywa w karcie, którą klik otwiera — link ma tylko otworzyć siebie.
             onClick={(e) => e.stopPropagation()}
           >
-            {node.display}
+            {external && shortLinks ? shortUrl(node.href, node.display) : node.display}
           </a>
         );
       })}

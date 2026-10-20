@@ -19,6 +19,12 @@ import { createContext, useContext } from "react";
 export interface RichTextContextValue {
   /** Obiekt, którego dotyczy tekst; `null` = notatka bez obiektu. */
   objectId?: number | null;
+  /**
+   * Adresy w treści skracane do „domena/…” (pełny adres zostaje w `href`
+   * i w podpowiedzi). Panel technika i link `/u/:token`: 200-znakowy link do
+   * map rozpychał notatkę na telefonie, a i tak otwiera się go z kafla.
+   */
+  shortLinks?: boolean;
 }
 
 export const RichTextContext = createContext<RichTextContextValue>({ objectId: null });
