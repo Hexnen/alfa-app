@@ -4829,7 +4829,13 @@ function ActivityPanel({
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     return entries.filter((a) => {
-      if (action && a.action !== action && !(action === "assigned" && a.action === "unassigned")) return false;
+      if (
+        action &&
+        a.action !== action &&
+        !(action === "assigned" && a.action === "unassigned") &&
+        !(action === "shared" && a.action === "unshared")
+      )
+        return false;
       if (!q) return true;
       const hay = [a.event?.title, a.userLabel, a.summary, a.oldValue, a.newValue]
         .filter(Boolean)

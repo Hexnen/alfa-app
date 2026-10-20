@@ -77,10 +77,16 @@ async function request<T>(
  * Wariant `request` dla multipart/form-data — bez ręcznego Content-Type
  * (przeglądarka sama dopisuje boundary). Ten sam format błędu co `request`.
  */
-async function requestMultipart<T>(endpoint: string, body: FormData, method = "POST"): Promise<T> {
+async function requestMultipart<T>(
+  endpoint: string,
+  body: FormData,
+  method = "POST",
+  init?: Pick<RequestInit, "credentials" | "referrerPolicy" | "cache">
+): Promise<T> {
   // Bez Content-Type (boundary dokłada przeglądarka), ale identyfikator karty musi być —
   // notatka z załącznikami też ma odświeżyć kalendarz w innych kartach.
   const response = await fetch(`${API_BASE}${endpoint}`, {
+    ...init,
     method,
     body,
     headers: { [CLIENT_ID_HEADER]: CLIENT_ID },
@@ -6650,6 +6656,8 @@ export type ActivityAction =
   | "updated"
   | "deleted"
   | "restored"
+  | "shared"
+  | "unshared"
   | "moved"
   | "assigned"
   | "unassigned"
@@ -11440,6 +11448,200 @@ export const technikApi = {
     await request<ApiResponse<{ removed: boolean }>>("/technik/push/subscribe", {
       method: "DELETE",
       body: JSON.stringify({ endpoint }),
+    });
+  },
+};
+
+// ============================================================================
+// Udostępnianie wydarzeń linkiem (kontrakt: docs/UDOSTEPNIANIE-WYDARZEN.md)
+// ============================================================================
+
+/** Ważność nowego linku: 24 h od teraz, 7 dni po zakończeniu wydarzenia, 30 dni od teraz. */
+export type EventShareExpiresIn = "24h" | "event+7d" | "30d";
+
+/** Jeden link udostępnienia wydarzenia. Token i jego hash nigdy tu nie wracają. */
+export interface EventShareRow {
+  id: number;
+  eventId: number;
+  /** Technik z kartoteki; `null` = gość wpisany ręcznie. */
+  technicianId: number | null;
+  recipientName: string;
+  createdByLabel: string | null;
+  createdAt: string;
+  /** ISO UTC. */
+  expiresAt: string;
+  revokedAt: string | null;
+  openCount: number;
+  lastOpenedAt: string | null;
+  status: "active" | "expired" | "revoked";
+  /**
+   * Etap 2: `true` = odbiorca może rozpocząć/zakończyć zlecenie i prowadzić
+   * własne notatki; `false` = tylko podgląd. Linki sprzed etapu 2 (i starszy
+   * backend bez tego pola) traktujemy jak „tylko podgląd”.
+   */
+  canWork?: boolean;
+}
+
+export interface EventShareCreateInput {
+  technicianId?: number;
+  recipientName?: string;
+  expiresIn: EventShareExpiresIn;
+  /** Uprawnienia linku; brak = backend przyjmuje `false` (tylko podgląd). */
+  canWork?: boolean;
+}
+
+/** Wynik utworzenia linku — `token`/`url` widać TYLKO w tej odpowiedzi. */
+export interface EventShareCreated {
+  share: EventShareRow;
+  url: string;
+  token: string;
+}
+
+/**
+ * Zlecenie widziane z publicznego linku: `JobJson` panelu technika BEZ notatek
+ * i bez protokołu. Pola, których backend może nie odesłać, są opcjonalne —
+ * widok i tak normalizuje je do pustych wartości.
+ */
+/** Wynik Rozpocznij/Zakończ spod linku: zlecenie + aktualne notatki linku. */
+export interface SharedProgressResult {
+  job: SharedJob;
+  notes: TechnikJobNote[] | null;
+}
+
+export type SharedJob = Omit<TechnikJob, "protocol" | "notesCount" | "foreignNotesAt" | "coTechnicians"> & {
+  protocol?: null;
+  notesCount?: number;
+  coTechnicians?: string[];
+  contacts?: TechnikJobContact[];
+};
+
+export interface SharedJobView {
+  job: SharedJob;
+  share: { recipientName: string; expiresAt: string };
+  canProtocol: false;
+  /** Rozpocznij/Zakończ: `can_work` linku ORAZ typ wydarzenia na to pozwala. */
+  canProgress: boolean;
+  /** Etap 2 — link „do pracy”. Starszy backend nie odsyła → tylko podgląd. */
+  canWork?: boolean;
+  /** Własne notatki (dziś = `canWork`). */
+  canNotes?: boolean;
+  /** Notatki dodane TYM linkiem (`mine: true`); `[]` przy linku tylko do odczytu. */
+  notes?: TechnikJobNote[];
+}
+
+/** Opcje fetch dla `/api/share/*` — link sam jest uprawnieniem: bez ciasteczek, bez Referera. */
+const SHARE_FETCH: Pick<RequestInit, "credentials" | "referrerPolicy" | "cache"> = {
+  credentials: "omit",
+  referrerPolicy: "no-referrer",
+  cache: "no-store",
+};
+const sharePublicPath = (token: string, rest = "") => `/share/${encodeURIComponent(token)}${rest}`;
+
+const sharesPath = (eventId: number) => `/calendar/events/${eventId}/shares`;
+
+export const eventSharesApi = {
+  async list(eventId: number): Promise<EventShareRow[]> {
+    const r = await request<ApiResponse<EventShareRow[]>>(sharesPath(eventId));
+    return r.data ?? [];
+  },
+  async create(eventId: number, input: EventShareCreateInput): Promise<EventShareCreated> {
+    const r = await request<ApiResponse<EventShareCreated>>(sharesPath(eventId), {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+    return r.data as EventShareCreated;
+  },
+  /**
+   * Zmiana uprawnień istniejącego (aktywnego) linku bez generowania nowego —
+   * `PATCH …/shares/:shareId {canWork}` → `ShareRow`. Nieaktywny link = 409.
+   */
+  async setCanWork(eventId: number, shareId: number, canWork: boolean): Promise<EventShareRow> {
+    const r = await request<ApiResponse<EventShareRow>>(`${sharesPath(eventId)}/${shareId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ canWork }),
+    });
+    return r.data as EventShareRow;
+  },
+  async revoke(eventId: number, shareId: number): Promise<void> {
+    await request<ApiResponse<unknown>>(`${sharesPath(eventId)}/${shareId}`, { method: "DELETE" });
+  },
+  /**
+   * Publiczny podgląd (`/u/:token`). Bez ciasteczek i bez Referera — link sam
+   * jest uprawnieniem, a sesja ewentualnie zalogowanego biura nie ma tu nic do
+   * rzeczy. Każdy nieważny token = 404 (`status` na błędzie).
+   */
+  async publicView(token: string): Promise<SharedJobView> {
+    const r = await request<ApiResponse<SharedJobView>>(sharePublicPath(token), SHARE_FETCH);
+    return r.data as SharedJobView;
+  },
+
+  // --- Etap 2: link „do pracy” (te same semantyki co /technik/jobs/:id/*) ---
+  // Każdy nieważny link (także `can_work = 0`) = 404 „Link nieaktywny”.
+
+  /** „Rozpocznij” — `at` lokalne `RRRR-MM-DDTGG:MM` (opcja „Inna godzina”); brak = teraz. */
+  /** `notes` = notatki linku po zapisie (z systemową „Rozpoczęto …”); `null` = starszy backend. */
+  async publicStart(token: string, at?: string): Promise<SharedProgressResult> {
+    const r = await request<ApiResponse<SharedJob> & { notes?: TechnikJobNote[] }>(sharePublicPath(token, "/start"), {
+      ...SHARE_FETCH,
+      method: "POST",
+      body: JSON.stringify(at ? { at } : {}),
+    });
+    return { job: r.data as SharedJob, notes: Array.isArray(r.notes) ? r.notes : null };
+  },
+  /** `notes` = notatki linku po zapisie (z systemową „Zakończono …”); `null` = starszy backend. */
+  async publicFinish(token: string, at?: string): Promise<SharedProgressResult> {
+    const r = await request<ApiResponse<SharedJob> & { notes?: TechnikJobNote[] }>(sharePublicPath(token, "/finish"), {
+      ...SHARE_FETCH,
+      method: "POST",
+      body: JSON.stringify(at ? { at } : {}),
+    });
+    return { job: r.data as SharedJob, notes: Array.isArray(r.notes) ? r.notes : null };
+  },
+  async publicAddNote(token: string, text: string): Promise<TechnikJobNote> {
+    const r = await request<ApiResponse<TechnikJobNote>>(sharePublicPath(token, "/notes"), {
+      ...SHARE_FETCH,
+      method: "POST",
+      body: JSON.stringify({ text }),
+    });
+    return r.data as TechnikJobNote;
+  },
+  /** Multipart jak `technikApi.addNoteWithFiles` (`text`, `files`, `photoMeta`). */
+  async publicAddNoteWithFiles(
+    token: string,
+    payload: { text?: string; files: File[]; photoMeta?: (PhotoMetaInput | null)[] }
+  ): Promise<TechnikJobNote> {
+    const fd = new FormData();
+    fd.append("text", payload.text ?? "");
+    for (const f of payload.files) fd.append("files", f, f.name);
+    if (payload.photoMeta?.some((m) => m != null)) {
+      fd.append("photoMeta", JSON.stringify(payload.photoMeta));
+    }
+    const r = await requestMultipart<ApiResponse<TechnikJobNote>>(
+      sharePublicPath(token, "/notes"),
+      fd,
+      "POST",
+      SHARE_FETCH
+    );
+    return r.data as TechnikJobNote;
+  },
+  async publicUpdateNote(token: string, noteId: number, text: string): Promise<TechnikJobNote> {
+    const r = await request<ApiResponse<TechnikJobNote>>(sharePublicPath(token, `/notes/${noteId}`), {
+      ...SHARE_FETCH,
+      method: "PUT",
+      body: JSON.stringify({ text }),
+    });
+    return r.data as TechnikJobNote;
+  },
+  async publicDeleteNote(token: string, noteId: number): Promise<void> {
+    await request<ApiResponse<unknown>>(sharePublicPath(token, `/notes/${noteId}`), {
+      ...SHARE_FETCH,
+      method: "DELETE",
+    });
+  },
+  async publicDeleteAttachment(token: string, attachmentId: number): Promise<void> {
+    await request<ApiResponse<unknown>>(sharePublicPath(token, `/attachments/${attachmentId}`), {
+      ...SHARE_FETCH,
+      method: "DELETE",
     });
   },
 };

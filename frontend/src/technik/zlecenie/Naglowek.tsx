@@ -38,7 +38,8 @@ export function Naglowek({
 }: {
   job: TechnikJobDetails;
   weather: WeatherBrief | null | undefined;
-  onBack: () => void;
+  /** Brak = bez strzałki „Wstecz” (publiczny podgląd z linku nie ma dokąd wracać). */
+  onBack?: () => void;
 }) {
   const state = jobStateOf(job);
   const typeMeta = jobTypeMeta(job.type);
@@ -57,15 +58,19 @@ export function Naglowek({
       data-testid="zlecenie-naglowek"
     >
       <div className="flex min-h-12 items-center gap-1">
-        <Button
-          variant="ghost"
-          size="icon"
-          aria-label="Wstecz"
-          className="h-11 w-11 shrink-0"
-          onClick={onBack}
-        >
-          <ChevronLeft className="h-5 w-5" />
-        </Button>
+        {onBack ? (
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label="Wstecz"
+            className="h-11 w-11 shrink-0"
+            onClick={onBack}
+          >
+            <ChevronLeft className="h-5 w-5" />
+          </Button>
+        ) : (
+          <span aria-hidden className="w-2 shrink-0" />
+        )}
         {/* Pasek koloru typu — ten sam odcień, co kafelek w kalendarzu biura. */}
         <span aria-hidden className={cn("h-9 w-1 shrink-0 rounded-full", typeBarClass(job.type))} />
 

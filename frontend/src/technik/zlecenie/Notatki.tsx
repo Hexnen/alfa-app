@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   Camera,
@@ -8,7 +8,9 @@ import {
   Images,
   MessageSquare,
   Paperclip,
+  Pencil,
   Send,
+  Trash2,
   X,
 } from "lucide-react";
 import {
@@ -35,6 +37,35 @@ import { isImageLike, prepareForUpload } from "../lib/image";
 import { clockOf, parseStamp, photoTakenLabel } from "../lib/dates";
 
 /**
+ * Skąd notatki biorą dane. Panel technika woła `/api/technik/*` (domyślny
+ * adapter niżej), publiczny link „do pracy” (`/u/:token`) — `/api/share/:token/*`.
+ * Komponent zna tylko ten kształt, więc oba ekrany dzielą jedno UI.
+ *
+ * `updateNote`/`deleteNote` są opcjonalne: panel technika ich (jeszcze) nie ma,
+ * więc przyciski „Edytuj”/„Usuń” przy wpisie pokazują się tylko, gdy adapter
+ * je niesie — i tylko przy notatkach `mine`.
+ */
+export interface NotesApi {
+  addNote(text: string): Promise<unknown>;
+  addNoteWithFiles(payload: {
+    text?: string;
+    files: File[];
+    photoMeta?: (PhotoMetaInput | null)[];
+  }): Promise<unknown>;
+  deleteAttachment(attachmentId: number): Promise<void>;
+  updateNote?(noteId: number, text: string): Promise<unknown>;
+  deleteNote?(noteId: number): Promise<void>;
+}
+
+function technikNotesApi(jobId: number): NotesApi {
+  return {
+    addNote: (text) => technikApi.addNote(jobId, text),
+    addNoteWithFiles: (payload) => technikApi.addNoteWithFiles(jobId, payload),
+    deleteAttachment: (attachmentId) => technikApi.deleteAttachment(attachmentId),
+  };
+}
+
+/**
  * NOTATKI — sekcja zwinięta domyślnie.
  *
  * Rozwinięta lista notatek z fotorelacją potrafiła mieć dwa ekrany wysokości
@@ -53,6 +84,11 @@ export function Notatki({
   onChanged,
   objectLat,
   objectLng,
+  api: apiProp,
+  title = "Notatki",
+  defaultOpen = false,
+  emptyText = "Jeszcze nikt nic nie dopisał.",
+  hint,
 }: {
   jobId: number;
   notes: TechnikJobNote[];
@@ -62,9 +98,24 @@ export function Notatki({
   /** Pinezka obiektu — panel „i” liczy z niej „~120 m od obiektu”. */
   objectLat?: number | null;
   objectLng?: number | null;
+  /** Źródło danych; brak = panel technika (`/api/technik/*`). */
+  api?: NotesApi;
+  /** Nagłówek sekcji („Notatki”, na linku „Moje notatki”). */
+  title?: string;
+  defaultOpen?: boolean;
+  emptyText?: string;
+  /** Linijka nad polem dodawania (np. kto zobaczy notatkę). */
+  hint?: React.ReactNode;
 }) {
-  const { toast, toastError } = useToast();
-  const [open, setOpen] = useState(false);
+  const { toast, toastError, toastFailure } = useToast();
+  const [open, setOpen] = useState(defaultOpen);
+  const api = useMemo(() => apiProp ?? technikNotesApi(jobId), [apiProp, jobId]);
+
+  /** Notatka w trybie edycji tekstu (tylko gdy adapter umie `updateNote`). */
+  const [editing, setEditing] = useState<{ id: number; text: string } | null>(null);
+  const [editBusy, setEditBusy] = useState(false);
+  const [noteToDelete, setNoteToDelete] = useState<TechnikJobNote | null>(null);
+  const [noteDeleteBusy, setNoteDeleteBusy] = useState(false);
 
   const [noteText, setNoteText] = useState("");
   const [noteBusy, setNoteBusy] = useState(false);
@@ -178,7 +229,7 @@ export function Notatki({
     setNoteBusy(true);
     try {
       if (picked.length === 0) {
-        await technikApi.addNote(jobId, content);
+        await api.addNote(content);
       } else {
         // Kompresja idzie plik po pliku — na tablecie to sekunda na zdjęcie,
         // więc technik ma widzieć, na którym stoimy.
@@ -195,7 +246,7 @@ export function Notatki({
           photoMeta.push(p.meta);
         }
         setProgress(`Wysyłam ${photoCount(files.length)}…`);
-        await technikApi.addNoteWithFiles(jobId, { text: content, files, photoMeta });
+        await api.addNoteWithFiles({ text: content, files, photoMeta });
       }
       revokeAll(picked);
       setPicked([]);
@@ -203,7 +254,7 @@ export function Notatki({
       toast({ message: picked.length ? "Zdjęcia dodane do notatek" : "Notatka dodana", kind: "success" });
       onChanged();
     } catch (e) {
-      toastError(e instanceof Error ? e.message : "Nie udało się zapisać notatki.");
+      toastFailure(e, "Nie udało się zapisać notatki.");
     } finally {
       setProgress(null);
       setNoteBusy(false);
@@ -214,17 +265,57 @@ export function Notatki({
   const deleteAttachment = async (att: CalendarNoteAttachment) => {
     setDeleteBusy(true);
     try {
-      await technikApi.deleteAttachment(att.id);
+      await api.deleteAttachment(att.id);
       setLightbox(null);
       setToDelete(null);
       toast({ message: "Zdjęcie usunięte", kind: "success" });
       onChanged();
     } catch (e) {
-      toastError(e instanceof Error ? e.message : "Nie udało się usunąć zdjęcia.");
+      toastFailure(e, "Nie udało się usunąć zdjęcia.");
     } finally {
       setDeleteBusy(false);
     }
   };
+
+  /** Zapis poprawionego tekstu. Pusta treść wolna tylko przy notatce ze zdjęciami. */
+  const saveEdit = async () => {
+    if (!editing || editBusy || !api.updateNote) return;
+    const note = notes.find((n) => n.id === editing.id);
+    const text = editing.text.trim();
+    if (!text && !(note?.attachments?.length)) {
+      toastError("Notatka bez zdjęć nie może być pusta — usuń ją zamiast czyścić.");
+      return;
+    }
+    setEditBusy(true);
+    try {
+      await api.updateNote(editing.id, text);
+      setEditing(null);
+      toast({ message: "Notatka poprawiona", kind: "success" });
+      onChanged();
+    } catch (e) {
+      toastFailure(e, "Nie udało się zapisać zmian.");
+    } finally {
+      setEditBusy(false);
+    }
+  };
+
+  const deleteNote = async (note: TechnikJobNote) => {
+    if (!api.deleteNote) return;
+    setNoteDeleteBusy(true);
+    try {
+      await api.deleteNote(note.id);
+      setNoteToDelete(null);
+      if (editing?.id === note.id) setEditing(null);
+      toast({ message: "Notatka usunięta", kind: "success" });
+      onChanged();
+    } catch (e) {
+      toastFailure(e, "Nie udało się usunąć notatki.");
+    } finally {
+      setNoteDeleteBusy(false);
+    }
+  };
+
+  const canManageNotes = canEdit && (api.updateNote != null || api.deleteNote != null);
 
   return (
     <section
@@ -242,13 +333,13 @@ export function Notatki({
         <MessageSquare className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
         <span className="min-w-0 flex-1">
           <span className="block text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-            Notatki ({notes.length})
+            {title} ({notes.length})
           </span>
           {/* Zwinięta sekcja pokazuje ostatni wpis JEDNĄ linią — po to, żeby
               nie trzeba było jej rozwijać tylko po to, by zobaczyć, że nic nowego. */}
           {!open && (
             <span className="block truncate text-sm leading-snug text-foreground/80">
-              {latest ? previewOf(latest) : "Jeszcze nikt nic nie dopisał."}
+              {latest ? previewOf(latest) : emptyText}
             </span>
           )}
         </span>
@@ -262,7 +353,7 @@ export function Notatki({
       {open && (
         <div id="zlecenie-notatki-tresc" className="space-y-3 border-t p-3">
           {notes.length === 0 ? (
-            <p className="text-sm text-muted-foreground">Jeszcze nikt nic nie dopisał.</p>
+            <p className="text-sm text-muted-foreground">{emptyText}</p>
           ) : (
             <ul className="space-y-2">
               {notes.map((n) => (
@@ -275,6 +366,21 @@ export function Notatki({
                   onDelete={setToDelete}
                   objectLat={objectLat}
                   objectLng={objectLng}
+                  manage={
+                    canManageNotes && n.mine === true && n.source !== "system"
+                      ? {
+                          editing: editing?.id === n.id ? editing.text : null,
+                          busy: editBusy,
+                          onEdit: api.updateNote
+                            ? () => setEditing({ id: n.id, text: n.text ?? "" })
+                            : undefined,
+                          onEditChange: (text) => setEditing({ id: n.id, text }),
+                          onEditCancel: () => setEditing(null),
+                          onEditSave: () => void saveEdit(),
+                          onDelete: api.deleteNote ? () => setNoteToDelete(n) : undefined,
+                        }
+                      : undefined
+                  }
                 />
               ))}
             </ul>
@@ -283,6 +389,7 @@ export function Notatki({
           {/* --- DODAWANIE — zawsze na dole rozwiniętej sekcji ------------- */}
           {canEdit && (
             <div className="space-y-2 border-t pt-3">
+              {hint && <p className="text-xs leading-snug text-muted-foreground">{hint}</p>}
               <ClearableTextarea
                 value={noteText}
                 onChange={setNoteText}
@@ -458,6 +565,17 @@ export function Notatki({
           if (toDelete) void deleteAttachment(toDelete);
         }}
       />
+
+      <ConfirmDialog
+        open={noteToDelete !== null}
+        onOpenChange={(o) => !o && !noteDeleteBusy && setNoteToDelete(null)}
+        title="Usunąć notatkę?"
+        description="Zniknie razem ze zdjęciami — także z kalendarza biura."
+        confirmLabel={noteDeleteBusy ? "Usuwam…" : "Usuń"}
+        onConfirm={() => {
+          if (noteToDelete) void deleteNote(noteToDelete);
+        }}
+      />
     </section>
   );
 }
@@ -475,6 +593,7 @@ function Wpis({
   onDelete,
   objectLat,
   objectLng,
+  manage,
 }: {
   note: TechnikJobNote;
   jobId: number;
@@ -483,6 +602,17 @@ function Wpis({
   onDelete: (att: CalendarNoteAttachment) => void;
   objectLat?: number | null;
   objectLng?: number | null;
+  /** Edycja / usunięcie własnej notatki — tylko gdy adapter to umie. */
+  manage?: {
+    /** Tekst w edycji; `null` = wpis wyświetlany normalnie. */
+    editing: string | null;
+    busy: boolean;
+    onEdit?: () => void;
+    onEditChange: (text: string) => void;
+    onEditCancel: () => void;
+    onEditSave: () => void;
+    onDelete?: () => void;
+  };
 }) {
   const system = note.source === "system";
   const images = imagesOf(note);
@@ -495,8 +625,42 @@ function Wpis({
   const { body, protocolLink } = withoutCrmProtocolLink(note.text);
 
   return (
-    <li className={cn("rounded-lg border p-2.5", system ? "border-dashed" : "bg-muted/30")}>
-      {body && (
+    <li
+      className={cn("rounded-lg border p-2.5", system ? "border-dashed" : "bg-muted/30")}
+      data-testid="zlecenie-notatka"
+    >
+      {manage?.editing != null ? (
+        <div className="space-y-2" data-testid="zlecenie-notatka-edycja">
+          <ClearableTextarea
+            value={manage.editing}
+            onChange={manage.onEditChange}
+            clearLabel="Wyczyść treść"
+            placeholder="Treść notatki…"
+            rows={3}
+            className="min-h-[88px] text-base"
+            enterKeyHint="enter"
+            autoFocus
+          />
+          <div className="flex gap-2">
+            <Button
+              variant="outline"
+              className="h-11 flex-1"
+              disabled={manage.busy}
+              onClick={manage.onEditCancel}
+            >
+              Anuluj
+            </Button>
+            <Button
+              className="h-11 flex-1"
+              disabled={manage.busy}
+              onClick={manage.onEditSave}
+              data-testid="zlecenie-notatka-edycja-zapisz"
+            >
+              {manage.busy ? "Zapisuję…" : "Zapisz"}
+            </Button>
+          </div>
+        </div>
+      ) : body && (
         <p
           className={cn(
             "whitespace-pre-wrap text-sm leading-snug",
@@ -593,10 +757,44 @@ function Wpis({
         </ul>
       )}
 
-      <p className="mt-1 text-xs text-muted-foreground">
-        {note.userLabel ? `${note.userLabel} · ` : ""}
-        {clockOf(note.createdAt)}
-      </p>
+      <div className="mt-1 flex items-center gap-1">
+        <p className="min-w-0 flex-1 text-xs text-muted-foreground">
+          {note.userLabel ? `${note.userLabel} · ` : ""}
+          {clockOf(note.createdAt)}
+        </p>
+        {manage && manage.editing == null && (
+          <>
+            {manage.onEdit && (
+              <Button
+                variant="ghost"
+                size="icon"
+                className="-my-2 h-11 w-11 shrink-0 text-muted-foreground"
+                onClick={manage.onEdit}
+                disabled={manage.busy}
+                aria-label="Edytuj notatkę"
+                title="Edytuj notatkę"
+                data-testid="zlecenie-notatka-edytuj"
+              >
+                <Pencil className="h-4 w-4" aria-hidden />
+              </Button>
+            )}
+            {manage.onDelete && (
+              <Button
+                variant="ghost"
+                size="icon"
+                className="-my-2 h-11 w-11 shrink-0 text-muted-foreground hover:text-destructive"
+                onClick={manage.onDelete}
+                disabled={manage.busy}
+                aria-label="Usuń notatkę"
+                title="Usuń notatkę"
+                data-testid="zlecenie-notatka-usun"
+              >
+                <Trash2 className="h-4 w-4" aria-hidden />
+              </Button>
+            )}
+          </>
+        )}
+      </div>
     </li>
   );
 }

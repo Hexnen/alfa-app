@@ -36,6 +36,10 @@ const TechnikApp = lazy(() =>
 const PublicOrderForm = lazy(() =>
   import("./pages/PublicOrderForm").then((m) => ({ default: m.PublicOrderForm })),
 );
+// Publiczny podgląd zlecenia z linku „Udostępnij” (bez logowania, tylko odczyt).
+const SharedJobPage = lazy(() =>
+  import("./technik/pages/Udostepnione").then((m) => ({ default: m.Udostepnione })),
+);
 const PublicOffer = lazy(() =>
   import("./pages/PublicOffer").then((m) => ({ default: m.PublicOffer })),
 );
@@ -197,6 +201,8 @@ function App() {
           <Route path="/formularz/zlecenie" element={<PublicOrderForm />} />
           {/* Public, unauthenticated client-facing offer (link + print/PDF) */}
           <Route path="/oferta/:token" element={<PublicOffer />} />
+          {/* Publiczny podgląd zlecenia z linku „Udostępnij” — tylko odczyt, bez konta */}
+          <Route path="/u/:token" element={<SharedJobPage />} />
           {/* Panel technika — osobna aplikacja na tablet, poza `AuthedApp` i poza
               `Layout`. Ma własny ekran logowania i własną powłokę; `AuthProvider`
               opakowuje całe `App`, więc konto jest to samo co w CRM. */}

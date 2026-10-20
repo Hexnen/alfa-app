@@ -852,7 +852,7 @@ export function loadEvents(dbx: DbOrTx, ids: number[]): CalendarEventJson[] {
       createdBy: e.createdBy,
       createdByLabel: label(r.createdByEmail, r.createdByName),
       updatedBy: e.updatedBy,
-      updatedByLabel: label(r.updatedByEmail, r.updatedByName),
+      updatedByLabel: e.updatedByLabel ?? label(r.updatedByEmail, r.updatedByName),
       createdAt: e.createdAt,
       updatedAt: e.updatedAt,
       deletedAt: e.deletedAt,

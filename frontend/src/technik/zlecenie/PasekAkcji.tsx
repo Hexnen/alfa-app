@@ -49,6 +49,8 @@ export function PasekAkcji({
   onFinish,
   onProtocol,
   onReopen,
+  allowReopen = true,
+  withTabBar = true,
 }: {
   state: JobState;
   startedAt: string | null;
@@ -65,9 +67,13 @@ export function PasekAkcji({
   onProtocol: () => void;
   /** „Wznów” — powrót do stanu „w toku” po omyłkowym zakończeniu. */
   onReopen: () => void;
+  /** `false` = bez „Wznów” (link „do pracy” nie ma wznowienia). */
+  allowReopen?: boolean;
+  /** `false` = pod paskiem nie ma tab bara (publiczny link `/u/:token`). */
+  withTabBar?: boolean;
 }) {
   const actions = canEdit && state !== "cancelled";
-  const reopenable = actions && canProgress && canReopen(state, finishedAt);
+  const reopenable = actions && allowReopen && canProgress && canReopen(state, finishedAt);
 
   // `null` = ten typ nie ma głównej akcji (urlop bez protokołu, „nagranie” po
   // zakończeniu) — pasek zostaje wtedy przy samej linijce stanu.
@@ -86,7 +92,12 @@ export function PasekAkcji({
   const PrimaryIcon = primary?.icon;
 
   return (
-    <div className="fixed inset-x-0 bottom-kb-nav z-40 border-t bg-background/95 backdrop-blur-sm">
+    <div
+      className={cn(
+        "fixed inset-x-0 z-40 border-t bg-background/95 backdrop-blur-sm",
+        withTabBar ? "bottom-kb-nav" : "bottom-kb",
+      )}
+    >
       <div className="mx-auto flex w-full max-w-3xl items-center gap-2 px-4 py-2.5">
         <p
           aria-live="polite"

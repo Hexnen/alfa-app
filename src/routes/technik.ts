@@ -214,7 +214,7 @@ function mineConditions(technicianId: number, opts: { includeCancelled?: boolean
 }
 
 /** Komunikat 409 dla każdej próby zmiany odwołanego zlecenia. */
-const JOB_CANCELLED_MESSAGE = "Zlecenie zostało odwołane";
+export const JOB_CANCELLED_MESSAGE = "Zlecenie zostało odwołane";
 
 /**
  * Warunki zakresu [from, to) dla dni „YYYY-MM-DD”.
@@ -377,7 +377,7 @@ function protocolBrief(p: Protocol | null): JobProtocolBrief | null {
  * Wydarzenia → JobJson, wsadowo (obiekty, kontrahenci, przypisania, notatki
  * i protokoły po jednym zapytaniu na zbiór, bez N+1).
  */
-function toJobs(rows: CalendarEventRow[], technicianId: number, userId: number | null = null): JobJson[] {
+export function toJobs(rows: CalendarEventRow[], technicianId: number, userId: number | null = null): JobJson[] {
   if (rows.length === 0) return [];
   const ids = rows.map((r) => r.id);
   // Ustawienia kalendarza raz na cały zbiór — to zapytania po kluczu głównym,
@@ -1086,7 +1086,7 @@ function mutationTarget(c: Context, rawId: string): { tech: LinkedTechnician; ev
  * front tych przycisków nie pokazuje, a router nie ma prawa na to liczyć —
  * żądanie z odświeżonej karty sprzed zmiany typu też tu trafi.
  */
-function assertProgressable(ev: CalendarEventRow): void {
+export function assertProgressable(ev: CalendarEventRow): void {
   if (technikCanProgress(ev.type as CalendarEventType)) return;
   throw new ApiError(
     409,
@@ -1150,45 +1150,72 @@ function momentFromBody(body: Record<string, unknown>, ev: CalendarEventRow): Da
   return at;
 }
 
+/**
+ * Wynik „Rozpocznij”/„Zakończ” — wspólny dla panelu technika i linku „do pracy”
+ * (src/routes/calendar-shares.ts). `changed = false` = idempotentne powtórzenie,
+ * nic nie zapisano (trasa nie publikuje wtedy sygnału).
+ */
+export interface ProgressResult {
+  after: CalendarEventRow;
+  changed: boolean;
+  message: string;
+}
+
+/**
+ * „Rozpocznij” — logika trasy `POST /jobs/:id/start`, wyjęta, żeby link
+ * udostępniony miał DOKŁADNIE tę samą semantykę. `workerName` trafia do treści
+ * notatki systemowej („Rozpoczęto o 9:00 — Jan Kowalski”); `noteShareId` —
+ * notatka spod linku (calendar_event_notes.share_id).
+ */
+export function startProgress(
+  ev: CalendarEventRow,
+  ctx: MutationCtx,
+  workerName: string,
+  body: Record<string, unknown>,
+  noteShareId: number | null = null
+): ProgressResult {
+  assertProgressable(ev);
+  // Idempotentnie: drugie kliknięcie (odświeżona karta, słaby zasięg) nie
+  // przestawia godziny rozpoczęcia i nie dopisuje drugiej notatki.
+  if (ev.startedAt) return { after: ev, changed: false, message: "Zlecenie jest już rozpoczęte" };
+  // „Teraz” (brak `at`) albo godzina wybrana w panelu — zapis zawsze jako ISO UTC.
+  const now = momentFromBody(body, ev);
+  const startedAt = now.toISOString();
+  const after = db.transaction((tx) => {
+    const row = setEventProgress(
+      tx,
+      ev.id,
+      {
+        startedAt,
+        // „Zaplanowane" → „Potwierdzone": ktoś na pewno tam jest. Statusu
+        // „wykonane" ani „anulowane" nie ruszamy (praca mogła być wznowiona).
+        ...(ev.status === "planned" ? { status: "confirmed" as const } : {}),
+      },
+      ctx
+    );
+    addNote(tx, {
+      eventId: ev.id,
+      // Autor to „System”, więc nazwisko idzie w treści — biuro w kalendarzu ma
+      // widzieć, KTÓRY technik wszedł na obiekt, nie tylko o której.
+      text: `Rozpoczęto ${whenLabel(now)} — ${workerName}`,
+      ctx,
+      source: "system",
+      shareId: noteShareId,
+    });
+    return row;
+  });
+  return { after, changed: true, message: "Zlecenie rozpoczęte" };
+}
+
 app.post("/jobs/:id/start", async (c) => {
   try {
     const { tech, ev, ctx } = mutationTarget(c, c.req.param("id"));
     assertProgressable(ev);
-    // Idempotentnie: drugie kliknięcie (odświeżona karta, słaby zasięg) nie
-    // przestawia godziny rozpoczęcia i nie dopisuje drugiej notatki.
-    if (ev.startedAt) {
-      const [job] = toJobs([ev], tech.id);
-      return c.json({ success: true, data: job, message: "Zlecenie jest już rozpoczęte" });
-    }
-    // „Teraz” (brak `at`) albo godzina wybrana w panelu — zapis zawsze jako ISO UTC.
-    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
-    const now = momentFromBody(body, ev);
-    const startedAt = now.toISOString();
-    const after = db.transaction((tx) => {
-      const row = setEventProgress(
-        tx,
-        ev.id,
-        {
-          startedAt,
-          // „Zaplanowane" → „Potwierdzone": ktoś na pewno tam jest. Statusu
-          // „wykonane" ani „anulowane" nie ruszamy (praca mogła być wznowiona).
-          ...(ev.status === "planned" ? { status: "confirmed" as const } : {}),
-        },
-        ctx
-      );
-      addNote(tx, {
-        eventId: ev.id,
-        // Autor to „System”, więc nazwisko idzie w treści — biuro w kalendarzu ma
-        // widzieć, KTÓRY technik wszedł na obiekt, nie tylko o której.
-        text: `Rozpoczęto ${whenLabel(now)} — ${`${tech.firstName} ${tech.lastName}`.trim()}`,
-        ctx,
-        source: "system",
-      });
-      return row;
-    });
-    publish(c, "updated", [ev.id]);
-    const [job] = toJobs([after], tech.id);
-    return c.json({ success: true, data: job, message: "Zlecenie rozpoczęte" });
+    const body = ev.startedAt ? {} : ((await c.req.json().catch(() => ({}))) as Record<string, unknown>);
+    const r = startProgress(ev, ctx, `${tech.firstName} ${tech.lastName}`.trim(), body);
+    if (r.changed) publish(c, "updated", [ev.id]);
+    const [job] = toJobs([r.after], tech.id);
+    return c.json({ success: true, data: job, message: r.message });
   } catch (error) {
     return handleError(c, error, "rozpoczynania zlecenia");
   }
@@ -1198,71 +1225,84 @@ app.post("/jobs/:id/start", async (c) => {
 // POST /jobs/:id/finish — „Zakończ" (+ opcjonalna notatka)
 // ---------------------------------------------------------------------------
 
+/** „Zakończ” (+ opcjonalna notatka `body.note`) — logika trasy `POST /jobs/:id/finish`, patrz `startProgress`. */
+export function finishProgress(
+  ev: CalendarEventRow,
+  ctx: MutationCtx,
+  workerName: string,
+  body: Record<string, unknown>,
+  noteShareId: number | null = null
+): ProgressResult {
+  assertProgressable(ev);
+  const noteText = typeof body.note === "string" ? body.note.trim() : "";
+  // Idempotentnie, tak jak „Rozpocznij”: drugie tapnięcie na słabym zasięgu
+  // (albo odświeżona karta) nie przestawia godziny i nie dokłada drugiej
+  // notatki. Jawnie wpisana godzina („Inna godzina”) to świadoma poprawka
+  // i przechodzi dalej.
+  //
+  // ROZSTRZYGA SAM `finishedAt`, nie status. Gdy biuro cofnęło status
+  // („wykonane" → „potwierdzone"), a technik odświeżył kartę i tapnął
+  // „Zakończ" jeszcze raz, warunek ze statusem przepuszczał żądanie i
+  // dokładał do dziennika drugie „Zakończono o 16:20". Świadome wznowienie
+  // pracy idzie przez `POST /jobs/:id/reopen`, który czyści `finished_at`.
+  if (ev.finishedAt && typeof body.at !== "string") {
+    return { after: ev, changed: false, message: "Zlecenie jest już zakończone" };
+  }
+  const now = momentFromBody(body, ev);
+  const finishedAt = now.toISOString();
+  // Zakończenie bez rozpoczęcia (technik zapomniał wcisnąć „Rozpocznij") nie
+  // może zostawić dziury — za początek bierzemy planowany start, ale
+  // PRZELICZONY na ISO UTC. Wpisany tam surowy `start_at` (lokalny zapis
+  // kalendarza) mieszał w jednej kolumnie dwa formaty, a porównanie tekstowe
+  // „2026-11-10T09:00” z „2026-11-10T08:00:00.000Z” dawało 400 przy każdej
+  // poprawce godziny.
+  //
+  // Kolejność zdarzeń musi się zgadzać — inaczej realizacja dostałaby ujemny
+  // czas pracy, a protokół godziny „od 16:00 do 09:00”. Porównanie przez
+  // `Date.parse`, nie po tekście: kolumna trzyma też starsze, lokalne zapisy.
+  if (ev.startedAt && Date.parse(finishedAt) < Date.parse(ev.startedAt)) {
+    throw new ApiError(400, "Zakończenie nie może być przed rozpoczęciem");
+  }
+  // Zlecenie zamknięte PRZED planowanym terminem (ekipa uwinęła się dzień
+  // wcześniej) nie może dostać początku późniejszego niż koniec — wtedy za
+  // początek bierzemy samo zakończenie, a nie plan.
+  const plannedStartIso = localCalendarDate(ev.startAt).toISOString();
+  const startedAt =
+    ev.startedAt ?? (Date.parse(plannedStartIso) > Date.parse(finishedAt) ? finishedAt : plannedStartIso);
+  const after = db.transaction((tx) => {
+    const row = setEventProgress(
+      tx,
+      ev.id,
+      {
+        status: "done",
+        finishedAt,
+        ...(ev.startedAt ? {} : { startedAt }),
+      },
+      ctx
+    );
+    addNote(tx, {
+      eventId: ev.id,
+      text: noteText
+        ? `Zakończono ${whenLabel(now)} — ${workerName}. ${noteText}`
+        : `Zakończono ${whenLabel(now)} — ${workerName}`,
+      ctx,
+      source: noteText ? "user" : "system",
+      shareId: noteShareId,
+    });
+    return row;
+  });
+  return { after, changed: true, message: "Zlecenie zakończone" };
+}
+
 app.post("/jobs/:id/finish", async (c) => {
   try {
     const { tech, ev, ctx } = mutationTarget(c, c.req.param("id"));
     assertProgressable(ev);
     const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
-    const noteText = typeof body.note === "string" ? body.note.trim() : "";
-    // Idempotentnie, tak jak „Rozpocznij”: drugie tapnięcie na słabym zasięgu
-    // (albo odświeżona karta) nie przestawia godziny i nie dokłada drugiej
-    // notatki. Jawnie wpisana godzina („Inna godzina”) to świadoma poprawka
-    // i przechodzi dalej.
-    //
-    // ROZSTRZYGA SAM `finishedAt`, nie status. Gdy biuro cofnęło status
-    // („wykonane" → „potwierdzone"), a technik odświeżył kartę i tapnął
-    // „Zakończ" jeszcze raz, warunek ze statusem przepuszczał żądanie i
-    // dokładał do dziennika drugie „Zakończono o 16:20". Świadome wznowienie
-    // pracy idzie przez `POST /jobs/:id/reopen`, który czyści `finished_at`.
-    if (ev.finishedAt && typeof body.at !== "string") {
-      const [current] = toJobs([ev], tech.id);
-      return c.json({ success: true, data: current, message: "Zlecenie jest już zakończone" });
-    }
-    const now = momentFromBody(body, ev);
-    const finishedAt = now.toISOString();
-    // Zakończenie bez rozpoczęcia (technik zapomniał wcisnąć „Rozpocznij") nie
-    // może zostawić dziury — za początek bierzemy planowany start, ale
-    // PRZELICZONY na ISO UTC. Wpisany tam surowy `start_at` (lokalny zapis
-    // kalendarza) mieszał w jednej kolumnie dwa formaty, a porównanie tekstowe
-    // „2026-11-10T09:00” z „2026-11-10T08:00:00.000Z” dawało 400 przy każdej
-    // poprawce godziny.
-    //
-    // Kolejność zdarzeń musi się zgadzać — inaczej realizacja dostałaby ujemny
-    // czas pracy, a protokół godziny „od 16:00 do 09:00”. Porównanie przez
-    // `Date.parse`, nie po tekście: kolumna trzyma też starsze, lokalne zapisy.
-    if (ev.startedAt && Date.parse(finishedAt) < Date.parse(ev.startedAt)) {
-      throw new ApiError(400, "Zakończenie nie może być przed rozpoczęciem");
-    }
-    // Zlecenie zamknięte PRZED planowanym terminem (ekipa uwinęła się dzień
-    // wcześniej) nie może dostać początku późniejszego niż koniec — wtedy za
-    // początek bierzemy samo zakończenie, a nie plan.
-    const plannedStartIso = localCalendarDate(ev.startAt).toISOString();
-    const startedAt =
-      ev.startedAt ?? (Date.parse(plannedStartIso) > Date.parse(finishedAt) ? finishedAt : plannedStartIso);
-    const after = db.transaction((tx) => {
-      const row = setEventProgress(
-        tx,
-        ev.id,
-        {
-          status: "done",
-          finishedAt,
-          ...(ev.startedAt ? {} : { startedAt }),
-        },
-        ctx
-      );
-      addNote(tx, {
-        eventId: ev.id,
-        text: noteText
-          ? `Zakończono ${whenLabel(now)} — ${`${tech.firstName} ${tech.lastName}`.trim()}. ${noteText}`
-          : `Zakończono ${whenLabel(now)} — ${`${tech.firstName} ${tech.lastName}`.trim()}`,
-        ctx,
-        source: noteText ? "user" : "system",
-      });
-      return row;
-    });
-    publish(c, "updated", [ev.id]);
-    const [job] = toJobs([after], tech.id);
-    return c.json({ success: true, data: job, message: "Zlecenie zakończone" });
+    const r = finishProgress(ev, ctx, `${tech.firstName} ${tech.lastName}`.trim(), body);
+    if (r.changed) publish(c, "updated", [ev.id]);
+    const [job] = toJobs([r.after], tech.id);
+    return c.json({ success: true, data: job, message: r.message });
   } catch (error) {
     return handleError(c, error, "kończenia zlecenia");
   }
@@ -1341,7 +1381,7 @@ app.post("/jobs/:id/reopen", (c) => {
  * jeszcze na telefonie, więc do serwera dociera plik BEZ EXIF-u — data, GPS
  * i model aparatu przychodzą wyłącznie tym polem.
  */
-async function readJobNoteBody(
+export async function readJobNoteBody(
   c: Context
 ): Promise<{ text: string; files: IncomingFile[]; photoMeta: Array<ClientPhotoMeta | null> | null }> {
   if (!/multipart\/form-data/i.test(c.req.header("content-type") ?? "")) {

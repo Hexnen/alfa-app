@@ -108,6 +108,14 @@ const sameOriginFrameHeaders = secureHeaders({
   referrerPolicy: "strict-origin-when-cross-origin",
 });
 const MANUAL_ATTACHMENT_PATH = /^\/api\/manuals\/attachments\/\d+$/;
+// Linki udostępnione (capability URL): token w adresie nie może wyciekać w Refererze.
+// `secureHeaders` ustawia nagłówek po `next()`, więc ten middleware musi stać PRZED nim (zewnętrzny wygrywa).
+app.use("*", async (c, next) => {
+  await next();
+  if (c.req.path.startsWith("/api/share/") || c.req.path.startsWith("/u/")) {
+    c.res.headers.set("Referrer-Policy", "no-referrer");
+  }
+});
 app.use("*", (c, next) =>
   (c.req.method === "GET" && MANUAL_ATTACHMENT_PATH.test(c.req.path) ? sameOriginFrameHeaders : strictHeaders)(c, next)
 );

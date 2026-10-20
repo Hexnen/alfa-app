@@ -17,7 +17,14 @@ import { jobTypeMeta } from "../lib/jobs";
  * tekst z zachowanymi nowymi liniami (`whitespace-pre-wrap`), bo biuro wpisuje
  * tam listy „1. …, 2. …”.
  */
-export function CoDoZrobienia({ job }: { job: TechnikJobDetails }) {
+export function CoDoZrobienia({
+  job,
+  coLabel = "Ze mną",
+}: {
+  job: TechnikJobDetails;
+  /** Etykieta listy współtechników; w publicznym podglądzie nie ma „mnie”. */
+  coLabel?: string;
+}) {
   const typeMeta = jobTypeMeta(job.type);
   // Tytuł wydarzenia trafia do karty tylko wtedy, gdy NIE jest nazwą obiektu —
   // tę technik ma już w nagłówku i drugi raz nic nie wnosi.
@@ -32,7 +39,7 @@ export function CoDoZrobienia({ job }: { job: TechnikJobDetails }) {
         <ReadRow label="Typ pracy" value={typeMeta?.label ?? job.typeLabel} />
         {job.coTechnicians.length > 0 && (
           <ReadRow
-            label="Ze mną"
+            label={coLabel}
             value={
               <ChipGroup className="gap-1.5">
                 {job.coTechnicians.map((name) => (

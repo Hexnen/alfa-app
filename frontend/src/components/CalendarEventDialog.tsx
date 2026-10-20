@@ -38,6 +38,7 @@ import {
   RotateCcw,
   Route,
   Search,
+  Share2,
   StickyNote,
   Trash2,
   TreePalm,
@@ -163,6 +164,7 @@ import { WeatherSection } from "@/components/CalendarWeather";
 import { ActivityTimeline } from "@/components/ActivityTimeline";
 import { tip } from "@/components/ui/tooltip";
 import { RichText } from "@/components/RichText";
+import { ShareEventDialog } from "@/components/calendar/ShareEventDialog";
 import { looksLikeMailNote } from "@/lib/richtext";
 
 export type CalendarDialogMode = "create" | "edit" | "view";
@@ -2088,6 +2090,8 @@ export function CalendarEventDialog({
 
   const [scopeFor, setScopeFor] = useState<"save" | "delete" | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  /** Okno „Udostępnij” (link do podglądu zlecenia bez logowania). */
+  const [shareOpen, setShareOpen] = useState(false);
   /** Pytanie o niewysłany szkic notatki i/lub niezapisany formularz (jedno na wszystkie przypadki). */
   const [prompt, setPrompt] = useState<DraftPrompt | null>(null);
   const [promptBusy, setPromptBusy] = useState(false);
@@ -4720,12 +4724,32 @@ export function CalendarEventDialog({
                   <Button
                     type="button"
                     variant="ghost"
-                    size="sm"
-                    className="shrink-0 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                    size="icon"
+                    className="h-9 w-9 shrink-0 text-destructive hover:bg-destructive/10 hover:text-destructive"
                     disabled={saving}
                     onClick={handleDeleteClick}
+                    aria-label="Usuń wydarzenie"
+                    data-testid="cal-event-delete"
+                    {...tip("Usuń wydarzenie")}
                   >
-                    <Trash2 className="mr-1 h-4 w-4" /> Usuń
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                )}
+                {/* Udostępnianie linkiem — tylko kalendarz techniczny (podgląd w stylu panelu
+                    technika), nigdy notatka (technik jej też nie widzi). */}
+                {isEdit && event && !event.deletedAt && cfg.department === "technical" && !isNoteEvent(event.type) && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-9 w-9 shrink-0"
+                    disabled={saving}
+                    onClick={() => setShareOpen(true)}
+                    aria-label="Udostępnij wydarzenie"
+                    data-testid="cal-event-share"
+                    {...tip("Udostępnij — link do podglądu bez logowania")}
+                  >
+                    <Share2 className="h-4 w-4" />
                   </Button>
                 )}
                 <div className="hidden min-w-0 sm:block">{metaLine}</div>
@@ -4870,6 +4894,17 @@ export function CalendarEventDialog({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {event && isEdit && cfg.department === "technical" && (
+        <ShareEventDialog
+          open={shareOpen}
+          onOpenChange={setShareOpen}
+          eventId={event.id}
+          eventTitle={event.title}
+          assignedIds={assigneesOf(event, cfg).map((a) => a.id)}
+          eventEndAt={event.endAt}
+        />
+      )}
 
       {/* Potwierdzenie usunięcia (pojedyncze wydarzenie) */}
       <AlertDialog open={confirmDelete} onOpenChange={setConfirmDelete}>

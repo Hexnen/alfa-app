@@ -30,6 +30,7 @@ import {
   TreePalm,
   Trophy,
   Undo2,
+  Share2,
   Unplug,
   Users,
   UserMinus,
@@ -646,6 +647,8 @@ export const ACTIVITY_ACTION_META: Record<string, { icon: LucideIcon; verb: stri
   updated: { icon: Pencil, verb: "Zmienił(a)", tone: "text-sky-600 dark:text-sky-400" },
   deleted: { icon: Trash2, verb: "Usunął(-ęła)", tone: "text-red-600 dark:text-red-400" },
   restored: { icon: Undo2, verb: "Przywrócił(a)", tone: "text-emerald-600 dark:text-emerald-400" },
+  shared: { icon: Share2, verb: "Udostępnił(a) link", tone: "text-sky-600 dark:text-sky-400" },
+  unshared: { icon: Share2, verb: "Unieważnił(a) link", tone: "text-amber-600 dark:text-amber-400" },
   moved: { icon: ArrowRightLeft, verb: "Przesunął(-ęła)", tone: "text-amber-600 dark:text-amber-400" },
   assigned: { icon: UserPlus, verb: "Przypisał(a)", tone: "text-sky-600 dark:text-sky-400" },
   unassigned: { icon: UserMinus, verb: "Odpisał(a)", tone: "text-slate-500 dark:text-slate-400" },
@@ -669,6 +672,8 @@ export const ACTIVITY_FILTER_OPTIONS: { value: string; label: string }[] = [
   { value: "assigned", label: "Przypisania" },
   { value: "deleted", label: "Usunięcia" },
   { value: "restored", label: "Przywrócenia" },
+  // `shared` obejmuje też `unshared` i zmianę „Może pracować” (filtr w CalendarPage).
+  { value: "shared", label: "Udostępnienia" },
   { value: "note_added", label: "Notatki" },
 ];
 
@@ -680,6 +685,8 @@ export const ACTIVITY_ACTION_LABELS: Record<string, string> = {
   updated: "zmienił(a)",
   deleted: "usunął(-ęła)",
   restored: "przywrócił(a)",
+  shared: "udostępnił(a) link",
+  unshared: "unieważnił(a) link",
   moved: "przesunął(-ęła)",
   assigned: "przypisał(a) technika",
   unassigned: "odpisał(a) technika",
@@ -736,6 +743,11 @@ export const ACTIVITY_FIELD_LABELS: Record<string, string> = {
   billing: "rozliczenie",
   protocol_id: "protokół",
   protocolId: "protokół",
+  // Rozpocznij/Zakończ z panelu technika i z linku udostępnienia (ISO UTC).
+  started_at: "rozpoczęcie prac",
+  startedAt: "rozpoczęcie prac",
+  finished_at: "zakończenie prac",
+  finishedAt: "zakończenie prac",
   // --- Pola szansy sprzedaży (diff z `PUT /leads/:id`).
   stage: "etap",
   estimated_monthly: "abonament (MRR)",
@@ -770,6 +782,15 @@ function fieldValue(field: string | null, v: string | null): string {
     case "end_at":
     case "endAt":
       return fmtShort(v);
+    case "started_at":
+    case "startedAt":
+    case "finished_at":
+    case "finishedAt": {
+      // Pełny ISO z „Z” (UTC) — parseLocal wziąłby godzinę UTC za lokalną.
+      const d = new Date(v);
+      if (Number.isNaN(d.getTime())) return quote(v);
+      return `${pad(d.getDate())}.${pad(d.getMonth() + 1)} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    }
     case "all_day":
     case "allDay":
       return v === "1" || v === "true" ? "tak" : "nie";
@@ -791,6 +812,10 @@ export function describeActivity(entry: ActivityEntry): string {
   if (isNoteActivity(entry.action)) {
     const { text: t, via } = noteActivityParts(entry);
     return `${who} ${ACTIVITY_ACTION_LABELS[entry.action]}${via ? ` (${via})` : ""}${t ? `: „${t}”` : ""}`;
+  }
+  // Zmiana uprawnień linku: summary („Jan K.: tylko podgląd”) nie mówi, co się stało.
+  if (entry.action === "shared" && entry.field === "share_can_work") {
+    return `${who} zmienił(a) uprawnienia linku${entry.summary ? ` — ${entry.summary}` : ""}`;
   }
   if (entry.summary) return `${who} — ${entry.summary}`;
   const a = entry.action;
@@ -853,6 +878,16 @@ export function activityParts(entry: ActivityEntry): {
     }
     case "restored":
       return { who, verb, detail: null };
+    case "shared":
+    case "unshared": {
+      // field „share” — summary „Udostępniono/Unieważniono link: X” (czasownik już to mówi);
+      // field „share_can_work” — summary „X: może pracować / tylko podgląd”.
+      if (entry.field === "share_can_work") {
+        return { who, verb: "Zmienił(a) uprawnienia linku", detail: entry.summary ?? null };
+      }
+      const m = entry.summary ? /link:\s*(.+)$/.exec(entry.summary) : null;
+      return { who, verb, detail: m ? `odbiorca: ${m[1]}` : entry.summary ?? null };
+    }
     case "moved":
       return {
         who,

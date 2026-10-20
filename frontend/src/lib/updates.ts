@@ -63,9 +63,24 @@ export interface VersionUpdate {
  */
 export const UPDATES_CURRENT: VersionUpdate[] = [
   {
-    version: "1.19.1",
+    version: "1.19.1–1.20.0",
     date: "2026-10-20",
     entries: [
+      {
+        text: "Wydarzenie z kalendarza technicznego można udostępnić linkiem technikowi albo gościowi: otwiera zlecenie bez logowania, dodaje własne notatki oraz rozpoczyna i kończy pracę",
+        type: "feat",
+        module: "techniczny",
+      },
+      {
+        text: "Uprawnienie linku włącza się przełącznikiem przy każdym linku, a w historii wydarzenia widać, kto jaki link dostał",
+        type: "feat",
+        module: "techniczny",
+      },
+      {
+        text: "Panel technika: zlecenie otwarte z linku wygląda tak samo jak w panelu",
+        type: "feat",
+        module: "technik",
+      },
       {
         text: "Kalendarz: osoby z wąskim dostępem widzą obiekty i techników (handlowców) do przypisania, zamiast pustych list",
         type: "fix",
@@ -431,6 +446,17 @@ export const UPDATES: VersionUpdate[] = [...UPDATES_CURRENT, ...UPDATES_2026];
  * wpisów — co się zmienia w robocie, bez nazw modułów i ekranów.
  */
 export const UPDATES_TECHNIK: VersionUpdate[] = [
+  {
+    version: "1.11.0",
+    date: "2026-10-20",
+    entries: [
+      {
+        text: "Notatki i przyciski Rozpocznij/Zakończ działają tak samo na zleceniu, które biuro wysłało Ci linkiem, także bez logowania",
+        type: "feat",
+        module: "technik",
+      },
+    ],
+  },
   {
     version: "1.10.0",
     date: "2026-09-19",

@@ -145,6 +145,14 @@ export function mountStatic(app: Hono, root: string, readIndexHtml: () => string
     // nagłówek ustawiamy tutaj: `index.html` musi być rewalidowany przy każdym
     // wejściu, inaczej nowa wersja nie dojdzie do zainstalowanej PWA.
     c.header("Cache-Control", "no-cache");
+    // Udostępnione wydarzenie (/u/<token>, src/lib/calendar-shares.ts): token
+    // w adresie nie może wyjść w Refererze, zostać w cache ani trafić do indeksu.
+    if (c.req.path.startsWith("/u/")) {
+      c.header("Cache-Control", "no-store");
+      c.header("Referrer-Policy", "no-referrer");
+      c.header("X-Robots-Tag", "noindex, nofollow");
+      return c.html(readIndexHtml());
+    }
     const etag = weakEtagFor(root, "/index.html");
     if (etag) c.header("ETag", etag);
     return c.html(readIndexHtml());

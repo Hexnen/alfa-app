@@ -51,8 +51,20 @@ interface ToastCtx {
   toastUndo: (message: ReactNode, onUndo: () => void) => number;
   /** Skrót na błąd (8 s — trzeba zdążyć przeczytać). */
   toastError: (message: ReactNode) => number;
+  /**
+   * Toast z przechwyconego wyjątku: `InfoNotice` → informacyjny (szary),
+   * każdy inny `Error` → błąd z jego treścią, reszta → `fallback` jako błąd.
+   */
+  toastFailure: (e: unknown, fallback: string) => number;
   dismiss: (id: number) => void;
 }
+
+/**
+ * „Błąd”, który nie jest porażką użytkownika, tylko informacją o zmianie stanu
+ * (np. biuro przełączyło link na „tylko podgląd”) — `toastFailure` pokaże go
+ * jako toast informacyjny, nie czerwony.
+ */
+export class InfoNotice extends Error {}
 
 const Ctx = createContext<ToastCtx | null>(null);
 
@@ -108,6 +120,14 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     [toast],
   );
 
+  const toastFailure = useCallback(
+    (e: unknown, fallback: string) =>
+      e instanceof InfoNotice
+        ? toast({ message: e.message, kind: "info", duration: 6000 })
+        : toastError(e instanceof Error ? e.message : fallback),
+    [toast, toastError],
+  );
+
   // Sprzątanie timerów przy odmontowaniu providera (HMR w dev).
   useEffect(() => {
     const map = timers.current;
@@ -118,8 +138,8 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo<ToastCtx>(
-    () => ({ toast, toastUndo, toastError, dismiss }),
-    [toast, toastUndo, toastError, dismiss],
+    () => ({ toast, toastUndo, toastError, toastFailure, dismiss }),
+    [toast, toastUndo, toastError, toastFailure, dismiss],
   );
 
   return (

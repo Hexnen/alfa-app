@@ -44,6 +44,7 @@ import leadsRoutes from "./leads.js";
 import contactsRoutes from "./contacts.js";
 import linksRoutes from "./links.js";
 import technikRoutes from "./technik.js";
+import calendarSharesRoutes, { sharePublicRoutes } from "./calendar-shares.js";
 import { requireAuth, requireAssistantAccess, tabPermissionGuard, technikRoleGuard, getUser } from "../middleware/auth.js";
 import { canView } from "../lib/auth/permissions.js";
 import { db, schema } from "../db/index.js";
@@ -98,6 +99,9 @@ function bodyLimitFor(path: string, method: string): number {
   // Panel technika: zdjęcia z tabletu jako notatka zlecenia — ta sama tabela
   // załączników i ten sam limit co w kalendarzu (src/routes/technik.ts).
   if (/^\/technik\/jobs\/\d+\/notes$/.test(path) && method === "POST") return BODY_LIMIT_NOTE_ATTACHMENTS;
+  // Link „do pracy” (src/routes/calendar-shares.ts): te same zdjęcia z telefonu co w panelu.
+  // Ścieżka z tokenem w formacie 43 znaków base64url — inne nie dostają podwyższonego limitu.
+  if (/^\/share\/[A-Za-z0-9_-]{43}\/notes$/.test(path) && method === "POST") return BODY_LIMIT_NOTE_ATTACHMENTS;
   // Mail .msg przeciągnięty z Outlooka na siatkę kalendarza.
   if (path === "/calendar/msg/parse" && method === "POST") return BODY_LIMIT_OUTLOOK_MSG;
   // Manuale: multipart przy zakładaniu (POST /manuals) i przy dokładaniu plików.
@@ -162,6 +166,12 @@ api.route("/calendar", calendarPublicRoutes);
 // GET /public-offer/:token — montowane PRZED requireAuth, jak /public.
 api.route("/", offersPublicRoutes);
 
+// --- UDOSTĘPNIONE WYDARZENIE: podgląd zlecenia spod linku (auth po tokenie w ścieżce) ---
+// GET /share/:token — montowane PRZED requireAuth (i przed technikRoleGuard), jak
+// /public-offer. Link jest sam w sobie uprawnieniem do JEDNEGO wydarzenia
+// (src/lib/calendar-shares.ts); router ma własny limit per IP i nagłówki no-store.
+api.route("/share", sharePublicRoutes);
+
 // --- WTYCZKA MAGAZYNU: API dla rozszerzenia przeglądarki (Bearer users.plugin_token) ---
 // Montowane PRZED requireAuth, jak /public: żądania lecą ze service workera
 // wtyczki, który NIE dostaje cookie `alfa_session` (SameSite=Lax). Router ma
@@ -209,6 +219,9 @@ api.route("/technik", technikRoutes);
 
 // --- KALENDARZ (technical/kalendarz) + globalny dziennik aktywności ---
 // /activity nie jest w API_TAB_MAP — historia obiektu czytelna dla każdego zalogowanego.
+// Linki do wydarzeń (GET/POST/DELETE /calendar/events/:id/shares) — wymagają
+// `edit` na technical/kalendarz (sprawdzane w trasie, bo strażnik puszcza GET z „view”).
+api.route("/calendar", calendarSharesRoutes);
 api.route("/calendar", calendarRoutes);
 api.route("/activity", activityRoutes);
 

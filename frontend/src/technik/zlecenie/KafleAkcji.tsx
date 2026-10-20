@@ -30,10 +30,13 @@ export function KafleAkcji({
   job,
   distance,
   distanceLoading,
+  showTrip = true,
 }: {
   job: TechnikJobDetails;
   distance: TechnikJobDistance | null;
   distanceLoading: boolean;
+  /** false = bez zarezerwowanej linijki „dojazd z biura” (podgląd z linku nie liczy dojazdu). */
+  showTrip?: boolean;
 }) {
   const navHref = mapsHref(job);
   const phoneHref = telHref(job.contactPhone);
@@ -140,12 +143,14 @@ export function KafleAkcji({
       {/* Dojazd z biura — pod kaflem nawigacji, bo opisuje właśnie jego.
           Miejsce jest zarezerwowane także w trakcie liczenia, żeby kafle nie
           podskakiwały technikowi pod palcem. */}
-      <p
-        className="col-start-1 min-h-4 text-xs tabular-nums text-muted-foreground line-clamp-2"
-        data-testid="zlecenie-dojazd"
-      >
-        {trip ?? (distanceLoading ? "Liczę dojazd…" : "")}
-      </p>
+      {showTrip && (
+        <p
+          className="col-start-1 min-h-4 text-xs tabular-nums text-muted-foreground line-clamp-2"
+          data-testid="zlecenie-dojazd"
+        >
+          {trip ?? (distanceLoading ? "Liczę dojazd…" : "")}
+        </p>
+      )}
     </div>
   );
 }

@@ -45,6 +45,21 @@ export const CALENDAR_ENTITY = "calendar_event";
 export interface MutationCtx {
   user: ActivityUser & { id: number; role?: string | null };
   summarySuffix?: string | null;
+  /**
+   * Snapshot etykiety autora do `calendar_events.updated_by_label` (migracja 0119).
+   * Ustawia go tylko zapis spod linku udostępnienia (`shareMutationCtx`): `user.id`
+   * to wtedy twórca linku (FK), a autorem jest „<odbiorca> (link)”. Brak = `NULL`,
+   * czyli etykieta z joinu po `updated_by` (zwykły użytkownik).
+   */
+  actorLabel?: string | null;
+}
+
+/**
+ * Kolumny „kto zmienił” wydarzenia — ZAWSZE razem: `updated_by` i snapshot
+ * `updated_by_label`. Zwykła zmiana zeruje snapshot, więc etykieta wraca do joinu.
+ */
+export function editorCols(ctx: MutationCtx): { updatedBy: number; updatedByLabel: string | null } {
+  return { updatedBy: ctx.user.id, updatedByLabel: ctx.actorLabel ?? null };
 }
 
 /** ISO z „Z” albo z offsetem — chwila absolutna, nie lokalny zapis kalendarza. */
@@ -825,7 +840,7 @@ function insertNoteEvent(
       noteId: p.note.id,
       noteMention: p.mention,
       createdBy: p.ctx.user.id,
-      updatedBy: p.ctx.user.id,
+      ...editorCols(p.ctx),
     })
     .returning()
     .get();
@@ -842,7 +857,7 @@ function insertNoteEvent(
 /** Soft delete wydarzenia + wpis „deleted” (wspólne dla kafelków notatek). */
 function softDeleteEventRow(tx: DbOrTx, ev: CalendarEventRow, ctx: MutationCtx, summary: string): void {
   tx.update(schema.calendarEvents)
-    .set({ deletedAt: sql`(datetime('now'))`, updatedBy: ctx.user.id, updatedAt: sql`(datetime('now'))` })
+    .set({ deletedAt: sql`(datetime('now'))`, ...editorCols(ctx), updatedAt: sql`(datetime('now'))` })
     .where(eq(schema.calendarEvents.id, ev.id))
     .run();
   logActivity(tx, {
@@ -993,7 +1008,7 @@ function applyUpdate(
       quoteId: input.quoteId,
       leadId: input.leadId,
       contactId: input.contactId,
-      updatedBy: ctx.user.id,
+      ...editorCols(ctx),
       updatedAt: sql`(datetime('now'))`,
     })
     .where(eq(schema.calendarEvents.id, row.id))
@@ -1086,7 +1101,7 @@ export function createEvent(tx: Tx, input: ParsedInput, ctx: MutationCtx): { fir
         contactId: input.contactId,
         seriesId,
         createdBy: ctx.user.id,
-        updatedBy: ctx.user.id,
+        ...editorCols(ctx),
       })
       .returning()
       .get();
@@ -1161,7 +1176,7 @@ function updateNoteEvent(tx: Tx, row: CalendarEventRow, input: ParsedInput, ctx:
       endAt: shiftLocal(input.startAt, 24 * 60, true),
       allDay: true,
       status: input.status,
-      updatedBy: ctx.user.id,
+      ...editorCols(ctx),
       updatedAt: sql`(datetime('now'))`,
     })
     .where(eq(schema.calendarEvents.id, row.id))
@@ -1192,7 +1207,7 @@ export function moveEvent(tx: Tx, id: number, body: Record<string, unknown>, ctx
 
   const after = tx
     .update(schema.calendarEvents)
-    .set({ startAt, endAt, allDay, updatedBy: ctx.user.id, updatedAt: sql`(datetime('now'))` })
+    .set({ startAt, endAt, allDay, ...editorCols(ctx), updatedAt: sql`(datetime('now'))` })
     .where(eq(schema.calendarEvents.id, id))
     .returning()
     .get();
@@ -1249,7 +1264,7 @@ export function setEventProgress(
 
   const after = tx
     .update(schema.calendarEvents)
-    .set({ ...patch, updatedBy: ctx.user.id, updatedAt: sql`(datetime('now'))` })
+    .set({ ...patch, ...editorCols(ctx), updatedAt: sql`(datetime('now'))` })
     .where(eq(schema.calendarEvents.id, id))
     .returning()
     .get();
@@ -1270,7 +1285,7 @@ export function deleteEvent(tx: Tx, id: number, scope: Scope, ctx: MutationCtx):
   const targets = [row, ...seriesSiblings(tx, row, scope)];
   for (const t of targets) {
     tx.update(schema.calendarEvents)
-      .set({ deletedAt: sql`(datetime('now'))`, updatedBy: ctx.user.id, updatedAt: sql`(datetime('now'))` })
+      .set({ deletedAt: sql`(datetime('now'))`, ...editorCols(ctx), updatedAt: sql`(datetime('now'))` })
       .where(eq(schema.calendarEvents.id, t.id))
       .run();
     logActivity(tx, {
@@ -1302,7 +1317,7 @@ export function restoreEvent(tx: Tx, id: number, ctx: MutationCtx): CalendarEven
   if (!row.deletedAt) throw new ApiError(409, "Wydarzenie nie jest usunięte");
   const after = tx
     .update(schema.calendarEvents)
-    .set({ deletedAt: null, updatedBy: ctx.user.id, updatedAt: sql`(datetime('now'))` })
+    .set({ deletedAt: null, ...editorCols(ctx), updatedAt: sql`(datetime('now'))` })
     .where(eq(schema.calendarEvents.id, id))
     .returning()
     .get();
@@ -1330,7 +1345,7 @@ export function restoreEvent(tx: Tx, id: number, ctx: MutationCtx): CalendarEven
         taken.add(key);
       }
       tx.update(schema.calendarEvents)
-        .set({ deletedAt: null, updatedBy: ctx.user.id, updatedAt: sql`(datetime('now'))` })
+        .set({ deletedAt: null, ...editorCols(ctx), updatedAt: sql`(datetime('now'))` })
         .where(eq(schema.calendarEvents.id, tile.id))
         .run();
       logActivity(tx, {
@@ -1392,6 +1407,11 @@ export interface AddNoteInput {
    * składa `attachmentRows`.
    */
   attachments?: AttachmentRowInput[];
+  /**
+   * Notatka spod udostępnionego linku „do pracy” (calendar_event_notes.share_id,
+   * migracja 0118) — odbiorca linku widzi i rusza wyłącznie notatki z tym id.
+   */
+  shareId?: number | null;
 }
 
 /**
@@ -1412,7 +1432,7 @@ function touchEventForNote(
 ): void {
   if (!ev || ev.deletedAt || source === "system") return;
   tx.update(schema.calendarEvents)
-    .set({ updatedBy: ctx.user.id, updatedAt: sql`(datetime('now'))` })
+    .set({ ...editorCols(ctx), updatedAt: sql`(datetime('now'))` })
     .where(eq(schema.calendarEvents.id, ev.id))
     .run();
 }
@@ -1449,6 +1469,7 @@ export function addNote(tx: DbOrTx, input: AddNoteInput): Note {
       mailSentAt: mail?.sentAt ?? null,
       // Nazwy załączników maila — snapshot wiersza „Załączniki:” (migracja 0096).
       mailAttachments: mail ? JSON.stringify(mail.attachments ?? []) : null,
+      shareId: input.shareId ?? null,
     })
     .returning()
     .get();

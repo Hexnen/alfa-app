@@ -3060,6 +3060,13 @@ export const calendarEvents = sqliteTable(
     updatedBy: integer("updated_by").references(() => users.id, {
       onDelete: "set null",
     }),
+    /**
+     * Snapshot „kto zmienił”, gdy autor NIE jest użytkownikiem (migracja 0119):
+     * zapis spod linku udostępnienia ma `updated_by` = twórca linku (FK), a tu
+     * „<odbiorca> (link)”. Zwykła zmiana zeruje — etykieta z joinu po `updated_by`.
+     * Pisać wyłącznie przez `editorCols(ctx)` z calendar-mutations.
+     */
+    updatedByLabel: text("updated_by_label"),
     createdAt: text("created_at")
       .default(sql`(datetime('now'))`)
       .notNull(),
@@ -3172,6 +3179,11 @@ export const calendarEventNotes = sqliteTable(
      * (za duże, nieobsługiwany typ); UI pokazuje je wtedy jako szare chipy.
      */
     mailAttachments: text("mail_attachments"),
+    /**
+     * Notatka napisana spod udostępnionego linku (migracja 0118) — „moja notatka”
+     * odbiorcy linku. NULL = wpis z CRM albo z panelu technika.
+     */
+    shareId: integer("share_id").references(() => calendarEventShares.id, { onDelete: "set null" }),
     createdAt: text("created_at")
       .default(sql`(datetime('now'))`)
       .notNull(),
@@ -3182,6 +3194,7 @@ export const calendarEventNotes = sqliteTable(
   },
   (t) => ({
     eventCreatedIdx: index("calendar_event_notes_event_created_idx").on(t.eventId, t.createdAt),
+    shareIdx: index("calendar_event_notes_share_idx").on(t.shareId),
   })
 );
 
@@ -3367,6 +3380,10 @@ export const ACTIVITY_ACTIONS = [
   "won",
   "lost",
   "converted",
+  // Link do wydarzenia (calendar_event_shares): utworzenie i unieważnienie —
+  // summary „Udostępniono link: <odbiorca>” / „Unieważniono link: <odbiorca>”.
+  "shared",
+  "unshared",
 ] as const;
 export type ActivityAction = (typeof ACTIVITY_ACTIONS)[number];
 
@@ -4265,3 +4282,42 @@ export const patrolEventSteps = sqliteTable(
 );
 
 export type PatrolEventStep = typeof patrolEventSteps.$inferSelect;
+
+// ============================================================================
+// UDOSTĘPNIANIE WYDARZEŃ LINKIEM (migracja 0117, docs/UDOSTEPNIANIE-WYDARZEN.md)
+// ============================================================================
+
+/**
+ * Link „tylko do odczytu” do JEDNEGO wydarzenia kalendarza technicznego.
+ * W bazie wyłącznie sha256(token) — sam token widać raz, w odpowiedzi POST.
+ * Wszystkie znaczniki czasu to ISO UTC z `toISOString()` (porównywalne tekstowo).
+ * Logika: src/lib/calendar-shares.ts.
+ */
+export const calendarEventShares = sqliteTable(
+  "calendar_event_shares",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    eventId: integer("event_id")
+      .notNull()
+      .references(() => calendarEvents.id, { onDelete: "cascade" }),
+    tokenHash: text("token_hash").notNull(),
+    technicianId: integer("technician_id").references(() => technicians.id, { onDelete: "set null" }),
+    recipientName: text("recipient_name").notNull(),
+    createdByUserId: integer("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdByLabel: text("created_by_label"),
+    createdAt: text("created_at").notNull(),
+    expiresAt: text("expires_at").notNull(),
+    revokedAt: text("revoked_at"),
+    openCount: integer("open_count").default(0).notNull(),
+    lastOpenedAt: text("last_opened_at"),
+    /** Etap 2 (migracja 0118): 1 = odbiorca może pisać swoje notatki i robić Rozpocznij/Zakończ. */
+    canWork: integer("can_work", { mode: "boolean" }).default(false).notNull(),
+  },
+  (t) => ({
+    tokenHashUidx: uniqueIndex("calendar_event_shares_token_hash_uidx").on(t.tokenHash),
+    eventIdx: index("calendar_event_shares_event_idx").on(t.eventId),
+  })
+);
+
+export type CalendarEventShare = typeof calendarEventShares.$inferSelect;
+export type NewCalendarEventShare = typeof calendarEventShares.$inferInsert;

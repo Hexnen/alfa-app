@@ -820,6 +820,27 @@
       "when": 1789300023000,
       "tag": "0116_patrol_mail_settings",
       "breakpoints": true
+    },
+    {
+      "idx": 117,
+      "version": "6",
+      "when": 1789300024000,
+      "tag": "0117_calendar_event_shares",
+      "breakpoints": true
+    },
+    {
+      "idx": 118,
+      "version": "6",
+      "when": 1789300025000,
+      "tag": "0118_calendar_event_shares_work",
+      "breakpoints": true
+    },
+    {
+      "idx": 119,
+      "version": "6",
+      "when": 1789300026000,
+      "tag": "0119_calendar_events_updated_by_label",
+      "breakpoints": true
     }
   ]
 }
