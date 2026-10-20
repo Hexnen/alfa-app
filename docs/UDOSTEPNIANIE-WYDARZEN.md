@@ -149,3 +149,22 @@ Decyzja użytkownika: odbiorca linku ma móc **tworzyć i edytować swoje notatk
 - **Toast „tylko podgląd”:** `InfoNotice` + `toastFailure(e, fallback)` w `frontend/src/technik/ui/toast.tsx` — `InfoNotice` = toast informacyjny; `Notatki.tsx` i `Udostepnione.tsx` używają `toastFailure`.
 - **Feed aktywności:** opcja filtra „Udostępnienia” (`shared`, obejmuje też `unshared` i zmianę „Może pracować” — warunek w `CalendarPage.tsx` jak przy przypisaniach).
 - Test: `scripts/test-event-shares.ts` +4 asercje (snapshot, etykieta w `loadEvents`, zerowanie przez zwykłą zmianę, `notes` w odpowiedzi start).
+
+## Korekta: „Widzi wszystkie notatki” (2026-10-20) — NADPISUJE zasadę „odbiorca widzi tylko własne notatki”
+
+Decyzja użytkownika: widoczność cudzych notatek steruje **osobny przełącznik per link**, w pełni **niezależny** od „Może pracować”.
+
+- **Dane:** migracja **0120** (`when` = 1789300027000 = 0119 + 1000): `calendar_event_shares.see_all_notes INTEGER NOT NULL DEFAULT 0` (istniejące linki = 0, czyli bez zmian). Schema `calendarEventShares.seeAllNotes`.
+- **Macierz** (A = `can_work`, B = `see_all_notes`):
+  | A | B | notatki w `GET /api/share/:token` | zapisy |
+  |---|---|---|---|
+  | 0 | 0 | `[]` | 404 „Link nieaktywny” |
+  | 1 | 0 | tylko notatki tego linku (`share_id`) | własne notatki + Rozpocznij/Zakończ |
+  | 0 | 1 | WSZYSTKIE żywe notatki wydarzenia (biuro, technicy, inne linki, systemowe; z podpisami `userLabel` i załącznikami) — tylko odczyt | 404 „Link nieaktywny” (także na własnych) |
+  | 1 | 1 | wszystkie | zmiany tylko własnych (`mine`) + Rozpocznij/Zakończ |
+  Własne notatki linku przy A=0 widać tylko przy B=1 (jako część „wszystkich”).
+- **API:** `ShareRow.seeAllNotes`; `POST …/shares` przyjmuje `seeAllNotes?: boolean` (brak = `false`; front wysyła jawnie, domyślnie `true`); `PATCH …/shares/:shareId` przyjmuje `{canWork?, seeAllNotes?}` — co najmniej jedno (inaczej 400), nie-boolean → 400, każda faktyczna zmiana = osobny wpis `activity_log` (`shared`, `field = "share_can_work"` / `"share_see_all_notes"`, summary „X: widzi wszystkie notatki” / „X: tylko własne notatki”). Publiczny widok: `data.seeAllNotes` (= B), `canNotes` = A, `notes[].mine` = notatka dodana tym linkiem, `job.notesCount` = liczba widocznych. `start/finish` zwracają w `notes` ten sam zestaw co GET.
+- **Błędy przy zapisie cudzej notatki** (A=1): notatka WIDOCZNA (B=1), ale nie z tego linku → **403** „Możesz zmieniać tylko własne notatki” (jej istnienie i tak widać, więc 404 byłoby niespójne); niewidoczna (B=0) / innego wydarzenia / nieistniejąca → **404** „Notatka nie istnieje” jak dotąd. Własny wpis systemowy → 409. Załącznik: `GET /:token/attachments/:id` dla załącznika KAŻDEJ notatki widocznej dla linku (inne wydarzenia → 404); `DELETE` cudzego widocznego → 403, niewidocznego → 404 „Załącznik nie istnieje”.
+- **Kod:** wspólne ładowanie notatek `eventNoteRows(eventId, onlyShareId?)` w `src/routes/technik.ts` (panel technika `jobNotes` na nim — zachowanie bez zmian); w `src/routes/calendar-shares.ts` `shareNotes`, `visibleShareNote` / `myShareNote`, `shareAttachment(…, own)`; w `src/lib/calendar-shares.ts` `parseShareFlagsPatch` + `setShareFlags` (`setShareCanWork` zostaje jako wrapper).
+- **Front:** `ShareEventDialog` — drugi przełącznik „Widzi wszystkie notatki” (przy tworzeniu domyślnie włączony; na każdym aktywnym linku, optymistycznie z cofnięciem, `eventSharesApi.setFlags`), bez wzajemnych blokad; testid `share-see-all`, `share-item-see-all`. Strona `/u/:token`: sekcja **„Notatki”** (zamiast „Moje notatki”) gdy A lub B; formularz i Edytuj/Usuń tylko przy A (i `mine`); baner opisuje tryb (`data-notes = all|own|none`). Feed aktywności: `share_see_all_notes` czytany jak `share_can_work` („zmienił(a) uprawnienia linku — …”).
+- **Test:** `scripts/test-event-shares.ts` — blok „SA:” (wszystkie 4 kombinacje, 403/404, cudze załączniki, PATCH pojedynczo i obu pól naraz).

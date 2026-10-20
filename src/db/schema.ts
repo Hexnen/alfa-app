@@ -4312,6 +4312,11 @@ export const calendarEventShares = sqliteTable(
     lastOpenedAt: text("last_opened_at"),
     /** Etap 2 (migracja 0118): 1 = odbiorca może pisać swoje notatki i robić Rozpocznij/Zakończ. */
     canWork: integer("can_work", { mode: "boolean" }).default(false).notNull(),
+    /**
+     * Migracja 0120: 1 = przy `can_work` odbiorca widzi WSZYSTKIE notatki wydarzenia
+     * (zmienia tylko własne); 0 = tylko notatki tego linku.
+     */
+    seeAllNotes: integer("see_all_notes", { mode: "boolean" }).default(false).notNull(),
   },
   (t) => ({
     tokenHashUidx: uniqueIndex("calendar_event_shares_token_hash_uidx").on(t.tokenHash),

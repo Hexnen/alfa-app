@@ -25,6 +25,11 @@
  *   • Rozpocznij/Zakończ (idempotencja, status, notatki systemowe), odwołane zlecenie → 409,
  *   • wygasły / odwołany / canWork=0 → 404 przy zapisie, wyłączenie nie kasuje notatek,
  *   • limity zapisów per IP i per link.
+ *   „Widzi wszystkie notatki” (see_all_notes, migracja 0120) — niezależne od canWork:
+ *   • POST/PATCH seeAllNotes (400 na nie-boolean, wpisy share_see_all_notes),
+ *   • 4 kombinacje: 0/0 brak notatek; 1/0 tylko własne; 0/1 wszystkie tylko do odczytu;
+ *     1/1 wszystkie (z podpisami, systemowe, cudze załączniki), zmiany tylko własnych —
+ *     cudza widoczna → 403, niewidoczna → 404, zapis bez canWork → 404 „Link nieaktywny”.
  *
  * Sprząta po sobie (prefiks fikstur), także przy błędzie.
  */
@@ -319,7 +324,7 @@ try {
   const keys = Object.keys(list.data?.[0] ?? {}).sort().join(",");
   ok(
     "ShareRow: dokładny zestaw kluczy",
-    keys === "canWork,createdAt,createdByLabel,eventId,expiresAt,id,lastOpenedAt,openCount,recipientName,revokedAt,status,technicianId",
+    keys === "canWork,createdAt,createdByLabel,eventId,expiresAt,id,lastOpenedAt,openCount,recipientName,revokedAt,seeAllNotes,status,technicianId",
     keys
   );
 
@@ -714,6 +719,167 @@ try {
   ok("E2: 31. zapis z jednego IP → 429", lastIp === 429, lastIp);
   shareWritePerIp.reset();
   shareWritePerLink.reset();
+
+  // =========================================================================
+  // „Widzi wszystkie notatki” (see_all_notes, 0120) — niezależne od canWork
+  // =========================================================================
+  shareWritePerIp.reset();
+  shareWritePerLink.reset();
+  shareFilesPerIp.reset();
+  const seeEv = insertEvent("Wszystkie notatki");
+  const SEE_OFFICE = `${PREFIX} notatka biura dla wszystkich`;
+  const seeOffice = db
+    .insert(schema.calendarEventNotes)
+    .values({ eventId: seeEv.id, userId: editor.id, userLabel: "Biuro Testowe", text: SEE_OFFICE })
+    .returning()
+    .get();
+  const mk = async (name: string, canWork: boolean, seeAllNotes?: boolean) => {
+    const body: Record<string, unknown> = { recipientName: name, expiresIn: "30d", canWork };
+    if (seeAllNotes !== undefined) body.seeAllNotes = seeAllNotes;
+    return E("POST", `/calendar/events/${seeEv.id}/shares`, body);
+  };
+  const badSee = await E("POST", `/calendar/events/${seeEv.id}/shares`, { recipientName: "X", expiresIn: "24h", seeAllNotes: "tak" });
+  ok("SA: seeAllNotes nie-boolean → 400", badSee.status === 400, badSee);
+  const s00 = await mk("Zero Zero", false, false);
+  const s10 = await mk("Jeden Zero", true); // brak seeAllNotes = false
+  const s01 = await mk("Zero Jeden", false, true);
+  const s11 = await mk("Jeden Jeden", true, true);
+  ok(
+    "SA: POST — flagi w ShareRow (domyślnie seeAllNotes false)",
+    s00.data?.share?.seeAllNotes === false && s10.data?.share?.seeAllNotes === false && s10.data?.share?.canWork === true &&
+      s01.data?.share?.seeAllNotes === true && s01.data?.share?.canWork === false && s11.data?.share?.seeAllNotes === true,
+    [s00, s10, s01, s11].map((r) => r.data?.share)
+  );
+  const [t00, t10, t01, t11] = [s00, s10, s01, s11].map((r) => r.data?.token as string);
+  const id01: number = s01.data?.share?.id;
+
+  // notatka 1/0 ze zdjęciem, notatka 1/1, wpis systemowy 1/1, „własna” notatka 0/1 (wstawiona w DB)
+  const pngS = await sharp({ create: { width: 20, height: 20, channels: 3, background: { r: 10, g: 200, b: 10 } } }).png().toBuffer();
+  const fdS = new FormData();
+  fdS.set("text", "Notatka linku 1/0");
+  fdS.append("files", new File([new Uint8Array(pngS)], "a.png", { type: "image/png" }));
+  const n10 = await wpub("POST", `${t10}/notes`, fdS);
+  const att10 = n10.json?.data?.attachments?.[0];
+  ok("SA: 1/0 dodaje notatkę ze zdjęciem", n10.status === 201 && !!att10, n10.text);
+  const n11 = await wpub("POST", `${t11}/notes`, { text: "Notatka linku 1/1" });
+  ok("SA: 1/1 dodaje notatkę", n11.status === 201 && n11.json?.data?.mine === true, n11.text);
+  const sys11 = db
+    .insert(schema.calendarEventNotes)
+    .values({ eventId: seeEv.id, userId: editor.id, userLabel: "Jeden Jeden (link)", text: "Rozpoczęto o 08:00 — Jeden Jeden (link)", source: "system", shareId: s11.data?.share?.id })
+    .returning()
+    .get();
+  const own01 = db
+    .insert(schema.calendarEventNotes)
+    .values({ eventId: seeEv.id, userId: editor.id, userLabel: "Zero Jeden (link)", text: "Dawna notatka 0/1", shareId: id01 })
+    .returning()
+    .get();
+
+  // 0/0 — brak notatek
+  const g00 = (await wpub("GET", t00)).json?.data;
+  ok("SA: 0/0 → notes [], seeAllNotes false, canNotes false", g00?.notes?.length === 0 && g00?.job?.notesCount === 0 && g00?.seeAllNotes === false && g00?.canNotes === false, g00);
+  const f00 = await wpub("GET", `${t00}/attachments/${att10?.id}`);
+  ok("SA: 0/0 → załącznik 404", f00.status === 404, f00.text);
+
+  // 1/0 — tylko własne
+  const g10 = await wpub("GET", t10);
+  ok(
+    "SA: 1/0 → tylko własna notatka",
+    g10.json?.data?.notes?.length === 1 && g10.json?.data?.notes?.[0]?.id === n10.json?.data?.id && g10.json?.data?.seeAllNotes === false && !g10.text.includes(SEE_OFFICE),
+    g10.json?.data?.notes
+  );
+  const put10Office = await wpub("PUT", `${t10}/notes/${seeOffice.id}`, { text: "x" });
+  ok("SA: 1/0 → PUT niewidocznej notatki biura → 404", put10Office.status === 404 && put10Office.json?.error === "Notatka nie istnieje", put10Office.text);
+
+  // 0/1 — wszystkie, tylko odczyt
+  const g01 = await wpub("GET", t01);
+  const d01 = g01.json?.data;
+  const ids01 = new Set((d01?.notes ?? []).map((n: any) => n.id));
+  ok(
+    "SA: 0/1 → wszystkie notatki (biuro, 1/0, 1/1, systemowa, własna)",
+    [seeOffice.id, n10.json?.data?.id, n11.json?.data?.id, sys11.id, own01.id].every((id) => ids01.has(id)) && d01?.job?.notesCount === d01?.notes?.length,
+    d01?.notes
+  );
+  ok("SA: 0/1 → flagi: canWork/canNotes/canProgress false, seeAllNotes true", d01?.canWork === false && d01?.canNotes === false && d01?.canProgress === false && d01?.seeAllNotes === true, d01);
+  const office01 = d01?.notes?.find((n: any) => n.id === seeOffice.id);
+  ok("SA: 0/1 → notatka biura z podpisem, mine false", office01?.userLabel === "Biuro Testowe" && office01?.mine === false, office01);
+  ok("SA: 0/1 → własna notatka linku mine true", d01?.notes?.find((n: any) => n.id === own01.id)?.mine === true, d01?.notes);
+  const n10in01 = d01?.notes?.find((n: any) => n.id === n10.json?.data?.id);
+  ok("SA: 0/1 → cudzy załącznik z url spod TEGO linku", n10in01?.attachments?.[0]?.url === `/api/share/${t01}/attachments/${att10?.id}`, n10in01);
+  const f01 = await api.request(`/share/${t01}/attachments/${att10?.id}`, { headers: { "x-real-ip": freshIp() } });
+  ok("SA: 0/1 → GET cudzego załącznika → 200", f01.status === 200, f01.status);
+  const add01 = await wpub("POST", `${t01}/notes`, { text: "x" });
+  ok("SA: 0/1 → POST notatki → 404 Link nieaktywny", add01.status === 404 && add01.json?.error === "Link nieaktywny", add01.text);
+  const put01 = await wpub("PUT", `${t01}/notes/${own01.id}`, { text: "x" });
+  ok("SA: 0/1 → PUT nawet własnej → 404 Link nieaktywny", put01.status === 404 && put01.json?.error === "Link nieaktywny", put01.text);
+  const start01 = await wpub("POST", `${t01}/start`, {});
+  ok("SA: 0/1 → start → 404", start01.status === 404, start01.text);
+
+  // 1/1 — wszystkie, zmiany tylko własnych
+  const d11 = (await wpub("GET", t11)).json?.data;
+  ok("SA: 1/1 → wszystkie notatki, mine tylko własne", d11?.notes?.length === d01?.notes?.length && d11?.notes?.every((n: any) => n.mine === (n.id === n11.json?.data?.id || n.id === sys11.id)), d11?.notes);
+  const put11Office = await wpub("PUT", `${t11}/notes/${seeOffice.id}`, { text: "hack" });
+  ok("SA: 1/1 → PUT widocznej notatki biura → 403", put11Office.status === 403, put11Office.text);
+  const del11Office = await wpub("DELETE", `${t11}/notes/${seeOffice.id}`);
+  ok("SA: 1/1 → DELETE notatki biura → 403", del11Office.status === 403, del11Office.text);
+  const put11Other = await wpub("PUT", `${t11}/notes/${n10.json?.data?.id}`, { text: "hack" });
+  ok("SA: 1/1 → PUT notatki innego linku → 403", put11Other.status === 403, put11Other.text);
+  const delAtt11 = await wpub("DELETE", `${t11}/attachments/${att10?.id}`);
+  ok("SA: 1/1 → DELETE cudzego załącznika → 403", delAtt11.status === 403, delAtt11.text);
+  const f11 = await api.request(`/share/${t11}/attachments/${att10?.id}`, { headers: { "x-real-ip": freshIp() } });
+  ok("SA: 1/1 → GET cudzego załącznika → 200", f11.status === 200, f11.status);
+  const put11Sys = await wpub("PUT", `${t11}/notes/${sys11.id}`, { text: "x" });
+  ok("SA: 1/1 → PUT własnego wpisu systemowego → 409", put11Sys.status === 409, put11Sys.text);
+  const put11Own = await wpub("PUT", `${t11}/notes/${n11.json?.data?.id}`, { text: "Poprawiona 1/1" });
+  ok("SA: 1/1 → PUT własnej → 200", put11Own.status === 200 && put11Own.json?.data?.mine === true, put11Own.text);
+  const officeSee = db.select().from(schema.calendarEventNotes).where(eq(schema.calendarEventNotes.id, seeOffice.id)).get();
+  const n10Row = db.select().from(schema.calendarEventNotes).where(eq(schema.calendarEventNotes.id, n10.json?.data?.id ?? -1)).get();
+  ok("SA: cudze notatki nietknięte", officeSee?.text === SEE_OFFICE && officeSee?.deletedAt == null && n10Row?.text === "Notatka linku 1/0" && n10Row?.deletedAt == null, { officeSee, n10Row });
+  const missing11 = await wpub("PUT", `${t11}/notes/999999999`, { text: "x" });
+  ok("SA: 1/1 → PUT nieistniejącej → 404", missing11.status === 404, missing11.text);
+  ok("SA: odpowiedź publiczna bez nazwy twórcy", !JSON.stringify(d11).includes(`${PREFIX}editor`), null);
+
+  // PATCH seeAllNotes — niezależnie od canWork
+  const seeLogs = () =>
+    db
+      .select()
+      .from(schema.activityLog)
+      .where(and(eq(schema.activityLog.entityType, "calendar_event"), eq(schema.activityLog.entityId, seeEv.id), eq(schema.activityLog.field, "share_see_all_notes")))
+      .all();
+  const id10: number = s10.data?.share?.id;
+  const badSeePatch = await E("PATCH", `/calendar/events/${seeEv.id}/shares/${id10}`, { seeAllNotes: 1 });
+  ok("SA: PATCH seeAllNotes nie-boolean → 400", badSeePatch.status === 400, badSeePatch);
+  const onSee = await E("PATCH", `/calendar/events/${seeEv.id}/shares/${id10}`, { seeAllNotes: true });
+  ok(
+    "SA: PATCH seeAllNotes=true → ShareRow + wpis „widzi wszystkie notatki”, canWork bez zmian",
+    onSee.status === 200 && onSee.data?.seeAllNotes === true && onSee.data?.canWork === true && seeLogs().length === 1 && seeLogs()[0].summary === "Jeden Zero: widzi wszystkie notatki",
+    { onSee, logs: seeLogs() }
+  );
+  const g10b = (await wpub("GET", t10)).json?.data;
+  ok("SA: po PATCH 1/0 → 1/1 widzi notatkę biura", g10b?.seeAllNotes === true && g10b?.notes?.some((n: any) => n.id === seeOffice.id && n.mine === false), g10b?.notes);
+  const sameSee = await E("PATCH", `/calendar/events/${seeEv.id}/shares/${id10}`, { seeAllNotes: true });
+  ok("SA: PATCH bez zmiany → bez wpisu", sameSee.status === 200 && seeLogs().length === 1, seeLogs());
+  const both = await E("PATCH", `/calendar/events/${seeEv.id}/shares/${id10}`, { canWork: false, seeAllNotes: false });
+  const cwLogs = db
+    .select()
+    .from(schema.activityLog)
+    .where(and(eq(schema.activityLog.entityType, "calendar_event"), eq(schema.activityLog.entityId, seeEv.id), eq(schema.activityLog.field, "share_can_work")))
+    .all();
+  ok(
+    "SA: PATCH obu pól naraz → dwa wpisy",
+    both.status === 200 && both.data?.canWork === false && both.data?.seeAllNotes === false &&
+      seeLogs().some((l) => l.summary === "Jeden Zero: tylko własne notatki") && cwLogs.some((l) => l.summary === "Jeden Zero: tylko podgląd"),
+    { both, seeLogs: seeLogs(), cwLogs }
+  );
+  const g10c = (await wpub("GET", t10)).json?.data;
+  ok("SA: po PATCH → 0/0: notes []", g10c?.notes?.length === 0, g10c);
+  const onlySee = await E("PATCH", `/calendar/events/${seeEv.id}/shares/${id10}`, { seeAllNotes: true });
+  const g10d = (await wpub("GET", t10)).json?.data;
+  ok("SA: PATCH samego seeAllNotes przy canWork=0 → wszystkie, tylko odczyt", onlySee.data?.canWork === false && g10d?.seeAllNotes === true && g10d?.canNotes === false && g10d?.notes?.length >= 5, g10d);
+  const vSee = await V("PATCH", `/calendar/events/${seeEv.id}/shares/${id10}`, { seeAllNotes: false });
+  ok("SA: PATCH z view → 403", vSee.status === 403, vSee);
+  shareWritePerIp.reset();
+  shareWritePerLink.reset();
+  shareFilesPerIp.reset();
 } catch (error) {
   console.error(error);
   failures++;

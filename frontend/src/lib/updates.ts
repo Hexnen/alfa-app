@@ -63,9 +63,14 @@ export interface VersionUpdate {
  */
 export const UPDATES_CURRENT: VersionUpdate[] = [
   {
-    version: "1.19.1–1.20.0",
+    version: "1.19.1–1.20.1",
     date: "2026-10-20",
     entries: [
+      {
+        text: "Link do wydarzenia ma dwa niezależne przełączniki: jeden pozwala odbiorcy dodawać i edytować własne notatki oraz rozpoczynać i kończyć pracę, drugi pokazuje mu notatki pozostałych osób",
+        type: "feat",
+        module: "techniczny",
+      },
       {
         text: "Wydarzenie z kalendarza technicznego można udostępnić linkiem technikowi albo gościowi: otwiera zlecenie bez logowania, dodaje własne notatki oraz rozpoczyna i kończy pracę",
         type: "feat",
@@ -447,9 +452,14 @@ export const UPDATES: VersionUpdate[] = [...UPDATES_CURRENT, ...UPDATES_2026];
  */
 export const UPDATES_TECHNIK: VersionUpdate[] = [
   {
-    version: "1.11.0",
+    version: "1.11.0–1.11.1",
     date: "2026-10-20",
     entries: [
+      {
+        text: "Na zleceniu otwartym z linku widać notatki innych osób razem z podpisami, a edytować możesz tylko swoje",
+        type: "feat",
+        module: "technik",
+      },
       {
         text: "Notatki i przyciski Rozpocznij/Zakończ działają tak samo na zleceniu, które biuro wysłało Ci linkiem, także bez logowania",
         type: "feat",

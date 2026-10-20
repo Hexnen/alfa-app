@@ -100,7 +100,7 @@ export function Notatki({
   objectLng?: number | null;
   /** Źródło danych; brak = panel technika (`/api/technik/*`). */
   api?: NotesApi;
-  /** Nagłówek sekcji („Notatki”, na linku „Moje notatki”). */
+  /** Nagłówek sekcji („Notatki”; na linku też „Notatki” — własne i, przy „widzi wszystkie”, cudze). */
   title?: string;
   defaultOpen?: boolean;
   emptyText?: string;

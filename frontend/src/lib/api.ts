@@ -11480,6 +11480,18 @@ export interface EventShareRow {
    * backend bez tego pola) traktujemy jak „tylko podgląd”.
    */
   canWork?: boolean;
+  /**
+   * Migracja 0120, niezależne od `canWork`: `true` = odbiorca widzi WSZYSTKIE
+   * notatki wydarzenia (biuro, technicy, inne linki), zmienia tylko własne
+   * (i tylko przy `canWork`). Brak = tylko własne.
+   */
+  seeAllNotes?: boolean;
+}
+
+/** PATCH uprawnień linku — co najmniej jedno pole. */
+export interface EventShareFlagsPatch {
+  canWork?: boolean;
+  seeAllNotes?: boolean;
 }
 
 export interface EventShareCreateInput {
@@ -11488,6 +11500,8 @@ export interface EventShareCreateInput {
   expiresIn: EventShareExpiresIn;
   /** Uprawnienia linku; brak = backend przyjmuje `false` (tylko podgląd). */
   canWork?: boolean;
+  /** Brak = backend przyjmuje `false` (tylko własne notatki). */
+  seeAllNotes?: boolean;
 }
 
 /** Wynik utworzenia linku — `token`/`url` widać TYLKO w tej odpowiedzi. */
@@ -11502,7 +11516,7 @@ export interface EventShareCreated {
  * i bez protokołu. Pola, których backend może nie odesłać, są opcjonalne —
  * widok i tak normalizuje je do pustych wartości.
  */
-/** Wynik Rozpocznij/Zakończ spod linku: zlecenie + aktualne notatki linku. */
+/** Wynik Rozpocznij/Zakończ spod linku: zlecenie + aktualne notatki widoczne dla linku. */
 export interface SharedProgressResult {
   job: SharedJob;
   notes: TechnikJobNote[] | null;
@@ -11523,9 +11537,14 @@ export interface SharedJobView {
   canProgress: boolean;
   /** Etap 2 — link „do pracy”. Starszy backend nie odsyła → tylko podgląd. */
   canWork?: boolean;
-  /** Własne notatki (dziś = `canWork`). */
+  /** Dodawanie/edycja własnych notatek (dziś = `canWork`). */
   canNotes?: boolean;
-  /** Notatki dodane TYM linkiem (`mine: true`); `[]` przy linku tylko do odczytu. */
+  /** Link widzi wszystkie notatki wydarzenia (niezależnie od `canWork`). */
+  seeAllNotes?: boolean;
+  /**
+   * Notatki widoczne dla linku: wszystkie (`seeAllNotes`), tylko dodane tym linkiem
+   * (`canWork`) albo `[]`. `mine` = dodana tym linkiem — tylko takie wolno zmieniać.
+   */
   notes?: TechnikJobNote[];
 }
 
@@ -11553,14 +11572,17 @@ export const eventSharesApi = {
   },
   /**
    * Zmiana uprawnień istniejącego (aktywnego) linku bez generowania nowego —
-   * `PATCH …/shares/:shareId {canWork}` → `ShareRow`. Nieaktywny link = 409.
+   * `PATCH …/shares/:shareId {canWork?, seeAllNotes?}` → `ShareRow`. Nieaktywny link = 409.
    */
-  async setCanWork(eventId: number, shareId: number, canWork: boolean): Promise<EventShareRow> {
+  async setFlags(eventId: number, shareId: number, patch: EventShareFlagsPatch): Promise<EventShareRow> {
     const r = await request<ApiResponse<EventShareRow>>(`${sharesPath(eventId)}/${shareId}`, {
       method: "PATCH",
-      body: JSON.stringify({ canWork }),
+      body: JSON.stringify(patch),
     });
     return r.data as EventShareRow;
+  },
+  async setCanWork(eventId: number, shareId: number, canWork: boolean): Promise<EventShareRow> {
+    return eventSharesApi.setFlags(eventId, shareId, { canWork });
   },
   async revoke(eventId: number, shareId: number): Promise<void> {
     await request<ApiResponse<unknown>>(`${sharesPath(eventId)}/${shareId}`, { method: "DELETE" });

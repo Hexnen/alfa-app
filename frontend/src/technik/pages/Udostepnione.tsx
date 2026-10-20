@@ -30,13 +30,15 @@ import "../technik.css";
  * otwiera go na telefonie i widzi to samo, co technik na ekranie zlecenia —
  * nagłówek, „Nawiguj”/„Zadzwoń”, „Co do zrobienia”.
  *
- * Dwa tryby (etap 2, `canWork` linku):
- *  - tylko podgląd — bez paska akcji, bez notatek;
- *  - „do pracy” — pasek Rozpocznij/Zakończ (bez „Wznów” i protokołu) oraz
- *    „Moje notatki”: TE SAME komponenty co w panelu (`Notatki`, `PasekAkcji`),
- *    tylko z adapterem API na `/api/share/:token/*`.
- * Wewnętrzna rozmowa biura i cudze notatki nigdy tu nie trafiają — backend
- * oddaje wyłącznie notatki dodane tym linkiem.
+ * Dwa NIEZALEŻNE przełączniki linku:
+ *  - `canWork` („Może pracować”) — pasek Rozpocznij/Zakończ (bez „Wznów”
+ *    i protokołu) oraz dodawanie/edycja/usuwanie WŁASNYCH notatek;
+ *  - `seeAllNotes` („Widzi wszystkie notatki”) — w sekcji „Notatki” także
+ *    notatki biura, techników, innych linków i systemowe (z podpisami, zdjęciami).
+ * Macierz: 0/0 podgląd bez notatek; 1/0 tylko własne; 0/1 wszystkie tylko do
+ * odczytu; 1/1 wszystkie, zmiany tylko przy `mine`. TE SAME komponenty co
+ * w panelu (`Notatki`, `PasekAkcji`), z adapterem API na `/api/share/:token/*`.
+ * Zakres notatek ustala backend — strona pokazuje, co dostała.
  *
  * Każdy nieważny link (wygasły, unieważniony, nieistniejący, wydarzenie
  * usunięte) to dla backendu to samo 404 — i tu też jeden ekran. Także 404
@@ -138,6 +140,9 @@ function Podglad({
 
   const canWork = view.canWork === true;
   const canNotes = canWork && view.canNotes !== false;
+  const seeAll = view.seeAllNotes === true;
+  /** Sekcja „Notatki”: własne (canNotes) albo cudze do odczytu (seeAll). */
+  const showNotes = canNotes || seeAll;
   const notes = useMemo(() => view.notes ?? [], [view.notes]);
 
   // Komponenty ekranu zlecenia znają pełny typ panelu — dopełniamy pola, których
@@ -180,7 +185,7 @@ function Podglad({
             // Biuro przełączyło link na „tylko podgląd” — strona sama przechodzi
             // w podgląd (pasek i notatki znikają), a toast mówi dlaczego.
             // To zmiana stanu, nie porażka — `InfoNotice` = toast informacyjny.
-            if (fresh.canWork !== true) {
+            if (fresh.canWork !== true && canWork) {
               throw new InfoNotice("Biuro zmieniło ten link na „tylko podgląd” — zapis nie jest już możliwy.", {
                 cause: e,
               });
@@ -190,7 +195,7 @@ function Podglad({
         throw e;
       }
     },
-    [token, onGone, setView],
+    [token, onGone, setView, canWork],
   );
 
   const patchNotes = useCallback(
@@ -248,12 +253,13 @@ function Podglad({
       );
       // Notatki z odpowiedzi zapisu (systemowe „Rozpoczęto/Zakończono …”) — bez
       // ponownego GET widoku, który podbijałby licznik otwarć linku w biurze.
+      // `mine` z backendu: przy „widzi wszystkie” lista zawiera też cudze.
       setView((v) =>
         v
           ? {
               ...v,
               job: { ...v.job, ...next, ...(fresh ? { notesCount: fresh.length } : {}) },
-              ...(fresh ? { notes: fresh.map((n) => ({ ...n, mine: true })) } : {}),
+              ...(fresh ? { notes: fresh.map((n) => ({ ...n, mine: n.mine === true })) } : {}),
             }
           : v,
       );
@@ -275,6 +281,13 @@ function Podglad({
   };
 
   const BannerIcon = canWork ? Wrench : Eye;
+  const bannerHint = canWork
+    ? seeAll
+      ? "Możesz rozpocząć i zakończyć zlecenie oraz dodawać własne notatki i zdjęcia; widzisz też notatki biura i techników"
+      : "Możesz rozpocząć i zakończyć zlecenie oraz dodawać własne notatki i zdjęcia"
+    : seeAll
+      ? "Tylko do odczytu — z notatkami biura i techników"
+      : "Tylko do odczytu";
 
   return (
     <>
@@ -286,6 +299,7 @@ function Podglad({
           className="flex items-start gap-2 rounded-xl border border-primary/30 bg-primary/5 px-3 py-2.5 text-sm"
           data-testid="share-banner"
           data-mode={canWork ? "work" : "view"}
+          data-notes={seeAll ? "all" : canWork ? "own" : "none"}
         >
           <BannerIcon className="mt-0.5 h-4 w-4 shrink-0 text-primary" aria-hidden />
           <div className="min-w-0">
@@ -294,9 +308,7 @@ function Podglad({
               <span className="break-words">{view.share.recipientName}</span>
             </p>
             <p className="text-xs leading-snug text-muted-foreground">
-              {canWork
-                ? "Możesz rozpocząć i zakończyć zlecenie oraz dodawać własne notatki i zdjęcia"
-                : "Tylko do odczytu"}
+              {bannerHint}
               {" · "}link ważny do {fmtTimestamp(view.share.expiresAt)}
             </p>
           </div>
@@ -311,21 +323,25 @@ function Podglad({
         <KafleAkcji job={job} distance={null} distanceLoading={false} showTrip={false} />
         <CoDoZrobienia job={job} coLabel="Technicy" />
 
-        {canNotes && (
+        {showNotes && (
           <Notatki
             jobId={job.id}
             notes={notes}
-            canEdit={!cancelled}
+            canEdit={canNotes && !cancelled}
             onChanged={() => {
               /* adapter sam wpisuje wynik w stan — nic do przeładowania */
             }}
             objectLat={job.lat}
             objectLng={job.lng}
             api={notesApi}
-            title="Moje notatki"
+            title="Notatki"
             defaultOpen
-            emptyText="Nie ma jeszcze Twoich notatek."
-            hint="Notatki i zdjęcia trafiają do biura. Widzisz tu tylko te, które dodano z tego linku."
+            emptyText={seeAll ? "Nikt jeszcze nic nie dopisał." : "Nie ma jeszcze Twoich notatek."}
+            hint={
+              seeAll
+                ? "Notatki i zdjęcia trafiają do biura. Widzisz notatki wszystkich, zmieniać możesz tylko własne."
+                : "Notatki i zdjęcia trafiają do biura. Widzisz tu tylko te, które dodano z tego linku."
+            }
           />
         )}
 

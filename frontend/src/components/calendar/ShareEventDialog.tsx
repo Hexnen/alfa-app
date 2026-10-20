@@ -107,6 +107,8 @@ export function ShareEventDialog({
   const [guestName, setGuestName] = useState("");
   const [expiresIn, setExpiresIn] = useState<EventShareExpiresIn>(defaultExpiry);
   const [canWork, setCanWork] = useState(true);
+  /** „Widzi wszystkie notatki” — niezależne od „Może pracować”, domyślnie włączone. */
+  const [seeAllNotes, setSeeAllNotes] = useState(true);
   const [formError, setFormError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   /** Świeżo utworzony link — jedyny moment, kiedy znamy pełny URL. */
@@ -138,6 +140,7 @@ export function ShareEventDialog({
     setGuestName("");
     setExpiresIn(defaultExpiry);
     setCanWork(true);
+    setSeeAllNotes(true);
     setWorkError(null);
     setFormError(null);
     setCreated(null);
@@ -193,7 +196,7 @@ export function ShareEventDialog({
   const create = async () => {
     setFormError(null);
     let recipient: string;
-    const input: EventShareCreateInput = { expiresIn, canWork };
+    const input: EventShareCreateInput = { expiresIn, canWork, seeAllNotes };
     if (mode === "technician") {
       const t = technicians?.find((x) => x.id === technicianId);
       if (!t) {
@@ -261,20 +264,23 @@ export function ShareEventDialog({
     }
   };
 
-  /** Zmiana uprawnień istniejącego linku — od razu na liście, cofana przy błędzie. */
-  const toggleWork = async (share: EventShareRow, next: boolean) => {
+  /**
+   * Zmiana uprawnień istniejącego linku („Może pracować” / „Widzi wszystkie
+   * notatki”, niezależnie) — od razu na liście, cofana przy błędzie.
+   */
+  const toggleFlag = async (share: EventShareRow, key: "canWork" | "seeAllNotes", next: boolean) => {
     if (workBusy.has(share.id)) return;
     setWorkError(null);
     setWorkBusy((prev) => new Set(prev).add(share.id));
-    setShares((list) => list?.map((x) => (x.id === share.id ? { ...x, canWork: next } : x)) ?? list);
+    setShares((list) => list?.map((x) => (x.id === share.id ? { ...x, [key]: next } : x)) ?? list);
     try {
-      const row = await eventSharesApi.setCanWork(eventId, share.id, next);
+      const row = await eventSharesApi.setFlags(eventId, share.id, { [key]: next });
       if (row && typeof row.id === "number") {
         setShares((list) => list?.map((x) => (x.id === row.id ? row : x)) ?? list);
       }
     } catch (e) {
       setShares((list) =>
-        list?.map((x) => (x.id === share.id ? { ...x, canWork: share.canWork } : x)) ?? list,
+        list?.map((x) => (x.id === share.id ? { ...x, [key]: share[key] } : x)) ?? list,
       );
       setWorkError({
         id: share.id,
@@ -446,6 +452,23 @@ export function ShareEventDialog({
                 <Switch checked={canWork} onCheckedChange={setCanWork} label="Może pracować (notatki, start/koniec)" />
               </span>
             </div>
+            <div className="flex items-center gap-3 rounded-lg border px-3 py-1" data-testid="share-see-all-row">
+              <div className="min-w-0 flex-1 py-1.5">
+                <p className="text-sm font-medium" id="share-see-all-label">
+                  Widzi wszystkie notatki
+                </p>
+                <p className="text-xs leading-snug text-muted-foreground">
+                  {seeAllNotes
+                    ? "Także notatki biura, techników i innych linków (ze zdjęciami) — tylko do odczytu."
+                    : canWork
+                      ? "Tylko notatki dodane tym linkiem."
+                      : "Bez notatek."}
+                </p>
+              </div>
+              <span data-testid="share-see-all">
+                <Switch checked={seeAllNotes} onCheckedChange={setSeeAllNotes} label="Widzi wszystkie notatki" />
+              </span>
+            </div>
 
             {formError && (
               <p
@@ -539,7 +562,8 @@ export function ShareEventDialog({
                       key={s.id}
                       share={s}
                       onRevoke={() => setToRevoke(s)}
-                      onToggleWork={(next) => void toggleWork(s, next)}
+                      onToggleWork={(next) => void toggleFlag(s, "canWork", next)}
+                      onToggleSeeAll={(next) => void toggleFlag(s, "seeAllNotes", next)}
                       workBusy={workBusy.has(s.id)}
                       workError={workError?.id === s.id ? workError.message : null}
                     />
@@ -624,17 +648,20 @@ function ShareItem({
   share: s,
   onRevoke,
   onToggleWork,
+  onToggleSeeAll,
   workBusy,
   workError,
 }: {
   share: EventShareRow;
   onRevoke: () => void;
   onToggleWork: (next: boolean) => void;
+  onToggleSeeAll: (next: boolean) => void;
   workBusy: boolean;
   workError: string | null;
 }) {
   const meta = STATUS_META[s.status] ?? STATUS_META.expired;
   const works = s.canWork === true;
+  const seesAll = s.seeAllNotes === true;
   return (
     <li className="rounded-lg border p-3 text-sm" data-testid="share-item">
       <div className="flex items-start justify-between gap-2">
@@ -679,6 +706,23 @@ function ShareItem({
             </div>
           ) : (
             <p className="mt-0.5 text-xs text-muted-foreground">{works ? "Mógł pracować" : "Tylko podgląd"}</p>
+          )}
+          {s.status === "active" ? (
+            <div className="mt-1 flex items-center gap-2" data-testid="share-item-see-all">
+              <Switch
+                checked={seesAll}
+                onCheckedChange={onToggleSeeAll}
+                busy={workBusy}
+                label={`Widzi wszystkie notatki: ${s.recipientName}`}
+              />
+              <span className="text-xs text-muted-foreground">
+                {seesAll ? "Widzi wszystkie notatki" : "Tylko własne notatki"}
+              </span>
+            </div>
+          ) : (
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              {seesAll ? "Widział wszystkie notatki" : "Tylko własne notatki"}
+            </p>
           )}
           {workError && (
             <p role="alert" className="mt-1 text-xs text-destructive" data-testid="share-item-can-work-error">

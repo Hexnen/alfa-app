@@ -97,6 +97,11 @@ export interface ShareRow {
   status: ShareStatus;
   /** Etap 2: odbiorca może pisać swoje notatki i robić Rozpocznij/Zakończ. */
   canWork: boolean;
+  /**
+   * Migracja 0120: przy `canWork` odbiorca widzi WSZYSTKIE notatki wydarzenia
+   * (zmienia tylko własne). Bez `canWork` bez znaczenia — notatek nie widać wcale.
+   */
+  seeAllNotes: boolean;
 }
 
 export function shareStatus(row: Pick<CalendarEventShare, "revokedAt" | "expiresAt">, now = new Date()): ShareStatus {
@@ -119,6 +124,7 @@ export function toShareRow(row: CalendarEventShare, now = new Date()): ShareRow 
     lastOpenedAt: row.lastOpenedAt,
     status: shareStatus(row, now),
     canWork: row.canWork,
+    seeAllNotes: row.seeAllNotes,
   };
 }
 
@@ -170,13 +176,43 @@ export interface ShareInput {
   expiresIn: ShareExpiresIn;
   /** Brak w ciele = `false` (tylko podgląd) — domyślne „włączone” ustawia front. */
   canWork: boolean;
+  /** Brak w ciele = `false` (tylko własne notatki) — domyślne „włączone” ustawia front. */
+  seeAllNotes: boolean;
+}
+
+/** Flaga boolean z ciała żądania: brak → `fallback`, inaczej wyłącznie boolean. */
+function parseBoolFlag(name: string, raw: unknown, fallback: boolean | null): boolean {
+  if (raw === undefined && fallback !== null) return fallback;
+  if (typeof raw !== "boolean") throw new ApiError(400, `Pole ${name}: oczekiwano true albo false`);
+  return raw;
 }
 
 /** `canWork` z ciała żądania: brak → `fallback`, inaczej wyłącznie boolean. */
 export function parseCanWork(raw: unknown, fallback: boolean | null): boolean {
-  if (raw === undefined && fallback !== null) return fallback;
-  if (typeof raw !== "boolean") throw new ApiError(400, "Pole canWork: oczekiwano true albo false");
-  return raw;
+  return parseBoolFlag("canWork", raw, fallback);
+}
+
+/** `seeAllNotes` z ciała żądania: brak → `fallback`, inaczej wyłącznie boolean. */
+export function parseSeeAllNotes(raw: unknown, fallback: boolean | null): boolean {
+  return parseBoolFlag("seeAllNotes", raw, fallback);
+}
+
+/** Uprawnienia linku zmieniane po fakcie (PATCH) — co najmniej jedno pole. */
+export interface ShareFlagsPatch {
+  canWork?: boolean;
+  seeAllNotes?: boolean;
+}
+
+/** Ciało PATCH: `{canWork?, seeAllNotes?}`, co najmniej jedno, każde wyłącznie boolean. */
+export function parseShareFlagsPatch(body: unknown): ShareFlagsPatch {
+  const b = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+  const out: ShareFlagsPatch = {};
+  if (b.canWork !== undefined) out.canWork = parseCanWork(b.canWork, null);
+  if (b.seeAllNotes !== undefined) out.seeAllNotes = parseSeeAllNotes(b.seeAllNotes, null);
+  if (out.canWork === undefined && out.seeAllNotes === undefined) {
+    throw new ApiError(400, "Podaj canWork albo seeAllNotes (true/false)");
+  }
+  return out;
 }
 
 export function parseShareInput(body: unknown): ShareInput {
@@ -186,18 +222,19 @@ export function parseShareInput(body: unknown): ShareInput {
     throw new ApiError(400, "Nieprawidłowa ważność linku");
   }
   const canWork = parseCanWork(b.canWork, false);
+  const seeAllNotes = parseSeeAllNotes(b.seeAllNotes, false);
   const rawTech = b.technicianId;
   if (rawTech !== undefined && rawTech !== null && rawTech !== "") {
     const technicianId = Number(rawTech);
     if (!Number.isInteger(technicianId) || technicianId <= 0) throw new ApiError(400, "Nieprawidłowy technik");
-    return { technicianId, recipientName: null, expiresIn: expiresIn as ShareExpiresIn, canWork };
+    return { technicianId, recipientName: null, expiresIn: expiresIn as ShareExpiresIn, canWork, seeAllNotes };
   }
   const name = typeof b.recipientName === "string" ? b.recipientName.replace(/\s+/g, " ").trim() : "";
   if (!name) throw new ApiError(400, "Podaj imię lub nazwę odbiorcy linku");
   if (name.length > RECIPIENT_NAME_MAX) {
     throw new ApiError(400, `Nazwa odbiorcy może mieć najwyżej ${RECIPIENT_NAME_MAX} znaków`);
   }
-  return { technicianId: null, recipientName: name, expiresIn: expiresIn as ShareExpiresIn, canWork };
+  return { technicianId: null, recipientName: name, expiresIn: expiresIn as ShareExpiresIn, canWork, seeAllNotes };
 }
 
 // ---------------------------------------------------------------------------
@@ -238,6 +275,7 @@ export function createShare(
       createdAt: now.toISOString(),
       expiresAt,
       canWork: input.canWork,
+      seeAllNotes: input.seeAllNotes,
     })
     .returning()
     .get();
@@ -255,15 +293,17 @@ export function createShare(
 }
 
 /**
- * Przełącznik „Może pracować” na istniejącym linku (korekta etapu 2). Tylko link
- * AKTYWNY (wygasły/odwołany → 409). Brak zmiany = bez zapisu i bez wpisu w dzienniku.
- * Wyłączenie nie kasuje notatek odbiorcy — po ponownym włączeniu znów je widzi.
+ * Przełączniki „Może pracować” i „Widzi wszystkie notatki” na istniejącym linku.
+ * Tylko link AKTYWNY (wygasły/odwołany → 409). Każda faktyczna zmiana = osobny
+ * wpis w dzienniku (`share_can_work` / `share_see_all_notes`); brak zmiany = bez
+ * zapisu i bez wpisu. Wyłączenie nie kasuje notatek odbiorcy — po ponownym
+ * włączeniu znów je widzi.
  */
-export function setShareCanWork(
+export function setShareFlags(
   tx: DbOrTx,
   ev: CalendarEvent,
   shareId: number,
-  canWork: boolean,
+  patch: ShareFlagsPatch,
   user: ShareUser,
   now = new Date()
 ): ShareRow {
@@ -276,26 +316,55 @@ export function setShareCanWork(
   if (shareStatus(row, now) !== "active") {
     throw new ApiError(409, "Link wygasł albo został unieważniony — uprawnień nie da się już zmienić");
   }
-  if (row.canWork === canWork) return toShareRow(row, now);
+  const set: Partial<Pick<CalendarEventShare, "canWork" | "seeAllNotes">> = {};
+  if (patch.canWork !== undefined && patch.canWork !== row.canWork) set.canWork = patch.canWork;
+  if (patch.seeAllNotes !== undefined && patch.seeAllNotes !== row.seeAllNotes) set.seeAllNotes = patch.seeAllNotes;
+  if (Object.keys(set).length === 0) return toShareRow(row, now);
   const updated = tx
     .update(schema.calendarEventShares)
-    .set({ canWork })
+    .set(set)
     .where(eq(schema.calendarEventShares.id, row.id))
     .returning()
     .get();
-  const mode = canWork ? "może pracować" : "tylko podgląd";
-  logActivity(tx, {
-    entityType: CALENDAR_ENTITY,
-    entityId: ev.id,
-    objectId: ev.objectId,
-    user,
-    action: "shared",
-    field: "share_can_work",
-    oldValue: row.canWork,
-    newValue: canWork,
-    summary: `${row.recipientName}: ${mode}`,
-  });
+  if (set.canWork !== undefined) {
+    logActivity(tx, {
+      entityType: CALENDAR_ENTITY,
+      entityId: ev.id,
+      objectId: ev.objectId,
+      user,
+      action: "shared",
+      field: "share_can_work",
+      oldValue: row.canWork,
+      newValue: set.canWork,
+      summary: `${row.recipientName}: ${set.canWork ? "może pracować" : "tylko podgląd"}`,
+    });
+  }
+  if (set.seeAllNotes !== undefined) {
+    logActivity(tx, {
+      entityType: CALENDAR_ENTITY,
+      entityId: ev.id,
+      objectId: ev.objectId,
+      user,
+      action: "shared",
+      field: "share_see_all_notes",
+      oldValue: row.seeAllNotes,
+      newValue: set.seeAllNotes,
+      summary: `${row.recipientName}: ${set.seeAllNotes ? "widzi wszystkie notatki" : "tylko własne notatki"}`,
+    });
+  }
   return toShareRow(updated, now);
+}
+
+/** Zgodność wstecz: sam przełącznik „Może pracować”. */
+export function setShareCanWork(
+  tx: DbOrTx,
+  ev: CalendarEvent,
+  shareId: number,
+  canWork: boolean,
+  user: ShareUser,
+  now = new Date()
+): ShareRow {
+  return setShareFlags(tx, ev, shareId, { canWork }, user, now);
 }
 
 /** Unieważnia link (idempotentnie — drugie wywołanie nic nie zmienia i nie loguje). */

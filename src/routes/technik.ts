@@ -553,27 +553,55 @@ function withPanelUrls(list: NoteAttachmentJson[]): NoteAttachmentJson[] {
   return list.map((a) => ({ ...a, url: `${TECHNIK_ATTACHMENT_URL_PREFIX}/${a.id}` }));
 }
 
-function jobNotes(eventId: number, userId: number): JobNote[] {
+/** Wiersz notatki wydarzenia z polami własności (autor-użytkownik, link) — przed mapowaniem na `JobNote`. */
+export interface EventNoteRow {
+  id: number;
+  text: string;
+  userId: number | null;
+  shareId: number | null;
+  userLabel: string | null;
+  source: string;
+  createdAt: string;
+  attachments: NoteAttachmentJson[];
+}
+
+/**
+ * Żywe notatki wydarzenia, najnowsze pierwsze (max 200), z załącznikami (jedno
+ * zapytanie, bez N+1). `onlyShareId` zawęża do notatek jednego linku. Adresy
+ * załączników są „kalendarzowe” — wołający podmienia `url` na swoją trasę.
+ * Wspólne dla panelu technika (`jobNotes`) i linku (`src/routes/calendar-shares.ts`).
+ */
+export function eventNoteRows(eventId: number, onlyShareId?: number): EventNoteRow[] {
+  const conds = [eq(schema.calendarEventNotes.eventId, eventId), isNull(schema.calendarEventNotes.deletedAt)];
+  if (onlyShareId !== undefined) conds.push(eq(schema.calendarEventNotes.shareId, onlyShareId));
   const rows = db
     .select({
       id: schema.calendarEventNotes.id,
       text: schema.calendarEventNotes.text,
       userId: schema.calendarEventNotes.userId,
+      shareId: schema.calendarEventNotes.shareId,
       userLabel: schema.calendarEventNotes.userLabel,
       source: schema.calendarEventNotes.source,
       createdAt: schema.calendarEventNotes.createdAt,
     })
     .from(schema.calendarEventNotes)
-    .where(and(eq(schema.calendarEventNotes.eventId, eventId), isNull(schema.calendarEventNotes.deletedAt)))
+    .where(and(...conds))
     .orderBy(desc(schema.calendarEventNotes.createdAt), desc(schema.calendarEventNotes.id))
     .limit(200)
     .all();
-  // Jedno zapytanie na wszystkie notatki (bez N+1) — tak samo jak w kalendarzu.
   const byNote = attachmentsByNote(db, rows.map((r) => r.id));
-  return rows.map(({ userId: author, ...n }) => ({
-    ...n,
-    mine: author === userId,
-    attachments: withPanelUrls(byNote.get(n.id) ?? []),
+  return rows.map((n) => ({ ...n, attachments: byNote.get(n.id) ?? [] }));
+}
+
+function jobNotes(eventId: number, userId: number): JobNote[] {
+  return eventNoteRows(eventId).map((n) => ({
+    id: n.id,
+    text: n.text,
+    userLabel: n.userLabel,
+    source: n.source,
+    createdAt: n.createdAt,
+    mine: n.userId === userId,
+    attachments: withPanelUrls(n.attachments),
   }));
 }
 

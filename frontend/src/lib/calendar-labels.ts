@@ -802,6 +802,11 @@ function fieldValue(field: string | null, v: string | null): string {
   }
 }
 
+/** Pola wpisów „shared” oznaczające zmianę uprawnień istniejącego linku. */
+function isShareFlagField(field: string | null | undefined): boolean {
+  return field === "share_can_work" || field === "share_see_all_notes";
+}
+
 /**
  * Czytelne zdanie PL z wpisu activity_log, np.
  * „Jan Kowalski przesunął z 12.09 08:00 na 14.09 08:00”.
@@ -813,8 +818,9 @@ export function describeActivity(entry: ActivityEntry): string {
     const { text: t, via } = noteActivityParts(entry);
     return `${who} ${ACTIVITY_ACTION_LABELS[entry.action]}${via ? ` (${via})` : ""}${t ? `: „${t}”` : ""}`;
   }
-  // Zmiana uprawnień linku: summary („Jan K.: tylko podgląd”) nie mówi, co się stało.
-  if (entry.action === "shared" && entry.field === "share_can_work") {
+  // Zmiana uprawnień linku: summary („Jan K.: tylko podgląd” / „Jan K.: widzi wszystkie
+  // notatki”) nie mówi, co się stało.
+  if (entry.action === "shared" && isShareFlagField(entry.field)) {
     return `${who} zmienił(a) uprawnienia linku${entry.summary ? ` — ${entry.summary}` : ""}`;
   }
   if (entry.summary) return `${who} — ${entry.summary}`;
@@ -881,8 +887,9 @@ export function activityParts(entry: ActivityEntry): {
     case "shared":
     case "unshared": {
       // field „share” — summary „Udostępniono/Unieważniono link: X” (czasownik już to mówi);
-      // field „share_can_work” — summary „X: może pracować / tylko podgląd”.
-      if (entry.field === "share_can_work") {
+      // field „share_can_work” — summary „X: może pracować / tylko podgląd”;
+      // field „share_see_all_notes” — summary „X: widzi wszystkie notatki / tylko własne notatki”.
+      if (isShareFlagField(entry.field)) {
         return { who, verb: "Zmienił(a) uprawnienia linku", detail: entry.summary ?? null };
       }
       const m = entry.summary ? /link:\s*(.+)$/.exec(entry.summary) : null;

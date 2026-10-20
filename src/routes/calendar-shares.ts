@@ -7,12 +7,14 @@
  *    montowane pod /calendar PO requireAuth i strażniku zakładek (src/routes/index.ts).
  *    Strażnik wpuszcza GET z samym „view” — tu WYMAGAMY `edit` na technical/kalendarz
  *    dla wszystkich trzech (lista linków to też informacja, komu co wysłano).
- *    PATCH /events/:id/shares/:shareId { canWork } — przełącznik „Może pracować” (etap 2).
+ *    PATCH /events/:id/shares/:shareId { canWork?, seeAllNotes? } — przełączniki
+ *    „Może pracować” (etap 2) i „Widzi wszystkie notatki” (migracja 0120).
  *  - sharePublicRoutes: /:token/* — montowane pod /share PRZED requireAuth (bez
  *    cookie; rola `technik` i `technikRoleGuard` nie mają tu zastosowania).
  *
  * WIDOK PUBLICZNY. To `JobJson` z panelu technika (wąski, bez kwot/billingu/wycen),
- * BEZ cudzych notatek i protokołu: notatki biura/techników to wewnętrzna rozmowa,
+ * BEZ protokołu i (domyślnie) cudzych notatek: notatki biura/techników to wewnętrzna rozmowa
+ * (odsłania je dopiero przełącznik `see_all_notes`),
  * a protokół — dokument klienta. Pola zostają w kształcie (zera/null), żeby front
  * mógł użyć komponentów panelu bez rozgałęzień.
  *
@@ -20,6 +22,15 @@
  * notatki (calendar_event_notes.share_id = id linku) i robi Rozpocznij/Zakończ
  * z semantyką panelu technika (`startProgress`/`finishProgress`). Każda mutacja
  * od nowa sprawdza token (`resolveWorkShare`) — inaczej to samo 404.
+ *
+ * WIDOCZNOŚĆ NOTATEK (`see_all_notes`, migracja 0120) — przełącznik NIEZALEŻNY
+ * od `can_work`:
+ *   can_work=0, see_all=0 → brak notatek;   can_work=1, see_all=0 → tylko własne;
+ *   can_work=0, see_all=1 → wszystkie, tylko odczyt (zapisy → 404 „Link nieaktywny”);
+ *   can_work=1, see_all=1 → wszystkie (biuro, technicy, inne linki, systemowe —
+ *   z podpisami i załącznikami), zmiany tylko własnych (`mine`).
+ * Cudza, ale WIDOCZNA notatka przy zapisie → 403 (jej istnienie i tak widać);
+ * niewidoczna/nieistniejąca → 404 jak dotąd.
  */
 import { Hono, type Context } from "hono";
 import { db, schema } from "../db/index.js";
@@ -33,7 +44,7 @@ import {
   updateNote,
   addNote,
 } from "../lib/calendar-mutations.js";
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { createReadStream, statSync } from "node:fs";
 import { Readable } from "node:stream";
 import type { CalendarEvent, CalendarEventShare, CalendarEventType } from "../db/schema.js";
@@ -41,7 +52,6 @@ import { technikCanProgress } from "../lib/calendar-labels.js";
 import {
   attachmentFilePath,
   attachmentRows,
-  attachmentsByNote,
   contentDisposition,
   removeStoredFiles,
   storeUploads,
@@ -53,15 +63,16 @@ import {
   createShare,
   listShares,
   lookupShareToken,
-  parseCanWork,
+  parseShareFlagsPatch,
   parseShareInput,
   resolveShareToken,
   resolveWorkShare,
   revokeShare,
-  setShareCanWork,
+  setShareFlags,
   shareMutationCtx,
 } from "../lib/calendar-shares.js";
 import {
+  eventNoteRows,
   finishProgress,
   readJobNoteBody,
   startProgress,
@@ -144,8 +155,8 @@ app.patch("/events/:id/shares/:shareId", async (c) => {
     const { user, ev } = eventForShares(c);
     const shareId = idParam(c, "shareId");
     const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
-    const canWork = parseCanWork(body?.canWork, null);
-    const share = db.transaction((tx) => setShareCanWork(tx, ev, shareId, canWork, user));
+    const patch = parseShareFlagsPatch(body);
+    const share = db.transaction((tx) => setShareFlags(tx, ev, shareId, patch, user));
     return c.json({ success: true, data: share });
   } catch (error) {
     return handleError(c, error, "zmiany uprawnień linku");
@@ -167,14 +178,17 @@ app.delete("/events/:id/shares/:shareId", (c) => {
 // Publiczne: /share/:token/*
 // ---------------------------------------------------------------------------
 
-/** Notatka w kształcie panelu technika (`JobNote`); `mine` zawsze true — widać tylko własne. */
+/**
+ * Notatka w kształcie panelu technika (`JobNote`). `mine` = napisana spod TEGO
+ * linku (`share_id`) — tylko takie odbiorca może edytować/usuwać.
+ */
 export interface SharedJobNote {
   id: number;
   text: string;
   userLabel: string | null;
   source: string;
   createdAt: string;
-  mine: true;
+  mine: boolean;
   attachments: NoteAttachmentJson[];
 }
 
@@ -187,9 +201,11 @@ export interface SharedJobView {
   canWork: boolean;
   /** = canWork (osobna flaga na przyszłość). */
   canNotes: boolean;
+  /** see_all_notes (niezależne od canWork) — `notes` zawiera też cudze notatki (z `mine: false`). */
+  seeAllNotes: boolean;
   /** canWork && typ pozwala na Rozpocznij/Zakończ (jak `canProgress` w panelu). */
   canProgress: boolean;
-  /** Tylko notatki TEGO linku; `[]` gdy `canWork = false`. */
+  /** Notatki widoczne dla linku: wszystkie (seeAllNotes), własne (canWork) albo `[]`. */
   notes: SharedJobNote[];
 }
 
@@ -229,42 +245,45 @@ function attachmentUrl(token: string, id: number): string {
   return `/api/share/${token}/attachments/${id}`;
 }
 
-/** Notatki TEGO linku (żywe), najnowsze pierwsze, z adresami plików spod linku. */
-function shareNotes(share: Pick<CalendarEventShare, "id" | "eventId">, token: string): SharedJobNote[] {
-  const rows = db
-    .select({
-      id: schema.calendarEventNotes.id,
-      text: schema.calendarEventNotes.text,
-      userLabel: schema.calendarEventNotes.userLabel,
-      source: schema.calendarEventNotes.source,
-      createdAt: schema.calendarEventNotes.createdAt,
-    })
-    .from(schema.calendarEventNotes)
-    .where(
-      and(
-        eq(schema.calendarEventNotes.eventId, share.eventId),
-        eq(schema.calendarEventNotes.shareId, share.id),
-        isNull(schema.calendarEventNotes.deletedAt)
-      )
-    )
-    .orderBy(desc(schema.calendarEventNotes.createdAt), desc(schema.calendarEventNotes.id))
-    .limit(200)
-    .all();
-  const byNote = attachmentsByNote(db, rows.map((r) => r.id));
+type ShareNotesScope = Pick<CalendarEventShare, "id" | "eventId" | "canWork" | "seeAllNotes">;
+
+/** Link widzi wszystkie notatki wydarzenia (niezależnie od `can_work`). */
+function seesAllNotes(share: Pick<CalendarEventShare, "seeAllNotes">): boolean {
+  return share.seeAllNotes;
+}
+
+/** Link widzi jakiekolwiek notatki (własne przy `can_work`, wszystkie przy `see_all_notes`). */
+function seesNotes(share: Pick<CalendarEventShare, "canWork" | "seeAllNotes">): boolean {
+  return share.canWork || share.seeAllNotes;
+}
+
+/**
+ * Notatki widoczne dla linku (żywe), najnowsze pierwsze, z adresami plików spod
+ * linku: `see_all_notes = 1` → wszystkie notatki wydarzenia; inaczej przy
+ * `can_work = 1` tylko notatki TEGO linku; bez obu → `[]`. `mine` = `share_id`
+ * = ten link (zmieniać je wolno i tak tylko przy `can_work`).
+ */
+function shareNotes(share: ShareNotesScope, token: string): SharedJobNote[] {
+  if (!seesNotes(share)) return [];
+  const rows = eventNoteRows(share.eventId, seesAllNotes(share) ? undefined : share.id);
   return rows.map((n) => ({
-    ...n,
-    mine: true as const,
-    attachments: (byNote.get(n.id) ?? []).map((a) => ({ ...a, url: attachmentUrl(token, a.id) })),
+    id: n.id,
+    text: n.text,
+    userLabel: n.userLabel,
+    source: n.source,
+    createdAt: n.createdAt,
+    mine: n.shareId === share.id,
+    attachments: n.attachments.map((a) => ({ ...a, url: attachmentUrl(token, a.id) })),
   }));
 }
 
-function shareNoteJson(share: Pick<CalendarEventShare, "id" | "eventId">, token: string, noteId: number): SharedJobNote {
+function shareNoteJson(share: ShareNotesScope, token: string, noteId: number): SharedJobNote {
   const note = shareNotes(share, token).find((n) => n.id === noteId);
   if (!note) throw new ApiError(404, "Notatka nie istnieje");
   return note;
 }
 
-/** JobJson dla odbiorcy linku: bez protokołu i cudzych notatek, flagi wg `can_work`. */
+/** JobJson dla odbiorcy linku: bez protokołu, `notesCount` = widoczne notatki, flagi wg `can_work`. */
 function sharedJob(event: CalendarEvent, share: CalendarEventShare, notesCount: number): JobJson {
   // technicianId odbiorcy: jego samego nie ma na liście „z kim jedzie”;
   // gość (-1) widzi wszystkich przypisanych. userId = null — brak „moich” notatek.
@@ -304,14 +323,28 @@ function workTarget(c: Context) {
   return { ...found, token, ctx: shareMutationCtx(found.share) };
 }
 
-/** Notatka TEGO linku (żywa, z tego wydarzenia) albo 404 — cudzych nie zdradzamy. */
-function myShareNote(share: Pick<CalendarEventShare, "id" | "eventId">, rawId: string | undefined) {
+/**
+ * Notatka widoczna dla linku (żywa, z tego wydarzenia; przy `see_all_notes = 0`
+ * tylko z tego linku) albo 404 — niewidocznych nie zdradzamy.
+ */
+function visibleShareNote(share: ShareNotesScope, rawId: string | undefined) {
   const id = Number(rawId);
   if (!Number.isInteger(id) || id <= 0) throw new ApiError(404, "Notatka nie istnieje");
   const note = getNoteRow(db, id);
-  if (!note || note.deletedAt || note.eventId !== share.eventId || note.shareId !== share.id) {
+  if (!note || note.deletedAt || note.eventId !== share.eventId || !seesNotes(share)) {
     throw new ApiError(404, "Notatka nie istnieje");
   }
+  if (note.shareId !== share.id && !seesAllNotes(share)) throw new ApiError(404, "Notatka nie istnieje");
+  return note;
+}
+
+/**
+ * Notatka TEGO linku do zmiany. Cudza, ale widoczna (`see_all_notes = 1`) → 403
+ * (odbiorca i tak ją widzi, więc 404 byłoby kłamstwem); niewidoczna → 404.
+ */
+function myShareNote(share: ShareNotesScope, rawId: string | undefined) {
+  const note = visibleShareNote(share, rawId);
+  if (note.shareId !== share.id) throw new ApiError(403, "Możesz zmieniać tylko własne notatki");
   return note;
 }
 
@@ -319,8 +352,8 @@ function assertEditableNote(note: { source: string }): void {
   if (note.source === "system") throw new ApiError(409, "Wpisu systemowego nie można zmieniać");
 }
 
-/** Załącznik notatki TEGO linku albo 404. */
-function myShareAttachment(share: Pick<CalendarEventShare, "id" | "eventId">, rawId: string | undefined) {
+/** Załącznik notatki widocznej dla linku albo 404 (`own` = do zmiany: cudza widoczna → 403). */
+function shareAttachment(share: ShareNotesScope, rawId: string | undefined, own: boolean) {
   const attId = Number(rawId);
   if (!Number.isInteger(attId) || attId <= 0) throw new ApiError(404, "Załącznik nie istnieje");
   const att = db
@@ -329,7 +362,14 @@ function myShareAttachment(share: Pick<CalendarEventShare, "id" | "eventId">, ra
     .where(eq(schema.calendarNoteAttachments.id, attId))
     .get();
   if (!att) throw new ApiError(404, "Załącznik nie istnieje");
-  const note = myShareNote(share, String(att.noteId));
+  let note;
+  try {
+    note = own ? myShareNote(share, String(att.noteId)) : visibleShareNote(share, String(att.noteId));
+  } catch (error) {
+    // Niewidoczna notatka = „załącznik nie istnieje” (bez zdradzania, że to notatka).
+    if (error instanceof ApiError && error.status === 404) throw new ApiError(404, "Załącznik nie istnieje");
+    throw error;
+  }
   return { att, note };
 }
 
@@ -349,8 +389,9 @@ sharePublicRoutes.get("/:token", (c) => {
     if (!resolved) return c.json(NOT_FOUND, 404);
     const { share, event } = resolved;
     // Notatki tylko dla linku „do pracy” — po wyłączeniu przełącznika znikają
-    // z widoku (nie z bazy) i wracają po ponownym włączeniu.
-    const notes = share.canWork ? shareNotes(share, token) : [];
+    // z widoku (nie z bazy) i wracają po ponownym włączeniu. Zakres (wszystkie /
+    // własne) wg `see_all_notes`.
+    const notes = shareNotes(share, token);
     const job = sharedJob(event, share, notes.length);
     const data: SharedJobView = {
       job,
@@ -358,6 +399,7 @@ sharePublicRoutes.get("/:token", (c) => {
       canProtocol: false,
       canWork: share.canWork,
       canNotes: share.canWork,
+      seeAllNotes: seesAllNotes(share),
       canProgress: job.canProgress,
       notes,
     };
@@ -450,10 +492,11 @@ sharePublicRoutes.get("/:token/attachments/:attachmentId", (c) => {
   try {
     if (!shareFilesPerIp.check(clientIp(c))) throw new ShareThrottled();
     // Odczyt pliku nie liczy się jako „otwarcie” i nie zużywa limitu zapisów,
-    // ale wymaga linku „do pracy” — tylko wtedy odbiorca w ogóle widzi notatki.
+    // ale wymaga, by link w ogóle widział notatki (`can_work` → własne,
+    // `see_all_notes` → wszystkie); plik tylko z notatki widocznej dla linku.
     const found = lookupShareToken(tokenOf(c));
-    if (!found || !found.share.canWork) throw new ShareGone();
-    const { att } = myShareAttachment(found.share, c.req.param("attachmentId"));
+    if (!found || !seesNotes(found.share)) throw new ShareGone();
+    const { att } = shareAttachment(found.share, c.req.param("attachmentId"), false);
     const abs = attachmentFilePath(att.storedPath);
     if (!abs) throw new ApiError(404, "Plik załącznika nie istnieje na dysku");
     const download = c.req.query("download") === "1";
@@ -475,7 +518,7 @@ sharePublicRoutes.get("/:token/attachments/:attachmentId", (c) => {
 sharePublicRoutes.delete("/:token/attachments/:attachmentId", (c) => {
   try {
     const { share, event } = workTarget(c);
-    const { att, note } = myShareAttachment(share, c.req.param("attachmentId"));
+    const { att, note } = shareAttachment(share, c.req.param("attachmentId"), true);
     assertEditableNote(note);
     db.delete(schema.calendarNoteAttachments).where(eq(schema.calendarNoteAttachments.id, att.id)).run();
     // Plik znika dopiero po skasowaniu wiersza (jak w panelu technika).
